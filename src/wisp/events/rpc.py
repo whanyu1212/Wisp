@@ -277,6 +277,10 @@ class RpcModelSelectionSnapshot(BaseModel):
     effective_model: RpcModelId | None = None
     catalog_model: RpcModelId | None = None
     effort: RpcModelEffort | None = None
+    # Whether the selected model takes images, and how many image bytes one
+    # request may carry, so a composer can refuse an attachment before sending.
+    image_input: bool = False
+    max_request_image_bytes: int = Field(default=0, ge=0)
 
 
 class RpcModelCatalogSnapshot(BaseModel):

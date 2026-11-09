@@ -14,6 +14,7 @@ from pytest import MonkeyPatch
 from tests.support.rpc import RecordingTransport
 from wisp import __version__
 from wisp.events import (
+    ImagePart,
     RpcCommandFinished,
     RpcCommandStarted,
 )
@@ -602,3 +603,17 @@ def test_controller_encodes_attached_images() -> None:
         (base64.b64encode(b"four").decode(),),
         None,
     ]
+
+
+def test_controller_passes_image_references() -> None:
+    reference = ImagePart(media_type="image/png", sha256="a" * 64, byte_size=84, width=3, height=2)
+
+    async def run() -> RecordingTransport:
+        transport = RecordingTransport()
+        controller = RpcController(transport, command_id_factory=lambda prefix: prefix)
+        await controller.prompt("again", images=[reference, b"new"])
+        return transport
+
+    (command,) = anyio.run(run).commands
+
+    assert getattr(command, "images", None) == (reference, base64.b64encode(b"new").decode())

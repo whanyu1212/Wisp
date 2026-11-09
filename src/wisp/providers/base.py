@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from wisp.events import ImagePart
 from wisp.messages import Message, NativeOutput
@@ -13,6 +13,9 @@ from wisp.messages.history import normalize_provider_history
 from wisp.providers.events import JsonObject, ProviderEvent
 from wisp.providers.events import ToolCall as ToolCall
 from wisp.tools.base import Tool
+
+if TYPE_CHECKING:
+    from wisp.providers.catalog import ModelRegistry
 
 
 @dataclass(frozen=True)
@@ -224,6 +227,30 @@ def provider_supports_image_input(provider: Provider) -> bool:
         bool: True only when supports_image_input is literally True.
     """
     return getattr(provider, "supports_image_input", False) is True
+
+
+def model_accepts_images(
+    provider: Provider, model: str | None, models: ModelRegistry | None
+) -> bool:
+    """Return whether a request to ``model`` through ``provider`` may carry images.
+
+    The adapter must opt in, and when a model catalog is configured it must list
+    the model; without a catalog the adapter's declaration decides.
+
+    Args:
+        provider (Provider): The adapter the request goes through.
+        model (str | None): The requested model, or None for the adapter's default.
+        models (ModelRegistry | None): The model catalog, when one is configured.
+
+    Returns:
+        bool: True when the model takes image input.
+    """
+    if not provider_supports_image_input(provider):
+        return False
+    if models is None:
+        return True
+    selected = model or provider.default_model
+    return selected is not None and models.supports_image_input(provider.name, selected)
 
 
 # Total raw image bytes one request carries unless the adapter sets a lower limit:

@@ -17,6 +17,7 @@ from pydantic import ValidationError
 from wisp import __version__
 from wisp.events import (
     AgentMode,
+    ImagePart,
     KnownWispEvent,
     PermissionMode,
     QueueKind,
@@ -121,16 +122,18 @@ class RpcController:
         self,
         prompt: str,
         *,
-        images: Sequence[bytes] = (),
+        images: Sequence[bytes | ImagePart] = (),
         command_id: str | None = None,
     ) -> str:
         """Send a prompt command and return its command id.
 
         Args:
             prompt (str): The user prompt.
-            images (Sequence[bytes], optional): Image files (PNG, JPEG, GIF or
-                WebP) to attach, at most ``MAX_RPC_MESSAGE_IMAGES``. The backend
-                checks them and fails the command if one is rejected. Defaults to ().
+            images (Sequence[bytes | ImagePart], optional): Image files (PNG,
+                JPEG, GIF or WebP), or references to images already in the
+                session's store such as a forked message's ``selected_images``, at
+                most ``MAX_RPC_MESSAGE_IMAGES``. The backend checks them and fails
+                the command if one is rejected. Defaults to ().
             command_id (str | None, optional): Command id to use instead of a
                 generated one. Defaults to None.
 
@@ -542,7 +545,7 @@ class RpcController:
         self,
         content: str,
         *,
-        images: Sequence[bytes] = (),
+        images: Sequence[bytes | ImagePart] = (),
         command_id: str | None = None,
     ) -> str:
         """Queue a steering message, with optional image files, for the active run."""
@@ -557,7 +560,7 @@ class RpcController:
         self,
         content: str,
         *,
-        images: Sequence[bytes] = (),
+        images: Sequence[bytes | ImagePart] = (),
         command_id: str | None = None,
     ) -> str:
         """Queue a follow-up message, with optional image files, for the active run."""
@@ -1021,8 +1024,16 @@ class JsonlSubprocessRpcTransport:
         self._limits = response.limits
 
 
-def _encoded_images(images: Sequence[bytes]) -> tuple[str, ...] | None:
-    return tuple(base64.b64encode(image).decode("ascii") for image in images) or None
+def _encoded_images(images: Sequence[bytes | ImagePart]) -> tuple[str | ImagePart, ...] | None:
+    """Base64-encode image files and pass stored-image references through, in order."""
+
+    return (
+        tuple(
+            image if isinstance(image, ImagePart) else base64.b64encode(image).decode("ascii")
+            for image in images
+        )
+        or None
+    )
 
 
 def _default_command_id(prefix: str) -> str:

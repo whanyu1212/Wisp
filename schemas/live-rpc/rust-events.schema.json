@@ -1667,7 +1667,7 @@
     },
     "QueueItemsRemoved": {
       "additionalProperties": false,
-      "description": "Queued text removed by an RPC pop or clear operation.",
+      "description": "Queued messages removed by an RPC pop or clear operation.",
       "properties": {
         "command_id": {
           "title": "QueueItemsRemovedCommandId",
@@ -1679,6 +1679,17 @@
             "type": "string"
           },
           "title": "QueueItemsRemovedFollowUp",
+          "type": "array"
+        },
+        "follow_up_images": {
+          "default": [],
+          "items": {
+            "items": {
+              "$ref": "#/$defs/ImagePart"
+            },
+            "type": "array"
+          },
+          "title": "QueueItemsRemovedFollowUpImages",
           "type": "array"
         },
         "kind": {
@@ -1713,6 +1724,17 @@
           "title": "QueueItemsRemovedSteering",
           "type": "array"
         },
+        "steering_images": {
+          "default": [],
+          "items": {
+            "items": {
+              "$ref": "#/$defs/ImagePart"
+            },
+            "type": "array"
+          },
+          "title": "QueueItemsRemovedSteeringImages",
+          "type": "array"
+        },
         "timestamp": {
           "format": "date-time",
           "title": "QueueItemsRemovedTimestamp",
@@ -1732,7 +1754,9 @@
         "operation",
         "kind",
         "steering",
-        "follow_up"
+        "follow_up",
+        "steering_images",
+        "follow_up_images"
       ],
       "title": "QueueItemsRemoved",
       "type": "object"
@@ -1836,6 +1860,17 @@
           "title": "QueueUpdatedFollowUp",
           "type": "array"
         },
+        "follow_up_images": {
+          "default": [],
+          "items": {
+            "items": {
+              "$ref": "#/$defs/ImagePart"
+            },
+            "type": "array"
+          },
+          "title": "QueueUpdatedFollowUpImages",
+          "type": "array"
+        },
         "follow_up_mode": {
           "default": "one_at_a_time",
           "enum": [
@@ -1851,6 +1886,17 @@
             "type": "string"
           },
           "title": "QueueUpdatedSteering",
+          "type": "array"
+        },
+        "steering_images": {
+          "default": [],
+          "items": {
+            "items": {
+              "$ref": "#/$defs/ImagePart"
+            },
+            "type": "array"
+          },
+          "title": "QueueUpdatedSteeringImages",
           "type": "array"
         },
         "steering_mode": {
@@ -1894,6 +1940,8 @@
         "timestamp",
         "steering",
         "follow_up",
+        "steering_images",
+        "follow_up_images",
         "steering_mode",
         "follow_up_mode",
         "token",
@@ -3675,6 +3723,17 @@
           "default": null,
           "title": "RpcModelSelectionSnapshotEffort"
         },
+        "image_input": {
+          "default": false,
+          "title": "RpcModelSelectionSnapshotImageInput",
+          "type": "boolean"
+        },
+        "max_request_image_bytes": {
+          "default": 0,
+          "minimum": 0,
+          "title": "RpcModelSelectionSnapshotMaxRequestImageBytes",
+          "type": "integer"
+        },
         "model": {
           "anyOf": [
             {
@@ -3701,7 +3760,9 @@
         "model",
         "effective_model",
         "catalog_model",
-        "effort"
+        "effort",
+        "image_input",
+        "max_request_image_bytes"
       ],
       "title": "RpcModelSelectionSnapshot",
       "type": "object"

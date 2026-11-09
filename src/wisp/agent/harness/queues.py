@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from uuid import uuid4
 
 from wisp.events import QueueKind, QueueMode, QueueUpdated
-from wisp.messages import Message
+from wisp.messages import Message, queued_message_images
 
 
 def queue_full_message(max_messages: int) -> str:
@@ -204,6 +204,8 @@ class _QueueStore:
         return QueueUpdated(
             steering=tuple(message.user_visible_content for message in self._steering),
             follow_up=tuple(message.user_visible_content for message in self._follow_up),
+            steering_images=queued_message_images(self._steering),
+            follow_up_images=queued_message_images(self._follow_up),
             steering_mode=steering_mode,
             follow_up_mode=follow_up_mode,
             token=self._token,

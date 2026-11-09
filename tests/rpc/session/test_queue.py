@@ -8,7 +8,15 @@ from tests.support.rpc import build_rpc_executor_fixture
 from wisp.agent.harness import AgentHarness, AgentHarnessConfig
 from wisp.agent.tool_contracts import ToolExecutor
 from wisp.coding import CodingSession
-from wisp.events import AgentStarted, QueueItemsRemoved, QueueUpdated, RpcCommandFinished, WispEvent
+from wisp.events import (
+    AgentStarted,
+    ImagePart,
+    QueueItemsRemoved,
+    QueueUpdated,
+    RpcCommandFinished,
+    WispEvent,
+)
+from wisp.messages import Message
 from wisp.providers.events import ProviderResponseStarted
 from wisp.providers.fake import ScriptedProvider
 from wisp.rpc.commands import (
@@ -18,6 +26,7 @@ from wisp.rpc.commands import (
     PopQueueCommand,
     SetQueueModeCommand,
 )
+from wisp.rpc.framing import encode_rpc_frame
 from wisp.rpc.session.queue import handle_rpc_queue_command
 from wisp.sessions.jsonl import JsonlSessionStore
 
@@ -211,5 +220,56 @@ def test_queue_removal_preflights_exact_output_and_preserves_event_order(
             assert isinstance(removed, QueueItemsRemoved) and removed.steering == (content,)
             assert isinstance(snapshot, QueueUpdated) and not snapshot.steering
             assert snapshot.token != token and snapshot.command_id == "remove"
+
+    anyio.run(scenario)
+
+
+def _image_part() -> ImagePart:
+    return ImagePart(media_type="image/png", sha256="a" * 64, byte_size=84, width=3, height=2)
+
+
+@pytest.mark.parametrize("fits", [True, False], ids=["fits", "images-overflow-frame"])
+def test_removal_preflight_counts_images(tmp_path: Path, fits: bool) -> None:
+    """Pop reports the popped message's images, and the frame check counts them."""
+
+    images = (_image_part(),) * 6
+
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        harness = AgentHarness(
+            AgentHarnessConfig(
+                provider=fixture.agent.provider, tool_executor=Mock(spec=ToolExecutor)
+            )
+        )
+        fixture.agent._active_harness = harness
+        fixture.agent._accepting_queued_messages = True
+        harness.steer("text only")
+        harness.steer_message(Message(role="user", content="look", images=images))
+        before = harness.queue_updated_event()
+        assert before.steering_images == ((), images)
+        text_only_frame = encode_rpc_frame(
+            QueueItemsRemoved(
+                command_id="remove", operation="pop", kind="steering", steering=("look",)
+            ),
+            max_frame_bytes=1_000_000,
+        )
+        executor = fixture.executor(task_group=Mock(), send=Mock())
+        # Room for the removal without its images, but not with six of them.
+        executor.outbound_frame_limit = 1_000_000 if fits else len(text_only_frame) + 200
+        command = PopQueueCommand(id="remove", kind="steering", expected_token=before.token)
+        await executor.dispatch_parsed(ParsedRpcCommand.from_known(command), None)
+
+        finished = fixture.events[-1]
+        assert isinstance(finished, RpcCommandFinished)
+        assert finished.ok is fits
+        if fits:
+            removed, snapshot = fixture.events[-3:-1]
+            assert isinstance(removed, QueueItemsRemoved)
+            assert removed.steering_images == (images,)
+            assert isinstance(snapshot, QueueUpdated)
+            assert snapshot.steering == ("text only",)
+            assert snapshot.steering_images == ()
+        else:
+            assert harness.queue_updated_event().steering == ("text only", "look")
 
     anyio.run(scenario)

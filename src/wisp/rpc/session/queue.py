@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from functools import partial
 from typing import assert_never
 
 import anyio
 
 from wisp.coding import CodingSession
 from wisp.events import QueueItemsRemoved, QueueUpdated, RpcCommandFinished, WispEvent
+from wisp.messages import queued_message_images
 from wisp.rpc.commands import (
     ClearQueueCommand,
     FollowUpCommand,
@@ -66,9 +68,11 @@ async def handle_rpc_queue_command(
         if isinstance(command, GetQueueStateCommand):
             state = agent.queue_state(session)
         elif isinstance(command, SteerCommand):
-            state = await agent.steer(command.content, images=await _decoded_images(command))
+            images = await _decoded_images(command, session)
+            state = await agent.steer(command.content, images=images)
         elif isinstance(command, FollowUpCommand):
-            state = await agent.follow_up(command.content, images=await _decoded_images(command))
+            images = await _decoded_images(command, session)
+            state = await agent.follow_up(command.content, images=images)
         elif isinstance(command, SetQueueModeCommand):
             kind = command.kind
             mode = command.mode
@@ -76,15 +80,22 @@ async def handle_rpc_queue_command(
         elif isinstance(command, PopQueueCommand):
             kind = command.kind
             popped, state = agent.pop_queue(kind)
+            popped_messages = (popped,) if popped is not None else ()
             removed = QueueItemsRemoved(
                 command_id=command_id,
                 operation="pop",
                 kind=kind,
-                steering=(popped.user_visible_content,)
-                if popped is not None and kind == "steering"
+                steering=tuple(message.user_visible_content for message in popped_messages)
+                if kind == "steering"
                 else (),
-                follow_up=(popped.user_visible_content,)
-                if popped is not None and kind == "follow_up"
+                follow_up=tuple(message.user_visible_content for message in popped_messages)
+                if kind == "follow_up"
+                else (),
+                steering_images=queued_message_images(popped_messages)
+                if kind == "steering"
+                else (),
+                follow_up_images=queued_message_images(popped_messages)
+                if kind == "follow_up"
                 else (),
             )
         elif isinstance(command, ClearQueueCommand):
@@ -96,6 +107,8 @@ async def handle_rpc_queue_command(
                 kind=clear_kind,
                 steering=tuple(message.user_visible_content for message in cleared.steering),
                 follow_up=tuple(message.user_visible_content for message in cleared.follow_up),
+                steering_images=queued_message_images(cleared.steering),
+                follow_up_images=queued_message_images(cleared.follow_up),
             )
         else:  # pragma: no cover - dispatch owns the closed command set
             assert_never(command)
@@ -112,12 +125,16 @@ async def handle_rpc_queue_command(
     lifecycle.finish()
 
 
-async def _decoded_images(command: SteerCommand | FollowUpCommand) -> tuple[bytes, ...]:
+async def _decoded_images(
+    command: SteerCommand | FollowUpCommand, session: JsonlSession | None
+) -> tuple[bytes, ...]:
     """Decode and check a queued message's images; messages without images stay inline."""
 
     if command.images is None:
         return ()
-    return await anyio.to_thread.run_sync(decode_rpc_images, command.images)
+    return await anyio.to_thread.run_sync(
+        partial(decode_rpc_images, command.images, session=session)
+    )
 
 
 def _preflight_mutation(
@@ -144,8 +161,11 @@ def _preflight_mutation(
     else:
         steering = before.steering if command.kind in (None, "steering") else ()
         follow_up = before.follow_up if command.kind in (None, "follow_up") else ()
+        steering_images = before.steering_images if command.kind in (None, "steering") else ()
+        follow_up_images = before.follow_up_images if command.kind in (None, "follow_up") else ()
         if isinstance(command, PopQueueCommand):
             steering, follow_up = steering[-1:], follow_up[-1:]
+            steering_images, follow_up_images = steering_images[-1:], follow_up_images[-1:]
         events.append(
             QueueItemsRemoved(
                 command_id=command_id,
@@ -153,12 +173,18 @@ def _preflight_mutation(
                 kind=command.kind,
                 steering=steering,
                 follow_up=follow_up,
+                steering_images=steering_images,
+                follow_up_images=follow_up_images,
             )
         )
+        kept_steering = len(before.steering) - len(steering)
+        kept_follow_up = len(before.follow_up) - len(follow_up)
         after = after.model_copy(
             update={
-                "steering": before.steering[: len(before.steering) - len(steering)],
-                "follow_up": before.follow_up[: len(before.follow_up) - len(follow_up)],
+                "steering": before.steering[:kept_steering],
+                "follow_up": before.follow_up[:kept_follow_up],
+                "steering_images": before.steering_images[:kept_steering],
+                "follow_up_images": before.follow_up_images[:kept_follow_up],
             }
         )
     events.extend(

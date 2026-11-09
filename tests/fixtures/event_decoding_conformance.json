@@ -1030,6 +1030,14 @@
    "event": "queue.items.removed",
    "operation": "remove",
    "path": [
+    "follow_up_images"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "queue.items.removed",
+   "operation": "remove",
+   "path": [
     "kind"
    ],
    "accepted": true
@@ -1047,6 +1055,14 @@
    "operation": "remove",
    "path": [
     "steering"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "queue.items.removed",
+   "operation": "remove",
+   "path": [
+    "steering_images"
    ],
    "accepted": true
   },
@@ -1138,6 +1154,14 @@
    "event": "queue.updated",
    "operation": "remove",
    "path": [
+    "follow_up_images"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "queue.updated",
+   "operation": "remove",
+   "path": [
     "follow_up_mode"
    ],
    "accepted": true
@@ -1147,6 +1171,14 @@
    "operation": "remove",
    "path": [
     "steering"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "queue.updated",
+   "operation": "remove",
+   "path": [
+    "steering_images"
    ],
    "accepted": true
   },
@@ -2264,6 +2296,26 @@
     "catalog",
     "selection",
     "effort"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.model_catalog",
+   "operation": "remove",
+   "path": [
+    "catalog",
+    "selection",
+    "image_input"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.model_catalog",
+   "operation": "remove",
+   "path": [
+    "catalog",
+    "selection",
+    "max_request_image_bytes"
    ],
    "accepted": true
   },

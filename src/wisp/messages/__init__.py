@@ -12,6 +12,7 @@ from .models import (
     Role,
     completion_event_has_history,
     message_from_completion_event,
+    queued_message_images,
 )
 
 __all__ = [
@@ -21,4 +22,5 @@ __all__ = [
     "Role",
     "completion_event_has_history",
     "message_from_completion_event",
+    "queued_message_images",
 ]
