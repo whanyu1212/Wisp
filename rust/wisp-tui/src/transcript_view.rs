@@ -298,6 +298,7 @@ impl TranscriptRow {
         } else {
             let source_end = source_offset.saturating_add(text.len());
             vec![TranscriptSpan {
+                link: None,
                 text,
                 style: TranscriptSpanStyle::default(),
                 affinity: SourceAffinity {
@@ -521,9 +522,20 @@ struct CardRowStyle<'a> {
     emphasis: &'a [std::ops::Range<usize>],
     syntax: &'a [crate::syntax::SyntaxToken],
     gutters: &'a [std::ops::Range<usize>],
+    /// Where the argument links to, such as the file a read names.
+    argument_link: Option<&'a std::sync::Arc<str>>,
 }
 
 impl CardRowStyle<'_> {
+    /// The link a span styled `inline` carries: the argument's, on the argument.
+    fn link_for(&self, inline: crate::markdown::InlineStyle) -> Option<std::sync::Arc<str>> {
+        self.argument_link
+            .filter(|_| {
+                inline == self.argument_style && inline != crate::markdown::InlineStyle::Normal
+            })
+            .cloned()
+    }
+
     const PLAIN: CardRowStyle<'static> = CardRowStyle {
         marker_end: 0,
         label_end: 0,
@@ -533,6 +545,7 @@ impl CardRowStyle<'_> {
         emphasis: &[],
         syntax: &[],
         gutters: &[],
+        argument_link: None,
     };
 
     /// The inline style of the grapheme of `len` bytes at `offset`.
@@ -584,6 +597,8 @@ struct CardProjection {
     action_label_end: usize,
     action_argument_start: usize,
     action_argument_style: crate::markdown::InlineStyle,
+    /// Where the action's argument links to: the file the call names.
+    action_link: Option<std::sync::Arc<str>>,
     metadata: String,
     detail: String,
     detail_base: usize,
@@ -945,6 +960,8 @@ pub struct TranscriptRowCache {
     card_retained_bytes: usize,
     work: LayoutWork,
     fold: FoldState,
+    /// The links the latest transcript paint drew, for the frame to apply once complete.
+    pub(crate) painted_links: Vec<crate::hyperlink::PaintedLink>,
 }
 
 impl TranscriptRowCache {
@@ -1721,6 +1738,7 @@ impl TranscriptRowCache {
                     emphasis: &[],
                     syntax: &[],
                     gutters: &[],
+                    argument_link: projection.action_link.as_ref(),
                 };
                 // A collapsed card keeps its action on one row; expanding it (Right in
                 // browse) wraps the full command or path instead and shows any hidden
@@ -2137,6 +2155,7 @@ impl TranscriptRowCache {
                     source_end: end,
                     output_offset: 0,
                 },
+                link: style.link_for(inline),
             });
         };
         let mut column = 0;
@@ -2219,6 +2238,7 @@ impl TranscriptRowCache {
             let prefix = format!("{}↳ ", " ".repeat(indent.saturating_sub(2)));
             text.push_str(&prefix);
             action_spans.push(TranscriptSpan {
+                link: None,
                 text: prefix,
                 style: TranscriptSpanStyle {
                     inline: crate::markdown::InlineStyle::DiffGutter,
@@ -2278,6 +2298,7 @@ impl TranscriptRowCache {
                             source_end: relative + grapheme.len(),
                             output_offset: 0,
                         },
+                        link: style.link_for(inline),
                     });
                 }
             }
@@ -2606,6 +2627,7 @@ impl TranscriptRowCache {
                                 text: String::new(),
                                 style: span.style,
                                 affinity: span.affinity,
+                                link: None,
                             });
                         }
                         cursor = absolute_offset + grapheme.len();
@@ -2628,6 +2650,7 @@ impl TranscriptRowCache {
                             let padding = indent.saturating_sub(column);
                             if padding > 0 {
                                 spans.push(TranscriptSpan {
+                                    link: None,
                                     text: " ".repeat(padding),
                                     style: crate::markdown::TranscriptSpanStyle {
                                         inline: crate::markdown::InlineStyle::ListMarker,
@@ -2696,6 +2719,7 @@ impl TranscriptRowCache {
                             source_end: span.affinity.source_end,
                             output_offset: u32::try_from(absolute_offset).unwrap_or(u32::MAX),
                         },
+                        span.link.as_ref(),
                     );
                     column = column.saturating_add(grapheme_width);
                     consumed_text = true;
@@ -3256,6 +3280,7 @@ fn card_projection(entry: &TranscriptEntry, expanded_output: bool) -> Option<Car
                 action_argument_start,
                 action_argument_style,
             ) = tool_action_projection(card);
+            let action_link = card_file_link(card);
             let note_start = push_status_note(&mut action, card.status_note().or(card.live_line()));
             if let DetailAvailability::LiveRetained(detail) = &card.structured_detail {
                 let diff = matches!(
@@ -3302,6 +3327,7 @@ fn card_projection(entry: &TranscriptEntry, expanded_output: bool) -> Option<Car
                     action_label_end,
                     action_argument_start,
                     action_argument_style,
+                    action_link,
                     metadata: String::new(),
                     detail: preview,
                     detail_base: 0,
@@ -3398,6 +3424,7 @@ fn card_projection(entry: &TranscriptEntry, expanded_output: bool) -> Option<Car
                 Vec::new()
             };
             Some(CardProjection {
+                action_link,
                 action,
                 action_marker_end,
                 action_label_end,
@@ -3458,6 +3485,7 @@ fn card_projection(entry: &TranscriptEntry, expanded_output: bool) -> Option<Car
                 tone: TranscriptRowTone::Surface,
             }];
             Some(CardProjection {
+                action_link: None,
                 action,
                 action_marker_end: process_marker(card).len(),
                 action_label_end: process_marker(card).len() + card.chip_label().len(),
@@ -3814,6 +3842,7 @@ impl McpGroupHeader {
 
     fn style(&self) -> CardRowStyle<'static> {
         CardRowStyle {
+            argument_link: None,
             marker_end: self.marker_end,
             label_end: self.label_end,
             argument_start: self.label_end + LABEL_GAP.len(),
@@ -4911,11 +4940,16 @@ fn push_styled_span(
     text: String,
     style: TranscriptSpanStyle,
     affinity: SourceAffinity,
+    link: Option<&std::sync::Arc<str>>,
 ) {
     if text.is_empty() {
         return;
     }
-    if let Some(last) = spans.last_mut().filter(|last| last.style == style) {
+    // Two links side by side stay apart, so each keeps its own destination.
+    if let Some(last) = spans
+        .last_mut()
+        .filter(|last| last.style == style && last.link.as_ref() == link)
+    {
         last.text.push_str(&text);
         return;
     }
@@ -4923,7 +4957,17 @@ fn push_styled_span(
         text,
         style,
         affinity,
+        link: link.cloned(),
     });
+}
+
+/// The `file://` link for the path a read, edit or write card shows. The file need
+/// not exist: a link to a missing file only fails to open.
+fn card_file_link(card: &crate::tool_cards::ToolCardSnapshot) -> Option<std::sync::Arc<str>> {
+    if !matches!(card.name.as_str(), "read" | "edit" | "write") {
+        return None;
+    }
+    crate::hyperlink::file_uri(&card.referenced_path()?)
 }
 
 /// The gap row after `entry`'s last row: blank, or a thin rule between back-to-back collapsed

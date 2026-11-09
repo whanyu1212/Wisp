@@ -23,6 +23,7 @@ mod framing;
 mod git_diff_view;
 pub mod history;
 mod hydration_profile;
+mod hyperlink;
 mod key_help;
 #[cfg(test)]
 mod keybinding_tests;
@@ -573,11 +574,13 @@ struct LiveUi {
     attention: Attention,
     /// Whether motion such as the decision pulse may play (`WISP_TUI_MOTION`).
     motion_allowed: bool,
-    /// The editor command for editing the draft (`$VISUAL`, `$EDITOR`, then `vi`).
+    /// Whether the transcript's links are drawn as OSC 8 hyperlinks.
+    hyperlinks: bool,
+    /// The editor command for the draft and for files (`$VISUAL`, `$EDITOR`, then `vi`).
     editor_command: String,
     /// Set by the key that opens the editor; the event loop runs the editor after the
     /// input that set it, since that needs the terminal.
-    external_edit_requested: bool,
+    editor_request: Option<external_editor::EditorRequest>,
     /// Parks the input task while the editor owns the terminal. `None` in tests that
     /// run no input task.
     input_gate: Option<Arc<InputGate>>,
@@ -649,8 +652,9 @@ impl Default for LiveUi {
             color_depth: ColorDepth::default(),
             attention: Attention::default(),
             motion_allowed: true,
+            hyperlinks: false,
             editor_command: "vi".into(),
-            external_edit_requested: false,
+            editor_request: None,
             input_gate: None,
             mouse_enabled: false,
             mouse_frame: None,
@@ -1169,16 +1173,30 @@ impl LiveUi {
     }
 
     /// Applies what the external editor returned, once the TUI has the terminal back.
+    fn apply_editor_outcome(&mut self, outcome: external_editor::EditorOutcome) {
+        // The editor may have set its own window title; write Wisp's again.
+        self.attention.forget_title();
+        self.invalidate_rendered_frame();
+        self.render_pending = true;
+        match outcome {
+            external_editor::EditorOutcome::Draft(edited) => self.apply_edited_draft(edited),
+            external_editor::EditorOutcome::File(target, Err(failure)) => {
+                self.notice = Some(format!(
+                    "Could not open {}: {failure}.",
+                    target.path().display()
+                ));
+            }
+            external_editor::EditorOutcome::File(_, Ok(())) => {}
+        }
+    }
+
+    /// Makes the draft the editor saved the new draft.
     ///
     /// A failed edit keeps the draft and says why in the footer; an unchanged one is not
     /// recorded as an undo step. Events handled while the editor ran may have changed the
     /// view, for example to a pending approval; the draft is still replaced, and shown
     /// once the composer is back.
-    fn apply_external_edit(&mut self, edited: Result<String, external_editor::EditFailure>) {
-        // The editor may have set its own window title; write Wisp's again.
-        self.attention.forget_title();
-        self.invalidate_rendered_frame();
-        self.render_pending = true;
+    fn apply_edited_draft(&mut self, edited: Result<String, external_editor::EditFailure>) {
         let saved = match edited {
             Ok(saved) => saved,
             Err(failure) => {
@@ -1200,6 +1218,27 @@ impl LiveUi {
         } else {
             None
         };
+    }
+
+    /// Asks the event loop to open the file `entry_id`'s tool card names, at its line,
+    /// or says why there is none to open.
+    fn open_card_file(&mut self, entry_id: TranscriptEntryId) {
+        self.render_pending = true;
+        let target = self
+            .state
+            .transcript
+            .entry(entry_id)
+            .and_then(|entry| entry.tool_card())
+            .and_then(|card| {
+                let line = card.file_reference.as_ref()?.line;
+                external_editor::FileTarget::resolve(&card.referenced_path()?, line)
+            });
+        match target {
+            Some(target) => {
+                self.editor_request = Some(external_editor::EditorRequest::File(target));
+            }
+            None => self.notice = Some("This card names no file that exists to open.".into()),
+        }
     }
 
     fn restore_session_draft(&mut self, content: &str) {
@@ -1739,7 +1778,16 @@ impl LiveUi {
         self.transcript_row_cache
             .fold_mut()
             .set_click_hints(self.mouse_enabled);
-        terminal::draw_frame(terminal, self.color_depth, |frame| {
+        // Taken from the transcript's paint inside `render`, applied in `finish`.
+        let painted_links = std::cell::RefCell::new(Vec::new());
+        let hyperlinks = self.hyperlinks;
+        let color_depth = self.color_depth;
+        let finish = |buffer: &mut ratatui::buffer::Buffer| {
+            if hyperlinks {
+                hyperlink::apply(buffer, &painted_links.borrow());
+            }
+        };
+        let render = |frame: &mut ratatui::Frame<'_>| {
             let completion_view = (self.state.editor_editable() && self.browse_selected.is_none())
                 .then(|| {
                     self.completion.view(
@@ -1773,6 +1821,8 @@ impl LiveUi {
                 activity_elapsed,
                 Some(&self.side_panel),
             );
+            *painted_links.borrow_mut() =
+                std::mem::take(&mut self.transcript_row_cache.painted_links);
             // Popups docked to the composer lay out in the conversation's column, beside
             // a docked side panel; centred popups still centre on the whole screen.
             let column = if self.side_panel.docked() {
@@ -2026,7 +2076,8 @@ impl LiveUi {
                 }
             };
             rendered_overlay = Some(kind);
-        })?;
+        };
+        terminal::draw_frame(terminal, color_depth, render, finish)?;
         // After the frame's synchronized update, so the title and any notification are
         // not held back with it.
         let attention = self.attention.observe(
@@ -2647,8 +2698,18 @@ impl LiveUi {
         entries
     }
 
-    fn browse_notice() -> String {
-        "Browse: Tab select · Right expand · Left collapse · Enter details · Esc prompt".into()
+    fn browse_notice(&self) -> String {
+        let open = if self.bindings.label(KeyAction::ExternalEditor) == "Unbound" {
+            String::new()
+        } else {
+            format!(
+                " · {} open file",
+                self.bindings.label(KeyAction::ExternalEditor)
+            )
+        };
+        format!(
+            "Browse: Tab select · Right expand · Left collapse · Enter details{open} · Esc prompt"
+        )
     }
 
     fn selected_closed_group(&self) -> Option<TranscriptEntryId> {
@@ -2676,7 +2737,7 @@ impl LiveUi {
                 self.transcript_viewport.reveal_output(entry);
             }
         }
-        self.notice = Some(Self::browse_notice());
+        self.notice = Some(self.browse_notice());
         self.render_pending = true;
     }
 
@@ -2736,7 +2797,7 @@ impl LiveUi {
                 .collapse_group(&members);
             self.browse_selected = Some(BrowseTarget::Group(start));
         }
-        self.notice = Some(Self::browse_notice());
+        self.notice = Some(self.browse_notice());
         self.render_pending = true;
     }
 
@@ -2757,10 +2818,10 @@ impl LiveUi {
                 .position(|entry| *entry == selected)
                 .map_or(entries.len() - 1, |index| (index + 1) % entries.len());
             self.browse_selected = Some(entries[next]);
-            self.notice = Some(Self::browse_notice());
+            self.notice = Some(self.browse_notice());
         } else {
             self.browse_selected = entries.last().copied();
-            self.notice = Some(Self::browse_notice());
+            self.notice = Some(self.browse_notice());
         }
         self.render_pending = true;
     }
@@ -2812,7 +2873,7 @@ impl LiveUi {
         } else {
             self.browse_selected = entries.last().copied();
             self.notice = if self.browse_selected.is_some() {
-                Some(Self::browse_notice())
+                Some(self.browse_notice())
             } else {
                 Some("No foldable transcript row is in view.".into())
             };
@@ -3687,6 +3748,10 @@ impl LiveUi {
         let Some(entry_id) = self.detail_view.selected_entry() else {
             return LoopControl::Continue;
         };
+        if self.bindings.action(key) == Some(KeyAction::ExternalEditor) {
+            self.open_card_file(entry_id);
+            return LoopControl::Continue;
+        }
         let Some(presentation) = retained_detail(&self.state, entry_id) else {
             self.detail_view.close();
             self.browse_selected = None;
@@ -3797,6 +3862,11 @@ impl LiveUi {
                 return Ok(LoopControl::Continue);
             }
             _ if self.bindings.action(key) == Some(KeyAction::Browse) => self.cycle_browse(false),
+            _ if self.bindings.action(key) == Some(KeyAction::ExternalEditor) => {
+                if let Some(target) = self.browse_selected {
+                    self.open_card_file(target.entry_id());
+                }
+            }
             _ if self.bound_transcript_action(key).is_some() => {
                 let control = self.navigate_transcript(key, writer, limit).await?;
                 self.reconcile_browse_selection();
@@ -4465,7 +4535,7 @@ impl LiveUi {
                     && self.browse_selected.is_none()
                     && self.editor_editable() =>
             {
-                self.external_edit_requested = true;
+                self.editor_request = Some(external_editor::EditorRequest::Draft);
                 Ok(Some(LoopControl::Continue))
             }
             Some(KeyAction::SessionTree)
@@ -5468,6 +5538,7 @@ where
                 color_depth,
                 attention,
                 motion_allowed,
+                hyperlinks: hyperlink::supported(std::env::var("TERM").ok().as_deref()),
                 editor_command: external_editor::editor_command(|name| std::env::var(name).ok()),
                 input_gate: Some(input_gate),
                 mouse_enabled,

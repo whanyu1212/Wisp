@@ -399,6 +399,16 @@ mod tests {
     }
 
     #[test]
+    fn writer_passes_links_through() {
+        // An OSC 8 link, even split across writes, reaches the terminal unchanged while
+        // the colour beside it is still rewritten.
+        let link = b"\x1b]8;id=1;https://example.test/a;b\x1b\\x\x1b]8;;\x1b\\";
+        let (head, tail) = link.split_at(9);
+        let out = written(ColorDepth::Ansi16, &[b"\x1b[38;5;1m", head, tail]);
+        assert_eq!(out, [&b"\x1b[31m"[..], link].concat());
+    }
+
+    #[test]
     fn writer_uses_basic_codes() {
         for (input, expected) in [
             (&b"\x1b[38;5;1m"[..], &b"\x1b[31m"[..]),

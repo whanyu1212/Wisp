@@ -61,6 +61,10 @@ this policy.
   custom `tui_keybindings` that already binds Ctrl+O to another action now conflicts with this
   default, which restores the default keymap with a warning; bind `prompt.external_editor` to
   another key, or to `[]`, to keep yours.
+- While browsing cards, Ctrl+O opens the file the selected card names in the same editor, at the
+  card's line: a read's start, a search's first match, or the top of an edited or written file.
+- Links in replies and the file path on read, edit and write cards are OSC 8 hyperlinks, so
+  terminals that support them make them clickable. Only `http` and `https` reply links are linked.
 
 ### Prompt
 

@@ -470,8 +470,8 @@ async fn run_with_interrupts<B: FrameBackend>(
                 return Ok(Exit::User);
             }
             // Opening the editor needs the terminal, which only the loop holds.
-            if ui.external_edit_requested
-                && edit_draft_externally(ui, terminal, &mut sources, writer, limit).await?
+            if let Some(request) = ui.editor_request.take()
+                && run_editor(ui, terminal, &mut sources, writer, limit, request).await?
                     == LoopControl::Exit
             {
                 return Ok(Exit::User);
@@ -559,7 +559,7 @@ async fn run_with_interrupts<B: FrameBackend>(
     }
 }
 
-/// Opens the draft in the user's editor, keeping backend events flowing until it exits.
+/// Runs the user's editor for `request`, keeping backend events flowing until it exits.
 ///
 /// The input task is parked and the terminal suspended first. While the editor runs,
 /// backend events are still dispatched, without drawing, because the reader gives up
@@ -570,14 +570,14 @@ async fn run_with_interrupts<B: FrameBackend>(
 ///
 /// Returns:
 ///     LoopControl: `Exit` when an event handled during the edit asked to exit.
-pub(super) async fn edit_draft_externally<B: FrameBackend>(
+pub(super) async fn run_editor<B: FrameBackend>(
     ui: &mut LiveUi,
     terminal: &mut Terminal<B>,
     sources: &mut Sources<'_>,
     writer: &mpsc::Sender<WriterMessage>,
     limit: usize,
+    request: crate::external_editor::EditorRequest,
 ) -> Result<LoopControl, Error> {
-    ui.external_edit_requested = false;
     let draft = ui.editor.text().to_owned();
     let command = ui.editor_command.clone();
     let gate = ui.input_gate.clone();
@@ -597,10 +597,10 @@ pub(super) async fn edit_draft_externally<B: FrameBackend>(
         }
     };
     let mut editor =
-        tokio::task::spawn_blocking(move || crate::external_editor::edit(&command, &draft));
+        tokio::task::spawn_blocking(move || crate::external_editor::run(&command, request, &draft));
     let mut stopped: Option<Result<LoopControl, Error>> = None;
     let mut events_open = true;
-    let edited = loop {
+    let outcome = loop {
         if stopped.is_none() {
             if let Some(event) = sources.ready_event.take() {
                 match ui
@@ -615,7 +615,7 @@ pub(super) async fn edit_draft_externally<B: FrameBackend>(
         }
         tokio::select! {
             biased;
-            edited = &mut editor => break edited,
+            outcome = &mut editor => break outcome,
             event = sources.events.recv(), if events_open && stopped.is_none() => match event {
                 Some(event) => *sources.ready_event = Some(event),
                 None => events_open = false,
@@ -630,11 +630,11 @@ pub(super) async fn edit_draft_externally<B: FrameBackend>(
         gate.resume();
     }
     restored?;
-    let edited = edited.map_err(Error::Task)?;
-    if let Some(outcome) = stopped {
-        return outcome;
+    let outcome = outcome.map_err(Error::Task)?;
+    if let Some(stopped) = stopped {
+        return stopped;
     }
-    ui.apply_external_edit(edited);
+    ui.apply_editor_outcome(outcome);
     Ok(LoopControl::Continue)
 }
 

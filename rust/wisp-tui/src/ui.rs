@@ -805,6 +805,7 @@ fn render_transcript(
     let visible_lines = usize::from(rows_area.height).max(1);
     // Size first: a resize can normalize the scrolled top that decides whether the prompt pins.
     viewport.set_geometry(&state.transcript, row_cache, content_width, visible_lines);
+    let mut links = Vec::new();
     let mut pinned = pinned_user_rows(state, viewport, row_cache, content_width);
     if let Some((user_id, rows)) = &mut pinned {
         let has_reply = state.transcript.entry_after(*user_id).is_some();
@@ -981,6 +982,7 @@ fn render_transcript(
                 pulse,
                 live_elapsed,
                 turn_rail(state, row, prompts, palette),
+                &mut links,
             );
         }
     }
@@ -1009,6 +1011,7 @@ fn render_transcript(
             render_jump_to_latest(frame, content_area(row), viewport, palette, bindings)
         })
         .flatten();
+    row_cache.painted_links = links;
     (jump_to_latest, fold_rows)
 }
 
@@ -1473,6 +1476,7 @@ fn render_transcript_row(
     pulse: Option<u8>,
     live_elapsed: Option<std::time::Duration>,
     rail: Option<(&'static str, Color)>,
+    links: &mut Vec<crate::hyperlink::PaintedLink>,
 ) {
     // A selected row looks like any other; its fold hint is the only cue.
     let selected = selected_row == Some(row.anchor);
@@ -1572,6 +1576,9 @@ fn render_transcript_row(
             .position(|span| span.style.inline == InlineStyle::ToolName)
     })
     .flatten();
+    // Where each linked span lands: its first column and width in the row.
+    let mut linked = Vec::new();
+    let mut column = 0_u16;
     let mut spans = row
         .spans
         .into_iter()
@@ -1580,12 +1587,18 @@ fn render_transcript_row(
             if span.style.inline == InlineStyle::ToolStatus {
                 semantic = semantic.patch(tone_style(row.tone, palette));
             }
-            match &spinner {
+            let painted = match &spinner {
                 Some(spinner) if span.style.inline == InlineStyle::ToolStatus => {
                     Span::styled(spinner.clone(), semantic)
                 }
                 _ => Span::styled(span.text, semantic),
+            };
+            let width = u16::try_from(painted.width()).unwrap_or(u16::MAX);
+            if let Some(link) = span.link {
+                linked.push((column, width, link));
             }
+            column = column.saturating_add(width);
+            painted
         })
         .collect::<Vec<_>>();
     if let Some(label) = label {
@@ -1597,6 +1610,13 @@ fn render_transcript_row(
         spans.push(Span::styled(hint, base.fg(palette.muted)));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), content);
+    for (start, width, link) in linked {
+        let width = width.min(content.width.saturating_sub(start));
+        if width > 0 {
+            let area = Rect::new(content.x + start, content.y, width, 1);
+            links.push(crate::hyperlink::record(frame.buffer_mut(), area, link));
+        }
+    }
     // The arrow takes the blank middle of the label gap. A row cut short can put
     // its `…` there instead, which stays.
     if let Some(arrow) = row.fold_arrow.filter(|arrow| arrow.column < content.width) {
@@ -7360,6 +7380,7 @@ mod tests {
     #[test]
     fn card_decorations_keep_text() {
         let span = |text: &str, inline| crate::markdown::TranscriptSpan {
+            link: None,
             text: text.into(),
             affinity: crate::markdown::SourceAffinity::default(),
             style: TranscriptSpanStyle {
@@ -7415,6 +7436,7 @@ mod tests {
                             None,
                             None,
                             None,
+                            &mut Vec::new(),
                         );
                     }
                     let selected = Some(action.anchor);
@@ -7429,6 +7451,7 @@ mod tests {
                         None,
                         None,
                         None,
+                        &mut Vec::new(),
                     );
                 })
                 .unwrap();
@@ -7470,6 +7493,7 @@ mod tests {
                 kind: TranscriptRowKind::CardDetail,
                 tone: TranscriptRowTone::Default,
                 spans: vec![crate::markdown::TranscriptSpan {
+                    link: None,
                     text: "selected code".into(),
                     affinity: crate::markdown::SourceAffinity::default(),
                     style: TranscriptSpanStyle {
@@ -7502,6 +7526,7 @@ mod tests {
                             None,
                             None,
                             None,
+                            &mut Vec::new(),
                         );
                     }
                 })

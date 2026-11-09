@@ -5,7 +5,9 @@ use std::fmt::Write as _;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-use crate::tool_detail::{DetailAvailability, DetailResult, ToolDetailSource, build_tool_detail};
+use crate::tool_detail::{
+    DetailAvailability, DetailResult, ToolDetailSource, build_tool_detail, parse_grep_record,
+};
 
 pub const TOOL_OUTPUT_MAX_BYTES: usize = 64 * 1024;
 pub const TOOL_OUTPUT_MAX_LINES: usize = 500;
@@ -311,6 +313,46 @@ pub struct ToolCardSnapshot {
     pub progress_bytes: (u64, u64),
     /// The latest line of the stream that last moved, shown while collapsed.
     pub live_line: Option<String>,
+    /// The file the call names, kept after the result clears `detail_source`.
+    pub file_reference: Option<FileReference>,
+}
+
+/// A file a tool call names, as the call gave its path, and the line to open it at.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FileReference {
+    pub path: String,
+    pub line: u64,
+}
+
+impl FileReference {
+    /// A read's start line, or the top of an edited or written file. A search names
+    /// its files only in its result.
+    fn of_call(source: &ToolDetailSource) -> Option<Self> {
+        let (path, line) = match source {
+            ToolDetailSource::Read(source) => (&source.path, source.offset),
+            ToolDetailSource::Edit(source) => (&source.path, 1),
+            ToolDetailSource::Write(source) => (&source.path, 1),
+            ToolDetailSource::Grep(_)
+            | ToolDetailSource::None
+            | ToolDetailSource::Find
+            | ToolDetailSource::Unavailable(_) => return None,
+        };
+        (!path.is_empty()).then(|| Self {
+            path: path.clone(),
+            line,
+        })
+    }
+
+    /// A search result's first match.
+    fn of_search(output: &str) -> Option<Self> {
+        output
+            .lines()
+            .find_map(parse_grep_record)
+            .map(|(path, line, _)| Self {
+                path: path.to_owned(),
+                line,
+            })
+    }
 }
 
 impl ToolCardSnapshot {
@@ -338,7 +380,20 @@ impl ToolCardSnapshot {
             progress_sequence: 0,
             progress_bytes: (0, 0),
             live_line: None,
+            file_reference: FileReference::of_call(&input.detail_source),
         }
+    }
+
+    /// The file `file_reference` names, resolved as the card shows paths: against the
+    /// folder its run used, or Wisp's own for a card from before runs recorded one.
+    pub fn referenced_path(&self) -> Option<std::path::PathBuf> {
+        let reference = self.file_reference.as_ref()?;
+        let base = self
+            .display_base
+            .as_deref()
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::current_dir().ok())?;
+        Some(base.join(&reference.path))
     }
 
     pub fn result_without_request(input: &ToolResultInput) -> Self {
@@ -375,6 +430,7 @@ impl ToolCardSnapshot {
             );
         } else {
             self.detail_source = input.detail_source.clone();
+            self.file_reference = FileReference::of_call(&self.detail_source);
         }
         self.name = name;
         self.action_arguments = action_arguments;
@@ -497,6 +553,12 @@ impl ToolCardSnapshot {
         self.failure_code = input.failure_code.as_deref().map(bounded_reason);
         self.retryable = input.retryable;
         let result_name_matches = self.name == bounded_tool_name(&input.name);
+        if self.status == ToolStatus::Done
+            && result_name_matches
+            && matches!(&self.detail_source, ToolDetailSource::Grep(_))
+        {
+            self.file_reference = FileReference::of_search(&normalized_output);
+        }
         self.structured_detail = if self.status == ToolStatus::Done && result_name_matches {
             build_tool_detail(
                 &self.detail_source,

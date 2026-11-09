@@ -1,11 +1,13 @@
-//! Editing the composer draft in the user's own editor.
+//! Running the user's own editor: on the composer draft, or on a file a tool card names.
 //!
 //! The draft is written to a private temporary file, the editor runs on the real
 //! terminal while the TUI steps aside, and the saved text comes back as the new draft.
+//! A file is opened in place, at a line.
 //! [`InputGate`] keeps the input task off the terminal meanwhile, so the editor
 //! receives every keystroke, and the editor runs as the terminal's foreground job, so
 //! the keys that signal a job (Ctrl+C, Ctrl+Z) reach it rather than Wisp.
 
+use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -13,6 +15,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -59,6 +62,33 @@ impl fmt::Display for EditFailure {
     }
 }
 
+/// What the editor key asked to open.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum EditorRequest {
+    /// The composer draft, which comes back as the new draft.
+    Draft,
+    /// A file a tool card names, opened in place.
+    File(FileTarget),
+}
+
+/// What running the editor for an [`EditorRequest`] returned.
+#[derive(Debug)]
+pub(crate) enum EditorOutcome {
+    Draft(Result<String, EditFailure>),
+    File(FileTarget, Result<(), EditFailure>),
+}
+
+/// Runs `command` for `request`, blocking until the editor exits.
+pub(crate) fn run(command: &str, request: EditorRequest, draft: &str) -> EditorOutcome {
+    match request {
+        EditorRequest::Draft => EditorOutcome::Draft(edit(command, draft)),
+        EditorRequest::File(target) => {
+            let opened = open_file(command, &target);
+            EditorOutcome::File(target, opened)
+        }
+    }
+}
+
 /// Opens `draft` in `command` and returns the text the user saved, or why there is none.
 ///
 /// Blocks until the editor exits, so the caller hands it the terminal first. The
@@ -84,6 +114,75 @@ pub(crate) fn edit(command: &str, draft: &str) -> Result<String, EditFailure> {
         .or_else(|| saved.strip_suffix('\n'))
         .unwrap_or(&saved);
     Ok(saved.to_owned())
+}
+
+/// A file to open in the editor, at a line.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FileTarget {
+    /// Always absolute, so it can never be read as an editor option such as vim's
+    /// `+cmd`, which runs a command.
+    path: PathBuf,
+    /// 1-based.
+    line: u64,
+}
+
+impl FileTarget {
+    /// A target for `path` at `line`, or `None` unless `path` is absolute and names a
+    /// regular file, so a model-chosen relative path like `+:!cmd` never reaches the
+    /// editor's arguments.
+    pub(crate) fn resolve(path: &Path, line: u64) -> Option<Self> {
+        (path.is_absolute() && path.is_file()).then(|| Self {
+            path: path.to_owned(),
+            line: line.max(1),
+        })
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// Opens `target` in `command` at its line and waits for the editor to exit.
+///
+/// As with [`edit`], the command runs through `sh` and the arguments are passed as
+/// `"$@"`, never parsed by the shell.
+pub(crate) fn open_file(command: &str, target: &FileTarget) -> Result<(), EditFailure> {
+    let mut shell = Command::new("sh");
+    shell
+        .arg("-c")
+        .arg(format!("{command} \"$@\""))
+        .arg("sh")
+        .args(line_arguments(command, target));
+    let status = run_in_foreground(shell).map_err(EditFailure::Spawn)?;
+    if !status.success() {
+        return Err(EditFailure::Exit(status));
+    }
+    Ok(())
+}
+
+/// The arguments that open `target` at its line, in the form the editor understands.
+///
+/// Most terminal editors take `+LINE path`, the vi convention. VS Code and its forks
+/// take `--goto path:line`; Zed, Helix and Sublime Text take `path:line`, and would
+/// open a file named `+LINE` instead.
+fn line_arguments(command: &str, target: &FileTarget) -> Vec<OsString> {
+    let program = command
+        .split_whitespace()
+        .next()
+        .map(|word| word.rsplit('/').next().unwrap_or(word))
+        .unwrap_or_default();
+    let mut located = target.path.as_os_str().to_owned();
+    located.push(format!(":{}", target.line));
+    match program {
+        "code" | "code-insiders" | "codium" | "cursor" | "windsurf" => {
+            vec!["--goto".into(), located]
+        }
+        "zed" | "zeditor" | "hx" | "helix" | "subl" => vec![located],
+        _ => vec![
+            format!("+{}", target.line).into(),
+            target.path.as_os_str().to_owned(),
+        ],
+    }
 }
 
 /// Runs `command` as the terminal's foreground job and waits for it to exit.
@@ -162,11 +261,15 @@ struct DraftFile {
 
 impl DraftFile {
     fn create(draft: &str) -> io::Result<Self> {
+        // The clock alone can repeat between two drafts in one process, since some
+        // clocks tick in microseconds, so a counter keeps each name unique.
+        static CREATED: AtomicU64 = AtomicU64::new(0);
+        let sequence = CREATED.fetch_add(1, Ordering::Relaxed);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.subsec_nanos());
         // `.md` lets the editor highlight the prompt as Markdown.
-        let name = format!("wisp-prompt-{}-{nanos}.md", std::process::id());
+        let name = format!("wisp-prompt-{}-{sequence}-{nanos}.md", std::process::id());
         let path = std::env::temp_dir().join(name);
         let mut file = OpenOptions::new()
             .write(true)
@@ -364,6 +467,69 @@ mod tests {
         fs::remove_file(&record).unwrap();
         assert!(edited.starts_with(std::env::temp_dir()), "{edited:?}");
         assert!(!edited.exists());
+    }
+
+    #[test]
+    fn line_argument_forms() {
+        let target = FileTarget {
+            path: PathBuf::from("/work/src/main.rs"),
+            line: 12,
+        };
+        let cases: [(&str, &[&str]); 5] = [
+            ("vim", &["+12", "/work/src/main.rs"]),
+            ("/usr/bin/nvim -p", &["+12", "/work/src/main.rs"]),
+            ("code --wait", &["--goto", "/work/src/main.rs:12"]),
+            ("/opt/bin/cursor -w", &["--goto", "/work/src/main.rs:12"]),
+            ("zed --wait", &["/work/src/main.rs:12"]),
+        ];
+        for (command, expected) in cases {
+            assert_eq!(line_arguments(command, &target), expected, "{command}");
+        }
+    }
+
+    #[test]
+    fn resolve_needs_existing_file() {
+        let dir = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("wisp-resolve-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("present.rs"), "").unwrap();
+        let target = FileTarget::resolve(&dir.join("present.rs"), 0).unwrap();
+        assert_eq!(target.path(), dir.join("present.rs"));
+        // Line 0 is not a line; the top of the file is.
+        assert_eq!(target.line, 1);
+        assert_eq!(FileTarget::resolve(&dir.join("absent.rs"), 1), None);
+        assert_eq!(FileTarget::resolve(&dir, 1), None);
+        // A relative path, where `+cmd` would be an option, is refused.
+        assert_eq!(FileTarget::resolve(Path::new("+:!cmd"), 1), None);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn open_file_passes_arguments_unparsed() {
+        // A path the shell would expand or split reaches the editor as one argument.
+        let dir = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("wisp-open-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let name = "a $(touch pwned) b;`x`.rs";
+        fs::write(dir.join(name), "").unwrap();
+        let target = FileTarget::resolve(&dir.join(name), 5).unwrap();
+        let record = dir.join("args");
+        let command = format!(r#"printf '%s\n' >'{}'"#, record.display());
+        open_file(&command, &target).unwrap();
+        assert_eq!(
+            fs::read_to_string(&record).unwrap(),
+            format!("+5\n{}\n", dir.join(name).display())
+        );
+        assert!(!dir.join("pwned").exists());
+        assert!(matches!(
+            open_file("exit 4; true", &target),
+            Err(EditFailure::Exit(_))
+        ));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

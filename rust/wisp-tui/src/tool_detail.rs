@@ -1168,7 +1168,9 @@ fn is_read_continuation_notice(line: &str) -> bool {
     line.starts_with("[More lines follow. Use offset=")
 }
 
-fn parse_grep_record(line: &str) -> Option<(&str, u64, &str)> {
+/// Splits a search result line into its path, line number and text, or `None` for
+/// anything else, such as a context line.
+pub(crate) fn parse_grep_record(line: &str) -> Option<(&str, u64, &str)> {
     let bytes = line.as_bytes();
     let mut found = None;
     let mut index = 0usize;

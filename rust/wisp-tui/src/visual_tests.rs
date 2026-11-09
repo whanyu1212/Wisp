@@ -1472,3 +1472,103 @@ fn capture_conversation_screens() {
         }
     }
 }
+
+/// Each link painted in `buffer`, as its URI and the text of its cells, in order.
+fn painted_links(buffer: &ratatui::buffer::Buffer) -> Vec<(String, String)> {
+    let mut links: Vec<(String, String)> = Vec::new();
+    for cell in &buffer.content {
+        let Some(rest) = cell.symbol().strip_prefix("\x1b]8;id=") else {
+            continue;
+        };
+        let (_, rest) = rest.split_once(';').expect("an id ends at `;`");
+        let (uri, rest) = rest.split_once("\x1b\\").expect("the URI ends at ST");
+        let text = rest
+            .strip_suffix("\x1b]8;;\x1b\\")
+            .expect("each cell closes its own link");
+        match links.last_mut().filter(|(last, _)| last == uri) {
+            Some((_, painted)) => painted.push_str(text),
+            None => links.push((uri.to_owned(), text.to_owned())),
+        }
+    }
+    links
+}
+
+#[test]
+fn links_paint_as_hyperlinks() {
+    let mut ui = LiveUi::default();
+    ui.state
+        .transcript
+        .append_prompt("Where are the docs?".into());
+    ui.state.transcript.complete_message(
+        1,
+        "See [docs](https://example.test/docs)[more](https://example.test/more), \
+         not [this](javascript:alert(1))."
+            .into(),
+    );
+    ui.state.transcript.set_tool_cwd("/work");
+    let BackendEvent::ToolCall(call) = BackendEvent::from_projection_value(&json!({
+        "type": "tool.call", "call_id": "read-1", "name": "read",
+        "arguments": {"path": "src/main.rs"}
+    }))
+    .unwrap() else {
+        panic!("tool call")
+    };
+    ui.state.transcript.observe_tool_call(call);
+    // Off by default, so every other test reads plain text.
+    let buffer = draw(&mut ui, 80, 24);
+    assert!(
+        buffer
+            .content
+            .iter()
+            .all(|cell| !cell.symbol().contains('\x1b')),
+        "{buffer:?}"
+    );
+
+    ui.hyperlinks = true;
+    let buffer = draw(&mut ui, 80, 24);
+    let file = crate::hyperlink::file_uri(std::path::Path::new("/work/src/main.rs")).unwrap();
+    // Adjacent links keep their own destinations; a script link stays plain text.
+    assert_eq!(
+        painted_links(&buffer),
+        [
+            ("https://example.test/docs".to_owned(), "docs".to_owned()),
+            ("https://example.test/more".to_owned(), "more".to_owned()),
+            (file.to_string(), "src/main.rs".to_owned()),
+        ]
+    );
+    row_containing(&buffer, "not this.");
+}
+
+#[test]
+fn search_pattern_is_not_a_link() {
+    // A search names a file only through its first match, which Ctrl+O opens; the
+    // pattern on its card is not a link to that file.
+    let mut ui = LiveUi {
+        hyperlinks: true,
+        ..LiveUi::default()
+    };
+    ui.state.transcript.set_tool_cwd("/work");
+    for event in [
+        json!({
+            "type": "tool.call", "call_id": "grep-1", "name": "grep",
+            "arguments": {"pattern": "fn main"}
+        }),
+        json!({
+            "type": "tool.result", "message_entry_id": null, "call_id": "grep-1",
+            "name": "grep", "output": "src/main.rs:1:fn main() {}", "is_error": false
+        }),
+    ] {
+        match BackendEvent::from_projection_value(&event).unwrap() {
+            BackendEvent::ToolCall(call) => {
+                ui.state.transcript.observe_tool_call(call);
+            }
+            BackendEvent::ToolResult(result) => {
+                ui.state.transcript.observe_tool_result(*result);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    let buffer = draw(&mut ui, 80, 24);
+    row_containing(&buffer, "fn main");
+    assert_eq!(painted_links(&buffer), []);
+}

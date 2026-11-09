@@ -2,6 +2,7 @@ use super::*;
 use crate::{
     PendingApproval, ViewStatus,
     color_depth::ColorDepth,
+    external_editor::EditorRequest,
     reducer::{ActiveCommand, ActiveCommandType, InteractionStatus, MessageContentKind},
     tool_detail::ToolDetailSource,
 };
@@ -1305,8 +1306,13 @@ fn editing_ui(editor: &str, draft: &str) -> LiveUi {
     ui
 }
 
-/// Runs one external edit with an empty event queue.
+/// Runs one external edit of the draft with an empty event queue.
 async fn edit(ui: &mut LiveUi) -> LoopControl {
+    run_request(ui, EditorRequest::Draft).await
+}
+
+/// Runs the editor for `request` with an empty event queue.
+async fn run_request(ui: &mut LiveUi, request: EditorRequest) -> LoopControl {
     let (writer, _commands) = mpsc::channel(16);
     let (_events_tx, mut events) = mpsc::channel(EVENTS_PER_TURN);
     let (_inputs_tx, mut inputs) = mpsc::channel(16);
@@ -1320,7 +1326,7 @@ async fn edit(ui: &mut LiveUi) -> LoopControl {
         writer: &mut writer_outcome,
     };
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
-    edit_draft_externally(ui, &mut terminal, &mut sources, &writer, 8192)
+    run_editor(ui, &mut terminal, &mut sources, &writer, 8192, request)
         .await
         .unwrap()
 }
@@ -1331,7 +1337,7 @@ async fn editor_key_requests_edit() {
     let ctrl_o = Input::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
     let mut ui = editing_ui("true", "draft");
     ui.handle_input(ctrl_o, &writer, 8192).await.unwrap();
-    assert!(ui.external_edit_requested);
+    assert_eq!(ui.editor_request, Some(EditorRequest::Draft));
 
     // A pending decision owns the keyboard, so the editor stays closed.
     let mut ui = editing_ui("true", "draft");
@@ -1340,7 +1346,7 @@ async fn editor_key_requests_edit() {
         .unwrap();
     let ctrl_o = Input::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
     ui.handle_input(ctrl_o, &writer, 8192).await.unwrap();
-    assert!(!ui.external_edit_requested);
+    assert_eq!(ui.editor_request, None);
 }
 
 #[tokio::test]
@@ -1349,9 +1355,7 @@ async fn edited_draft_replaces_composer() {
         r#"grep -qx 'first idea' "$1" && printf 'second idea\nwith detail\n' >"$1" && true"#,
         "first idea",
     );
-    ui.external_edit_requested = true;
     assert_eq!(edit(&mut ui).await, LoopControl::Continue);
-    assert!(!ui.external_edit_requested);
     assert_eq!(ui.editor.text(), "second idea\nwith detail");
     assert!(ui.notice.is_none());
     assert!(ui.render_pending);
@@ -1410,9 +1414,16 @@ async fn events_drain_while_editing() {
         reader: &mut reader,
         writer: &mut writer_outcome,
     };
-    let control = edit_draft_externally(&mut ui, &mut terminal, &mut sources, &writer, 8192)
-        .await
-        .unwrap();
+    let control = run_editor(
+        &mut ui,
+        &mut terminal,
+        &mut sources,
+        &writer,
+        8192,
+        EditorRequest::Draft,
+    )
+    .await
+    .unwrap();
     assert_eq!(control, LoopControl::Continue);
     // Checked as the editor closes: without draining, the producer would still be
     // blocked on the full queue.
@@ -1421,4 +1432,148 @@ async fn events_drain_while_editing() {
         "events waited for the editor to close"
     );
     assert_eq!(ui.editor.text(), "draft");
+}
+
+/// A folder of its own under the system temporary folder, removed when dropped.
+struct ScratchDir(std::path::PathBuf);
+
+impl ScratchDir {
+    fn new(name: &str) -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "wisp-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        // The system temporary folder may be reached through a symbolic link.
+        Self(path.canonicalize().unwrap())
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A UI whose transcript holds one finished tool card, run in `cwd`, selected for
+/// browsing.
+async fn browsing_card(
+    cwd: &std::path::Path,
+    name: &str,
+    arguments: serde_json::Value,
+    output: &str,
+) -> LiveUi {
+    let (writer, _commands) = mpsc::channel(16);
+    let mut ui = LiveUi::default();
+    ui.state.transcript.set_tool_cwd(cwd.to_str().unwrap());
+    for event in [
+        json!({"type": "tool.call", "call_id": "call-1", "name": name, "arguments": arguments}),
+        json!({
+            "type": "tool.result", "message_entry_id": null, "call_id": "call-1", "name": name,
+            "output": output, "is_error": false
+        }),
+    ] {
+        let event = BackendEvent::from_projection_value(&event).unwrap();
+        ui.dispatch(UiAction::BackendEvent(event), &writer, 8192)
+            .await
+            .unwrap();
+    }
+    ui.handle_input(key(KeyCode::F(6)), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(ui.browse_selected.is_some());
+    ui
+}
+
+async fn press_ctrl_o(ui: &mut LiveUi) {
+    let (writer, _commands) = mpsc::channel(16);
+    let ctrl_o = Input::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
+    ui.handle_input(ctrl_o, &writer, 8192).await.unwrap();
+}
+
+#[tokio::test]
+async fn editor_key_opens_card_file() {
+    let dir = ScratchDir::new("open-card");
+    std::fs::create_dir(dir.0.join("src")).unwrap();
+    std::fs::write(dir.0.join("src/main.rs"), "fn main() {}\n").unwrap();
+    let edits = json!([{"oldText": "a", "newText": "b"}]);
+    let cases = [
+        (
+            "read",
+            json!({"path": "src/main.rs", "offset": 40}),
+            "fn main() {}",
+            40,
+        ),
+        (
+            "edit",
+            json!({"path": "src/main.rs", "edits": edits}),
+            "Applied 1 edit",
+            1,
+        ),
+        (
+            "grep",
+            json!({"pattern": "main"}),
+            "src/main.rs-3-context\nsrc/main.rs:7:fn main() {}",
+            7,
+        ),
+    ];
+    for (name, arguments, output, line) in cases {
+        let mut ui = browsing_card(&dir.0, name, arguments, output).await;
+        press_ctrl_o(&mut ui).await;
+        let Some(EditorRequest::File(target)) = ui.editor_request.clone() else {
+            panic!("{name}: no file request, notice {:?}", ui.notice);
+        };
+        assert_eq!(target.path(), dir.0.join("src/main.rs"), "{name}");
+
+        // The editor gets the line and the absolute path as separate arguments.
+        let record = dir.0.join("args");
+        ui.editor_command = format!(r#"printf '%s\n' >'{}'"#, record.display());
+        assert_eq!(
+            run_request(&mut ui, EditorRequest::File(target)).await,
+            LoopControl::Continue
+        );
+        let recorded = std::fs::read_to_string(&record).unwrap();
+        let expected = format!("+{line}\n{}\n", dir.0.join("src/main.rs").display());
+        assert_eq!(recorded, expected, "{name}");
+        // Browsing goes on where it was, with its hint naming the key.
+        assert!(ui.browse_selected.is_some());
+        let notice = ui.notice.clone().unwrap_or_default();
+        assert!(notice.contains("Ctrl+O open file"), "{name}: {notice}");
+    }
+}
+
+#[tokio::test]
+async fn card_without_file_opens_nothing() {
+    let dir = ScratchDir::new("no-card-file");
+    // Neither a missing file nor a model-chosen name an editor would read as an
+    // option (vim's `+cmd` runs a command) reaches the editor.
+    for path in ["missing.rs", "+:!touch pwned", "-c", "."] {
+        let mut ui = browsing_card(&dir.0, "read", json!({"path": path}), "").await;
+        press_ctrl_o(&mut ui).await;
+        assert_eq!(ui.editor_request, None, "{path}");
+        assert_eq!(
+            ui.notice.as_deref(),
+            Some("This card names no file that exists to open."),
+            "{path}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn failed_open_names_file() {
+    let dir = ScratchDir::new("failed-open");
+    std::fs::write(dir.0.join("notes.md"), "notes\n").unwrap();
+    let mut ui = browsing_card(&dir.0, "read", json!({"path": "notes.md"}), "notes").await;
+    press_ctrl_o(&mut ui).await;
+    let request = ui.editor_request.take().unwrap();
+    ui.editor_command = "exit 2; true".into();
+    run_request(&mut ui, request).await;
+    let notice = ui.notice.clone().unwrap();
+    let expected = format!(
+        "Could not open {}: the editor exited",
+        dir.0.join("notes.md").display()
+    );
+    assert!(notice.starts_with(&expected), "{notice}");
 }

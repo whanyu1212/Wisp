@@ -107,17 +107,20 @@ impl FrameBackend for ratatui::backend::TestBackend {
     }
 }
 
-/// Draws one frame inside a synchronized update, downconverting its colours to `depth`
-/// after `render` fills the buffer and before ratatui diffs and flushes it.
+/// Draws one frame inside a synchronized update. After `render` fills the buffer,
+/// `finish` gets the complete frame, then its colours are downconverted to `depth`,
+/// before ratatui diffs and flushes it.
 pub(crate) fn draw_frame<B: FrameBackend>(
     terminal: &mut Terminal<B>,
     depth: ColorDepth,
     render: impl FnOnce(&mut ratatui::Frame<'_>),
+    finish: impl FnOnce(&mut ratatui::buffer::Buffer),
 ) -> io::Result<()> {
     terminal.backend_mut().begin_frame()?;
     let draw_result = terminal
         .draw(|frame| {
             render(frame);
+            finish(frame.buffer_mut());
             depth.downconvert_buffer(frame.buffer_mut());
         })
         .map(drop)
