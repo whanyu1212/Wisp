@@ -10,6 +10,7 @@ from wisp.agent.loop.config import (
     DEFAULT_CONTEXT_RESERVE_TOKENS,
     AgentLoopConfig,
     CancellationToken,
+    ToolResultImageLoader,
     UsageCostEstimator,
 )
 from wisp.agent.request_boundary import ContextOverflowHook, RequestBoundaryHook
@@ -42,6 +43,8 @@ class AgentHarnessConfig:
     max_pending_queue_bytes: int = _MAX_PENDING_QUEUE_BYTES
     prompt_cache_key: str | None = None
     web_search: bool = False
+    # Loads the bytes of each tool batch's images before the next request.
+    tool_result_image_loader: ToolResultImageLoader | None = None
 
     def __post_init__(self) -> None:
         """Reject invalid runtime settings even when callers bypass static typing."""
@@ -107,4 +110,5 @@ def _build_loop_config(
         cost_estimator=config.cost_estimator,
         request_boundary_hook=request_boundary_hook,
         context_overflow_hook=context_overflow_hook,
+        tool_result_image_loader=config.tool_result_image_loader,
     )

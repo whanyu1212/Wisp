@@ -53,12 +53,19 @@ def _canonical_history_json(payload: object) -> str:
 
 
 def _tool_result_payload(message: Message) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "call_id": message.tool_call_id,
         "is_error": message.is_error,
         "output": message.content,
         "tool_name": message.tool_name,
     }
+    # This assistant-role record cannot carry images, so it names the ones the
+    # tool returned; the key is absent otherwise, keeping older records identical.
+    if message.images:
+        payload["images_not_shown"] = [
+            f"{image.media_type}, {image.width}x{image.height}" for image in message.images
+        ]
+    return payload
 
 
 def _portable_orphan_tool_result(message: Message) -> Message:

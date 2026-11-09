@@ -102,6 +102,7 @@ def _provider_result(result_event: ToolResultReady) -> ToolCallResult:
         call_id=result_event.call_id,
         output=result_event.output,
         is_error=result_event.is_error,
+        images=result_event.images,
     )
 
 

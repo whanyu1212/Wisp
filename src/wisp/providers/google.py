@@ -26,6 +26,9 @@ from wisp.providers.base import (
     is_context_overflow_message,
     message_image_inputs,
     strip_or_none,
+    tool_call_result_from_message,
+    tool_images_preamble,
+    tool_result_image_inputs,
 )
 from wisp.providers.continuations import ContinuationStore
 from wisp.providers.events import (
@@ -314,8 +317,12 @@ class GoogleProvider:
             previous = self._require_replay(previous_response_id)
             replay_tail = (
                 *previous,
-                *((self._tool_results_to_content(tool_results),) if tool_results else ()),
-                *_messages_to_google(extra_messages),
+                *(
+                    (self._tool_results_to_content(tool_results, model=selected_model),)
+                    if tool_results
+                    else ()
+                ),
+                *_messages_to_google(extra_messages, model=selected_model),
                 genai_types.Content(role="model", parts=parts),
             )
             if previous_response_id is not None and previous_response_id != continuation_id:
@@ -349,12 +356,12 @@ class GoogleProvider:
         effort: str | None = None,
     ) -> AsyncIterator[genai_types.GenerateContentResponse]:
         client = await self._client_or_create()
-        contents = _messages_to_google(messages)
+        contents = _messages_to_google(messages, model=model)
         if previous_response_id is not None:
             contents.extend(self._require_replay(previous_response_id))
         if tool_results:
-            contents.append(self._tool_results_to_content(tool_results))
-        contents.extend(_messages_to_google(extra_messages))
+            contents.append(self._tool_results_to_content(tool_results, model=model))
+        contents.extend(_messages_to_google(extra_messages, model=model))
         system_instruction = _system_from_messages(messages)
 
         # thinking_level only -- Gemini 2.5 models need thinking_budget (a
@@ -443,26 +450,24 @@ class GoogleProvider:
             self._call_info.popitem(last=False)
 
     def _tool_results_to_content(
-        self, tool_results: Sequence[ToolCallResult]
+        self, tool_results: Sequence[ToolCallResult], *, model: str
     ) -> genai_types.Content:
-        parts = []
-        for result in tool_results:
-            info = self._call_info.get(result.call_id)
-            parts.append(
-                genai_types.Part(
-                    function_response=genai_types.FunctionResponse(
-                        # Only echo an id Gemini actually issued for this
-                        # call -- when it never did (info is None or its
-                        # provider_id is None), omit id entirely rather than
-                        # sending Wisp's own synthetic call_id back as if it
-                        # were a real Gemini-issued one.
-                        id=info.provider_id if info is not None else None,
-                        name=info.name if info is not None else result.call_id,
-                        response={"error" if result.is_error else "output": result.output},
-                    )
+        return _function_responses_content(
+            [
+                (
+                    result,
+                    # Only echo an id Gemini actually issued for this call -- when
+                    # it never did (info is None or its provider_id is None), omit
+                    # id entirely rather than sending Wisp's own synthetic call_id
+                    # back as if it were a real Gemini-issued one.
+                    info.provider_id if info is not None else None,
+                    info.name if info is not None else result.call_id,
                 )
-            )
-        return genai_types.Content(role="user", parts=parts)
+                for result in tool_results
+                for info in (self._call_info.get(result.call_id),)
+            ],
+            model=model,
+        )
 
 
 def _google_retry_decision(
@@ -507,7 +512,71 @@ def _system_from_messages(messages: Sequence[Message]) -> str | None:
     return "\n\n".join(system_parts) or None
 
 
-def _messages_to_google(messages: Sequence[Message]) -> list[genai_types.Content]:
+def _takes_function_response_images(model: str) -> bool:
+    """Whether ``model`` accepts images inside a function response.
+
+    Google documents multimodal function responses for Gemini 3 and later; earlier
+    models take the images as ordinary parts of the same turn.
+    """
+
+    return not model.startswith(("gemini-1", "gemini-2"))
+
+
+def _function_responses_content(
+    responses: Sequence[tuple[ToolCallResult, str | None, str]], *, model: str
+) -> genai_types.Content:
+    """Encode a turn of function responses, with the images their tools returned.
+
+    Args:
+        responses (Sequence[tuple[ToolCallResult, str | None, str]]): Each result
+            with the id Gemini issued for its call, if any, and the function name.
+        model (str): The requested model, which decides where the images go.
+
+    Returns:
+        genai_types.Content: One user turn: the function responses, then, for a
+        model before Gemini 3, each tool's images after a note naming the call.
+        Images without loaded bytes are named in their response text instead.
+    """
+
+    native = _takes_function_response_images(model)
+    parts: list[genai_types.Part] = []
+    image_parts: list[genai_types.Part] = []
+    for result, provider_id, name in responses:
+        images = tool_result_image_inputs(result)
+        not_sent = [image_placeholder_text(image) for image, data in images if data is None]
+        text = "\n".join(part for part in (result.output, *not_sent) if part)
+        sent = [(image, data) for image, data in images if data is not None]
+        parts.append(
+            genai_types.Part(
+                function_response=genai_types.FunctionResponse(
+                    id=provider_id,
+                    name=name,
+                    response={"error" if result.is_error else "output": text},
+                    parts=[
+                        genai_types.FunctionResponsePart(
+                            inline_data=genai_types.FunctionResponseBlob(
+                                mime_type=image.media_type, data=data
+                            )
+                        )
+                        for image, data in sent
+                    ]
+                    if native and sent
+                    else None,
+                )
+            )
+        )
+        if sent and not native:
+            image_parts.append(genai_types.Part(text=tool_images_preamble(result)))
+            image_parts.extend(
+                genai_types.Part(
+                    inline_data=genai_types.Blob(mime_type=image.media_type, data=data)
+                )
+                for image, data in sent
+            )
+    return genai_types.Content(role="user", parts=[*parts, *image_parts])
+
+
+def _messages_to_google(messages: Sequence[Message], *, model: str) -> list[genai_types.Content]:
     """Encode fresh base context without flattening an active tool exchange."""
 
     contents: list[genai_types.Content] = []
@@ -525,23 +594,21 @@ def _messages_to_google(messages: Sequence[Message]) -> list[genai_types.Content
             index += 1
             continue
         if message.role == "tool" and message.tool_call_id:
-            parts: list[genai_types.Part] = []
+            responses: list[tuple[ToolCallResult, str | None, str]] = []
             while index < len(messages):
                 result = messages[index]
                 if result.role != "tool" or not result.tool_call_id:
                     break
                 call_id = result.tool_call_id
-                parts.append(
-                    genai_types.Part(
-                        function_response=genai_types.FunctionResponse(
-                            id=provider_call_ids.get(call_id),
-                            name=result.tool_name or tool_names.get(call_id) or call_id,
-                            response={"error" if result.is_error else "output": result.content},
-                        )
+                responses.append(
+                    (
+                        tool_call_result_from_message(result),
+                        provider_call_ids.get(call_id),
+                        result.tool_name or tool_names.get(call_id) or call_id,
                     )
                 )
                 index += 1
-            contents.append(genai_types.Content(role="user", parts=parts))
+            contents.append(_function_responses_content(responses, model=model))
             provider_call_ids.clear()
             tool_names.clear()
             continue

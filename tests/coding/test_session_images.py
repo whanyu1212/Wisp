@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 import anyio
@@ -9,6 +10,7 @@ from wisp.coding.session import CodingSession, ImageInputUnsupportedError
 from wisp.events import QueueMessageInjected, QueueUpdated, ToolResultReady, WispEvent
 from wisp.images import ImageRejectedError, inspect_image
 from wisp.messages import Message
+from wisp.providers.base import ToolCallResult
 from wisp.providers.catalog import ModelCatalog, ModelCatalogProviderEntry, ModelRegistry
 from wisp.providers.events import (
     ProviderResponseCompleted,
@@ -294,8 +296,14 @@ def test_oversized_prompt_images_refused(tmp_path: Path, monkeypatch: pytest.Mon
     assert not session.images.directory.exists()
 
 
-def test_read_tool_result_keeps_image(tmp_path: Path) -> None:
-    """An image `read` returns is stored, persisted on the tool message, and resumed."""
+def _read_twice(
+    tmp_path: Path,
+    *,
+    image_models: tuple[str, ...],
+    budget: int | None = None,
+    native_tool_history: bool = False,
+) -> tuple[ScriptedProvider, list[WispEvent], Path]:
+    """Run a turn where the model reads an image, then a second turn in the session."""
 
     project = tmp_path / "project"
     project.mkdir()
@@ -314,6 +322,12 @@ def test_read_tool_result_keeps_image(tmp_path: Path) -> None:
             [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="again")],
         ]
     )
+    if budget is not None:
+        provider.max_request_image_bytes = budget  # type: ignore[attr-defined]
+    if native_tool_history:
+        provider.supports_structured_tool_replacement = (  # type: ignore[attr-defined]
+            lambda *, effort: True
+        )
     tools = ToolRegistry()
     tools.register(ReadTool())
     store = JsonlSessionStore(tmp_path / "sessions")
@@ -323,7 +337,7 @@ def test_read_tool_result_keeps_image(tmp_path: Path) -> None:
         sessions=store,
         tool_registry=tools,
         tool_context=ToolContext(cwd=project),
-        models=_registry(image_models=("scripted",)),
+        models=_registry(image_models=image_models),
     )
 
     async def two_runs() -> list[WispEvent]:
@@ -332,15 +346,213 @@ def test_read_tool_result_keeps_image(tmp_path: Path) -> None:
             pass
         return events
 
-    events = anyio.run(two_runs)
+    return provider, anyio.run(two_runs), session.path
+
+
+def test_read_tool_result_sends_image(tmp_path: Path) -> None:
+    """An image `read` returns is stored, sent with its result, and named on resume."""
+
+    provider, events, path = _read_twice(tmp_path, image_models=("scripted",))
 
     image = inspect_image(PNG)
     result = next(event for event in events if isinstance(event, ToolResultReady))
     assert result.images == (image,)
     assert result.output.startswith("Image file shot.png: PNG")
-    (tool_message,) = [m for m in store.load(session.path).read_messages() if m.role == "tool"]
+    (tool_message,) = [
+        m for m in JsonlSessionStore(path.parent).load(path).read_messages() if m.role == "tool"
+    ]
     assert tool_message.images == (image,)
-    assert session.images.read(image) == PNG
-    # Adapters send tool results as text for now, so no request loads their bytes.
-    assert len(provider.calls) == 3
-    assert not any(message.image_bytes for call in provider.calls for message in call.messages)
+    (sent,) = provider.calls[1].tool_results
+    assert sent.images == (image,)
+    assert sent.image_bytes == (PNG,)
+    # The scripted adapter replays earlier tool calls as a summary, which names the
+    # image instead of carrying it, so the resumed request loads no bytes for it.
+    resumed = provider.calls[2].messages
+    assert not any(message.image_bytes for message in resumed)
+    assert any("images_not_shown" in message.content for message in resumed)
+
+
+@pytest.mark.parametrize(
+    ("image_models", "budget"),
+    [((), None), (("scripted",), len(PNG) - 1)],
+    ids=["text-only-model", "over-budget"],
+)
+def test_unsendable_tool_image_is_named(
+    tmp_path: Path, image_models: tuple[str, ...], budget: int | None
+) -> None:
+    provider, _, _ = _read_twice(tmp_path, image_models=image_models, budget=budget)
+
+    (sent,) = provider.calls[1].tool_results
+    assert sent.images == (inspect_image(PNG),)
+    assert sent.image_bytes is None
+
+
+def test_native_replay_resends_tool_image(tmp_path: Path) -> None:
+    """A provider that replays tool calls natively gets the image again on resume."""
+
+    provider, _, _ = _read_twice(tmp_path, image_models=("scripted",), native_tool_history=True)
+
+    (resumed_tool,) = [m for m in provider.calls[2].messages if m.role == "tool"]
+    assert resumed_tool.image_bytes == (PNG,)
+
+
+def test_missing_tool_image_is_named(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """A tool image gone from the store goes as a placeholder rather than failing."""
+
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+    agent = CodingSession(
+        provider=_answers(0), sessions=store, models=_registry(image_models=("scripted",))
+    )
+    agent._start_tool_image_allowance(())
+    missing = ToolCallResult(call_id="call-1", output="x", images=(inspect_image(PNG),))
+
+    (loaded,) = anyio.run(agent._load_tool_result_images, session, [missing])
+
+    assert loaded.image_bytes is None
+    assert "Sending tool image placeholders" in caplog.text
+
+
+def test_tool_images_share_run_budget(tmp_path: Path) -> None:
+    """Each tool batch's images come out of what the run's requests still carry."""
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "shot.png").write_bytes(PNG)
+
+    def read_turn(call_id: str) -> list[object]:
+        read = ToolCall(call_id=call_id, name="read", arguments={"path": "shot.png"})
+        return [
+            ProviderResponseStarted(model="test"),
+            ProviderToolCallCompleted(tool_call=read),
+            ProviderResponseCompleted(content="", tool_calls=(read,), finish_reason="tool_calls"),
+        ]
+
+    provider = ScriptedProvider(
+        [
+            read_turn("call-1"),
+            read_turn("call-2"),
+            [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="done")],
+        ]
+    )
+    provider.max_request_image_bytes = len(PNG) + len(PNG) // 2  # type: ignore[attr-defined]
+    tools = ToolRegistry()
+    tools.register(ReadTool())
+    agent = CodingSession(
+        provider=provider,
+        sessions=JsonlSessionStore(tmp_path / "sessions"),
+        tool_registry=tools,
+        tool_context=ToolContext(cwd=project),
+        models=_registry(image_models=("scripted",)),
+    )
+
+    async def run() -> None:
+        async for _ in agent.run("look twice"):
+            pass
+
+    anyio.run(run)
+
+    (first,) = provider.calls[1].tool_results
+    (second,) = provider.calls[2].tool_results
+    assert first.image_bytes == (PNG,)
+    assert second.images == first.images
+    assert second.image_bytes is None
+
+
+def _queue_during_run(
+    tmp_path: Path, *, budget: int, queue: Callable[[CodingSession], Awaitable[None]]
+) -> None:
+    """Run a prompt carrying PNG and call ``queue`` once the run accepts messages."""
+
+    store = JsonlSessionStore(tmp_path)
+    event_bus = EventBus()
+    provider = _answers(3)
+    provider.max_request_image_bytes = budget  # type: ignore[attr-defined]
+    agent = CodingSession(provider=provider, sessions=store, events=event_bus)
+
+    async def on_started(event: WispEvent) -> None:
+        await queue(agent)
+
+    event_bus.on("agent.started", on_started)
+
+    async def run() -> None:
+        async for _ in agent.run("look", images=[PNG], session=store.create()):
+            pass
+
+    anyio.run(run)
+
+
+@pytest.mark.parametrize("room", [0, -1], ids=["fits", "too-big"])
+def test_queued_image_fits_run(tmp_path: Path, room: int) -> None:
+    """A queued message's images must fit beside those the run already sends."""
+
+    outcomes: list[str] = []
+
+    async def steer(agent: CodingSession) -> None:
+        try:
+            await agent.steer("and this?", images=[JPEG])
+        except ImageInputUnsupportedError as exc:
+            outcomes.append(str(exc))
+        else:
+            outcomes.append("queued")
+
+    _queue_during_run(tmp_path, budget=len(PNG) + len(JPEG) + room, queue=steer)
+
+    if room == 0:
+        assert outcomes == ["queued"]
+    else:
+        (rejection,) = outcomes
+        assert f"room for {len(JPEG) - 1} more bytes" in rejection
+
+
+@pytest.mark.parametrize("remove", ["pop", "clear"])
+def test_removed_queue_frees_budget(tmp_path: Path, remove: str) -> None:
+    """Images removed from the queue unsent stop holding the run's budget."""
+
+    async def requeue(agent: CodingSession) -> None:
+        await agent.follow_up("later", images=[JPEG])
+        if remove == "pop":
+            agent.pop_queue("follow_up")
+        else:
+            agent.clear_queue()
+        await agent.follow_up("later", images=[JPEG])
+
+    _queue_during_run(tmp_path, budget=len(PNG) + len(JPEG), queue=requeue)
+
+
+def test_restored_queue_fits_budget(tmp_path: Path) -> None:
+    """A queue kept from a failed run drops image bytes the next run cannot fit."""
+
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+    event_bus = EventBus()
+    provider = ScriptedProvider(
+        [
+            [RuntimeError("provider failed")],
+            [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="one")],
+            [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="two")],
+        ]
+    )
+    provider.max_request_image_bytes = len(PNG) + len(JPEG) - 1  # type: ignore[attr-defined]
+    agent = CodingSession(provider=provider, sessions=store, events=event_bus)
+    queued_once: list[bool] = []
+
+    async def queue_once(event: WispEvent) -> None:
+        if not queued_once:
+            queued_once.append(True)
+            await agent.follow_up("later", images=[PNG])
+
+    event_bus.on("agent.started", queue_once)
+
+    async def run(prompt: str, images: list[bytes]) -> None:
+        async for _ in agent.run(prompt, images=images, session=session):
+            pass
+
+    with pytest.raises(RuntimeError, match="provider failed"):
+        anyio.run(run, "look", [])
+    anyio.run(run, "next", [JPEG])
+
+    request = _user_messages(provider.calls[-1])
+    assert [message.image_bytes for message in request] == [None, (JPEG,), None]
+    assert request[-1].content == "later"
+    assert request[-1].images is not None

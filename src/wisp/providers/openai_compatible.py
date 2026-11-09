@@ -37,6 +37,9 @@ from wisp.providers.base import (
     is_context_overflow_message,
     message_image_inputs,
     strip_or_none,
+    tool_call_result_from_message,
+    tool_images_preamble,
+    tool_result_image_inputs,
 )
 from wisp.providers.continuations import ContinuationStore
 from wisp.providers.events import (
@@ -462,11 +465,21 @@ class OpenAICompatibleProvider:
 
 def _messages_to_chat(messages: Sequence[Message]) -> list[ChatPayload]:
     result: list[ChatPayload] = []
-    for message in messages:
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        index += 1
         if message.role == "tool" and message.tool_call_id:
-            result.append(
-                {"role": "tool", "content": message.content, "tool_call_id": message.tool_call_id}
-            )
+            # A run of results is encoded together, so their images follow the last.
+            results = [tool_call_result_from_message(message)]
+            while (
+                index < len(messages)
+                and messages[index].role == "tool"
+                and messages[index].tool_call_id
+            ):
+                results.append(tool_call_result_from_message(messages[index]))
+                index += 1
+            result.extend(_tool_results_to_messages(results))
         elif message.role == "assistant" and message.tool_calls:
             # A structured tool-call row from the still-active turn (see
             # ``normalize_provider_history``). Emit it as the model's own function
@@ -512,10 +525,31 @@ def _chat_user_content(message: Message) -> list[ChatPayload]:
 
 
 def _tool_results_to_messages(results: Sequence[ToolCallResult]) -> tuple[ChatPayload, ...]:
-    return tuple(
-        {"role": "tool", "tool_call_id": result.call_id, "content": result.output}
-        for result in results
-    )
+    """Encode consecutive tool results, then one user message with their images.
+
+    Chat Completions accepts images only in user messages, and every tool message
+    must follow its assistant call uninterrupted, so the images come after the last
+    result, each tool's introduced by ``tool_images_preamble``. An image without
+    loaded bytes is named in its tool message instead.
+    """
+
+    turn: list[ChatPayload] = []
+    image_parts: list[ChatPayload] = []
+    for result in results:
+        images = tool_result_image_inputs(result)
+        not_sent = [image_placeholder_text(image) for image, data in images if data is None]
+        content = "\n".join(text for text in (result.output, *not_sent) if text)
+        turn.append({"role": "tool", "tool_call_id": result.call_id, "content": content})
+        sent = [(image, data) for image, data in images if data is not None]
+        if sent:
+            image_parts.append({"type": "text", "text": tool_images_preamble(result)})
+            image_parts.extend(
+                {"type": "image_url", "image_url": {"url": image_data_url(image, data)}}
+                for image, data in sent
+            )
+    if image_parts:
+        turn.append({"role": "user", "content": image_parts})
+    return tuple(turn)
 
 
 def _assistant_tool_message(content: str, tool_calls: Sequence[ToolCall]) -> ChatPayload:

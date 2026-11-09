@@ -373,9 +373,18 @@ same secured descriptor. A PNG, JPEG, GIF or WebP signature makes it an image re
 Wisp does not resize images. Validating headers needs no image library, which keeps
 installation free of native dependencies such as Pillow, and the providers that
 take images scale large ones down themselves. The 8000 px and 7.5 MB bounds are
-the tightest limits among those providers. Sending a tool result's image to the
-model is each provider adapter's job; until an adapter encodes it, the model reads
-the text line only.
+the tightest limits among those providers.
+
+How the image reaches the model depends on the provider. Anthropic, the OpenAI
+Responses API, Codex and xAI take it inside the tool result. Chat Completions APIs
+accept images only from the user, so the image follows the batch's tool messages in
+one user message that says which tool call returned it and that it is tool output,
+not an instruction. Gemini 3 and later take it inside the function response; earlier
+Gemini models get it as a part of the same turn. A model that does not accept
+images, or a request whose image budget is spent, gets a short note naming the
+image instead. When a later session replays the call as a summary rather than as
+native tool history (Anthropic and Gemini do), the summary names the image but does
+not carry it; read the file again to see it.
 
 ## 4. `write`
 

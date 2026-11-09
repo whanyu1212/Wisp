@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -10,9 +10,13 @@ from wisp.agent.request_boundary import ContextOverflowHook, RequestBoundaryHook
 from wisp.agent.tool_contracts import ToolExecutor
 from wisp.agent.validation import validate_agent_runtime_limits, validate_non_negative_integer
 from wisp.events import TokenUsage, UsageCost
-from wisp.providers.base import Provider, ToolSpec
+from wisp.providers.base import Provider, ToolCallResult, ToolSpec
 
 type UsageCostEstimator = Callable[[str, str | None, str | None, TokenUsage], UsageCost]
+type ToolResultImageLoader = Callable[
+    [Sequence[ToolCallResult]], Awaitable[tuple[ToolCallResult, ...]]
+]
+"""Give a tool batch's results the image bytes the next request can carry."""
 
 DEFAULT_CONTEXT_RESERVE_TOKENS = 16_384
 DEFAULT_CONTEXT_PRESSURE_THRESHOLD = 0.8
@@ -58,6 +62,9 @@ class AgentLoopConfig:
             after a successful turn to stop, continue, or change request context.
         context_overflow_hook (ContextOverflowHook | None, optional): Policy that can
             replace or rebase rejected context before retrying in the same loop.
+        tool_result_image_loader (ToolResultImageLoader | None, optional): Loads the
+            bytes of a tool batch's images before the next request; None sends them
+            as placeholders.
     """
 
     provider: Provider
@@ -81,6 +88,7 @@ class AgentLoopConfig:
     web_search: bool = False
     request_boundary_hook: RequestBoundaryHook | None = None
     context_overflow_hook: ContextOverflowHook | None = None
+    tool_result_image_loader: ToolResultImageLoader | None = None
 
     def __post_init__(self) -> None:
         """Validate runtime limits and continuation offsets after construction.

@@ -323,9 +323,6 @@ def _tool_payload(tool: ToolSpec) -> dict[str, object]:
 
 
 def _message_image_tokens(message: Message) -> int:
-    # Adapters send tool results as text, so only user images cost tokens.
-    if message.role != "user":
-        return 0
     return sum(image_tokens(image) for image in message.images or ())
 
 
