@@ -927,24 +927,29 @@ fn user_and_code_surfaces_fill_only_their_allocated_rows() {
             ui.no_color = no_color;
             let palette = ui.palette();
             let canvas = palette.base().bg.unwrap_or(Color::Reset);
+            // A theme drawn on the terminal's own background has no prompt band.
+            let band = palette.user_text().bg.unwrap_or(Color::Reset);
             let buffer = draw(&mut ui, 100, 48);
             let user = row_containing(&buffer, "Review the startup");
             let label = row_containing(&buffer, "you");
             assert_eq!(buffer[(3, label - 1)].symbol(), " ");
             // The prompt's bar covers its top padding too.
             assert_eq!(buffer[(2, label - 1)].symbol(), buffer[(2, label)].symbol());
-            assert_eq!(buffer[(2, label - 1)].bg, palette.panel);
-            assert_eq!(buffer[(97, label - 1)].bg, palette.panel);
+            assert_eq!(buffer[(2, label - 1)].bg, band);
+            assert_eq!(buffer[(97, label - 1)].bg, band);
             assert_eq!(buffer[(3, label - 2)].bg, canvas);
-            assert_eq!(buffer[(2, user)].bg, palette.panel);
-            assert_eq!(buffer[(97, user)].bg, palette.panel);
+            assert_eq!(buffer[(2, user)].bg, band);
+            assert_eq!(buffer[(97, user)].bg, band);
             assert_eq!(buffer[(1, user)].bg, canvas);
             assert_eq!(buffer[(98, user)].bg, canvas);
             assert_eq!(buffer[(3, user)].fg, palette.foreground);
-            assert!(!buffer[(3, user)].modifier.contains(Modifier::BOLD));
+            assert_eq!(
+                buffer[(3, user)].modifier.contains(Modifier::BOLD),
+                palette.user_text().bg.is_none()
+            );
             assert_eq!(buffer[(3, user + 1)].symbol(), " ");
-            assert_eq!(buffer[(2, user + 1)].bg, palette.panel);
-            assert_eq!(buffer[(97, user + 1)].bg, palette.panel);
+            assert_eq!(buffer[(2, user + 1)].bg, band);
+            assert_eq!(buffer[(97, user + 1)].bg, band);
             assert_eq!(buffer[(3, user + 2)].bg, canvas);
             let code = row_containing(&buffer, "let ready");
             for y in code..=code + 2 {
@@ -980,6 +985,105 @@ fn active_user_surface_keeps_one_highlighted_row_above_and_below() {
     assert_eq!(buffer[(77, prompt + 1)].bg, palette.panel);
     assert_eq!(buffer[(1, prompt + 1)].bg, palette.background);
     assert_eq!(buffer[(78, prompt + 1)].bg, palette.background);
+}
+
+/// The cells of row `y` whose background is `fill`.
+fn cells_on(buffer: &ratatui::buffer::Buffer, y: u16, fill: Color) -> usize {
+    (0..buffer.area.width)
+        .filter(|&x| buffer[(x, y)].bg == fill)
+        .count()
+}
+
+#[test]
+fn diff_band_skips_line_numbers() {
+    for depth in [ColorDepth::TrueColor, ColorDepth::Ansi256] {
+        let mut ui = fixture("diff-previews");
+        ui.color_depth = depth;
+        let palette = ui.palette();
+        let shown = |color| depth.downconvert(color);
+        let buffer = draw(&mut ui, 100, 64);
+        for (text, band) in [
+            (".mermaid svg * {", palette.deletion_background),
+            ("await page.goto", palette.addition_background),
+        ] {
+            let y = row_containing(&buffer, text);
+            let digit = (0..buffer.area.width)
+                .find(|&x| buffer[(x, y)].symbol().chars().all(|c| c.is_ascii_digit()))
+                .expect("a line number");
+            assert_eq!(
+                buffer[(digit, y)].bg,
+                shown(palette.background),
+                "{depth:?}"
+            );
+            assert_eq!(buffer[(90, y)].bg, shown(band), "{depth:?}");
+            assert_ne!(shown(band), shown(palette.background), "{depth:?}");
+        }
+    }
+}
+
+#[test]
+fn wrapped_diff_band_aligns() {
+    let mut ui = fixture("diff-previews");
+    let palette = ui.palette();
+    let buffer = draw(&mut ui, 40, 64);
+    let band_start = |y: u16| {
+        (0..buffer.area.width)
+            .find(|&x| buffer[(x, y)].bg == palette.addition_background)
+            .unwrap_or_else(|| panic!("no band on row {y}"))
+    };
+    let wrapped = (1..buffer.area.height)
+        .find(|&y| {
+            (0..buffer.area.width).any(|x| buffer[(x, y)].symbol() == "↳")
+                && buffer[(30, y)].bg == palette.addition_background
+        })
+        .expect("a wrapped added line");
+    assert_eq!(band_start(wrapped), band_start(wrapped - 1));
+    assert_eq!(buffer[(band_start(wrapped), wrapped)].symbol(), "↳");
+}
+
+#[test]
+fn browse_selection_draws_band() {
+    for depth in [ColorDepth::TrueColor, ColorDepth::Ansi256] {
+        let mut ui = fixture("tools");
+        ui.color_depth = depth;
+        let palette = ui.palette();
+        let band = depth.downconvert(palette.selected);
+        let buffer = draw(&mut ui, 100, 40);
+        let y = row_containing(&buffer, "Rust tests");
+        // The band runs the transcript's width, rail and gutter included.
+        assert_eq!(buffer[(2, y)].bg, band, "{depth:?}");
+        let banded = (0..buffer.area.height)
+            .filter(|&row| cells_on(&buffer, row, band) > 60)
+            .collect::<Vec<_>>();
+        assert_eq!(banded, [y], "{depth:?}");
+        for tier in [palette.background, palette.surface, palette.panel] {
+            assert_ne!(band, depth.downconvert(tier), "{depth:?}");
+        }
+    }
+}
+
+#[test]
+fn reversed_selection_without_bands() {
+    for (theme, no_color, depth) in [
+        (theme::default_theme(), true, ColorDepth::TrueColor),
+        (
+            theme::resolve("glass").unwrap(),
+            false,
+            ColorDepth::TrueColor,
+        ),
+        (theme::default_theme(), false, ColorDepth::Ansi16),
+    ] {
+        let mut ui = fixture("tools");
+        ui.theme.active = theme;
+        ui.no_color = no_color;
+        ui.color_depth = depth;
+        let buffer = draw(&mut ui, 100, 40);
+        let y = row_containing(&buffer, "Rust tests");
+        let reversed = (0..buffer.area.height)
+            .filter(|&row| buffer[(10, row)].modifier.contains(Modifier::REVERSED))
+            .collect::<Vec<_>>();
+        assert_eq!(reversed, [y], "{} {depth:?}", theme.slug);
+    }
 }
 
 #[test]

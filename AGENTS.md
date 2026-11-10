@@ -206,7 +206,9 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
   `ui::sanitize_for_terminal` replaces every control and bidi character in untrusted text, which
   neutralizes OSC 0/8/52, CSI, and bidi overrides. Colours come from `theme.rs` palette tokens,
   mostly loaded from `theme_catalog.json`, and stay RGB while a frame is drawn; only
-  `color_depth.rs` maps them to 256 or 16 colours, after rendering.
+  `color_depth.rs` maps them to 256 or 16 colours, after rendering. Before drawing,
+  `Palette::for_depth` moves background tiers apart for 256 colours and switches selections to
+  reverse video at 16.
 - Rendering tests draw `LiveUi` into ratatui's `TestBackend` and assert on the buffer:
   `visual_tests.rs` for screens and `overlay_tests.rs` for overlays, with more beside each view.
 - For ratatui APIs, read the pinned crate source rather than ratatui.rs, its repository examples,

@@ -4639,7 +4639,10 @@ impl LiveUi {
         let preview = (self.active_overlay() == Some(OverlayKind::Theme))
             .then(|| self.theme_picker.as_ref().map(ThemePicker::preview))
             .flatten();
-        preview.unwrap_or(self.theme.active).palette(self.no_color)
+        preview
+            .unwrap_or(self.theme.active)
+            .palette(self.no_color)
+            .for_depth(self.color_depth)
     }
 
     fn invalidate_theme_presentation(&mut self) {

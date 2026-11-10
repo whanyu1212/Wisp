@@ -605,7 +605,7 @@ pub(crate) mod tests {
                 buffer
                     .content
                     .iter()
-                    .any(|cell| cell.bg == Palette::default().primary)
+                    .any(|cell| cell.bg == Palette::default().selected)
             );
             let effort_row = (0..height)
                 .find(|&y| {

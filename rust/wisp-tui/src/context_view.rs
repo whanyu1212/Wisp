@@ -503,7 +503,7 @@ impl ContextView {
                 self.selected_line = Some(lines.len());
                 let padding = width.saturating_sub(row.width());
                 row.spans.push(Span::raw(" ".repeat(padding)));
-                row = row.patch_style(palette.selection());
+                row = palette.selected_line(row);
             }
             lines.push(row);
             if open {

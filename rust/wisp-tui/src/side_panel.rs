@@ -854,7 +854,7 @@ fn mark_focus(lines: &mut [Line<'static>], row: usize, width: usize, palette: Pa
         // Pad the row so the highlight spans the panel, as a list selection does.
         let padding = width.saturating_sub(line.width());
         line.spans.push(Span::raw(" ".repeat(padding)));
-        *line = std::mem::take(line).patch_style(palette.selection());
+        *line = palette.selected_line(std::mem::take(line));
     }
 }
 
