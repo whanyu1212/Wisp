@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import cast
 
 import anyio
@@ -14,11 +15,16 @@ from tests.providers.anthropic_support import (
     text_delta_event,
 )
 from wisp.messages import Message as WispMessage
-from wisp.providers.anthropic import AnthropicCacheTtl, AnthropicProvider
+from wisp.providers.anthropic import (
+    AnthropicCacheTtl,
+    AnthropicProvider,
+    _tool_specs_to_anthropic_tools,
+)
 from wisp.providers.base import (
     ToolCallResult,
     ToolSpec,
 )
+from wisp.tools.shell.tool import BashTool
 
 
 @pytest.mark.parametrize("effort", [None, "high"])
@@ -189,6 +195,66 @@ def test_anthropic_provider_serializes_tool_specs() -> None:
             ],
         }
     ]
+
+
+@pytest.mark.parametrize(
+    ("schema", "expected"),
+    [
+        (
+            # `bash`'s own schema: per-operation variants under a top-level oneOf.
+            BashTool.input_schema,
+            {key: value for key, value in BashTool.input_schema.items() if key != "oneOf"},
+        ),
+        (
+            {
+                "type": "object",
+                "properties": {"a": {"type": "string"}},
+                "anyOf": [{"required": ["a"]}],
+            },
+            {"type": "object", "properties": {"a": {"type": "string"}}},
+        ),
+        (
+            {
+                "type": "object",
+                "properties": {"a": {"type": "string"}},
+                "required": ["a"],
+                "allOf": [
+                    {"properties": {"b": {"type": "integer"}}, "required": ["b", "a"]},
+                    {"properties": {"a": {"type": "number"}}},
+                ],
+            },
+            {
+                "type": "object",
+                "properties": {"a": {"type": "string"}, "b": {"type": "integer"}},
+                "required": ["a", "b"],
+            },
+        ),
+        (
+            # Nested combinators are accepted, so they stay.
+            {
+                "type": "object",
+                "properties": {"x": {"anyOf": [{"type": "string"}, {"type": "null"}]}},
+            },
+            {
+                "type": "object",
+                "properties": {"x": {"anyOf": [{"type": "string"}, {"type": "null"}]}},
+            },
+        ),
+    ],
+    ids=["bash", "any-of", "all-of", "nested"],
+)
+def test_tool_schema_has_no_top_level_combinator(
+    schema: dict[str, object], expected: dict[str, object]
+) -> None:
+    """Anthropic rejects a request whose tool schema has a top-level combinator."""
+
+    original = deepcopy(schema)
+    tool = ToolSpec(name="t", description="T.", input_schema=schema)
+
+    (sent,) = _tool_specs_to_anthropic_tools([tool])
+
+    assert sent["input_schema"] == expected
+    assert schema == original
 
 
 def test_anthropic_provider_sends_output_config_effort_when_provided() -> None:

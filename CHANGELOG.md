@@ -79,6 +79,16 @@ this policy.
   project is trusted. A refused path now reads `Path is outside the workspace`, and its hint names
   the boundary. `ToolContext` gains `workspace_root` and `boundary()`. (HY-475)
 
+### Providers
+
+- Anthropic requests that offer `bash` work again. Anthropic rejects a whole request when a tool's
+  input schema has `oneOf`, `anyOf` or `allOf` at its top level, and `bash` lists its operations
+  under a top-level `oneOf`, so every such request failed before the model answered. The Anthropic
+  adapter now sends schemas without top-level combinators: `allOf` parts merge into the top level,
+  and `oneOf` and `anyOf` variants are dropped, since each tool still checks its own arguments.
+  This also covers MCP and extension tools with such schemas. Other providers receive schemas
+  unchanged; OpenAI, Codex, xAI and DeepSeek accept `bash`'s. (HY-496)
+
 ### TUI
 
 - A selected row is drawn as a full-width band in a new `selected` theme tier, one step past the

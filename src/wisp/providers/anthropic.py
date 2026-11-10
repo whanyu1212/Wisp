@@ -1013,9 +1013,54 @@ def _tool_spec_to_anthropic_tool(tool: ToolSpec) -> ToolParam:
         {
             "name": tool.name,
             "description": tool.description,
-            "input_schema": deepcopy(dict(tool.input_schema)),
+            "input_schema": _anthropic_input_schema(tool.input_schema),
         },
     )
+
+
+def _anthropic_input_schema(schema: Mapping[str, object]) -> dict[str, object]:
+    """Return a copy of ``schema`` without the top-level combinators Anthropic rejects.
+
+    Anthropic refuses a whole request when any tool's input schema has `oneOf`,
+    `anyOf` or `allOf` at its top level, as `bash`'s per-operation variants do. An
+    `allOf` part's properties and required fields merge into the top level, which
+    keeps their meaning. `oneOf` and `anyOf` variants cannot be said without the
+    combinator, so they are dropped: the properties the top level already lists
+    remain, and each tool still checks its own arguments. Nested schemas, which
+    Anthropic accepts, are left alone.
+
+    Args:
+        schema (Mapping[str, object]): The tool's input schema.
+
+    Returns:
+        dict[str, object]: The schema Anthropic receives.
+    """
+
+    flattened = deepcopy(dict(schema))
+    flattened.pop("oneOf", None)
+    flattened.pop("anyOf", None)
+    parts = flattened.pop("allOf", None)
+    if not isinstance(parts, list):
+        return flattened
+    properties = flattened.get("properties")
+    merged_properties = dict(properties) if isinstance(properties, Mapping) else {}
+    required = flattened.get("required")
+    merged_required = list(required) if isinstance(required, list) else []
+    for part in parts:
+        if not isinstance(part, Mapping):
+            continue
+        part_properties = part.get("properties")
+        if isinstance(part_properties, Mapping):
+            for name, definition in part_properties.items():
+                merged_properties.setdefault(name, definition)
+        part_required = part.get("required")
+        if isinstance(part_required, list):
+            merged_required.extend(name for name in part_required if name not in merged_required)
+    if merged_properties:
+        flattened["properties"] = merged_properties
+    if merged_required:
+        flattened["required"] = merged_required
+    return flattened
 
 
 def _usage_from_anthropic_start(event: RawMessageStartEvent) -> ProviderUsage:
