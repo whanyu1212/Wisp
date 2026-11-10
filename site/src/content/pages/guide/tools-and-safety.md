@@ -456,6 +456,29 @@ token in a URL path) are rejected before you are asked, as are line breaks and c
 This is a heuristic, so read every proposal before confirming. To store a value in the settings file instead, add the server from
 `/mcp` or with `wisp mcp add --env`.
 
+## Scripting tool calls with codemode (experimental)
+
+With `"codemode": true` in `~/.wisp/settings.json`, or `WISP_CODEMODE=1` for one process, the model
+also gets a `codemode` tool. It writes a short Python script that calls the run's read-only tools as
+async functions, and only what the script prints and its last expression come back. One script can
+run many calls at once with `asyncio.gather`, chain calls on earlier answers, and filter large results
+before the model reads them. Install the `codemode` extra first (`pip install 'wisp-ai[codemode]'`);
+it adds [monty](https://github.com/pydantic/monty), the sandbox scripts run in.
+
+- **Only read-only tools.** A script can call the read-only tools the run already offers: `read`,
+  `ls`, `grep`, `find`, and MCP tools whose `tool_safety` you set to `"read"`. Tool selection and
+  plan mode apply as for direct calls.
+- **Each call is checked on its own.** Every call a script makes passes the same checks as a direct
+  call. A script cannot ask for an approval, so a call that would need one fails, and the script can
+  catch the error. Approving or allowing the script grants nothing to the calls it makes.
+- **A sandbox, not a shell.** Scripts run in a separate process with no files, network, environment
+  or third-party packages, in a subset of Python. They are type-checked against the tools'
+  declarations before anything runs.
+- **Limits.** 200 tool calls, 2 minutes, 10 seconds of the script's own computing and 128 MiB per
+  script. A script cannot start another script, and cancelling a run kills it.
+
+It is off by default while its effect is measured on the tool-use evals (HY-431).
+
 ## Saved project permissions
 
 The Rust permission dialog offers allow once, allow this tool for the session, saved project YOLO,

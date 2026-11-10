@@ -104,11 +104,23 @@ def _summarize_ls(data: Mapping[str, object], truncated: bool) -> str | None:
     return f"ls: {body}{_more(truncated)}"
 
 
+def _summarize_codemode(data: Mapping[str, object], truncated: bool) -> str | None:
+    calls = data.get("calls")
+    failed = data.get("failed_calls")
+    if not isinstance(calls, int) or isinstance(calls, bool):
+        return None
+    summary = f"codemode: {_count(calls, 'tool call', 'tool calls')}"
+    if isinstance(failed, int) and not isinstance(failed, bool) and failed:
+        summary += f", {failed} failed"
+    return f"{summary} (truncated)" if truncated else summary
+
+
 _BUILDERS = {
     "read": _summarize_read,
     "grep": _summarize_grep,
     "find": _summarize_find,
     "ls": _summarize_ls,
+    "codemode": _summarize_codemode,
 }
 
 

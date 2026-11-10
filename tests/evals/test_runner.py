@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from evals.tool_use.credentials import Credentials
-from evals.tool_use.metrics import RunMetrics
+from evals.tool_use.metrics import RunMetrics, measure, parse_events
 from evals.tool_use.runner import (
     Budget,
     Build,
@@ -330,6 +330,29 @@ def test_on_demand_run_offered_discovery(tmp_path: Path) -> None:
     row = run_one(task, ModelSpec("fake", "fake"), 1, context)
 
     assert (row.status, row.error, row.mcp_tool_exposure) == ("passed", None, "on_demand")
+
+
+@pytest.mark.process
+@pytest.mark.parametrize("codemode", ["off", "python"])
+def test_codemode_run_offers_tool(tmp_path: Path, codemode: str) -> None:
+    """The setting reaches Wisp even for a task without MCP servers."""
+
+    context = dataclasses.replace(
+        _context(tmp_path, build=detect_build(_REPO_ROOT)),
+        codemode=codemode,  # type: ignore[arg-type]
+    )
+
+    row = run_one(_task(tmp_path), ModelSpec("fake", "fake"), 1, context)
+
+    events = (context.results_dir / row.run_dir / "events.jsonl").read_text(encoding="utf-8")
+    (setup,) = [
+        measure(parse_events([line])).setup
+        for line in events.splitlines()
+        if '"agent.started"' in line
+    ]
+    assert setup is not None
+    assert ("codemode" in setup.tool_names) is (codemode == "python")
+    assert (row.status, row.codemode) == ("passed", codemode)
 
 
 def test_mcp_settings_carry_exposure(tmp_path: Path) -> None:

@@ -67,6 +67,13 @@ this policy.
 
 ### Tools
 
+- An experimental `codemode` tool, off unless `"codemode": true` or `WISP_CODEMODE=1`: the model
+  writes a Python script that calls the run's read-only tools, and only what the script prints and
+  returns comes back. Scripts run in [monty](https://github.com/pydantic/monty)'s sandbox, from the
+  new `codemode` extra, with no files, network or environment, and are type-checked before they
+  run. Each call a script makes passes the same checks as a direct call; a call that would need an
+  approval fails, so approving the script grants nothing. Limits: 200 calls, 2 minutes, 10 seconds
+  of computing and 128 MiB per script. The tool-use evals gain `--codemode python`. (HY-495)
 - The file and search tools' boundary is the project root in a trusted project, instead of the
   working directory, so a session started in a subfolder can read, edit and search the rest of its
   project. Relative paths are still taken from the working directory, protected paths stay
@@ -78,6 +85,16 @@ this policy.
   can match, and a search inside the working directory returns the same files whether or not the
   project is trusted. A refused path now reads `Path is outside the workspace`, and its hint names
   the boundary. `ToolContext` gains `workspace_root` and `boundary()`. (HY-475)
+
+### Providers
+
+- Anthropic requests that offer `bash` work again. Anthropic rejects a whole request when a tool's
+  input schema has `oneOf`, `anyOf` or `allOf` at its top level, and `bash` lists its operations
+  under a top-level `oneOf`, so every such request failed before the model answered. The Anthropic
+  adapter now sends schemas without top-level combinators: `allOf` parts merge into the top level,
+  and `oneOf` and `anyOf` variants are dropped, since each tool still checks its own arguments.
+  This also covers MCP and extension tools with such schemas. Other providers receive schemas
+  unchanged; OpenAI, Codex, xAI and DeepSeek accept `bash`'s. (HY-496)
 
 ### TUI
 

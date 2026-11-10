@@ -61,6 +61,8 @@ class WispConfig(BaseModel):
     context_reserve_tokens: int = Field(default=DEFAULT_CONTEXT_RESERVE_TOKENS, ge=0)
     auto_compaction_enabled: bool = DEFAULT_AUTO_COMPACTION_ENABLED
     web_search: bool = DEFAULT_WEB_SEARCH_ENABLED
+    # The experimental codemode tool, which needs the `codemode` extra.
+    codemode: bool = False
     mcp_servers: tuple[McpServerConfig, ...] = Field(
         default=(), max_length=MAX_MCP_SERVERS, repr=False
     )
@@ -135,6 +137,7 @@ class WispConfig(BaseModel):
         context_reserve_tokens: int | None = None,
         auto_compaction_enabled: bool | None = None,
         web_search: bool | None = None,
+        codemode: bool | None = None,
         mcp_servers: tuple[McpServerConfig, ...] | None = None,
         mcp_tool_exposure: McpToolExposure | None = None,
         openai_compatible: OpenAICompatibleSettings | None = None,
@@ -172,6 +175,10 @@ class WispConfig(BaseModel):
 
         ``web_search`` is user-only too, because each search is billed to the user's
         provider account. It is off unless enabled.
+
+        ``codemode`` (``WISP_CODEMODE``) is user-only and off unless enabled: it
+        offers the experimental codemode tool, which runs model-written scripts that
+        call the run's read-only tools.
 
         ``mcp_servers`` is likewise user-only because it defines commands that Wisp
         may later execute. There is deliberately no environment-variable layer for
@@ -269,6 +276,16 @@ class WispConfig(BaseModel):
                     settings.web_search,
                     default=DEFAULT_WEB_SEARCH_ENABLED,
                     name="WISP_WEB_SEARCH",
+                )
+            ),
+            codemode=(
+                codemode
+                if codemode is not None
+                else _resolve_bool(
+                    os.environ.get("WISP_CODEMODE"),
+                    settings.codemode,
+                    default=False,
+                    name="WISP_CODEMODE",
                 )
             ),
             mcp_servers=mcp_servers if mcp_servers is not None else settings.mcp_servers or (),

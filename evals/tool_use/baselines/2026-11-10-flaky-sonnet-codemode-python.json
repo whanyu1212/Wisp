@@ -1,0 +1,192 @@
+{
+ "date": "2026-11-10",
+ "label": "flaky-sonnet-codemode-python",
+ "runs": [
+  {
+   "cache_read_tokens": 157822,
+   "codemode": "python",
+   "failed_scripts": 0,
+   "git_commit": "b61edc9bfb98eefb4d344080bbba702207f27377",
+   "input_tokens": 10,
+   "known_usd": "0.1574397",
+   "mcp_tool_exposure": "direct",
+   "model": "claude-sonnet-5-5",
+   "nested_calls": 3,
+   "output_tokens": 621,
+   "provider": "anthropic",
+   "proxied_argument_errors": 0,
+   "proxied_calls": 0,
+   "proxied_errors": 0,
+   "rep": 1,
+   "reruns": 0,
+   "scripts": 1,
+   "seconds": 13.314,
+   "status": "passed",
+   "task": "mcp-flaky-comments",
+   "timed_out": false,
+   "tool_calls": {
+    "bash": 1,
+    "codemode": 1,
+    "mcp__devhub__list_issues": 1
+   },
+   "tool_errors": {},
+   "tools_sha256": "3d125e3cb3589faafc884159ed043e4037cb0def865f9dda5cda4bb62dc82ac4",
+   "turns": 4,
+   "used_read_output": false,
+   "wisp_version": "wisp 0.7.0"
+  },
+  {
+   "cache_read_tokens": 212404,
+   "codemode": "python",
+   "failed_scripts": 1,
+   "git_commit": "b61edc9bfb98eefb4d344080bbba702207f27377",
+   "input_tokens": 12,
+   "known_usd": "0.1660919",
+   "mcp_tool_exposure": "direct",
+   "model": "claude-sonnet-5-5",
+   "nested_calls": 3,
+   "output_tokens": 834,
+   "provider": "anthropic",
+   "proxied_argument_errors": 0,
+   "proxied_calls": 0,
+   "proxied_errors": 0,
+   "rep": 2,
+   "reruns": 0,
+   "scripts": 2,
+   "seconds": 12.974,
+   "status": "passed",
+   "task": "mcp-flaky-comments",
+   "timed_out": false,
+   "tool_calls": {
+    "bash": 1,
+    "codemode": 2,
+    "mcp__devhub__list_issues": 1
+   },
+   "tool_errors": {
+    "unknown": 1
+   },
+   "tools_sha256": "3d125e3cb3589faafc884159ed043e4037cb0def865f9dda5cda4bb62dc82ac4",
+   "turns": 5,
+   "used_read_output": false,
+   "wisp_version": "wisp 0.7.0"
+  },
+  {
+   "cache_read_tokens": 212564,
+   "codemode": "python",
+   "failed_scripts": 1,
+   "git_commit": "b61edc9bfb98eefb4d344080bbba702207f27377",
+   "input_tokens": 12,
+   "known_usd": "0.1677529",
+   "mcp_tool_exposure": "direct",
+   "model": "claude-sonnet-5-5",
+   "nested_calls": 3,
+   "output_tokens": 966,
+   "provider": "anthropic",
+   "proxied_argument_errors": 0,
+   "proxied_calls": 0,
+   "proxied_errors": 0,
+   "rep": 3,
+   "reruns": 0,
+   "scripts": 2,
+   "seconds": 13.922,
+   "status": "passed",
+   "task": "mcp-flaky-comments",
+   "timed_out": false,
+   "tool_calls": {
+    "bash": 1,
+    "codemode": 2,
+    "mcp__devhub__list_issues": 1
+   },
+   "tool_errors": {
+    "unknown": 1
+   },
+   "tools_sha256": "3d125e3cb3589faafc884159ed043e4037cb0def865f9dda5cda4bb62dc82ac4",
+   "turns": 5,
+   "used_read_output": false,
+   "wisp_version": "wisp 0.7.0"
+  },
+  {
+   "cache_read_tokens": 213683,
+   "codemode": "python",
+   "failed_scripts": 1,
+   "git_commit": "b61edc9bfb98eefb4d344080bbba702207f27377",
+   "input_tokens": 12,
+   "known_usd": "0.1684823",
+   "mcp_tool_exposure": "direct",
+   "model": "claude-sonnet-5-5",
+   "nested_calls": 4,
+   "output_tokens": 896,
+   "provider": "anthropic",
+   "proxied_argument_errors": 0,
+   "proxied_calls": 0,
+   "proxied_errors": 0,
+   "rep": 4,
+   "reruns": 0,
+   "scripts": 3,
+   "seconds": 14.809,
+   "status": "passed",
+   "task": "mcp-flaky-comments",
+   "timed_out": false,
+   "tool_calls": {
+    "bash": 1,
+    "codemode": 3
+   },
+   "tool_errors": {
+    "unknown": 1
+   },
+   "tools_sha256": "3d125e3cb3589faafc884159ed043e4037cb0def865f9dda5cda4bb62dc82ac4",
+   "turns": 5,
+   "used_read_output": false,
+   "wisp_version": "wisp 0.7.0"
+  },
+  {
+   "cache_read_tokens": 157838,
+   "codemode": "python",
+   "failed_scripts": 0,
+   "git_commit": "b61edc9bfb98eefb4d344080bbba702207f27377",
+   "input_tokens": 10,
+   "known_usd": "0.1576713",
+   "mcp_tool_exposure": "direct",
+   "model": "claude-sonnet-5-5",
+   "nested_calls": 3,
+   "output_tokens": 640,
+   "provider": "anthropic",
+   "proxied_argument_errors": 0,
+   "proxied_calls": 0,
+   "proxied_errors": 0,
+   "rep": 5,
+   "reruns": 0,
+   "scripts": 1,
+   "seconds": 10.433,
+   "status": "passed",
+   "task": "mcp-flaky-comments",
+   "timed_out": false,
+   "tool_calls": {
+    "bash": 1,
+    "codemode": 1,
+    "mcp__devhub__list_issues": 1
+   },
+   "tool_errors": {},
+   "tools_sha256": "3d125e3cb3589faafc884159ed043e4037cb0def865f9dda5cda4bb62dc82ac4",
+   "turns": 4,
+   "used_read_output": false,
+   "wisp_version": "wisp 0.7.0"
+  }
+ ],
+ "suite": {
+  "codemode": "python",
+  "finished_at": "2026-11-10T15:39:53.048943+00:00",
+  "git_commit": "b61edc9bfb98eefb4d344080bbba702207f27377",
+  "mcp_tool_exposure": "direct",
+  "models": [
+   "anthropic::claude-sonnet-5-5"
+  ],
+  "reps": 5,
+  "skipped_runs": 0,
+  "stopped_for_budget": false,
+  "tasks": [
+   "mcp-flaky-comments"
+  ],
+  "wisp_version": "wisp 0.7.0"
+ }
+}
