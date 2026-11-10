@@ -1032,6 +1032,9 @@ def _atomic_edit_windows(
         )
 
 
+_BYTE_ORDER_MARK = "\ufeff"
+
+
 def _apply_edits(original: str, edits: list[tuple[str, str]]) -> _EditedText:
     """Replace each edit's ``oldText``, matched once in the original text.
 
@@ -1040,7 +1043,9 @@ def _apply_edits(original: str, edits: list[tuple[str, str]]) -> _EditedText:
     file uses CRLF, so the model need not reproduce line endings it cannot see and
     lines outside the edits keep their exact bytes. An ``oldText`` with no exact
     match may still match whole lines that differ only in trailing whitespace;
-    those lines are then replaced with ``newText``.
+    those lines are then replaced with ``newText``. An edit that replaces the start
+    of a file with a UTF-8 byte-order mark keeps the mark even when ``newText``
+    leaves it out, since ``read`` shows it as part of the first line.
 
     Args:
         original (str): The file's current text.
@@ -1060,6 +1065,11 @@ def _apply_edits(original: str, edits: list[tuple[str, str]]) -> _EditedText:
     for index, (old_text, new_text) in enumerate(edits):
         old_text, new_text = _match_line_endings(original, old_text, new_text)
         start, end, new_text = _locate_edit(original, old_text, new_text, index)
+        # The mark is invisible, so a newText without it means the model copied
+        # the first line from `read` rather than chose to drop the mark.
+        keeps_mark = new_text.startswith(_BYTE_ORDER_MARK)
+        if start == 0 and original.startswith(_BYTE_ORDER_MARK) and not keeps_mark:
+            new_text = _BYTE_ORDER_MARK + new_text
         replacements.append((start, end, new_text, index))
     replacements.sort(key=lambda replacement: replacement[0])
     for previous, current in pairwise(replacements):
