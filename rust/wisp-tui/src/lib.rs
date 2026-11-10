@@ -3512,15 +3512,17 @@ impl LiveUi {
                 && matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::ALT)))
                 && !self.completion.is_exact(view.items[view.selected]))
         {
-            if let Some((range, replacement)) = self
-                .completion
-                .replacement(view.items[view.selected], &self.editor)
-            {
+            let item = view.items[view.selected];
+            // A filled-in folder lists its own subfolders next, so Tab can keep going.
+            let descends = matches!(item, commands::CompletionItem::Directory(_));
+            if let Some((range, replacement)) = self.completion.replacement(item, &self.editor) {
                 let outcome = self.editor.replace_range(range, &replacement);
                 self.update_edit_notice(outcome);
                 self.completion
                     .sync(&self.editor, self.state.workspace_cwd.as_deref());
-                self.completion.dismiss();
+                if !descends {
+                    self.completion.dismiss();
+                }
             }
         } else {
             return false;
