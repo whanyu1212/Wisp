@@ -144,6 +144,11 @@ def test_alerts_only_for_answer() -> None:
             "billing-gateway\nledger-sync\nnotify-hub\nsearch-indexer\nlegacy-billing\n",
             False,
         ),
+        (
+            "mcp-service-alerts",
+            "billing-gateway\nledger-sync\nnotify-hub\nsearch-indexer\npayments-api\n",
+            False,
+        ),
     ],
     ids=[
         "lint-formatted",
@@ -159,6 +164,7 @@ def test_alerts_only_for_answer() -> None:
         "alerts-formatted",
         "alerts-fixed",
         "alerts-outside-list",
+        "alerts-made-up",
     ],
 )
 def test_verifier_traps(tmp_path: Path, task_id: str, answer: str, passes: bool) -> None:
