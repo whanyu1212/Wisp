@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import assert_never
 
@@ -10,7 +11,7 @@ from anyio.streams.memory import MemoryObjectSendStream
 
 from wisp.coding import CodingSession
 from wisp.coding.session import DirectoryChangeError
-from wisp.events import RpcPermissionsReported, SessionDirectoryChanged, WispEvent
+from wisp.events import RpcPermissionsReported, WispEvent
 from wisp.rpc.commands import (
     AddMcpServerCommand,
     ApprovalCommand,
@@ -67,8 +68,8 @@ from wisp.rpc.handlers.mcp import (
     handle_rpc_mcp_snippet_preview_command,
 )
 from wisp.rpc.handlers.project_files import ProjectFilesPublisher, RpcProjectFiles
+from wisp.rpc.working_directory import DirectoryMove, directory_move_events
 from wisp.runtime.api import WispRuntime
-from wisp.sessions.errors import SessionError
 from wisp.sessions.jsonl import JsonlSessionStore
 
 from .configuration import _RpcConfigureOverrides
@@ -131,13 +132,15 @@ from .session.run import (
 )
 from .session.state import rpc_session_state, updated_rpc_session_state
 
+_logger = logging.getLogger(__name__)
+
 type RpcEventRenderer = Callable[[AsyncIterator[WispEvent]], Awaitable[None]]
 type RunningCommandFactory = Callable[..., _RpcRunningCommand]
 type CommandCompletedFactory = Callable[..., _RpcCommandCompleted]
 
 
-type DirectoryChanger = Callable[[str], Awaitable[SessionDirectoryChanged | None]]
-"""Moves the agent's working directory and refreshes what depends on it."""
+type DirectoryChanger = Callable[[str], Awaitable[DirectoryMove]]
+"""Moves the agent's working directory, and project, and refreshes what depends on it."""
 
 
 class RpcCommandExecutor:
@@ -619,20 +622,24 @@ class RpcCommandExecutor:
             lifecycle.fail("This host cannot change the working directory")
             return _RpcDispatchResult(running_command=running_command)
         try:
-            change = await self.change_directory(command.path)
+            moved = await self.change_directory(command.path)
         except DirectoryChangeError as exc:
             lifecycle.fail(str(exc))
             return _RpcDispatchResult(running_command=running_command)
-        except (SessionError, OSError) as exc:
-            # The command runs inline in the coordinator, so a storage failure must
-            # become this command's error rather than stop the host.
-            lifecycle.fail(f"Could not save the move; the folder is unchanged: {exc}")
+        except Exception as exc:
+            # The command runs inline in the coordinator, so any failure (a save, a
+            # project's configuration, its providers) must become this command's
+            # error rather than stop the host. A failed move leaves the session
+            # where it was.
+            _logger.exception("change_directory to %r failed", command.path)
+            lifecycle.fail(f"Could not change the working directory; it is unchanged: {exc}")
             return _RpcDispatchResult(running_command=running_command)
-        except RuntimeError:
-            lifecycle.fail("Change directory after the current operation finishes")
-            return _RpcDispatchResult(running_command=running_command)
-        if change is not None:
-            self.write_event(change)
+        if moved.change is not None:
+            self.write_event(moved.change)
+        for event in directory_move_events(
+            self.agent, self.approval_policy, moved, command_id=lifecycle.command_id
+        ):
+            self.write_event(event)
         self.write_event(await rpc_workspace_report(self.agent.tool_context.cwd))
         lifecycle.finish()
         return _RpcDispatchResult(running_command=running_command)

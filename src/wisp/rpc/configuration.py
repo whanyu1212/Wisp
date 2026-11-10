@@ -9,7 +9,11 @@ from pathlib import Path
 
 import anyio
 
-from wisp.coding import CodingSession, resolve_coding_session_configuration
+from wisp.coding import (
+    CodingSession,
+    CodingSessionConfiguration,
+    resolve_coding_session_configuration,
+)
 from wisp.config.runtime import WispConfig
 from wisp.events import ProjectConfigApplied
 from wisp.runtime.api import WispRuntime
@@ -65,7 +69,12 @@ class _RpcConfigureOverrides:
 
 @dataclass
 class RpcProjectConfiguration:
-    """Own the trust-time transition from startup config to project config."""
+    """Own the transitions between project configurations.
+
+    The session starts in ``project_context_root`` with ``startup_config``. Trusting
+    that project, or moving the session into another one, applies that project's
+    configuration; ``active_config`` and ``trusted`` describe the one in effect.
+    """
 
     startup_config: WispConfig
     startup_trusted: bool
@@ -73,6 +82,14 @@ class RpcProjectConfiguration:
     project_context_root: Path
     runtime_builder: RuntimeBuilder
     configure_overrides: _RpcConfigureOverrides = field(default_factory=_RpcConfigureOverrides)
+    # The configuration in effect, and whether its project is trusted. Provider
+    # adapters are rebuilt only when a new configuration differs from this one.
+    active_config: WispConfig = field(init=False)
+    trusted: bool = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.active_config = self.startup_config
+        self.trusted = self.startup_trusted
 
     async def apply_trusted_project(
         self,
@@ -81,7 +98,7 @@ class RpcProjectConfiguration:
         agent: CodingSession,
         reserve_protected_paths: Callable[[tuple[str, ...]], None] | None = None,
     ) -> ProjectConfigApplied | None:
-        """Apply the trusted project layer and return its frontend event, if changed.
+        """Apply the current project's trusted layer once its trust is granted.
 
         The active session store is intentionally not relocated. Its path was
         selected before the first prompt and changing it mid-process would split
@@ -95,46 +112,82 @@ class RpcProjectConfiguration:
 
         Returns:
             ProjectConfigApplied | None: Updated frontend configuration, or None when
-                the trusted configuration is unchanged.
+                the project was already trusted or its configuration is unchanged.
         """
 
-        if self.startup_trusted:
+        if self.trusted:
             return None
-        if self.config_overrides is None:
-            trusted_config = self.startup_config
-        else:
-            trusted_config = await anyio.to_thread.run_sync(
-                partial(
-                    self.config_overrides.build,
-                    trusted=True,
-                    project_dir=self.project_context_root,
-                ),
-                abandon_on_cancel=True,
-            )
+        return await self.apply_project(
+            root=self.project_context_root,
+            trusted=True,
+            runtime=runtime,
+            cwd=agent.tool_context.cwd,
+            commit=agent.reconfigure,
+            reserve_protected_paths=reserve_protected_paths,
+        )
+
+    async def apply_project(
+        self,
+        *,
+        root: Path,
+        trusted: bool,
+        runtime: WispRuntime,
+        cwd: Path,
+        commit: Callable[[CodingSessionConfiguration], None],
+        record: Callable[[], Awaitable[object]] | None = None,
+        reserve_protected_paths: Callable[[tuple[str, ...]], None] | None = None,
+    ) -> ProjectConfigApplied | None:
+        """Apply ``root``'s configuration, trusted or not, to the session.
+
+        Everything that can fail without side effects runs first: building the
+        configuration, discovering skills, and staging provider adapters. Then
+        ``record`` runs (a move saves itself there), the live runtime adopts the
+        staged providers when the configuration changed them, and ``commit`` hands
+        the new session configuration to the agent.
+
+        Args:
+            root (Path): The project root to apply.
+            trusted (bool): Whether ``root`` is trusted; an untrusted project applies
+                no project settings layer, skills, or instruction files.
+            runtime (WispRuntime): Live runtime whose provider configuration is adopted.
+            cwd (Path): The working directory the new configuration's tools use.
+            commit (Callable): Applies the session configuration to the agent.
+            record (Callable | None): Runs before any live change, such as saving a
+                move. Defaults to None.
+            reserve_protected_paths (Callable | None): Reserves candidate secrets before
+                adoption can change the auth store. Protection survives later failure.
+
+        Returns:
+            ProjectConfigApplied | None: Updated frontend configuration, or None when
+                the configuration in effect is unchanged.
+        """
+
+        config = await self._config_for(root, trusted=trusted)
         if reserve_protected_paths is not None:
             # Reserve before building/adopting providers: adoption can change the
             # auth store before cleanup or agent reconfiguration succeeds.
             protected_context = await anyio.to_thread.run_sync(
-                partial(ToolContext.from_config, trusted_config, cwd=agent.tool_context.cwd),
+                partial(ToolContext.from_config, config, cwd=cwd),
                 abandon_on_cancel=True,
             )
             reserve_protected_paths(protected_context.protected_paths)
         skill_catalog = await discover_skill_catalog(
-            project_root=self.project_context_root,
-            trusted=True,
-            protected_paths=trusted_config.protected_paths,
+            project_root=root,
+            trusted=trusted,
+            protected_paths=config.protected_paths,
         )
         overrides = self.configure_overrides
-        effective_provider = overrides.effective_provider(trusted_config.provider)
-        effective_model = overrides.effective_model(trusted_config.model)
-        if trusted_config == self.startup_config:
+        effective_provider = overrides.effective_provider(config.provider)
+        effective_model = overrides.effective_model(config.model)
+
+        def configuration_for(providers: ProviderRegistry) -> CodingSessionConfiguration:
             configuration = resolve_coding_session_configuration(
-                trusted_config,
-                providers=runtime.providers,
+                config,
+                providers=providers,
                 models=runtime.models,
-                trusted=True,
-                cwd=agent.tool_context.cwd,
-                project_root=self.project_context_root,
+                trusted=trusted,
+                cwd=cwd,
+                project_root=root,
                 skill_catalog=skill_catalog,
                 provider_name=effective_provider,
                 model=effective_model,
@@ -142,47 +195,63 @@ class RpcProjectConfiguration:
                 effort=overrides.effort,
                 has_effort=overrides.has_effort,
             )
+            if (
+                overrides.has_auto_compaction_enabled
+                and overrides.auto_compaction_enabled is not None
+            ):
+                configuration = replace(
+                    configuration,
+                    auto_compaction_enabled=overrides.auto_compaction_enabled,
+                )
+            if overrides.web_search is not None:
+                configuration = replace(configuration, web_search=overrides.web_search)
+            return configuration
+
+        changed = config != self.active_config
+        if not changed:
+            configuration = configuration_for(runtime.providers)
+            if record is not None:
+                await record()
         else:
             # This temporary runtime exists only to refresh provider adapters. The
             # live runtime already owns the configured MCP processes.
-            provider_config = trusted_config.model_copy(update={"mcp_servers": ()})
-            trusted_runtime = await self.runtime_builder(provider_config)
+            provider_config = config.model_copy(update={"mcp_servers": ()})
+            staged_runtime = await self.runtime_builder(provider_config)
             try:
                 staged_providers = ProviderRegistry()
-                staged_providers.replace_all(runtime.providers_for_configuration(trusted_runtime))
-                configuration = resolve_coding_session_configuration(
-                    trusted_config,
-                    providers=staged_providers,
-                    models=runtime.models,
-                    trusted=True,
-                    cwd=agent.tool_context.cwd,
-                    project_root=self.project_context_root,
-                    skill_catalog=skill_catalog,
-                    provider_name=effective_provider,
-                    model=effective_model,
-                    has_model=overrides.has_model,
-                    effort=overrides.effort,
-                    has_effort=overrides.has_effort,
-                )
-                await runtime.adopt_provider_configuration(trusted_runtime)
+                staged_providers.replace_all(runtime.providers_for_configuration(staged_runtime))
+                configuration = configuration_for(staged_providers)
+                if record is not None:
+                    await record()
+                await runtime.adopt_provider_configuration(staged_runtime)
             finally:
-                await trusted_runtime.aclose()
-        if overrides.has_auto_compaction_enabled and overrides.auto_compaction_enabled is not None:
-            configuration = replace(
-                configuration,
-                auto_compaction_enabled=overrides.auto_compaction_enabled,
-            )
-        if overrides.web_search is not None:
-            configuration = replace(configuration, web_search=overrides.web_search)
-        agent.reconfigure(configuration)
-        if trusted_config == self.startup_config:
+                await staged_runtime.aclose()
+        commit(configuration)
+        self.active_config = config
+        self.project_context_root = root
+        self.trusted = trusted
+        if not changed:
             return None
         return ProjectConfigApplied(
             provider=effective_provider,
             model=effective_model,
-            effort=agent.effort,
-            auto_compaction_enabled=agent.auto_compaction_enabled,
-            auth_path=trusted_config.auth_path,
+            effort=configuration.effort,
+            auto_compaction_enabled=configuration.auto_compaction_enabled,
+            auth_path=config.auth_path,
+        )
+
+    async def _config_for(self, root: Path, *, trusted: bool) -> WispConfig:
+        """Build the configuration a session in ``root`` runs with.
+
+        An embedder that passed an explicit configuration has no settings layers to
+        rebuild, so its configuration applies to every project.
+        """
+
+        if self.config_overrides is None:
+            return self.startup_config
+        return await anyio.to_thread.run_sync(
+            partial(self.config_overrides.build, trusted=trusted, project_dir=root),
+            abandon_on_cancel=True,
         )
 
 

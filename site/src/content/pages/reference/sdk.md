@@ -162,7 +162,7 @@ request. Completion and results arrive through `events()`.
 | `get_session_stats` | `(*, command_id: str \| None = None)` | `SessionStatsReported` |
 | `get_permissions` | `(*, command_id: str \| None = None)` | `RpcPermissionsReported` |
 | `set_permissions` | `(mode: PermissionMode, *, command_id: str \| None = None)` | Saved project default, then `RpcPermissionsReported` |
-| `change_directory` | `(path: str, *, command_id: str \| None = None)` | After running work: `SessionDirectoryChanged` when a move was saved, then `RpcWorkspaceReported` |
+| `change_directory` | `(path: str, *, command_id: str \| None = None)` | After running work: `SessionDirectoryChanged` when a move was saved; for another project, `ProjectConfigApplied` when its configuration differs, `SkillCatalogUpdated`, and `RpcPermissionsReported`; then `RpcWorkspaceReported` |
 | `get_state` | `(*, command_id: str \| None = None)` | `RpcStateReported` |
 | `get_commands` | `(*, command_id: str \| None = None)` | `RpcCommandsReported` |
 | `get_git_diff` | `(*, command_id: str \| None = None)` | `RpcGitDiffReported` |

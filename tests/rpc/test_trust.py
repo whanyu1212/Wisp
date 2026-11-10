@@ -738,3 +738,33 @@ def test_config_overrides_gates_project_settings_on_trust(
 
     assert overrides.build(trusted=False).provider != "from-project-settings"
     assert overrides.build(trusted=True).provider == "from-project-settings"
+
+
+@pytest.mark.parametrize("trusted", [True, False], ids=["known", "undecided"])
+def test_reset_gate_for_new_project(
+    tmp_path: Path, monkeypatch: MonkeyPatch, trusted: bool
+) -> None:
+    """After a move, the gate decides the new project, rerunning the trust hook."""
+
+    monkeypatch.setenv("WISP_TRUST", "1")
+    calls = 0
+
+    async def on_trusted() -> None:
+        nonlocal calls
+        calls += 1
+
+    gate = RpcTrustGate(
+        tmp_path / "a", write_event=lambda _event: None, on_first_trusted=on_trusted
+    )
+
+    async def scenario() -> None:
+        assert await gate.resolve() is True
+        gate.reset(tmp_path / "b", decision=True if trusted else None)
+        assert gate.project_path == tmp_path / "b"
+        assert gate.decision is (True if trusted else None)
+        assert await gate.resolve() is True
+
+    anyio.run(scenario)
+
+    # A known decision needs no hook; an undecided project runs it when trusted.
+    assert calls == (1 if trusted else 2)

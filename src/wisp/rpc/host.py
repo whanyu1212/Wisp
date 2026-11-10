@@ -7,6 +7,7 @@ and configuration transitions; transports only adapt input and events.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
@@ -28,7 +29,6 @@ from wisp.events import (
     RpcCommandFinished,
     RpcGitDiffReported,
     RpcProjectFilesReported,
-    SessionDirectoryChanged,
     SkillCatalogUpdated,
     TrustRequested,
     TrustResolved,
@@ -54,6 +54,11 @@ from wisp.rpc.execution import (
 from wisp.rpc.handlers.inspection import rpc_skill_catalog_snapshot, rpc_workspace_report
 from wisp.rpc.handlers.mcp import RpcMcpServers, RpcToolSelection
 from wisp.rpc.handlers.project_files import RpcProjectFiles
+from wisp.rpc.working_directory import (
+    DirectoryMove,
+    RpcWorkingDirectory,
+    directory_move_events,
+)
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
@@ -74,6 +79,8 @@ from wisp.trust.records import (
     trust_override_from_env,
 )
 from wisp.trust.scope import BROAD_FOLDER_DESCRIPTION, is_broad_root
+
+_logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from wisp.providers.anthropic import AnthropicCacheTtl
@@ -164,6 +171,10 @@ def _broad_root_notices(project: Path) -> tuple[str, ...]:
     return tuple(notices)
 
 
+def _restore_failure(agent: CodingSession, error: Exception) -> str:
+    return f"Working in {agent.tool_context.cwd}: could not enter the session's folder: {error}"
+
+
 class RpcToolApprovalPolicy(ToolApprovalPolicy):
     """Approval policy resolved by typed ``approval`` commands."""
 
@@ -175,11 +186,34 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
         self._pending: dict[str, _PendingApproval] = {}
         self._confirmations: dict[str, ConfirmationHandler] = {}
         self._input_closed_reason: str | None = None
+        # Startup grants (such as --yes), kept apart from any project's saved mode so
+        # a move into another project starts from them again.
+        self._fallback = fallback
+        self.set_project(project_path)
+
+    def _drop_startup_grants(self) -> None:
+        # An explicit choice replaces the startup grants for the rest of the run, so
+        # a later move into another project does not bring back an earlier --yes.
+        self._fallback = ToolApprovalPolicy()
+
+    def set_project(self, project_path: Path | None) -> None:
+        """Use ``project_path``'s saved permission mode from now on.
+
+        Called at startup and when the session moves into another project: the
+        startup grants and that project's saved mode become the baseline, and
+        temporary grants from the previous project are cleared.
+
+        Args:
+            project_path (Path | None): The project whose mode to load, if any.
+        """
+
         self._project_path = project_path
         # YOLO is never saved for the home folder or a folder above it, so there it
         # is granted for this session only (see ``wisp.trust.scope``).
         self.session_only_yolo = project_path is not None and is_broad_root(project_path)
         self._saved_mode = load_permission_mode(project_path) if project_path is not None else None
+        self.approved_tools = self._fallback.approved_tools
+        self.approved_safety = self._fallback.approved_safety
         if self._saved_mode == "yolo":
             self.approved_safety = self.approved_safety | {"mutating", "command"}
         self._baseline_approved_tools = self.approved_tools
@@ -249,10 +283,12 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
         if mode == "yolo" and self.session_only_yolo:
             self.approved_tools = self._baseline_approved_tools
             self.approved_safety = self.approved_safety | {"read", "mutating", "command"}
+            self._drop_startup_grants()
             return
         if self._project_path is None:
             raise OSError("No project is available for saving permissions")
         save_permission_mode(self._project_path, mode)
+        self._drop_startup_grants()
         self._saved_mode = mode
         self.approved_tools = frozenset()
         self.approved_safety = (
@@ -427,6 +463,37 @@ class RpcTrustGate:
         self._resolved = initially_trusted
         self._input_closed = False
 
+    @property
+    def project_path(self) -> Path:
+        """The project whose trust this gate decides."""
+
+        return self._project_path
+
+    @property
+    def decision(self) -> bool | None:
+        """This process's decision for the project, or None while undecided."""
+
+        return self._decision if self._resolved else None
+
+    def reset(self, project_path: Path, *, decision: bool | None) -> None:
+        """Decide trust for ``project_path`` from now on, as at startup.
+
+        Called when the session moves into another project. ``decision`` is the one
+        known without asking: this process's earlier answer, an environment
+        override, or a saved record. With none, the next prompt asks, and
+        approving it applies the project's configuration through the
+        first-trusted callback.
+
+        Args:
+            project_path (Path): The project the session moved into.
+            decision (bool | None): Its known trust decision, or None if undecided.
+        """
+
+        self._project_path = project_path
+        self._pending = None
+        self._decision = decision
+        self._resolved = decision is not None
+
     async def resolve(self) -> bool:
         """Return the project decision, asking the frontend once when needed."""
 
@@ -574,7 +641,9 @@ class RpcHost:
         on_shutdown_abandoned: Callable[[], None] | None = None,
         outbound_frame_limit: int | None = None,
         tool_selection: RpcToolSelection | None = None,
+        working_directory: RpcWorkingDirectory | None = None,
     ) -> None:
+        self.working_directory = working_directory
         self.runtime = runtime
         self.sessions = sessions
         self.agent = agent
@@ -694,14 +763,6 @@ class RpcHost:
             mcp_tool_exposure=config.mcp_tool_exposure,
             mcp_server_connected=runtime.mcp_server_connected,
         )
-        # A resumed session works from the folder it last recorded. This runs before
-        # the host indexes project files, so nothing needs refreshing yet.
-        restore_notice = (
-            await agent.restore_directory(session_state.session)
-            if session_state.session is not None
-            else None
-        )
-
         host: RpcHost | None = None
 
         def publish_event(event: WispEvent) -> None:
@@ -739,6 +800,26 @@ class RpcHost:
             on_first_trusted=rebuild_agent_for_trusted_project,
             initially_trusted=options.startup_trusted,
         )
+        working_directory = RpcWorkingDirectory(
+            agent=agent,
+            runtime=runtime,
+            project_configuration=project_configuration,
+            permissions=approval_policy,
+            trust=trust_gate,
+            project_notices=_broad_root_notices,
+        )
+        # A resumed session works from the folder it last recorded, in its project.
+        # This runs before the host indexes project files, so nothing needs
+        # refreshing yet.
+        startup_move_events: tuple[WispEvent, ...] = ()
+        if session_state.session is not None:
+            try:
+                restored = await working_directory.restore(session_state.session)
+                startup_move_events = directory_move_events(agent, approval_policy, restored)
+            except Exception as exc:
+                # A session whose project cannot be entered still resumes, here.
+                _logger.exception("Could not restore the resumed session's folder")
+                startup_move_events = (ErrorEvent(message=_restore_failure(agent, exc)),)
 
         async def render_completion_events(events: tuple[WispEvent, ...]) -> None:
             assert host is not None
@@ -762,15 +843,28 @@ class RpcHost:
                     )
                 )
 
-        async def work_from_active_path(session: JsonlSession | None) -> None:
+        async def work_from_active_path(session: JsonlSession | None, command_id: str) -> None:
             assert host is not None
-            notice = await host._refresh_working_directory(
-                partial(agent.restore_directory, session)
-            )
+            try:
+                moved = await host._refresh_working_directory(
+                    partial(
+                        working_directory.restore,
+                        session,
+                        reserve_protected_paths=host.project_files.reserve_protected_paths,
+                    )
+                )
+                move_events = directory_move_events(
+                    agent, approval_policy, moved, command_id=command_id
+                )
+            except Exception as exc:
+                # This runs inside the coordinator's completion of the selection, so a
+                # project that cannot be entered must not stop the host.
+                _logger.exception("Could not restore the session's folder")
+                move_events = (ErrorEvent(message=_restore_failure(agent, exc)),)
             # Rendered now, before the command's own completion events, so a client
-            # knows the folder by the time the selection finishes.
+            # knows the folder and project by the time the selection finishes.
             events: tuple[WispEvent, ...] = (
-                *((ErrorEvent(message=notice),) if notice is not None else ()),
+                *move_events,
                 await rpc_workspace_report(agent.tool_context.cwd),
             )
             await host._render_event_batch(events)
@@ -805,6 +899,7 @@ class RpcHost:
             on_shutdown_dispatched=on_shutdown_dispatched,
             on_shutdown_abandoned=on_shutdown_abandoned,
             outbound_frame_limit=outbound_frame_limit,
+            working_directory=working_directory,
             tool_selection=RpcToolSelection(
                 all_tools=options.all_tools,
                 allow_read_tools=options.allow_read_tools,
@@ -815,8 +910,8 @@ class RpcHost:
             write_event(event)
         for notice in _broad_root_notices(project_context_root):
             write_event(ErrorEvent(message=notice))
-        if restore_notice is not None:
-            write_event(ErrorEvent(message=restore_notice))
+        for event in startup_move_events:
+            write_event(event)
         write_event(await rpc_workspace_report(agent.tool_context.cwd))
         return host
 
@@ -952,12 +1047,26 @@ class RpcHost:
         if self._pending_published_events == 0:
             self._published_events_drained.set()
 
-    async def _change_directory(self, path: str) -> SessionDirectoryChanged | None:
-        """Move the agent to ``path`` and save the move in the active session."""
+    async def _change_directory(self, path: str) -> DirectoryMove:
+        """Move the agent to ``path``, entering its project if it lies in another.
 
-        session = self.coordinator.session_state.session
+        The move is saved in the active session first.
+
+        Raises:
+            DirectoryChangeError: When ``path`` is not an existing folder.
+            RuntimeError: When the host cannot move the session, or while it is busy.
+        """
+
+        if self.working_directory is None:
+            raise RuntimeError("This host cannot change the working directory")
+        folder = self.agent.resolve_directory(path)
         return await self._refresh_working_directory(
-            partial(self.agent.change_directory, path, session=session)
+            partial(
+                self.working_directory.move,
+                folder,
+                record_in=self.coordinator.session_state.session,
+                reserve_protected_paths=self.project_files.reserve_protected_paths,
+            )
         )
 
     async def _refresh_working_directory[T](self, change: Callable[[], Awaitable[T]]) -> T:
