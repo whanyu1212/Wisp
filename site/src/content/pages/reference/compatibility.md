@@ -116,6 +116,29 @@ with `write_constraint`, under the exception below. Tool behavior changes are li
 `bash` runs commands in bash rather than `/bin/sh`, and that the read-only file tools follow
 symbolic links whose targets stay inside the workspace.
 
+## Wisp 0.7 compatibility
+
+0.7.0 reads every session 0.6.x wrote. The session `schema_version` stays 6, because each new field
+is optional and is written only when it has a value. A 0.6.x reader still rejects some of them:
+
+- A session holding a successful `edit` (its result records `edit_locations`) or a proxied MCP call
+  (its result records `target`) fails to open in 0.6.x.
+- A session holding images opens in 0.6.x without them: the messages keep their text, and the
+  `images/` folder beside the session files is left alone.
+
+Settings, credential, and trust formats are unchanged; `mcp_tool_exposure` is a new optional
+user-only setting.
+
+Commands and events gain fields: `images` on `prompt`, `steer`, and `follow_up`, and image, edit
+location, and MCP target fields on events, all listed in the
+[changelog](https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md). `agent.started` gains
+`setup`. A 0.6 reader rejects them, so the backend and every frontend must be the same release, and
+external RPC clients should use the 0.7.0 schema bundle.
+
+The supported Python API only gains optional parameters and methods: `CodingSession.run()`,
+`steer()`, and `follow_up()` accept `images`, `RpcController` does the same, and
+`CodingSession.cancel_run()` asks an active run to stop as a cancellation does.
+
 ## Wisp 0.6 compatibility
 
 0.6.0 changes no command, handshake, session, settings, credential, or trust format, so 0.5.x and
