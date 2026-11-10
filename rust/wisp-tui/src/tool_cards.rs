@@ -224,6 +224,8 @@ pub struct ToolResultInput {
     /// Where each of an edit call's edits landed, in call order; empty for other
     /// tools and for results that did not say.
     pub edit_locations: Vec<crate::tool_detail::EditLocation>,
+    /// Each image the result returned, as a `[image 640×480 png]` line, in order.
+    pub images: Vec<String>,
 }
 
 /// A running call's output so far, from one `tool.execution.progress` event.
@@ -318,6 +320,9 @@ pub struct ToolCardSnapshot {
     pub live_line: Option<String>,
     /// The file the call names, kept after the result clears `detail_source`.
     pub file_reference: Option<FileReference>,
+    /// Each image the result returned, as a `[image 640×480 png]` line. The
+    /// backend sends at most six.
+    pub images: Vec<String>,
 }
 
 /// The longest path a file reference keeps, the usual `PATH_MAX`.
@@ -395,6 +400,7 @@ impl ToolCardSnapshot {
             progress_bytes: (0, 0),
             live_line: None,
             file_reference: FileReference::of_call(&input.name, &input.arguments),
+            images: Vec::new(),
         }
     }
 
@@ -564,6 +570,7 @@ impl ToolCardSnapshot {
         };
         self.detail = preferred_result_detail(input, &preview.text, self.status);
         self.backend_truncated = input.truncated;
+        self.images.clone_from(&input.images);
         self.failure_code = input.failure_code.as_deref().map(bounded_reason);
         self.retryable = input.retryable;
         let result_name_matches = self.name == bounded_tool_name(&input.name);
@@ -2234,6 +2241,7 @@ mod tests {
             process_started_at_ms: None,
             process_ended_at_ms: None,
             edit_locations: Vec::new(),
+            images: Vec::new(),
         }
     }
 

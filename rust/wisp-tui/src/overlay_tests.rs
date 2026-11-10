@@ -1227,6 +1227,7 @@ fn finished_edit(ui: &mut LiveUi, call_id: &str) -> crate::transcript::Transcrip
             process_started_at_ms: None,
             process_ended_at_ms: None,
             edit_locations: Vec::new(),
+            images: Vec::new(),
         });
     card
 }

@@ -71,6 +71,7 @@ fn fixture(scenario: &str) -> LiveUi {
         process_started_at_ms: None,
         process_ended_at_ms: None,
         edit_locations: Vec::new(),
+        images: Vec::new(),
     };
     ui.state.transcript.observe_tool_result(result.clone());
     ui.state.transcript.complete_message(1, fixture.reply);
@@ -613,6 +614,7 @@ fn showcase_state(worked: bool) -> UiState {
             process_started_at_ms: None,
             process_ended_at_ms: None,
             edit_locations: Vec::new(),
+            images: Vec::new(),
         });
     }
     state.transcript.complete_message(
@@ -1573,4 +1575,65 @@ fn search_pattern_is_not_a_link() {
     let buffer = draw(&mut ui, 80, 24);
     row_containing(&buffer, "fn main");
     assert_eq!(painted_links(&buffer), []);
+}
+
+fn image_part(width: u64, height: u64) -> serde_json::Value {
+    json!({"media_type": "image/png", "sha256": "0".repeat(64), "byte_size": 1234,
+           "width": width, "height": height})
+}
+
+/// Draw one finished `read` card whose result returned `images`.
+fn image_read_card(images: serde_json::Value, width: u16) -> ratatui::buffer::Buffer {
+    let mut ui = LiveUi::default();
+    for event in [
+        json!({"type": "tool.call", "call_id": "read-1", "name": "read",
+               "arguments": {"path": "screenshots/before-and-after.png"}}),
+        json!({"type": "tool.result", "message_entry_id": null, "call_id": "read-1",
+               "name": "read", "output": "Image file shot.png", "is_error": false,
+               "images": images}),
+    ] {
+        match BackendEvent::from_projection_value(&event).unwrap() {
+            BackendEvent::ToolCall(call) => {
+                ui.state.transcript.observe_tool_call(call);
+            }
+            BackendEvent::ToolResult(result) => {
+                ui.state.transcript.observe_tool_result(*result);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    draw(&mut ui, width, 12)
+}
+
+fn buffer_row(buffer: &ratatui::buffer::Buffer, y: u16) -> String {
+    (0..buffer.area.width)
+        .map(|x| buffer[(x, y)].symbol())
+        .collect()
+}
+
+#[test]
+fn tool_card_names_images() {
+    for (images, label) in [
+        (json!([image_part(640, 480)]), "[image 640×480 png]"),
+        (
+            json!([image_part(640, 480), image_part(32, 32)]),
+            "[2 images]",
+        ),
+    ] {
+        let buffer = image_read_card(images, 80);
+        let row = buffer_row(&buffer, row_containing(&buffer, "Read"));
+        assert!(row.contains(label), "{row:?} lacks {label:?}");
+    }
+    let plain = image_read_card(json!([]), 80);
+    let row = buffer_row(&plain, row_containing(&plain, "Read"));
+    assert!(!row.contains("image"), "{row:?}");
+}
+
+#[test]
+fn image_label_survives_narrow_row() {
+    // The path gives way first; the label is kept whole, like a status note.
+    let buffer = image_read_card(json!([image_part(640, 480)]), 60);
+    let row = buffer_row(&buffer, row_containing(&buffer, "Read"));
+    assert!(row.contains("[image 640×480 png]"), "{row:?}");
+    assert!(!row.contains("before-and-after.png"), "{row:?}");
 }

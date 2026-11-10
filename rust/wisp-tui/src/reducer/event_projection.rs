@@ -542,6 +542,7 @@ impl BackendEvent {
                     .ok()
                     .flatten();
                 Self::ToolResult(Box::new(ToolResultInput {
+                    images: composer_images::reported_image_lines(value.get("images")),
                     call_id: bounded_identity(&string_field(value, &event_type, "call_id")?),
                     name: bounded_tool_name(raw_name),
                     output,

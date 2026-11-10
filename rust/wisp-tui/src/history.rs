@@ -469,6 +469,7 @@ fn tool_result(message: &Value, index: usize) -> Result<ToolResultInput, History
         .map(bounded_identity)
         .unwrap_or_else(|| format!("s:history-result-boundary-{index}"));
     Ok(ToolResultInput {
+        images: composer_images::reported_image_lines(message.get("images")),
         call_id,
         name: bounded_tool_name(name),
         output_source_bytes: source_count(message, "content_original_bytes", output.len()),
@@ -1027,6 +1028,27 @@ mod tests {
         assert_eq!(transcript.entries().len(), 1);
         assert_eq!(transcript.entries()[0].role, TranscriptRole::User);
         assert_eq!(transcript.entries()[0].content, "retained");
+    }
+
+    #[test]
+    fn resumed_tool_card_names_images() {
+        let mut assistant = message("assistant", "");
+        assistant["tool_calls"] =
+            json!([{"call_id": "one", "name": "read", "arguments": {"path": "shot.png"}}]);
+        let mut result = message("tool", "Image file shot.png");
+        result["tool_call_id"] = json!("one");
+        result["tool_name"] = json!("read");
+        result["images"] = json!([{"media_type": "image/jpeg", "sha256": "0".repeat(64),
+                                   "byte_size": 10, "width": 640, "height": 480}]);
+
+        let transcript = project_rpc_messages(&[assistant, result]).unwrap();
+
+        let card = transcript
+            .entries()
+            .iter()
+            .find_map(|entry| entry.tool_card())
+            .unwrap();
+        assert_eq!(card.images, ["[image 640×480 jpeg]"]);
     }
 
     #[test]
