@@ -196,6 +196,19 @@ class SetPermissionsCommand(RpcCommandModel):
     mode: PermissionMode
 
 
+class ChangeDirectoryCommand(RpcCommandModel):
+    """Move the session's working directory to another folder in its project.
+
+    It waits for running work and never applies in the middle of a prompt. The
+    reply is the saved ``session.directory_changed`` move, when one was saved,
+    then ``rpc.workspace`` for the new folder.
+    """
+
+    type: Literal["change_directory"] = "change_directory"
+    # Absolute, ``~``, or relative to the current working directory.
+    path: str = Field(min_length=1, max_length=4096)
+
+
 class GetCommandsCommand(RpcCommandModel):
     """Return an immediate in-memory command registry snapshot."""
 
@@ -718,7 +731,8 @@ type RpcCommand = Annotated[
     | ApprovalCommand
     | TrustCommand
     | ShutdownCommand
-    | ConfigureCommand,
+    | ConfigureCommand
+    | ChangeDirectoryCommand,
     Field(discriminator="type"),
 ]
 RpcCommandAdapter: TypeAdapter[RpcCommand] = TypeAdapter(RpcCommand)

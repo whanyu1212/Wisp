@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 from collections import deque
 from collections.abc import (
     AsyncGenerator,
@@ -15,6 +16,7 @@ from collections.abc import (
     Iterator,
     Sequence,
 )
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -99,6 +101,7 @@ from wisp.events import (
     QueueUpdated,
     RunOutcome,
     RunSetup,
+    SessionDirectoryChanged,
     SessionSaved,
     SessionStats,
     SkillInvoked,
@@ -153,10 +156,15 @@ from wisp.sessions.entries import (
     SessionEntry,
     ToolResultPresentationSnapshot,
 )
-from wisp.sessions.errors import StaleSessionWriterError
+from wisp.sessions.errors import SessionError, StaleSessionWriterError
 from wisp.sessions.images import SessionImageError
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
-from wisp.sessions.replay import SessionReplay, replay_session_entries
+from wisp.sessions.replay import (
+    SessionReplay,
+    directory_change_note,
+    replay_session_entries,
+    with_directory_notes,
+)
 from wisp.skills.invocation import expand_skill_invocation
 from wisp.skills.models import SkillCatalog
 from wisp.skills.prompt import build_skill_index
@@ -188,6 +196,8 @@ PERSISTED_SESSION_EVENT_TYPES = frozenset(
         "error",
         # Reopened sessions rebuild a run's closing summary line from its totals.
         "agent.completed",
+        # Resuming restores the folder, and the next prompt names a move.
+        "session.directory_changed",
     }
 )
 
@@ -238,6 +248,44 @@ def _for_image_support(message: Message, *, takes_images: bool) -> Message:
     if takes_images or message.image_bytes is None:
         return message
     return message.model_copy(update={"image_bytes": None})
+
+
+class DirectoryChangeError(ValueError):
+    """A working directory a session cannot move to.
+
+    The folder must exist, be a directory, and stay inside the session's project
+    root, both as written and after following symbolic links. Moving into another
+    project is not supported yet.
+    """
+
+
+def _same_folder(first: Path, second: Path) -> bool:
+    """Return whether two existing paths name one folder, as the file system sees it."""
+
+    try:
+        return os.path.samefile(first, second)
+    except OSError:
+        return first == second
+
+
+def _inside_folder(path: Path, root: Path) -> bool:
+    """Return whether existing ``path`` is ``root`` or inside it, by file identity."""
+
+    return any(_same_folder(folder, root) for folder in (path, *path.parents))
+
+
+@dataclass(frozen=True, slots=True)
+class _ResumedHistory:
+    """What a run resumes from its session."""
+
+    messages: Sequence[Message]
+    active_leaf_id: str | None
+    # Entries the session already held; zero for a new session.
+    entry_count: int
+    # The folder the session last recorded, or None if it records none.
+    cwd: Path | None
+    # Notes for moves since the last user message, which the prompt carries.
+    directory_notes: tuple[str, ...]
 
 
 class ImageInputUnsupportedError(ValueError):
@@ -430,6 +478,9 @@ class CodingSession:
                 web_search=web_search,
             )
         )
+        # The folder Wisp started in. A session that records no folder ran here, so
+        # one records its folder only when it starts somewhere else, after a move.
+        self._launch_cwd = self.tool_context.cwd.resolve(strict=False)
 
     @classmethod
     def from_configuration(
@@ -930,6 +981,141 @@ class CodingSession:
         self.auto_compaction_enabled = configuration.auto_compaction_enabled
         self.web_search = configuration.web_search
 
+    async def change_directory(
+        self, path: str, *, session: JsonlSession | None
+    ) -> SessionDirectoryChanged | None:
+        """Move the working directory to another folder in the same project.
+
+        The tools work from the new folder from the next operation on. When
+        ``session`` already has entries, the move is saved in it, so resuming the
+        session restores the folder and the next prompt tells the model; a session
+        that has none records its folder when its first prompt runs.
+
+        Args:
+            path (str): The folder: absolute, ``~``, or relative to the current one.
+            session (JsonlSession | None): The session to record the move in.
+
+        Returns:
+            SessionDirectoryChanged | None: The saved move, or None when nothing
+            was saved because the folder did not change or the session is empty.
+
+        Raises:
+            RuntimeError: While a prompt, compaction, or another folder change runs.
+            DirectoryChangeError: When the folder does not exist, is not a
+                directory, or lies outside the project root.
+            SessionError: When the move cannot be saved; the folder is unchanged.
+            OSError: When the session file cannot be written; the folder is unchanged.
+        """
+
+        async with self._exclusive_operation():
+            target = self._directory_in_project(path)
+            previous = self.tool_context.cwd.resolve(strict=False)
+            if _same_folder(target, previous):
+                return None
+            change = None
+            if session is not None and session.path.exists():
+                change = SessionDirectoryChanged(
+                    session_id=session.session_id, previous_cwd=previous, cwd=target
+                )
+                # Saved before the folder changes, so a failed save leaves the
+                # session where it was rather than moved with no record.
+                await self._flush_pending_entries()
+                await session.append_event(change)
+            self.tool_context = replace(self.tool_context, cwd=target)
+            return change
+
+    async def restore_directory(self, session: JsonlSession | None) -> str | None:
+        """Work from the folder ``session`` last recorded, or from the launch folder.
+
+        Called when a session, or a branch of it, becomes the active one. A session
+        that records no folder ran in the folder Wisp started in, so it gets that
+        one; so does a session whose recorded folder can no longer be used, or that
+        cannot be read.
+
+        Args:
+            session (JsonlSession | None): The session that became active.
+
+        Returns:
+            str | None: Why the recorded folder was not restored, or None when it
+            was, or when ``session`` records none.
+
+        Raises:
+            RuntimeError: While a prompt, compaction, or another folder change runs.
+        """
+
+        async with self._exclusive_operation():
+            target = self._launch_cwd
+            notice = None
+            try:
+                recorded = await self._recorded_directory(session)
+            except (SessionError, OSError) as exc:
+                recorded = None
+                notice = f"Working in {target}: could not read the session's folder: {exc}"
+            if recorded is not None:
+                try:
+                    target = self._directory_in_project(str(recorded))
+                except DirectoryChangeError as exc:
+                    notice = f"Working in {target} instead of the session's folder: {exc}"
+            self.tool_context = replace(self.tool_context, cwd=target)
+            return notice
+
+    async def _recorded_directory(self, session: JsonlSession | None) -> Path | None:
+        if session is None or not session.path.exists():
+            return None
+        snapshot = await anyio.to_thread.run_sync(session.read_run_snapshot)
+        return snapshot.replay.cwd
+
+    @asynccontextmanager
+    async def _exclusive_operation(self) -> AsyncIterator[None]:
+        """Hold the operation lock for a short change, failing instead of waiting.
+
+        A prompt or compaction holds the same lock for its whole run, so a folder
+        change can never interleave with one, even for a direct caller that the RPC
+        host does not order.
+        """
+
+        try:
+            self._operation_lock.acquire_nowait()
+        except anyio.WouldBlock:
+            raise RuntimeError("CodingSession is busy") from None
+        try:
+            self._operation_active = True
+            yield
+        finally:
+            self._operation_active = False
+            self._operation_lock.release()
+
+    def _directory_in_project(self, path: str) -> Path:
+        """Resolve ``path`` from the working directory and check it stays in the project.
+
+        The folder's real path, after symbolic links, must lie inside the real
+        project root, so a link inside the project cannot lead out. Containment is
+        checked by file identity, so case-insensitive file systems compare folders
+        the way they open them.
+        """
+
+        root = self.project_context_root
+        if root is None:
+            raise DirectoryChangeError("This session has no project root to move within")
+        real_root = Path(os.path.realpath(root))
+        cwd = self.tool_context.cwd.resolve(strict=False)
+        candidate = Path(path).expanduser()
+        if not candidate.is_absolute():
+            candidate = cwd / candidate
+        # Only where the folder really is matters: a path through a symlinked parent
+        # such as /tmp, or spelled in another case, still names a folder inside.
+        real = Path(os.path.realpath(candidate))
+        if not real.exists():
+            raise DirectoryChangeError(f"No such folder: {path}")
+        if not real.is_dir():
+            raise DirectoryChangeError(f"Not a folder: {path}")
+        if not _inside_folder(real, real_root):
+            raise DirectoryChangeError(
+                f"{path} is outside the project {real_root}; moving into another "
+                "project is not supported yet"
+            )
+        return real
+
     async def run(
         self,
         prompt: str,
@@ -1064,13 +1250,14 @@ class CodingSession:
             seen_files = self._seen_files.setdefault(session.session_id, SeenFiles())
             operation_context = replace(operation_context, seen_files=seen_files)
         prompt_image_bytes = sum(image.byte_size for image in user_message.images or ())
-        history, active_leaf_id = await self._resume_history(
+        resumed = await self._resume_history(
             session, history, reserved_image_bytes=prompt_image_bytes
         )
+        history = resumed.messages
         self._start_tool_image_allowance(history, reserved_bytes=prompt_image_bytes)
         persistence = RunPersistence(
             session=session,
-            expected_active_leaf_id=active_leaf_id,
+            expected_active_leaf_id=resumed.active_leaf_id,
             operation_id=operation_id,
         )
         self._active_persistence = persistence
@@ -1081,6 +1268,18 @@ class CodingSession:
             published = await self._emit(event, session=session, operation_id=operation_id)
             run_stats.observe(published)
             return published
+
+        # The prompt carries a note for every move since the last user message, the
+        # same notes a later replay of the saved prompt adds, so both match exactly.
+        directory_notes = resumed.directory_notes
+        directory_change = self._run_directory_change(session, resumed)
+        if directory_change is not None:
+            # Saved, not published: the run's own events already name its folder,
+            # and a frontend learns of a /cd move from that command's reply.
+            await self._flush_pending_entries()
+            await persistence.append_event(directory_change)
+            if directory_change.previous_cwd is not None and history:
+                directory_notes = (*directory_notes, directory_change_note(directory_change.cwd))
 
         operation_registry = self._operation_tool_registry()
         effective_tools, executor = self._run_tools(
@@ -1152,7 +1351,7 @@ class CodingSession:
         )
         # Add the persisted prompt before checking the threshold so provider limits
         # apply to the complete next request, not only the resumed history.
-        harness.append_message(user_message)
+        harness.append_message(with_directory_notes(user_message, directory_notes))
         if user_message.skill_invocation is not None:
             yield await emit(
                 SkillInvoked(
@@ -1283,7 +1482,7 @@ class CodingSession:
         history: Sequence[Message],
         *,
         reserved_image_bytes: int = 0,
-    ) -> tuple[Sequence[Message], str | None]:
+    ) -> _ResumedHistory:
         """Choose the history a run resumes and read the leaf its writer is pinned to.
 
         Entries still pending from earlier runs are flushed first, so the
@@ -1296,9 +1495,10 @@ class CodingSession:
                 already uses, so history images are trimmed around it. Defaults to 0.
 
         Returns:
-            tuple[Sequence[Message], str | None]: The persisted history when the
-            session has entries, had entries pending, or is marked for a history
-            refresh, otherwise `history`; and the session's active leaf.
+            _ResumedHistory: The persisted history when the session has entries,
+            had entries pending, or is marked for a history refresh, otherwise
+            `history`; the session's active leaf; and the folder and pending
+            directory notes it records.
         """
 
         recover_history = session.session_id in self._history_refresh_session_ids or any(
@@ -1309,9 +1509,41 @@ class CodingSession:
         if snapshot.entry_count or recover_history:
             history = snapshot.replay.messages
             self._history_refresh_session_ids.discard(session.session_id)
-        return (
-            await self._with_image_bytes(session, history, reserved_bytes=reserved_image_bytes),
-            snapshot.active_leaf_id,
+        return _ResumedHistory(
+            messages=await self._with_image_bytes(
+                session, history, reserved_bytes=reserved_image_bytes
+            ),
+            active_leaf_id=snapshot.active_leaf_id,
+            entry_count=snapshot.entry_count,
+            cwd=snapshot.replay.cwd,
+            directory_notes=snapshot.replay.pending_directory_notes,
+        )
+
+    def _run_directory_change(
+        self, session: JsonlSession, resumed: _ResumedHistory
+    ) -> SessionDirectoryChanged | None:
+        """Return the folder record a run must save before its prompt, if any.
+
+        A session that records no folder ran in the launch folder. A new session
+        that starts elsewhere, after a move, records its folder; an older one that
+        resumes elsewhere records the move. A session that records a folder and
+        runs in another, such as one continued from a different folder, records
+        that move too.
+        """
+
+        current = self.tool_context.cwd.resolve(strict=False)
+        if resumed.cwd is None:
+            if current == self._launch_cwd:
+                return None
+            if not resumed.entry_count:
+                return SessionDirectoryChanged(session_id=session.session_id, cwd=current)
+            return SessionDirectoryChanged(
+                session_id=session.session_id, previous_cwd=self._launch_cwd, cwd=current
+            )
+        if resumed.cwd == current:
+            return None
+        return SessionDirectoryChanged(
+            session_id=session.session_id, previous_cwd=resumed.cwd, cwd=current
         )
 
     async def _persist_run_prompt(

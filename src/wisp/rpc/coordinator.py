@@ -44,6 +44,18 @@ type _SequentialRpcCommandType = Literal[
 ]
 
 
+# Commands after which the session's active path may record another folder.
+_ACTIVE_PATH_COMMAND_TYPES = frozenset(
+    {
+        "select_session",
+        "clone_session",
+        "fork_session",
+        "navigate_session_tree",
+        "unrevert_session_tree",
+    }
+)
+
+
 @dataclass(frozen=True)
 class _RpcInputCommand:
     command: ParsedRpcCommand = field(repr=False)
@@ -151,6 +163,7 @@ class RpcCoordinator:
         *,
         input_closed_handlers: tuple[Callable[[], None], ...] = (),
         session_changed: Callable[[], Awaitable[None]] | None = None,
+        session_activated: Callable[[JsonlSession | None], Awaitable[None]] | None = None,
         max_queued_commands: int = _MAX_QUEUED_RPC_COMMANDS,
         max_queued_bytes: int = MAX_LIVE_RPC_FRAME_BYTES,
         input_closed_type: type[object] = _RpcInputClosed,
@@ -175,6 +188,9 @@ class RpcCoordinator:
         # Called after the active session changes to another one or to a new session,
         # before the new session is applied; nothing from the old one carries over.
         self._session_changed = session_changed
+        # Called after a session, or a branch of it, becomes the active one, so the
+        # agent can work from the folder that path last recorded.
+        self._session_activated = session_activated
         self._max_queued_commands = max_queued_commands
         self._max_queued_bytes = max_queued_bytes
         self._queued_command_bytes = 0
@@ -413,6 +429,12 @@ class RpcCoordinator:
             ):
                 await self._session_changed()
             self.session_state.session = selected_session
+        if (
+            completed.ok
+            and completed.command_type in _ACTIVE_PATH_COMMAND_TYPES
+            and self._session_activated is not None
+        ):
+            await self._session_activated(self.session_state.session)
         post_apply_events = getattr(completed, "post_apply_events", ())
         if post_apply_events and self._completion_event_renderer is not None:
             await self._completion_event_renderer(post_apply_events)

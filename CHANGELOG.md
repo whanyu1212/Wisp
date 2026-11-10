@@ -12,6 +12,37 @@ this policy.
 
 ## Unreleased
 
+### Sessions
+
+- A session can move its working directory to another folder in its project: the new
+  `change_directory {path}` RPC command, and `RpcController.change_directory()` and
+  `CodingSession.change_directory()` in Python. The path may be absolute, `~`, or relative to the
+  current folder, and must exist, be a directory, and stay inside the project root, also after
+  following symbolic links; moving into another project is refused for now. The command waits for
+  running work and replies with `session.directory_changed` when it saved the move, then
+  `rpc.workspace`. File and shell tools, the prompt's project context, Git status, and the file
+  picker use the new folder from the next operation. (HY-476)
+- A move is saved as a `session.directory_changed` event entry on the active branch, not as a
+  message. The next user message the model sees starts with
+  `[The working directory has been changed to <folder>.]`; the saved prompt stays as typed, and a
+  later replay rebuilds the same text, so the prompt cache still matches after the first turn. A
+  separate note message would have put two user messages in a row, which some chat templates
+  reject.
+- Selecting, cloning, forking, navigating, or resuming a session restores the folder its active
+  path last recorded; a session that records none, including every session saved before this
+  release, works from the folder Wisp started in, as before. A recorded folder that is gone or
+  outside the project falls back to that folder with a notice. A new session started after a move
+  records its starting folder, and a session continued from another folder (`wisp -p --resume`)
+  records that move. Session files keep `schema_version` 6, and 0.7 reads a session with moves; it
+  ignores the event entries, so it works from its launch folder.
+
+### Events
+
+- `session.directory_changed` (`SessionDirectoryChanged`) is new: `session_id`, `previous_cwd`
+  (`null` for the folder a new session started in), and `cwd`. `change_directory` is a new
+  command. `rpc.workspace` is now also sent after a move and after a session becomes active. The
+  schema bundle and conformance fixture are regenerated; the same-release rule applies.
+
 ### Tools
 
 - The file and search tools' boundary is the project root in a trusted project, instead of the

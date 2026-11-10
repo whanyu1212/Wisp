@@ -155,6 +155,22 @@ class SessionSaved(WispEvent):
     path: Path
 
 
+class SessionDirectoryChanged(WispEvent):
+    """A session's working directory: where it started, or where it moved.
+
+    Saved in the session as an event entry on the active branch, so resuming the
+    session, or a branch of it, restores the folder of the last one on that path.
+    A move (``previous_cwd`` set) after earlier messages also tells the model: the
+    next user message it sees starts with a note naming the new folder.
+    """
+
+    type: Literal["session.directory_changed"] = "session.directory_changed"
+    session_id: str = Field(min_length=1)
+    # None for the folder a new session started in; set for a move.
+    previous_cwd: Path | None = None
+    cwd: Path
+
+
 class RpcMessagesReported(WispEvent):
     """On-demand, bounded persisted transcript page returned over RPC."""
 
