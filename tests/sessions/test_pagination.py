@@ -16,6 +16,7 @@ from wisp.events import (
     ErrorEvent,
     RpcMessageToolResultSnapshot,
     RunOutcome,
+    SessionDirectoryChanged,
     ToolCallSnapshot,
 )
 from wisp.messages import Message
@@ -769,3 +770,34 @@ def test_older_runs_have_no_totals(tmp_path: Path) -> None:
 
     anyio.run(run)
     assert all(message.run_completed is None for message in session.read_message_page().messages)
+
+
+def test_moves_follow_their_message(tmp_path: Path) -> None:
+    """A move belongs to the message before it; moves back to the start show nothing."""
+
+    session = JsonlSessionStore(tmp_path).create()
+    first, second, third = tmp_path / "a", tmp_path / "b", tmp_path / "c"
+
+    def moved(cwd: Path, previous: Path | None) -> SessionDirectoryChanged:
+        return SessionDirectoryChanged(session_id="s", previous_cwd=previous, cwd=cwd)
+
+    async def run() -> None:
+        # A session's starting folder, saved before its first prompt, is not a move.
+        await session.append_event(moved(first, None))
+        await session.append_message(Message(role="user", content="one"), operation_id="a")
+        await session.append_message(Message(role="assistant", content="ok"), operation_id="a")
+        await session.append_event(moved(second, first))
+        await session.append_event(moved(third, second))
+        await session.append_message(Message(role="user", content="two"), operation_id="b")
+        await session.append_message(Message(role="assistant", content="ok"), operation_id="b")
+        await session.append_event(moved(first, third))
+        await session.append_message(Message(role="user", content="three"), operation_id="c")
+        await session.append_message(Message(role="assistant", content="ok"), operation_id="c")
+        # A failed move into another project saves the move and then the move back.
+        await session.append_event(moved(second, first))
+        await session.append_event(moved(first, second))
+
+    anyio.run(run)
+    page = session.read_message_page()
+    moves = [message.moved_to for message in page.messages]
+    assert moves == [None, third, None, first, None, None]

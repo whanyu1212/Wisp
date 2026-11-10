@@ -124,6 +124,7 @@ reconnect.
 /clone                                    clone the current session
 /tree                                     browse the session tree and switch branches
 /unrevert                                 restore the previous branch after navigation
+/cd <path>                                work from another folder, entering its project if needed
 /diff                                     review working-tree changes against HEAD
 /compact [instructions]                   summarize older context while preserving the JSONL audit
 /context [auto on|off]                    show or toggle compaction policy

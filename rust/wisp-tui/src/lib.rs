@@ -16,6 +16,7 @@ mod context_view;
 mod detail_view;
 mod diff_card;
 mod diff_review;
+mod directory_completion;
 mod discovery_view;
 mod event_loop;
 mod external_editor;
@@ -1840,7 +1841,8 @@ impl LiveUi {
         let mut rendered_model_picker = false;
         let mut rendered_overlay = None;
         let mut rendered_completion = None;
-        self.completion.sync(&self.editor);
+        self.completion
+            .sync(&self.editor, self.state.workspace_cwd.as_deref());
         self.file_picker.invalidate();
         if let Some(picker) = &mut self.theme_picker {
             picker.invalidate();
@@ -2703,7 +2705,8 @@ impl LiveUi {
                 if action == ClipboardAction::Cut {
                     let outcome = self.editor.replace_range(range, "");
                     self.update_edit_notice(outcome);
-                    self.completion.sync(&self.editor);
+                    self.completion
+                        .sync(&self.editor, self.state.workspace_cwd.as_deref());
                     self.file_picker.sync_editor(&self.editor);
                 }
                 let verb = if action == ClipboardAction::Cut {
@@ -2753,7 +2756,8 @@ impl LiveUi {
     fn insert_clipboard_text(&mut self, pasted: &str) {
         let outcome = self.editor.insert_paste(pasted);
         let notice_changed = self.update_edit_notice(outcome);
-        self.completion.sync(&self.editor);
+        self.completion
+            .sync(&self.editor, self.state.workspace_cwd.as_deref());
         self.file_picker.sync_editor(&self.editor);
         if outcome.changed || notice_changed {
             self.render_pending = true;
@@ -3297,6 +3301,11 @@ impl LiveUi {
                 self.dispatch(UiAction::Search(enabled), writer, limit)
                     .await
             }
+            Command::ChangeDirectory(path) => {
+                self.editor.clear();
+                self.dispatch(UiAction::ChangeDirectory(path), writer, limit)
+                    .await
+            }
             Command::AutoCompaction(enabled) => {
                 self.notice = None;
                 self.dispatch(UiAction::ConfigureAutoCompaction(enabled), writer, limit)
@@ -3503,14 +3512,17 @@ impl LiveUi {
                 && matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::ALT)))
                 && !self.completion.is_exact(view.items[view.selected]))
         {
-            if let Some((range, replacement)) = self
-                .completion
-                .replacement(view.items[view.selected], &self.editor)
-            {
+            let item = view.items[view.selected];
+            // A filled-in folder lists its own subfolders next, so Tab can keep going.
+            let descends = matches!(item, commands::CompletionItem::Directory(_));
+            if let Some((range, replacement)) = self.completion.replacement(item, &self.editor) {
                 let outcome = self.editor.replace_range(range, &replacement);
                 self.update_edit_notice(outcome);
-                self.completion.sync(&self.editor);
-                self.completion.dismiss();
+                self.completion
+                    .sync(&self.editor, self.state.workspace_cwd.as_deref());
+                if !descends {
+                    self.completion.dismiss();
+                }
             }
         } else {
             return false;
@@ -4385,7 +4397,8 @@ impl LiveUi {
                     self.update_edit_notice(outcome);
                     if !outcome.rejected_limit {
                         self.prompt_history_view = None;
-                        self.completion.sync(&self.editor);
+                        self.completion
+                            .sync(&self.editor, self.state.workspace_cwd.as_deref());
                         self.completion.dismiss();
                     }
                 }
@@ -4704,7 +4717,8 @@ impl LiveUi {
         if let Some(control) = self.handle_global_shortcut(&input, writer, limit).await? {
             return Ok(control);
         }
-        self.completion.sync(&self.editor);
+        self.completion
+            .sync(&self.editor, self.state.workspace_cwd.as_deref());
         let overlay = self.active_overlay();
         let decision_pending = matches!(
             self.state.view_status,
@@ -5040,7 +5054,8 @@ impl LiveUi {
                 self.update_edit_notice(outcome);
                 if !outcome.rejected_limit {
                     self.discovery_view = None;
-                    self.completion.sync(&self.editor);
+                    self.completion
+                        .sync(&self.editor, self.state.workspace_cwd.as_deref());
                     self.completion.dismiss();
                 }
             }
@@ -5242,7 +5257,8 @@ impl LiveUi {
                 self.update_edit_notice(outcome);
                 self.render_pending |= outcome.changed;
             }
-            self.completion.sync(&self.editor);
+            self.completion
+                .sync(&self.editor, self.state.workspace_cwd.as_deref());
             self.file_picker.sync_editor(&self.editor);
             return Ok(Some(LoopControl::Continue));
         }

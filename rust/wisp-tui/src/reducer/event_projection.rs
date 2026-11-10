@@ -391,6 +391,14 @@ impl BackendEvent {
                 turn: u64_field(value, &event_type, "turn")?,
                 search: crate::web_search::search(value),
             },
+            // A record with no previous folder is a session's starting folder, not a move.
+            "session.directory_changed" if value.get("previous_cwd").is_none_or(Value::is_null) => {
+                Self::Other { event_type }
+            }
+            "session.directory_changed" => Self::DirectoryChanged {
+                previous: string_field(value, &event_type, "previous_cwd")?,
+                cwd: string_field(value, &event_type, "cwd")?,
+            },
             "rpc.workspace" => Self::WorkspaceReported {
                 cwd: string_field(value, &event_type, "cwd")?,
                 git_branch: value

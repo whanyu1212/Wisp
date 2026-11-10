@@ -1,5 +1,6 @@
 //! Local command routing and presentation over backend-owned discovery metadata.
 
+use crate::directory_completion::{self, DirectoryListing};
 use crate::model_picker::{self, ModelCommand};
 use crate::mouse::Rows;
 use crate::prompt_editor::PromptEditor;
@@ -14,6 +15,7 @@ use ratatui::{
 };
 use std::borrow::Cow;
 use std::ops::{ControlFlow, Range};
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use wisp_protocol::{
     commands::AgentMode,
@@ -37,6 +39,8 @@ pub(crate) enum Command {
     AutoCompaction(bool),
     Search(Option<bool>),
     Compact(Option<String>),
+    /// `/cd`: the folder to work from, as typed.
+    ChangeDirectory(String),
     Quit,
     Model(ModelCommand),
     Session(SessionCommand),
@@ -72,6 +76,7 @@ fn usage(name: &str) -> Option<&'static str> {
         "clone" => "/clone",
         "tree" => "/tree",
         "unrevert" => "/unrevert",
+        "cd" => "/cd <path>",
         _ => return None,
     })
 }
@@ -166,6 +171,9 @@ fn parse_command(canonical: &str, tail: &str, syntax: &str) -> Command {
         "build" => Command::Mode(AgentMode::Build),
         "context" => parse_context(tail, syntax),
         "compact" => Command::Compact((!tail.trim().is_empty()).then(|| tail.trim().to_owned())),
+        // The whole tail is the path, spaces included; the backend resolves it.
+        "cd" if tail.trim().is_empty() => Command::Invalid(format!("Usage: {syntax}")),
+        "cd" => Command::ChangeDirectory(tail.trim().to_owned()),
         "quit" => Command::Quit,
         "model" | "provider" => Command::Model(
             model_picker::command(&format!("/{canonical}{tail}")).expect("known model command"),
@@ -243,6 +251,42 @@ pub(crate) fn is_supported_token(token: &str, catalog: Option<&[CommandDescripto
     })
 }
 
+/// What the composer's completion popup completes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum CompletionContext {
+    /// The command token under the cursor, and its text.
+    Command(Range<usize>, String),
+    /// The path typed after `/cd `, and its text.
+    Directory(Range<usize>, String),
+}
+
+impl CompletionContext {
+    fn range(&self) -> &Range<usize> {
+        match self {
+            Self::Command(range, _) | Self::Directory(range, _) => range,
+        }
+    }
+}
+
+/// The path after `/cd ` while the cursor sits at its end.
+fn directory_context(editor: &PromptEditor) -> Option<(Range<usize>, String)> {
+    if editor.selection_range().is_some() {
+        return None;
+    }
+    let text = editor.text();
+    if text.contains(['\n', '\r']) || editor.cursor_offset() != text.len() {
+        return None;
+    }
+    let trimmed = text.trim_start();
+    let token = trimmed.split_whitespace().next()?;
+    let after = &trimmed[token.len()..];
+    if !token.eq_ignore_ascii_case("/cd") || !after.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let start = text.len() - after.trim_start().len();
+    Some((start..text.len(), text[start..].to_owned()))
+}
+
 fn token_context(editor: &PromptEditor) -> Option<(Range<usize>, String)> {
     if editor.selection_range().is_some() {
         return None;
@@ -263,7 +307,12 @@ fn token_context(editor: &PromptEditor) -> Option<(Range<usize>, String)> {
 
 #[derive(Default)]
 pub(crate) struct Completion {
-    context: Option<(Range<usize>, String)>,
+    context: Option<CompletionContext>,
+    /// The folders that complete a `/cd` path, listed when its context or the
+    /// working folder changes.
+    directories: DirectoryListing,
+    /// The working folder `directories` was listed from.
+    listed_from: Option<String>,
     selected: usize,
     dismissed: bool,
     rendered: Option<String>,
@@ -326,6 +375,8 @@ fn command_descriptors(catalog: Option<&[CommandDescriptor]>) -> Vec<&CommandDes
 pub(crate) enum CompletionItem<'a> {
     Command(&'a CommandDescriptor),
     Skill(&'a SkillCatalogEntry),
+    /// A folder for `/cd`, as the whole path it completes to.
+    Directory(&'a str),
 }
 
 impl<'a> CompletionItem<'a> {
@@ -333,6 +384,7 @@ impl<'a> CompletionItem<'a> {
         match self {
             Self::Command(command) => Cow::Borrowed(&command.slash_command),
             Self::Skill(skill) => Cow::Owned(format!("/skill:{}", skill.name)),
+            Self::Directory(path) => Cow::Borrowed(path),
         }
     }
 
@@ -347,6 +399,7 @@ impl<'a> CompletionItem<'a> {
                 skill.source.as_str(),
                 crate::ui::sanitize_for_terminal(&skill.description)
             ),
+            Self::Directory(_) => String::new(),
         }
     }
 
@@ -354,6 +407,8 @@ impl<'a> CompletionItem<'a> {
         match self {
             Self::Command(command) => usage(&command.name).is_some_and(|usage| usage.contains(' ')),
             Self::Skill(_) => true,
+            // A folder ends in `/`, ready for the next name.
+            Self::Directory(_) => false,
         }
     }
 }
@@ -364,14 +419,41 @@ impl Completion {
         self.rendered.as_deref()
     }
 
-    pub fn sync(&mut self, editor: &PromptEditor) {
-        let context = token_context(editor);
+    /// Follows the composer, listing folders again when a `/cd` path changes.
+    /// `cwd` is where a relative path starts: the folder the backend reports.
+    pub fn sync(&mut self, editor: &PromptEditor, cwd: Option<&str>) {
+        let context = token_context(editor)
+            .map(|(range, token)| CompletionContext::Command(range, token))
+            .or_else(|| {
+                directory_context(editor)
+                    .map(|(range, partial)| CompletionContext::Directory(range, partial))
+            });
+        let directory = matches!(context, Some(CompletionContext::Directory(..)));
+        // A folder reported after the path was typed lists it again, keeping the choice.
+        if directory && self.context == context && self.listed_from.as_deref() != cwd {
+            self.list_directories(cwd);
+        }
         if self.context != context {
             self.context = context;
+            if directory {
+                self.list_directories(cwd);
+            } else {
+                self.directories = DirectoryListing::default();
+            }
             self.selected = 0;
             self.dismissed = false;
             self.rendered = None;
         }
+    }
+
+    fn list_directories(&mut self, cwd: Option<&str>) {
+        let Some(CompletionContext::Directory(_, partial)) = &self.context else {
+            return;
+        };
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        self.directories = directory_completion::list(partial, cwd.map(Path::new), home.as_deref());
+        self.listed_from = cwd.map(str::to_owned);
+        self.rendered = None;
     }
 
     pub fn invalidate(&mut self) {
@@ -384,14 +466,29 @@ impl Completion {
     }
 
     pub fn view<'a>(
-        &self,
+        &'a self,
         catalog: Option<&'a [CommandDescriptor]>,
         skills: Option<&'a SkillCatalogSnapshot>,
     ) -> Option<CompletionView<'a>> {
         if self.dismissed {
             return None;
         }
-        let (range, prefix) = self.context.as_ref()?;
+        let (range, prefix) = match self.context.as_ref()? {
+            CompletionContext::Command(range, prefix) => (range, prefix),
+            CompletionContext::Directory(..) => {
+                let items: Vec<_> = self
+                    .directories
+                    .candidates
+                    .iter()
+                    .map(|path| CompletionItem::Directory(path))
+                    .collect();
+                if items.is_empty() {
+                    return None;
+                }
+                let selected = self.selected.min(items.len() - 1);
+                return Some(CompletionView { items, selected });
+            }
+        };
         let prefix = prefix.to_ascii_lowercase();
         let items: Vec<_> = command_descriptors(catalog)
             .into_iter()
@@ -452,7 +549,7 @@ impl Completion {
         if self.rendered.as_deref() != Some(spelling.as_ref()) {
             return None;
         }
-        let (range, _) = self.context.as_ref()?;
+        let range = self.context.as_ref()?.range();
         let mut replacement = spelling.into_owned();
         if editor.text()[range.end..].is_empty() && item.takes_arguments() {
             replacement.push(' ');
@@ -460,11 +557,22 @@ impl Completion {
         Some((range.clone(), replacement))
     }
 
+    /// Whether the typed text is already complete, so Enter submits it rather than
+    /// taking the selection. For `/cd` that is a path naming a folder: Enter moves
+    /// there, while Tab still descends into the selected subfolder.
     pub fn is_exact(&self, item: CompletionItem<'_>) -> bool {
-        self.context.as_ref().is_some_and(|(_, token)| match item {
-            CompletionItem::Command(_) => token.eq_ignore_ascii_case(&item.spelling()),
-            CompletionItem::Skill(_) => token == item.spelling().as_ref(),
-        })
+        match (self.context.as_ref(), item) {
+            (Some(CompletionContext::Command(_, token)), CompletionItem::Command(_)) => {
+                token.eq_ignore_ascii_case(&item.spelling())
+            }
+            (Some(CompletionContext::Command(_, token)), CompletionItem::Skill(_)) => {
+                token == item.spelling().as_ref()
+            }
+            (Some(CompletionContext::Directory(..)), CompletionItem::Directory(_)) => {
+                self.directories.names_directory
+            }
+            _ => false,
+        }
     }
 }
 
@@ -673,6 +781,61 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn cd_takes_whole_path() {
+        assert!(matches!(
+            classify("/cd ~/my work/app ", None),
+            Some(Command::ChangeDirectory(path)) if path == "~/my work/app"
+        ));
+        assert!(matches!(
+            classify("/cd", None),
+            Some(Command::Invalid(usage)) if usage == "Usage: /cd <path>"
+        ));
+    }
+
+    #[test]
+    fn cd_completes_folders() {
+        let root = std::env::temp_dir().join(format!("wisp-cd-composer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src/ui")).unwrap();
+        std::fs::create_dir_all(root.join("scripts")).unwrap();
+        let cwd = root.to_str().unwrap();
+        let mut completion = Completion::default();
+        let mut editor = PromptEditor::default();
+        editor.insert_paste("/cd s");
+        completion.sync(&editor, Some(cwd));
+        let view = completion.view(None, None).unwrap();
+        let spellings: Vec<_> = view.items.iter().map(|item| item.spelling()).collect();
+        assert_eq!(spellings, ["scripts/", "src/"]);
+        // A partial name is not a folder yet, so Enter takes the selection.
+        assert!(!completion.is_exact(view.items[1]));
+        completion.mark_rendered("src/".into());
+        let item = completion.view(None, None).unwrap().items[1];
+        let (range, replacement) = completion.replacement(item, &editor).unwrap();
+        editor.replace_range(range, &replacement);
+        assert_eq!(editor.text(), "/cd src/");
+
+        // A typed folder submits on Enter, while Tab can still go deeper.
+        completion.sync(&editor, Some(cwd));
+        let view = completion.view(None, None).unwrap();
+        assert_eq!(view.items[0].spelling(), "src/ui/");
+        assert!(completion.is_exact(view.items[0]));
+        // A folder reported after the path was typed lists it then.
+        let mut late = Completion::default();
+        late.sync(&editor, None);
+        assert!(late.view(None, None).is_none());
+        late.sync(&editor, Some(cwd));
+        assert_eq!(
+            late.view(None, None).unwrap().items[0].spelling(),
+            "src/ui/"
+        );
+        // Only the path after `/cd ` completes, with the cursor at its end.
+        editor.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        completion.sync(&editor, Some(cwd));
+        assert!(completion.view(None, None).is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn context_accepts_auto_on_off() {
         assert!(matches!(classify("/context", None), Some(Command::Context)));
         assert!(matches!(
@@ -730,7 +893,7 @@ pub(crate) mod tests {
         let mut editor = PromptEditor::default();
         editor.insert_paste("/");
         let mut completion = Completion::default();
-        completion.sync(&editor);
+        completion.sync(&editor, None);
         let view = completion.view(Some(&catalog), Some(&skills)).unwrap();
         let first_skill = view
             .items
@@ -760,18 +923,27 @@ pub(crate) mod tests {
         for _ in 0..9 {
             editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
         }
-        completion.sync(&editor);
+        completion.sync(&editor, None);
         let view = completion.view(Some(&catalog), Some(&skills)).unwrap();
         assert_eq!(view.items.len(), 1);
         let item = view.items[0];
         assert_eq!(item.spelling(), "/skill:build");
         assert!(completion.replacement(item, &editor).is_none());
-        completion.mark_rendered(item.spelling().into_owned());
+        let spelling = item.spelling().into_owned();
+        completion.mark_rendered(spelling);
+        let item = completion
+            .view(Some(&catalog), Some(&skills))
+            .unwrap()
+            .items[0];
         let (range, replacement) = completion.replacement(item, &editor).unwrap();
         editor.replace_range(range, &replacement);
         assert_eq!(editor.text(), "/skill:build 候選  arguments");
         assert!(classify(editor.text(), Some(&catalog)).is_none());
         completion.invalidate();
+        let item = completion
+            .view(Some(&catalog), Some(&skills))
+            .unwrap()
+            .items[0];
         assert!(completion.replacement(item, &editor).is_none());
     }
 
@@ -783,14 +955,17 @@ pub(crate) mod tests {
         for literal in ["  /skill:re", "\t/skill:re", "/skill:re\nrequest"] {
             editor.clear();
             editor.insert_paste(literal);
-            completion.sync(&editor);
+            completion.sync(&editor, None);
             assert!(completion.view(None, Some(&skills)).is_none(), "{literal}");
         }
         editor.clear();
         editor.insert_paste("/skill:re");
-        completion.sync(&editor);
+        completion.sync(&editor, None);
+        let spelling = completion.view(None, Some(&skills)).unwrap().items[0]
+            .spelling()
+            .into_owned();
+        completion.mark_rendered(spelling);
         let item = completion.view(None, Some(&skills)).unwrap().items[0];
-        completion.mark_rendered(item.spelling().into_owned());
         let (range, replacement) = completion.replacement(item, &editor).unwrap();
         editor.replace_range(range, &replacement);
         assert_eq!(editor.text(), "/skill:review ");
@@ -891,20 +1066,22 @@ pub(crate) mod tests {
             editor.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
         }
         let mut completion = Completion::default();
-        completion.sync(&editor);
+        completion.sync(&editor, None);
         let view = completion.view(Some(&catalog), None).unwrap();
         assert_eq!(view.items.len(), 1);
         let model = view.items[0];
         assert!(completion.replacement(model, &editor).is_none());
-        completion.mark_rendered(model.spelling().into_owned());
+        let spelling = model.spelling().into_owned();
+        completion.mark_rendered(spelling);
+        let model = completion.view(Some(&catalog), None).unwrap().items[0];
         let (range, text) = completion.replacement(model, &editor).unwrap();
         assert!(editor.replace_range(range, &text).changed);
         assert_eq!(editor.text(), "  /model 候選 arguments");
-        completion.sync(&editor);
+        completion.sync(&editor, None);
         completion.dismiss();
         assert!(completion.view(Some(&catalog), None).is_none());
         editor.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
-        completion.sync(&editor);
+        completion.sync(&editor, None);
         assert!(completion.view(Some(&catalog), None).is_some());
     }
 
@@ -936,7 +1113,7 @@ pub(crate) mod tests {
         let mut editor = PromptEditor::default();
         editor.insert_paste("/");
         let mut completion = Completion::default();
-        completion.sync(&editor);
+        completion.sync(&editor, None);
         assert!(
             completion
                 .view(Some(&catalog), None)

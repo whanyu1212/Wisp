@@ -28,6 +28,7 @@ mod model_selection;
 pub(crate) mod project_files;
 pub mod queue_management;
 mod session_catalog;
+mod working_directory;
 use model_selection::ModelOperation;
 
 pub(crate) use discovery::McpSignInState;
@@ -801,6 +802,8 @@ pub struct UiState {
     mode_read: Option<PendingRead<AgentMode>>,
     search_read: Option<PendingRead<bool>>,
     search_change: Option<(String, bool)>,
+    /// The pending `/cd` command's id.
+    directory_change: Option<String>,
     mode_change: Option<PendingModeChange>,
     pub last_session: Option<String>,
     pub selected_session: Option<SessionIdentity>,
@@ -897,6 +900,7 @@ impl UiState {
             mode_read: None,
             search_read: None,
             search_change: None,
+            directory_change: None,
             mode_change: None,
             last_session: None,
             selected_session: None,
@@ -1109,6 +1113,7 @@ pub enum CommandKind {
     GetCommands,
     GetState,
     Configure,
+    ChangeDirectory,
     StoreApiKey,
     DisconnectProvider,
     BeginDeviceCode,
@@ -1152,6 +1157,7 @@ impl CommandKind {
             Self::GetCommands => "get_commands",
             Self::GetState => "get_state",
             Self::Configure => "configure",
+            Self::ChangeDirectory => "change_directory",
             Self::StoreApiKey => "store_api_key",
             Self::DisconnectProvider => "disconnect_provider",
             Self::BeginDeviceCode => "begin_device_code",
@@ -1247,6 +1253,12 @@ pub enum BackendEvent {
     WorkspaceReported {
         cwd: String,
         git_branch: Option<String>,
+    },
+    /// The session moved from `previous` to `cwd`; the transcript shows a divider after
+    /// its last entry.
+    DirectoryChanged {
+        previous: String,
+        cwd: String,
     },
     /// A run finished; its totals close the run's last reply.
     RunCompleted(crate::transcript::RunTotals),
@@ -1407,6 +1419,7 @@ pub enum UiAction {
     SetSidePanelVisible(bool),
     ConfigureAutoCompaction(bool),
     Search(Option<bool>),
+    ChangeDirectory(String),
     Compact(Option<String>),
     Steer(String),
     SteerPresented {
@@ -1624,6 +1637,7 @@ pub fn reduce(
         UiAction::SetSidePanelVisible(visible) => Ok(set_side_panel_visible(state, visible, ids)?),
         UiAction::LoadContext => Ok(context::request(state)),
         UiAction::Search(enabled) => Ok(command_controls::search(state, enabled, ids)?),
+        UiAction::ChangeDirectory(path) => Ok(working_directory::change(state, path, ids)?),
         UiAction::ConfigureAutoCompaction(enabled) => {
             Ok(context::configure_auto(state, enabled, ids)?)
         }
@@ -1796,6 +1810,7 @@ fn close_transport(state: &mut UiState) -> Vec<UiEffect> {
     state.mode_read = None;
     state.search_read = None;
     state.search_change = None;
+    state.directory_change = None;
     state.command_catalog_read = None;
     state.queue.clear_local_presentations();
     for pending in state.pending_queue_submissions.values_mut() {
@@ -5328,6 +5343,12 @@ fn handle_backend_event(
                 .complete_message_with_cost(turn, content, cost);
             Ok(vec![UiEffect::RequestRender])
         }
+        BackendEvent::DirectoryChanged { previous, cwd } => {
+            state
+                .transcript
+                .attach_directory_change(Some(previous), cwd);
+            Ok(vec![UiEffect::RequestRender])
+        }
         BackendEvent::WorkspaceReported { cwd, git_branch } => {
             state.transcript.set_tool_cwd(&cwd);
             state.workspace_cwd = Some(cwd);
@@ -5498,6 +5519,10 @@ fn observe_backend_event(
         return Ok(Some(effects));
     }
     if let Some(effects) = state.project_files.observe(event) {
+        return Ok(Some(effects));
+    }
+    // Before discovery, which drops a permissions report it did not ask for.
+    if let Some(effects) = working_directory::observe(state, event) {
         return Ok(Some(effects));
     }
     if let Some(mut effects) = discovery::observe(state, event) {

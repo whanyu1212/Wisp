@@ -153,6 +153,20 @@ plain text. Very large sessions therefore require more startup time and memory.
 
 
 
+## Changing directory
+
+`/cd <path>` moves the session to another folder: an absolute path, `~`, or a path relative to the
+current folder. As you type the path, the composer lists matching folders from the local file
+system; `Tab` fills in the selected one, and `Enter` moves once the path names a folder. Hidden
+folders are listed only when the name you type starts with `.`. A folder outside the project
+enters the project that contains it, with that project's settings, skills, permission mode, and
+trust; an undecided project asks for trust at the next prompt. `/cd` is refused while a run or
+another operation is in progress; run it again once the session is idle.
+
+Each move draws a `── Working in <folder> ──` divider below the last reply; moves that end where
+they started draw none. Resuming the session draws it again from the session file and works from the
+folder it last moved to. The footer and side panel follow the new folder.
+
 ## Session branches
 
 The Rust TUI also exposes direct persisted-session workflows: `/name <display name>` and

@@ -1453,11 +1453,17 @@ fn turn_rail(
     if row.kind == TranscriptRowKind::RunSummary {
         return Some(("╰", palette.rail()));
     }
-    // The gap that ends a turn, after its summary or before the next prompt, is bare.
+    // A move's divider sits between turns, after the summary that ends one.
+    if row.kind == TranscriptRowKind::DirectoryChange {
+        return None;
+    }
+    // The gap that ends a turn, after its summary or a move, or before the next prompt,
+    // is bare.
     if matches!(
         row.kind,
         TranscriptRowKind::Spacer | TranscriptRowKind::Rule
     ) && (entry.run_summary().is_some()
+        || entry.moved_to().is_some()
         || state
             .transcript
             .entry_after(entry.id)

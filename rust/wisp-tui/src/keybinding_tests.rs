@@ -155,6 +155,30 @@ async fn composer_selection_bypasses_completion_and_rebound_newline_replaces_it(
 }
 
 #[tokio::test]
+async fn tab_descends_into_folders() {
+    let root = std::env::temp_dir().join(format!("wisp-cd-tab-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src/ui/widgets")).unwrap();
+    let mut ui = LiveUi::default();
+    ui.state.workspace_cwd = Some(root.to_str().unwrap().to_owned());
+    let (writer, _received) = mpsc::channel(8);
+    ui.editor.insert_paste("/cd s");
+    for expected in ["/cd src/", "/cd src/ui/", "/cd src/ui/widgets/"] {
+        // A choice fills in only once it has been drawn.
+        draw(&mut ui, 80, 24);
+        ui.handle_input(
+            Input::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            &writer,
+            MAX_APPLICATION_FRAME_BYTES,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ui.editor.text(), expected);
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
 async fn composer_undo_bypasses_and_restores_visible_completion() {
     let mut ui = LiveUi::default();
     let (writer, mut received) = mpsc::channel(8);

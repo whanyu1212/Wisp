@@ -105,6 +105,10 @@ class RpcMessageSnapshot(BaseModel):
     web_searches: tuple[WebSearchPerformed, ...] = ()
     # The totals of the run this message closed, on the last message a run persisted.
     run_completed: AgentCompleted | None = None
+    # The folder the session moved to after this message and before the next one: where
+    # the moves in between ended, unless that is where they started. The TUI shows it
+    # as a divider.
+    moved_to: Path | None = None
     tool_result: RpcMessageToolResultSnapshot | None = None
     skill_invocation: RpcSkillInvocationSnapshot | None = None
 

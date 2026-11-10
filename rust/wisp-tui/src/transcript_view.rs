@@ -69,6 +69,9 @@ pub enum RowPosition {
     /// The run's totals, closing the turn's rail. The turn's last entry owns it, after its
     /// body and before its `Spacer`.
     RunSummary,
+    /// The divider for a move to another folder after this entry, after its `RunSummary`
+    /// and before its `Spacer`.
+    DirectoryChange,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -147,6 +150,8 @@ pub enum TranscriptRowKind {
     Rule,
     /// The muted totals that end a finished turn's rail.
     RunSummary,
+    /// The muted divider naming the folder the session moved to.
+    DirectoryChange,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -327,7 +332,8 @@ fn default_row_tone(role: TranscriptRole, kind: TranscriptRowKind) -> Transcript
     match kind {
         TranscriptRowKind::Placeholder
         | TranscriptRowKind::Thought
-        | TranscriptRowKind::RunSummary => TranscriptRowTone::Muted,
+        | TranscriptRowKind::RunSummary
+        | TranscriptRowKind::DirectoryChange => TranscriptRowTone::Muted,
         TranscriptRowKind::CardGroup => TranscriptRowTone::Pending,
         TranscriptRowKind::Header if role == TranscriptRole::User => TranscriptRowTone::User,
         TranscriptRowKind::Header if role == TranscriptRole::Assistant => {
@@ -1123,6 +1129,25 @@ impl TranscriptRowCache {
                         entry.role,
                         TranscriptRowKind::RunSummary,
                         summary,
+                        entry.display_content().len(),
+                    ),
+                    next: after_run_summary(transcript, entry),
+                }
+            }
+            RowPosition::DirectoryChange => {
+                // The folder comes from the session file: keep terminal controls inert.
+                let folder = entry
+                    .moved_to()?
+                    .graphemes(true)
+                    .map(|grapheme| sanitize_grapheme(grapheme, 0))
+                    .collect::<String>();
+                let divider = self.clip_to_columns(&directory_divider(&folder), width);
+                ProjectedRow {
+                    row: TranscriptRow::plain(
+                        anchor,
+                        entry.role,
+                        TranscriptRowKind::DirectoryChange,
+                        divider,
                         entry.display_content().len(),
                     ),
                     next: spacer_after(transcript, entry),
@@ -2835,11 +2860,17 @@ impl TranscriptRowCache {
                 entry_id: entry.id,
                 position: RowPosition::Spacer,
             }),
-            RowPosition::Spacer if entry.run_summary().is_some() => Some(RowAnchor {
+            RowPosition::Spacer if entry.moved_to().is_some() => Some(RowAnchor {
                 entry_id: entry.id,
-                position: RowPosition::RunSummary,
+                position: RowPosition::DirectoryChange,
             }),
-            RowPosition::Spacer | RowPosition::RunSummary => {
+            RowPosition::Spacer | RowPosition::DirectoryChange if entry.run_summary().is_some() => {
+                Some(RowAnchor {
+                    entry_id: entry.id,
+                    position: RowPosition::RunSummary,
+                })
+            }
+            RowPosition::Spacer | RowPosition::RunSummary | RowPosition::DirectoryChange => {
                 if let Some(start) = collapsed_group_start(&self.fold, transcript, entry.id) {
                     Some(RowAnchor {
                         entry_id: start,
@@ -2852,13 +2883,20 @@ impl TranscriptRowCache {
         }
     }
 
-    /// An entry's final row: its run summary when it closes a turn, else its body's last row.
+    /// An entry's final row: the divider of a move after it, else its run summary when it
+    /// closes a turn, else its body's last row.
     fn end_anchor(
         &mut self,
         transcript: &Transcript,
         entry: &TranscriptEntry,
         width: usize,
     ) -> RowAnchor {
+        if entry.moved_to().is_some() {
+            return RowAnchor {
+                entry_id: entry.id,
+                position: RowPosition::DirectoryChange,
+            };
+        }
         if entry.run_summary().is_some() {
             return RowAnchor {
                 entry_id: entry.id,
@@ -2921,7 +2959,11 @@ impl TranscriptRowCache {
                 }
                 Some(offset) if offset == target => return Some(anchor),
                 Some(_) => return Some(anchor),
-                None if matches!(next.position, RowPosition::Spacer | RowPosition::RunSummary) => {
+                None if matches!(
+                    next.position,
+                    RowPosition::Spacer | RowPosition::RunSummary | RowPosition::DirectoryChange
+                ) =>
+                {
                     return Some(anchor);
                 }
                 None => return Some(previous),
@@ -2951,7 +2993,10 @@ impl TranscriptRowCache {
                 return Some(current);
             }
             if next.entry_id != entry.id
-                || matches!(next.position, RowPosition::Spacer | RowPosition::RunSummary)
+                || matches!(
+                    next.position,
+                    RowPosition::Spacer | RowPosition::RunSummary | RowPosition::DirectoryChange
+                )
             {
                 return Some(current);
             }
@@ -3062,7 +3107,12 @@ impl TranscriptRowCache {
                     return current;
                 };
                 if next.entry_id != entry.id
-                    || matches!(next.position, RowPosition::Spacer | RowPosition::RunSummary)
+                    || matches!(
+                        next.position,
+                        RowPosition::Spacer
+                            | RowPosition::RunSummary
+                            | RowPosition::DirectoryChange
+                    )
                 {
                     return current;
                 }
@@ -3156,6 +3206,7 @@ impl TranscriptRowCache {
                                 | RowPosition::UserLeadIn
                                 | RowPosition::UserLeadOut
                                 | RowPosition::RunSummary
+                                | RowPosition::DirectoryChange
                         )
                 })
         });
@@ -4609,19 +4660,25 @@ fn cached_row_valid(
     // ended the entry must still lead where the entry now ends.
     let ended_body = cached.next.is_none_or(|next| {
         next.entry_id == entry.id
-            && matches!(next.position, RowPosition::Spacer | RowPosition::RunSummary)
+            && matches!(
+                next.position,
+                RowPosition::Spacer | RowPosition::RunSummary | RowPosition::DirectoryChange
+            )
     });
     if ended_body
         && !matches!(
             cached.row.kind,
-            TranscriptRowKind::Spacer | TranscriptRowKind::Rule | TranscriptRowKind::RunSummary
+            TranscriptRowKind::Spacer
+                | TranscriptRowKind::Rule
+                | TranscriptRowKind::RunSummary
+                | TranscriptRowKind::DirectoryChange
         )
         && cached.next != separator_after(transcript, entry)
     {
         return false;
     }
     match cached.row.kind {
-        TranscriptRowKind::RunSummary => false,
+        TranscriptRowKind::RunSummary | TranscriptRowKind::DirectoryChange => false,
         TranscriptRowKind::Header if entry.role == TranscriptRole::Assistant => false,
         TranscriptRowKind::Header => {
             let expected = RowPosition::Content(0);
@@ -4790,6 +4847,13 @@ fn normalize_anchor(
                 None => cache.end_anchor(transcript, entry, width),
             })
         }
+        // A divider that is no longer shown resumes at the entry's own gap or final row.
+        RowPosition::DirectoryChange if entry.moved_to().is_none() => {
+            Some(match spacer_after(transcript, entry) {
+                Some(spacer) => spacer,
+                None => cache.end_anchor(transcript, entry, width),
+            })
+        }
         // A summary that is no longer shown resumes at the entry's own gap or last row.
         RowPosition::RunSummary if entry.run_summary().is_none() => {
             Some(match spacer_after(transcript, entry) {
@@ -4918,7 +4982,8 @@ fn row_position_offset(position: RowPosition) -> Option<usize> {
         | RowPosition::Spacer
         | RowPosition::UserLeadIn
         | RowPosition::UserLeadOut
-        | RowPosition::RunSummary => None,
+        | RowPosition::RunSummary
+        | RowPosition::DirectoryChange => None,
     }
 }
 
@@ -4990,7 +5055,7 @@ fn card_file_link(card: &crate::tool_cards::ToolCardSnapshot) -> Option<std::syn
 /// The gap row after `entry`'s last row: blank, or a thin rule between back-to-back collapsed
 /// cards.
 /// What follows an entry's body: the run summary when the entry ends its turn, then the
-/// gap before the next entry.
+/// divider of a move after it, then the gap before the next entry.
 fn separator_after(transcript: &Transcript, entry: &TranscriptEntry) -> Option<RowAnchor> {
     if entry.run_summary().is_some() {
         return Some(RowAnchor {
@@ -4998,7 +5063,32 @@ fn separator_after(transcript: &Transcript, entry: &TranscriptEntry) -> Option<R
             position: RowPosition::RunSummary,
         });
     }
+    after_run_summary(transcript, entry)
+}
+
+/// What follows an entry's run summary: the divider of a move after it, then the gap.
+fn after_run_summary(transcript: &Transcript, entry: &TranscriptEntry) -> Option<RowAnchor> {
+    if entry.moved_to().is_some() {
+        return Some(RowAnchor {
+            entry_id: entry.id,
+            position: RowPosition::DirectoryChange,
+        });
+    }
     spacer_after(transcript, entry)
+}
+
+/// The divider text for a move to `folder`, with the home folder shown as `~`.
+fn directory_divider(folder: &str) -> String {
+    let home = std::env::var("HOME").ok().filter(|home| !home.is_empty());
+    let shown = match home.as_deref() {
+        Some(home) if folder == home => "~".to_owned(),
+        Some(home) => match folder.strip_prefix(home) {
+            Some(rest) if rest.starts_with('/') => format!("~{rest}"),
+            _ => folder.to_owned(),
+        },
+        None => folder.to_owned(),
+    };
+    format!("── Working in {shown} ──")
 }
 
 /// The gap before the entry that follows, if any.
@@ -5470,6 +5560,73 @@ mod tests {
             cache.row_at(&transcript, before, 60).unwrap().next,
             Some(summary)
         );
+    }
+
+    #[test]
+    fn divider_follows_summary() {
+        let mut transcript = Transcript::default();
+        // A move before any reply has nothing to sit under.
+        assert!(!transcript.attach_directory_change(None, "/work/early".into()));
+        transcript.append_prompt("first".into());
+        assert!(!transcript.attach_directory_change(None, "/work/early".into()));
+        let reply = transcript.append_message_delta(1, "done");
+        transcript.complete_message(1, "done".into());
+        assert!(transcript.attach_run_summary(RunTotals::finished(4_000, 1)));
+        let mut cache = TranscriptRowCache::default();
+        let mut viewport = TranscriptViewport::default();
+        viewport.set_geometry(&transcript, &mut cache, 60, 20);
+        // Rows cached before the move still lead to its divider after.
+        viewport.visible_rows(&transcript, &mut cache);
+        assert!(transcript.attach_directory_change(None, "/work/old".into()));
+        assert!(transcript.attach_directory_change(None, "/work/app\u{1b}[2J".into()));
+        viewport.reduce(TranscriptViewAction::OutputChanged, &transcript, &mut cache);
+        let rows = viewport.visible_rows(&transcript, &mut cache);
+        let [.., summary, divider] = rows.as_slice() else {
+            panic!("expected a summary and a divider: {rows:#?}");
+        };
+        assert_eq!(summary.kind, TranscriptRowKind::RunSummary);
+        assert_eq!(divider.kind, TranscriptRowKind::DirectoryChange);
+        // The latest move replaces an earlier one, and its controls stay inert.
+        assert!(divider.plain_text().starts_with("── Working in /work/app"));
+        assert!(!divider.plain_text().contains('\u{1b}'));
+
+        transcript.append_prompt("second".into());
+        viewport.reduce(TranscriptViewAction::OutputChanged, &transcript, &mut cache);
+        let at = |position| RowAnchor {
+            entry_id: reply,
+            position,
+        };
+        // Walking back from the gap passes the divider, then the summary.
+        assert_eq!(
+            cache.previous_anchor(&transcript, at(RowPosition::Spacer), 60),
+            Some(at(RowPosition::DirectoryChange))
+        );
+        assert_eq!(
+            cache.previous_anchor(&transcript, at(RowPosition::DirectoryChange), 60),
+            Some(at(RowPosition::RunSummary))
+        );
+        assert_eq!(
+            cache
+                .row_at(&transcript, at(RowPosition::RunSummary), 60)
+                .unwrap()
+                .next,
+            Some(at(RowPosition::DirectoryChange))
+        );
+    }
+
+    #[test]
+    fn round_trip_shows_no_divider() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("first".into());
+        transcript.complete_message(1, "done".into());
+        let moved = |transcript: &Transcript| transcript.entries()[1].moved_to().map(str::to_owned);
+        // A failed move into another project saves the move and then the move back.
+        assert!(transcript.attach_directory_change(Some("/a".into()), "/b".into()));
+        assert!(transcript.attach_directory_change(Some("/b".into()), "/a".into()));
+        assert_eq!(moved(&transcript), None);
+        assert!(transcript.attach_directory_change(Some("/a".into()), "/b".into()));
+        assert!(transcript.attach_directory_change(Some("/b".into()), "/c".into()));
+        assert_eq!(moved(&transcript).as_deref(), Some("/c"));
     }
 
     #[test]

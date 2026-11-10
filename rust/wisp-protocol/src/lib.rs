@@ -1146,6 +1146,17 @@ pub mod commands {
             }))
         }
 
+        /// Move the session's working directory to `path`, entering its project if it
+        /// lies outside the current one. The backend resolves `path` against the
+        /// current folder and expands `~`.
+        pub fn change_directory(id: &str, path: &str) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({
+                "type": "change_directory",
+                "id": id,
+                "path": path,
+            }))
+        }
+
         /// Clone the selected session's active path and select the clone.
         pub fn clone_session(id: &str) -> Result<Self, super::ProtocolDecodeError> {
             deserialize(serde_json::json!({"type": "clone_session", "id": id}))
