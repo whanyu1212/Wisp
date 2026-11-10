@@ -1,6 +1,8 @@
-//! Presentation-only palettes, generated from the existing Python theme catalog.
+//! Presentation-only palettes, loaded from `theme_catalog.json`.
 
+use crate::color_depth::ColorDepth;
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::Line;
 use serde::{Deserialize, Deserializer};
 use std::sync::OnceLock;
 
@@ -38,6 +40,9 @@ pub(crate) struct Palette {
     pub surface: Color,
     #[serde(deserialize_with = "color")]
     pub panel: Color,
+    /// The band under a selected row, one tier past `panel`.
+    #[serde(deserialize_with = "color")]
+    pub selected: Color,
     #[serde(deserialize_with = "color")]
     pub muted: Color,
     #[serde(deserialize_with = "color")]
@@ -52,6 +57,8 @@ pub(crate) struct Palette {
     monochrome: bool,
     #[serde(skip)]
     terminal_background: bool,
+    #[serde(skip)]
+    depth: ColorDepth,
 }
 
 impl Palette {
@@ -59,8 +66,50 @@ impl Palette {
         self.monochrome
     }
 
+    /// This palette for a terminal of `depth`. At 256 colours, background tiers and diff
+    /// bands that would show as one colour are moved apart (see
+    /// [`ColorDepth::separate_tiers`]); at 16 colours, where every dark tier shows as
+    /// black, selections reverse instead of drawing a band.
+    pub fn for_depth(mut self, depth: ColorDepth) -> Self {
+        self.depth = depth;
+        let [
+            background,
+            surface,
+            panel,
+            selected,
+            addition_background,
+            deletion_background,
+        ] = depth.separate_tiers([
+            self.background,
+            self.surface,
+            self.panel,
+            self.selected,
+            self.addition_background,
+            self.deletion_background,
+        ]);
+        self.background = background;
+        self.surface = surface;
+        self.panel = panel;
+        self.selected = selected;
+        self.addition_background = addition_background;
+        self.deletion_background = deletion_background;
+        self
+    }
+
+    /// Whether a row band can show: not in monochrome, on the terminal's own
+    /// background, or at 16 colours.
+    pub fn shows_bands(self) -> bool {
+        !(self.monochrome || self.terminal_background || self.depth == ColorDepth::Ansi16)
+    }
+
+    /// The user's prompt: a band on the panel tier, or bold text where a theme draws on
+    /// the terminal's own background.
     pub fn user_text(self) -> Style {
-        self.base().bg(self.panel)
+        if self.terminal_background {
+            self.base().add_modifier(Modifier::BOLD)
+        } else {
+            self.base().bg(self.panel)
+        }
     }
 
     pub fn speaker_label(self) -> Style {
@@ -326,7 +375,55 @@ impl Palette {
         Style::default().fg(self.muted)
     }
 
+    /// A selected picker or list row: bold text on the selected band, or where a band
+    /// cannot show, reversed foreground text, so the row reverses as one bar rather than a
+    /// block per span colour.
     pub fn selection(self) -> Style {
+        let style = Style::default()
+            .fg(self.foreground)
+            .add_modifier(Modifier::BOLD);
+        if self.shows_bands() {
+            style.bg(self.selected)
+        } else {
+            style.add_modifier(Modifier::REVERSED)
+        }
+    }
+
+    /// `style` on a selected row's band. Text keeps its own colour where that reads at
+    /// 4.5:1 on the band and otherwise moves toward the foreground until it does. Where a
+    /// band cannot show, the row reverses as one bar in the foreground colour, rather than
+    /// each coloured span turning into a block of its own.
+    pub fn selected_row(self, style: Style) -> Style {
+        if !self.shows_bands() {
+            return style.fg(self.foreground).add_modifier(Modifier::REVERSED);
+        }
+        let style = style.bg(self.selected);
+        match style.fg {
+            Some(color) => style.fg(self.readable_on(color, self.selected)),
+            None => style,
+        }
+    }
+
+    /// A picker or panel row drawn as selected: [`Palette::selection`] across the line,
+    /// with each span's own colour kept as [`Palette::selected_row`] keeps it.
+    pub fn selected_line(self, mut line: Line<'static>) -> Line<'static> {
+        for span in &mut line.spans {
+            span.style = self.selected_row(span.style);
+        }
+        line.patch_style(self.selection())
+    }
+
+    /// `color`, or the nearest blend toward the foreground that reads at 4.5:1 on `fill`.
+    fn readable_on(self, color: Color, fill: Color) -> Color {
+        (0..=20)
+            .map(|step| mix(self.foreground, color, f64::from(step) / 20.0))
+            .find(|text| contrast_ratio(*text, fill) >= 4.5)
+            .unwrap_or(self.foreground)
+    }
+
+    /// Selected text in the composer, in the primary colour so it stands out from the
+    /// composer's own surface.
+    pub fn text_selection(self) -> Style {
         if self.monochrome {
             Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD)
         } else {
@@ -360,6 +457,7 @@ impl Palette {
             error: gray(self.error),
             surface: gray(self.surface),
             panel: gray(self.panel),
+            selected: gray(self.selected),
             muted: gray(self.muted),
             addition: gray(self.addition),
             addition_background: gray(self.addition_background),
@@ -367,6 +465,7 @@ impl Palette {
             deletion_background: gray(self.deletion_background),
             monochrome: true,
             terminal_background: self.terminal_background,
+            depth: self.depth,
         };
         let backgrounds = [palette.background, palette.surface];
         for foreground in [

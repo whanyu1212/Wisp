@@ -2260,21 +2260,31 @@ impl TranscriptRowCache {
         let indent = if width > indent + 4 { indent } else { 0 };
         let mut column = indent;
         if indent > 0 {
-            let prefix = format!("{}↳ ", " ".repeat(indent.saturating_sub(2)));
-            text.push_str(&prefix);
-            action_spans.push(TranscriptSpan {
-                link: None,
-                text: prefix,
-                style: TranscriptSpanStyle {
-                    inline: crate::markdown::InlineStyle::DiffGutter,
-                    ..TranscriptSpanStyle::default()
-                },
-                affinity: SourceAffinity {
-                    source_offset: relative_start,
-                    source_end: relative_start,
-                    output_offset: 0,
-                },
-            });
+            // The arrow takes the sign's columns, and its style, so a changed line's band
+            // starts at the same column on every row it wraps to.
+            let blank = " ".repeat(indent.saturating_sub(2));
+            for (prefix, inline) in [
+                (blank, crate::markdown::InlineStyle::DiffGutter),
+                ("↳ ".to_owned(), crate::markdown::InlineStyle::DiffSign),
+            ] {
+                if prefix.is_empty() {
+                    continue;
+                }
+                text.push_str(&prefix);
+                action_spans.push(TranscriptSpan {
+                    link: None,
+                    text: prefix,
+                    style: TranscriptSpanStyle {
+                        inline,
+                        ..TranscriptSpanStyle::default()
+                    },
+                    affinity: SourceAffinity {
+                        source_offset: relative_start,
+                        source_end: relative_start,
+                        output_offset: 0,
+                    },
+                });
+            }
         }
         let mut next_offset = None;
         let mut preserve_terminal_break = false;

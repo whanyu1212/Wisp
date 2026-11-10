@@ -136,6 +136,56 @@ impl ColorDepth {
         (repaired, shown_background)
     }
 
+    /// Keeps background tiers apart after downconversion.
+    ///
+    /// Tiers a few levels apart in RGB, such as a background and the surface on it, can
+    /// land on one 256-colour gray. At 256 colours, a tier that would show as the same
+    /// colour as an earlier, different tier moves to the nearest free step of the gray
+    /// ramp on the side it sits on in RGB, or on the other side when that side is full,
+    /// so it stays visible after the frame is downconverted. Tiers equal in RGB stay
+    /// equal. Other depths return the tiers unchanged: truecolor needs no help, and 16
+    /// colours have no steps to spare.
+    pub(crate) fn separate_tiers<const N: usize>(self, tiers: [Color; N]) -> [Color; N] {
+        if self != Self::Ansi256 {
+            return tiers;
+        }
+        let shown = |color: Color| shown_rgb(self.downconvert(color));
+        let mut separated = tiers;
+        for index in 1..N {
+            if let Some(twin) = tiers[..index].iter().position(|tier| *tier == tiers[index]) {
+                separated[index] = separated[twin];
+                continue;
+            }
+            let taken = |color: Color| {
+                separated[..index]
+                    .iter()
+                    .any(|earlier| shown(*earlier) == shown(color))
+            };
+            let Some(earlier) =
+                (0..index).find(|earlier| shown(separated[*earlier]) == shown(tiers[index]))
+            else {
+                continue;
+            };
+            let (Some(level), Some(from), Some(other)) = (
+                shown(separated[earlier]).map(gray_level),
+                rgb(tiers[index]).map(gray_level),
+                rgb(tiers[earlier]).map(gray_level),
+            ) else {
+                continue;
+            };
+            let lighter = from >= other;
+            let free = gray_ramp(level, lighter)
+                .into_iter()
+                .chain(gray_ramp(level, !lighter))
+                .map(|step| Color::Rgb(step, step, step))
+                .find(|candidate| !taken(*candidate));
+            if let Some(free) = free {
+                separated[index] = free;
+            }
+        }
+        separated
+    }
+
     /// Returns the nearest colour this depth can show. Named colours and `Reset` pass through.
     pub(crate) fn downconvert(self, color: Color) -> Color {
         match (self, color) {
@@ -179,6 +229,22 @@ fn nearest_256(r: u8, g: u8, b: u8) -> u8 {
         232 + gray_step
     } else {
         16 + 36 * cr + 6 * cg + cb
+    }
+}
+
+/// The mean of a colour's channels, the level its gray would sit at.
+fn gray_level((r, g, b): (u8, u8, u8)) -> u8 {
+    ((u16::from(r) + u16::from(g) + u16::from(b)) / 3) as u8
+}
+
+/// The steps of the 256-colour gray ramp (8, 18, …, 238) beyond `level`, nearest first:
+/// those above it when `lighter`, otherwise those below it.
+fn gray_ramp(level: u8, lighter: bool) -> Vec<u8> {
+    let steps = (8..=238_u8).step_by(10);
+    if lighter {
+        steps.filter(|step| *step > level).collect()
+    } else {
+        steps.rev().filter(|step| *step < level).collect()
     }
 }
 
@@ -624,6 +690,89 @@ mod tests {
             }
         }
         assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[test]
+    fn tiers_stay_apart() {
+        for theme in crate::theme::themes() {
+            for no_color in [false, true] {
+                let palette = theme.palette(no_color);
+                let fills = |palette: crate::theme::Palette| {
+                    [
+                        palette.background,
+                        palette.surface,
+                        palette.panel,
+                        palette.selected,
+                        palette.addition_background,
+                        palette.deletion_background,
+                    ]
+                };
+                let rgb = fills(palette);
+                let shown = fills(palette.for_depth(ColorDepth::Ansi256))
+                    .map(|fill| ColorDepth::Ansi256.downconvert(fill));
+                for later in 1..rgb.len() {
+                    for earlier in 0..later {
+                        // Tiers equal in RGB, such as Grove's surface and panel, stay equal.
+                        assert_eq!(
+                            shown[later] == shown[earlier],
+                            rgb[later] == rgb[earlier],
+                            "{} no_color={no_color} tiers {earlier} and {later}: {shown:?}",
+                            theme.name
+                        );
+                    }
+                }
+                let truecolor = palette.for_depth(ColorDepth::TrueColor);
+                assert_eq!(truecolor.surface, palette.surface);
+                assert_eq!(truecolor.selected, palette.selected);
+            }
+        }
+    }
+
+    #[test]
+    fn tier_moves_past_collision() {
+        let (background, surface) = (Color::Rgb(24, 24, 30), Color::Rgb(30, 30, 36));
+        assert_eq!(
+            ColorDepth::Ansi256.separate_tiers([background, surface]),
+            [background, Color::Rgb(38, 38, 38)]
+        );
+        // A light theme's darker tier steps down the ramp.
+        let (paper, darker) = (Color::Rgb(242, 240, 229), Color::Rgb(240, 238, 226));
+        assert_eq!(
+            ColorDepth::Ansi256.separate_tiers([paper, darker]),
+            [paper, Color::Rgb(228, 228, 228)]
+        );
+        // A tier between two taken steps goes to the nearest free one instead of
+        // bouncing between them.
+        let gray = |level| Color::Rgb(level, level, level);
+        assert_eq!(
+            ColorDepth::Ansi256.separate_tiers([gray(24), gray(40), gray(30)]),
+            [gray(24), gray(40), gray(48)]
+        );
+        for depth in [ColorDepth::TrueColor, ColorDepth::Ansi16] {
+            assert_eq!(
+                depth.separate_tiers([background, surface]),
+                [background, surface]
+            );
+        }
+    }
+
+    #[test]
+    fn diff_bands_keep_hue() {
+        for theme in crate::theme::themes() {
+            let palette = theme.palette(false);
+            for (band, red) in [
+                (palette.addition_background, false),
+                (palette.deletion_background, true),
+            ] {
+                let (r, g, b) = shown_rgb(ColorDepth::Ansi256.downconvert(band)).unwrap();
+                let (lead, other) = if red { (r, g) } else { (g, r) };
+                assert!(
+                    lead > other && lead > b,
+                    "{} {band:?} shows as ({r}, {g}, {b})",
+                    theme.name
+                );
+            }
+        }
     }
 
     #[test]

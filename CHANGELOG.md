@@ -79,6 +79,24 @@ this policy.
   project is trusted. A refused path now reads `Path is outside the workspace`, and its hint names
   the boundary. `ToolContext` gains `workspace_root` and `boundary()`. (HY-475)
 
+### TUI
+
+- A selected row is drawn as a full-width band in a new `selected` theme tier, one step past the
+  prompt's band, with bold text in pickers and lists. It replaces the primary-colour fill, and the
+  row picked in browse mode now shows the band too. Text on the band keeps its colour where it
+  reads at 4.5:1 and moves toward the foreground where it would not. Monochrome, the Glass theme,
+  and 16-colour terminals reverse the row as one bar instead. Selected text in the composer keeps
+  the primary colour.
+- Changed lines in edit and write diffs are dark green and red bands in the dark themes and pastel
+  ones in the light themes, from the sign to the right edge, on wrapped rows too; the line numbers
+  stay on the plain background. In monochrome both bands stay at least ten gray levels from the
+  background.
+- At 256 colours, background tiers and diff bands that would land on the same gray, such as
+  Vapor's background and composer, move to the nearest free gray step, and the diff bands show as
+  green and red rather than gray.
+- Glass, which draws on the terminal's own background, shows your prompt in bold instead of on a
+  band. (HY-483)
+
 <!-- Keeps links to the pre-release "0.7.0 — Unreleased" heading working. -->
 <a id="070--unreleased"></a>
 
