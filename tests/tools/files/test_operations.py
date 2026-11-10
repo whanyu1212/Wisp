@@ -562,8 +562,10 @@ def _edit(tmp_path: Path, content: bytes, *edits: tuple[str, str]) -> bytes:
         (b"one two\nthree\n", [("two\nthree", "2\n3")], [(1, 1)]),
         # Matched only when trailing whitespace is ignored.
         (b"first\nx  \ny\n", [("x\ny", "X\nY")], [(2, 2)]),
+        # Keeping a byte-order mark adds no line.
+        ("﻿a\nb\n".encode(), [("﻿a", "A"), ("b", "B")], [(1, 1), (2, 2)]),
     ],
-    ids=["call-order", "lines-removed", "crlf", "mid-line", "trailing-whitespace"],
+    ids=["call-order", "lines-removed", "crlf", "mid-line", "trailing-whitespace", "bom"],
 )
 def test_edit_reports_locations(
     tmp_path: Path,
@@ -602,10 +604,29 @@ def test_edit_mixed_endings_untouched(tmp_path: Path) -> None:
     assert edited == b"A\nA2\nB\r\nC\n"
 
 
-def test_edit_keeps_bom(tmp_path: Path) -> None:
-    edited = _edit(tmp_path, "\ufeffhello\n".encode(), ("hello", "hi"))
+@pytest.mark.parametrize(
+    ("content", "edit", "expected"),
+    [
+        ("\ufeffhello\n", ("hello", "hi"), "\ufeffhi\n"),
+        # `read` shows the mark, so a first line copied from it carries one.
+        ("\ufeffhello\n", ("\ufeffhello", "hi"), "\ufeffhi\n"),
+        ("\ufeffhello\n", ("\ufeffhello", "\ufeffhi"), "\ufeffhi\n"),
+        ("\ufeffhello  \nx\n", ("\ufeffhello\nx", "hi\nx"), "\ufeffhi\nx\n"),
+        ("\ufeffa\r\nb\r\n", ("\ufeffa\nb", "A\nB"), "\ufeffA\r\nB\r\n"),
+        # Only a mark at the start of the file is kept; elsewhere it is text.
+        ("x\ufeffy\n", ("\ufeffy", "z"), "xz\n"),
+    ],
+    ids=["mark-omitted", "mark-copied", "mark-repeated", "whitespace-match", "crlf", "mid-file"],
+)
+def test_edit_keeps_bom(tmp_path: Path, content: str, edit: tuple[str, str], expected: str) -> None:
+    assert _edit(tmp_path, content.encode(), edit) == expected.encode()
 
-    assert edited == "\ufeffhi\n".encode()
+
+def test_bom_text_needs_bom_file(tmp_path: Path) -> None:
+    """An oldText starting with a mark the file lacks does not match its first line."""
+
+    with pytest.raises(ToolError, match=r"edits\[0\].oldText was not found"):
+        _edit(tmp_path, b"hello\n", ("\ufeffhello", "hi"))
 
 
 def test_edit_missing_names_index(tmp_path: Path) -> None:
