@@ -47,6 +47,10 @@ BASELINE_FIELDS = (
     "proxied_calls",
     "proxied_errors",
     "proxied_argument_errors",
+    "codemode",
+    "scripts",
+    "failed_scripts",
+    "nested_calls",
 )
 SUITE_FIELDS = (
     "models",
@@ -58,6 +62,7 @@ SUITE_FIELDS = (
     "skipped_runs",
     "finished_at",
     "mcp_tool_exposure",
+    "codemode",
 )
 
 # Two-sided 95% critical values of Student's t for 1 to 30 degrees of freedom.

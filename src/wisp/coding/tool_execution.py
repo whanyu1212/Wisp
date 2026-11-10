@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import cast
 
+import anyio
 from pydantic import ValidationError
 
 from wisp.agent.tool_contracts import (
@@ -34,6 +35,7 @@ from wisp.sessions.errors import SessionError
 from wisp.tool_types import ToolFailureCode
 from wisp.tools.approval import ToolApprovalPolicy, confirms_every_call
 from wisp.tools.base import ArgumentCheckedTool, Tool
+from wisp.tools.codemode.calls import CODEMODE, NestedCallResult
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
 from wisp.tools.progress import ToolProgress
@@ -59,6 +61,8 @@ _EXIT_CODE_TOOLS = frozenset({"bash"})
 _BEFORE_TEXT_TOOLS = frozenset({"write"})
 
 _MODEL_VISIBLE_TOOL_ERROR_MAX_CHARS = 2_000
+# The batch limit, `_MAX_PARALLEL_TOOL_EXECUTIONS` in the loop, for a script's calls.
+_MAX_PARALLEL_NESTED_CALLS = 8
 _MAX_RESULT_COUNT = (1 << 63) - 1
 _MIN_EXIT_CODE = -(1 << 31)
 _MAX_EXIT_CODE = (1 << 31) - 1
@@ -105,6 +109,7 @@ _RESULT_DATA_KEYS = {
     "grep": ("count",),
     "find": ("count",),
     "ls": ("entries", "entry_count", "path"),
+    CODEMODE: ("calls", "failed_calls"),
 }
 
 
@@ -202,6 +207,10 @@ class ConfiguredToolExecutor:
         # Stores a tool's images before its result references them; without one a
         # result's images are dropped and the model is told so.
         self._image_store = image_store
+        # Nested calls a script makes concurrently take turns through this, unless
+        # their tool is parallel-safe; those run at most as many at once as in a batch.
+        self._nested_serial_lock = anyio.Lock()
+        self._nested_parallel_limit = anyio.CapacityLimiter(_MAX_PARALLEL_NESTED_CALLS)
 
     @property
     def mcp_catalog(self) -> McpCatalog | None:
@@ -235,88 +244,139 @@ class ConfiguredToolExecutor:
         """Resolve policy and approval while deferring all tool side effects."""
 
         outcome: _ToolRunOutcome
-        resolved = self._resolve_call(tool_call)
-        if isinstance(resolved, _ToolRunOutcome):
-            outcome = resolved
+        checked = self._check_call(tool_call)
+        if isinstance(checked, _ToolRunOutcome):
+            outcome = checked
         else:
-            # A proxied `mcp_call` continues as the MCP tool it names: from here on
-            # every check, the approval, and the run see that tool, not the proxy.
-            target, arguments = resolved.target, resolved.arguments
-            try:
-                tool = resolved.registry.get(target or tool_call.name)
-            except UnknownToolError as exc:
-                outcome = _failure_outcome(str(exc), failure_code="unknown_tool")
-            else:
-                problem = (
-                    tool.check_arguments(arguments)
-                    if isinstance(tool, ArgumentCheckedTool)
-                    else None
+            tool, arguments, target = checked.tool, checked.arguments, checked.target
+            if self._approval_policy.requires_approval(tool) and not self._approval_policy.approves(
+                tool
+            ):
+                # The approval shows the call exactly as the model made it; for a
+                # proxied call that names the target, so the user sees what runs.
+                approval_arguments = dict(tool_call.arguments)
+                self._approval_policy.prepare_approval(
+                    tool,
+                    call_id=tool_call.call_id,
+                    arguments=approval_arguments,
                 )
-                if not self._policy.allows(tool):
-                    outcome = _failure_outcome(
-                        self._policy.block_reason(tool), failure_code="policy_denied"
+                approval_resolved = False
+                try:
+                    yield ToolApprovalRequested(
+                        call_id=tool_call.call_id,
+                        name=tool_call.name,
+                        target=target,
+                        arguments=approval_arguments,
+                        safety=tool.safety,
+                        grants_allowed=not confirms_every_call(tool),
+                        session_only_yolo=self._approval_policy.session_only_yolo,
                     )
-                elif problem is not None:
-                    # Rejected before the user is asked, so a bad proposal never
-                    # reaches an approval panel.
-                    outcome = _failure_outcome(
-                        problem,
-                        failure_code="invalid_arguments",
-                        retryable=True,
-                    )
-                elif self._approval_policy.requires_approval(
-                    tool
-                ) and not self._approval_policy.approves(tool):
-                    # The approval shows the call exactly as the model made it; for a
-                    # proxied call that names the target, so the user sees what runs.
-                    approval_arguments = dict(tool_call.arguments)
-                    self._approval_policy.prepare_approval(
+                    decision = await self._approval_policy.await_approval(
                         tool,
                         call_id=tool_call.call_id,
                         arguments=approval_arguments,
                     )
-                    approval_resolved = False
-                    try:
-                        yield ToolApprovalRequested(
-                            call_id=tool_call.call_id,
-                            name=tool_call.name,
-                            target=target,
-                            arguments=approval_arguments,
-                            safety=tool.safety,
-                            grants_allowed=not confirms_every_call(tool),
-                            session_only_yolo=self._approval_policy.session_only_yolo,
-                        )
-                        decision = await self._approval_policy.await_approval(
-                            tool,
-                            call_id=tool_call.call_id,
-                            arguments=approval_arguments,
-                        )
-                        approval_resolved = True
-                        yield ToolApprovalResolved(
-                            call_id=tool_call.call_id,
-                            name=tool_call.name,
-                            target=target,
-                            approved=decision.approved,
-                            reason=decision.reason,
-                        )
-                    finally:
-                        if not approval_resolved:
-                            self._approval_policy.cancel_approval(
-                                call_id=tool_call.call_id,
-                                reason="Agent run cancelled",
-                            )
-                    if decision.approved:
-                        yield self._prepare_tool(tool_call, tool, arguments, target=target)
-                        return
-                    outcome = _failure_outcome(
-                        decision.reason or "Tool execution was not approved",
-                        failure_code="approval_denied",
+                    approval_resolved = True
+                    yield ToolApprovalResolved(
+                        call_id=tool_call.call_id,
+                        name=tool_call.name,
+                        target=target,
+                        approved=decision.approved,
+                        reason=decision.reason,
                     )
-                else:
+                finally:
+                    if not approval_resolved:
+                        self._approval_policy.cancel_approval(
+                            call_id=tool_call.call_id,
+                            reason="Agent run cancelled",
+                        )
+                if decision.approved:
                     yield self._prepare_tool(tool_call, tool, arguments, target=target)
                     return
+                outcome = _failure_outcome(
+                    decision.reason or "Tool execution was not approved",
+                    failure_code="approval_denied",
+                )
+            else:
+                yield self._prepare_tool(tool_call, tool, arguments, target=target)
+                return
 
         yield self._prepare_outcome(tool_call, outcome, target=self.resolve_target(tool_call))
+
+    def _check_call(self, tool_call: ToolCall) -> _CheckedCall | _ToolRunOutcome:
+        """Find the tool a call runs and run every check that comes before approval.
+
+        A proxied `mcp_call` continues as the MCP tool it names: from here on every
+        check, the approval and the run see that tool, not the proxy. A rejected
+        call fails before the user is asked, so a bad proposal never reaches an
+        approval panel.
+        """
+
+        resolved = self._resolve_call(tool_call)
+        if isinstance(resolved, _ToolRunOutcome):
+            return resolved
+        target, arguments = resolved.target, resolved.arguments
+        try:
+            tool = resolved.registry.get(target or tool_call.name)
+        except UnknownToolError as exc:
+            return _failure_outcome(str(exc), failure_code="unknown_tool")
+        problem = tool.check_arguments(arguments) if isinstance(tool, ArgumentCheckedTool) else None
+        if not self._policy.allows(tool):
+            return _failure_outcome(self._policy.block_reason(tool), failure_code="policy_denied")
+        if problem is not None:
+            return _failure_outcome(problem, failure_code="invalid_arguments", retryable=True)
+        return _CheckedCall(tool, arguments, target)
+
+    async def run_nested(self, tool_call: ToolCall) -> NestedCallResult:
+        """Run a call a codemode script made, under the same policy as a direct call.
+
+        The call passes every check a direct call does, and the tool that runs must
+        be read-only. It never asks the user: a call that would need approval fails
+        unless the approval policy already grants it, so approving the script grants
+        nothing it calls. A tool that is
+        not parallel-safe waits for the other such nested calls, as it would in a
+        batch. Nested calls report no progress or events of their own; the script's
+        result describes them.
+
+        Args:
+            tool_call (ToolCall): The call, with an id unique within the script.
+
+        Returns:
+            NestedCallResult: The tool's text, and whether it failed.
+        """
+
+        if tool_call.name == CODEMODE:
+            return NestedCallResult(text="A script cannot run another script.", is_error=True)
+        checked = self._check_call(tool_call)
+        if isinstance(checked, _ToolRunOutcome):
+            return NestedCallResult(text=checked.output, is_error=True)
+        tool, arguments, target = checked.tool, checked.arguments, checked.target
+        if tool.safety != "read":
+            # Checked on the tool that runs, so no route, such as `mcp_call` naming a
+            # command tool, reaches more than a read-only tool even under `--yes`.
+            return NestedCallResult(
+                text=f"{tool.name} is not read-only; a script can call only read-only tools.",
+                is_error=True,
+            )
+        if self._approval_policy.requires_approval(tool) and not self._approval_policy.approves(
+            tool
+        ):
+            return NestedCallResult(
+                text=f"{tool.name} needs approval, which a script cannot ask for. "
+                "Call it directly instead.",
+                is_error=True,
+            )
+        name = target or tool_call.name
+        parallel_safe = (
+            self._registry.execution_metadata_for(name).parallel_safe
+            if self._registry is not None
+            else False
+        )
+        async with self._nested_parallel_limit if parallel_safe else self._nested_serial_lock:
+            outcome = await self._run_tool(
+                tool, arguments, call_id=tool_call.call_id, tool_name=name, nested=True
+            )
+        return NestedCallResult(text=outcome.output, is_error=outcome.is_error)
 
     def _resolve_call(self, tool_call: ToolCall) -> _ResolvedCall | _ToolRunOutcome:
         """Find what a call will run, or the failure decided before any check.
@@ -424,11 +484,21 @@ class ConfiguredToolExecutor:
         *,
         call_id: str,
         tool_name: str,
+        nested: bool = False,
     ) -> _ToolRunOutcome:
+        """Run ``tool`` and normalize its result.
+
+        A ``nested`` call, one a codemode script made, reports no progress of its own
+        and stores no images, since only its text reaches the script.
+        """
+
         try:
-            result = await self._run_reporting_progress(
-                tool, arguments, call_id=call_id, tool_name=tool_name
-            )
+            if not nested:
+                result = await self._run_reporting_progress(
+                    tool, arguments, call_id=call_id, tool_name=tool_name
+                )
+            else:
+                result = await tool.run(arguments, self._context)
         except Exception as exc:  # noqa: BLE001 - tool failures are recoverable results
             return _tool_exception_outcome(exc)
 
@@ -503,6 +573,8 @@ class ConfiguredToolExecutor:
             )
         except Exception as exc:
             raise ToolResultProcessingError(call_id=call_id, tool_name=tool_name) from exc
+        if nested:
+            return outcome
         return await self._with_stored_images(outcome, snapshot.images)
 
     async def _with_stored_images(
@@ -560,6 +632,15 @@ class ConfiguredToolExecutor:
             return await tool.run(arguments, replace(self._context, progress=progress))
 
         return await run_with_progress(sink, call_id=call_id, name=tool_name, run=run)
+
+
+@dataclass(frozen=True, slots=True)
+class _CheckedCall:
+    """A call that passed every check before approval: its tool and what it runs as."""
+
+    tool: Tool
+    arguments: dict[str, object]
+    target: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -720,6 +801,9 @@ def _snapshot_result_data(
                 if entry_count <= _MAX_RESULT_COUNT:
                     snapshot["entry_count"] = entry_count
         _copy_exact(data, snapshot, "path", str)
+    elif tool_name == CODEMODE:
+        _copy_result_count(data, snapshot, "calls")
+        _copy_result_count(data, snapshot, "failed_calls")
     return snapshot
 
 

@@ -17,6 +17,7 @@ from wisp.events import (
     ProviderRetrying,
     RunSetup,
     TokenUsage,
+    ToolExecutionEnded,
     ToolExecutionStarted,
     ToolResultReady,
     UsageCost,
@@ -148,3 +149,34 @@ def test_counts_proxied_calls_by_target() -> None:
         1,
         1,
     )
+
+
+def test_codemode_counts_scripts() -> None:
+    def script(call_id: str) -> ToolExecutionStarted:
+        return ToolExecutionStarted(call_id=call_id, name="codemode", arguments={"code": "1"})
+
+    events: list[WispEvent] = [
+        script("s1"),
+        ToolExecutionEnded(
+            call_id="s1",
+            name="codemode",
+            output="ok",
+            is_error=False,
+            summary="codemode: 12 tool calls",
+        ),
+        script("s2"),
+        ToolResultReady(call_id="s2", name="codemode", output="Script failed", is_error=True),
+        script("s3"),
+        ToolExecutionEnded(
+            call_id="s3",
+            name="codemode",
+            output="ok",
+            is_error=False,
+            summary="codemode: 1 tool call",
+        ),
+    ]
+
+    metrics = measure(events)
+
+    assert (metrics.scripts, metrics.failed_scripts, metrics.nested_calls) == (3, 1, 13)
+    assert metrics.tool_calls["codemode"] == 3

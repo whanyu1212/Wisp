@@ -34,6 +34,9 @@ from wisp.mcp.config import McpToolExposure
 from wisp.mcp.discovery import DISCOVERY_TOOL_NAMES
 from wisp.mcp.tool import mcp_tool_name
 
+# Whether runs offer the experimental codemode tool, and in which language.
+type Codemode = Literal["off", "python"]
+CODEMODES: tuple[Codemode, ...] = ("off", "python")
 type RunStatus = Literal["passed", "failed", "errored"]
 
 DEADLINE_EXIT_CODE = 124
@@ -146,6 +149,8 @@ class RunContext:
         mcp_tool_exposure (McpToolExposure): How MCP tasks' tools reach the
             model: every definition (`direct`), found on demand (`on_demand`), or
             either by catalog size (`auto`, Wisp's default).
+        codemode (Codemode): Whether runs offer the codemode tool (`python`) or
+            not (`off`).
     """
 
     build: Build
@@ -153,6 +158,7 @@ class RunContext:
     results_dir: Path
     python: str = sys.executable
     mcp_tool_exposure: McpToolExposure = "direct"
+    codemode: Codemode = "off"
 
 
 @dataclass(slots=True)
@@ -197,6 +203,10 @@ class RunRow:
     proxied_calls: int = 0
     proxied_errors: int = 0
     proxied_argument_errors: int = 0
+    codemode: Codemode = "off"
+    scripts: int = 0
+    failed_scripts: int = 0
+    nested_calls: int = 0
 
 
 @dataclass(slots=True)
@@ -562,13 +572,19 @@ def _run_wisp(
     # through the discovery tools, which exist per run and are never selected by name.
     for tool in (*definition.tools, *mcp_tool_names(task)):
         command += ["--allow-tool", tool]
-    if definition.mcp_servers:
-        settings = home / ".wisp" / "settings.json"
-        settings.parent.mkdir(parents=True, exist_ok=True)
-        settings.write_text(
-            json.dumps(mcp_settings(task, context.python, context.mcp_tool_exposure)),
-            encoding="utf-8",
-        )
+    settings: dict[str, object] = (
+        mcp_settings(task, context.python, context.mcp_tool_exposure)
+        if definition.mcp_servers
+        else {}
+    )
+    if context.codemode != "off":
+        # A user-only setting, like the MCP servers. Scripts may call the task's
+        # read-only tools, which include every MCP tool, all marked read-only above.
+        settings["codemode"] = True
+    if settings:
+        settings_path = home / ".wisp" / "settings.json"
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        settings_path.write_text(json.dumps(settings), encoding="utf-8")
     environment = run_environment(home, context.credentials, os.environ)
     with (
         (run_dir / "events.jsonl").open("w", encoding="utf-8") as events,
@@ -741,4 +757,8 @@ def _row(
         proxied_calls=measured.proxied_calls,
         proxied_errors=measured.proxied_errors,
         proxied_argument_errors=measured.proxied_argument_errors,
+        codemode=context.codemode,
+        scripts=measured.scripts,
+        failed_scripts=measured.failed_scripts,
+        nested_calls=measured.nested_calls,
     )

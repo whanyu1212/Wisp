@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
+import itertools
 import json
 import logging
 import os
@@ -14,6 +16,7 @@ from collections.abc import (
     Callable,
     Iterable,
     Iterator,
+    Mapping,
     Sequence,
 )
 from contextlib import asynccontextmanager
@@ -147,6 +150,7 @@ from wisp.providers.base import (
     structured_tool_replacement_support,
 )
 from wisp.providers.catalog import ModelRegistry
+from wisp.providers.events import ToolCall
 from wisp.runtime.event_bus import EventBus
 from wisp.runtime.registry import ToolRegistry, UnknownToolError
 from wisp.sessions.entries import (
@@ -172,6 +176,8 @@ from wisp.skills.tool import SkillTool
 from wisp.tool_presentation import tool_result_status
 from wisp.tools.approval import ToolApprovalPolicy
 from wisp.tools.base import ToolExecutionMetadata
+from wisp.tools.codemode.calls import CODEMODE, NestedCallResult
+from wisp.tools.codemode.tool import CODEMODE_PROMPT, CodemodeTool
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
 from wisp.tools.seen_files import SeenFiles
@@ -386,6 +392,12 @@ class _HarnessLoopState:
             self.tool_presentation_statuses[event.call_id] = "denied"
 
 
+def _no_executor() -> ConfiguredToolExecutor:
+    """Stand in for the executor where a codemode tool is built only to be measured."""
+
+    raise RuntimeError("This codemode tool only describes a run; it cannot call tools")
+
+
 class CodingSession:
     """Coordinate coding policy, persistence, and events around `AgentHarness`."""
 
@@ -415,11 +427,14 @@ class CodingSession:
         mode: AgentMode = DEFAULT_AGENT_MODE,
         mcp_tool_exposure: McpToolExposure = DEFAULT_MCP_TOOL_EXPOSURE,
         mcp_server_connected: Callable[[str], bool] | None = None,
+        codemode: bool = False,
     ) -> None:
         self.sessions = sessions
         self.events = events
         self.tool_registry = tool_registry
         self.mcp_tool_exposure: McpToolExposure = mcp_tool_exposure
+        # Offer the experimental codemode tool, which scripts the run's read-only tools.
+        self.codemode = codemode
         self._mcp_server_connected = mcp_server_connected
         self.tool_policy = tool_policy or ToolPolicy.allow_all_tools()
         self.tool_approval_policy = tool_approval_policy or ToolApprovalPolicy.require_approval()
@@ -499,6 +514,7 @@ class CodingSession:
         max_tool_iterations: int | None = None,
         mcp_tool_exposure: McpToolExposure = DEFAULT_MCP_TOOL_EXPOSURE,
         mcp_server_connected: Callable[[str], bool] | None = None,
+        codemode: bool = False,
     ) -> CodingSession:
         """Create a session from one resolved dynamic configuration snapshot."""
 
@@ -525,6 +541,7 @@ class CodingSession:
             web_search=configuration.web_search,
             mcp_tool_exposure=mcp_tool_exposure,
             mcp_server_connected=mcp_server_connected,
+            codemode=codemode,
         )
 
     @property
@@ -2010,6 +2027,12 @@ class CodingSession:
             policy = replace(
                 policy, allowed_tools=policy.allowed_tools | frozenset(DISCOVERY_TOOL_NAMES)
             )
+        codemode = self._codemode_tool(offered_tools, registry, lambda: executor)
+        if codemode is not None:
+            # Like the discovery tools, the script tool joins without widening what
+            # anything else may do: each call a script makes is checked as itself.
+            offered_tools = (*offered_tools, ToolSpec.from_tool(codemode))
+            policy = replace(policy, allowed_tools=policy.allowed_tools | {CODEMODE})
         executor = ConfiguredToolExecutor(
             registry=registry,
             context=context,
@@ -2020,6 +2043,61 @@ class CodingSession:
             image_store=image_store,
         )
         return offered_tools, executor
+
+    def _codemode_tool(
+        self,
+        offered: tuple[ToolSpec, ...],
+        registry: ToolRegistry | None,
+        executor: Callable[[], ConfiguredToolExecutor],
+    ) -> CodemodeTool | None:
+        """Register the codemode tool for one run, when the session offers it.
+
+        A script may call the read-only tools among ``offered``: what this run
+        already allows after selection, policy, plan mode and MCP exposure. Their
+        calls run through ``executor``, built after this tool and so looked up when a
+        script calls.
+
+        Args:
+            offered (tuple[ToolSpec, ...]): The tools the run offers the model.
+            registry (ToolRegistry | None): The operation's registry copy, which the
+                tool is registered in.
+            executor (Callable[[], ConfiguredToolExecutor]): The run's executor.
+
+        Returns:
+            CodemodeTool | None: The registered tool, or None when codemode is off,
+            the run has no registry, or no read-only tool is offered.
+        """
+
+        if not self.codemode or registry is None or CODEMODE in registry.names():
+            return None
+        if importlib.util.find_spec("pydantic_monty") is None:
+            # Offering a tool that can only fail would cost the model a turn.
+            _logger.warning("codemode is on, but the codemode extra is not installed")
+            return None
+        registered = set(registry.names())
+        scriptable = [
+            tool
+            for spec in offered
+            if spec.name in registered and (tool := registry.get(spec.name)).safety == "read"
+        ]
+        if not scriptable:
+            return None
+        call_ids = itertools.count(1)
+
+        async def call(name: str, arguments: Mapping[str, object]) -> NestedCallResult:
+            tool_call = ToolCall(
+                call_id=f"{CODEMODE}-{next(call_ids)}", name=name, arguments=dict(arguments)
+            )
+            return await executor().run_nested(tool_call)
+
+        tool = CodemodeTool(scriptable, call)
+        registry.register(
+            tool,
+            replace=False,
+            execution=ToolExecutionMetadata(parallel_safe=False),
+            prompt=CODEMODE_PROMPT,
+        )
+        return tool
 
     def _apply_mcp_exposure(
         self, tools: tuple[ToolSpec, ...], registry: ToolRegistry | None
@@ -2627,6 +2705,9 @@ class CodingSession:
             stats_tools, stats_catalog = self._apply_mcp_exposure(
                 self._effective_tools(stats_registry), stats_registry
             )
+            stats_codemode = self._codemode_tool(stats_tools, stats_registry, _no_executor)
+            if stats_codemode is not None:
+                stats_tools = (*stats_tools, ToolSpec.from_tool(stats_codemode))
             prompt = await self._prompt_messages_async(
                 stats_tools,
                 registry=stats_registry,
@@ -2682,7 +2763,8 @@ class CodingSession:
             # session's: they read the catalog, and `mcp_call` never runs anything
             # itself (a proxied call that ran a tool is judged by its `target`). A
             # registered tool that shares their name is judged above by its safety.
-            return name not in DISCOVERY_TOOL_NAMES
+            # The codemode tool is the same: a script reaches only read-only tools.
+            return name not in DISCOVERY_TOOL_NAMES and name != CODEMODE
 
     def _effective_tools(self, registry: ToolRegistry | None = None) -> tuple[ToolSpec, ...]:
         """Return the startup-authorized tools available in the current mode."""

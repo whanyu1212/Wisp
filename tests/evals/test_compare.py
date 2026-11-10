@@ -54,6 +54,10 @@ def _run(
         "run_dir": "a/b/rep1",
         "error": None,
         "credential_source": "stored",
+        "codemode": "off",
+        "scripts": 0,
+        "failed_scripts": 0,
+        "nested_calls": 0,
     }
 
 
