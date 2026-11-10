@@ -10,7 +10,10 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.7.0 — Unreleased
+<!-- Keeps links to the pre-release "0.7.0 — Unreleased" heading working. -->
+<a id="070--unreleased"></a>
+
+## 0.7.0 — 2026-11-10
 
 0.7.0 lets models see images: pasted or dragged into the TUI composer, attached through RPC or the
 SDK, or returned by `read` for an image file. It also finds MCP tools on demand when a catalog is
