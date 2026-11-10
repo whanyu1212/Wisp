@@ -10,9 +10,60 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## Unreleased
+## 0.7.0 — Unreleased
+
+0.7.0 lets models see images: pasted or dragged into the TUI composer, attached through RPC or the
+SDK, or returned by `read` for an image file. It also finds MCP tools on demand when a catalog is
+large, shows edit diffs with the file's real line numbers, previews long `bash` output as its start
+and its end, and adds `$EDITOR` editing, clickable links, terminal title and notification signals,
+and a colour fallback to the TUI. Commands and events gain fields, so the backend and every
+frontend must come from the same release. 0.7.0 reads sessions 0.6.x wrote, but 0.6.x refuses a
+0.7.0 session that holds a successful edit or a proxied MCP call, and drops the images of one that
+holds images.
+
+### Images
+
+- Sessions keep images in a content-addressed store, an `images/` folder beside the session files
+  keyed by SHA-256, and messages reference them as `ImagePart`s (`media_type`,
+  `sha256`, `byte_size`, `width`, `height`) instead of holding base64. An image is stored before any
+  message refers to it, and the bytes sent to a provider are the stored bytes, so a resumed request
+  sends the same image. Wisp accepts PNG, JPEG, GIF and WebP, detected from the file's content, up
+  to 7.5 MB and 8,000 px a side; it reads the dimensions from the header and does not resize. A
+  message with no images is written as before. (#937)
+- The `prompt`, `steer` and `follow_up` commands, and the matching `RpcController` methods, accept up
+  to six `images` per message, each a base64 image file or the `ImagePart` of an image already in
+  the session. A model that does not take images, or images larger than one request can carry, is
+  refused before anything is stored. (#938, #941)
+- Each adapter sends user-message images in its provider's format: Anthropic image blocks,
+  Responses and Codex `input_image` parts, Chat Completions `image_url` parts, and Gemini inline
+  data. A request carries at most 24 MB of images (12 MB for Gemini), newest first; older images,
+  images whose bytes are missing, and every image for a text-only model go as a short
+  `[image not sent: image/png, 640x480]` note. The catalog's `image_input_models` lists the models
+  that take images. (#939)
+- `read` returns an image file as an image: the model gets a line naming the file, its format, size
+  and bytes, and the image itself. BMP, TIFF, HEIC and AVIF files are refused with a message that
+  names the format. (#944)
+- Each adapter also sends tool-result images: inside Anthropic tool results and Responses and Codex
+  `function_call_output`, in one user message after the tool messages for Chat Completions (which
+  accepts images only from the user), and inside Gemini 3's function responses or alongside earlier
+  Gemini models' responses. Tool images share the run's image budget with the prompt's and with
+  queued messages'; a queued message whose images no longer fit is refused. Providers that replay
+  earlier tool calls as a summary (Anthropic, Gemini, DeepSeek) name the images in it rather than
+  resending them. (#945)
+- `scripts/live_image_smoke.py` checks the formats against the live APIs. On 2026-11-10 they passed
+  for the OpenAI Responses API, Codex, xAI (Responses and Chat Completions) and Anthropic, and
+  DeepSeek got notes as a text-only model should. Gemini has not been checked live yet. (#947)
 
 ### Events
+
+- `ImagePart` is new. User-message `rpc.messages` snapshots and `queue.message.injected` gain
+  `images`; `queue.updated` and `queue.items.removed` gain `steering_images` and
+  `follow_up_images`; `rpc.session.forked` gains `selected_images` and `rpc.session.tree.navigated`
+  `editor_images`, so a message that returns to the composer brings its images; and
+  `tool.execution.ended` and `tool.result` gain `images` (at most six). The model selection in
+  `rpc.model_catalog` gains `image_input` and `max_request_image_bytes`. Sessions
+  save message images (optional, so no `schema_version` change). The schema bundle and conformance
+  fixture are regenerated; the same-release rule applies. (#937–#945)
 
 - `tool.execution.ended` and `tool.result` gain `edit_locations`: for a successful `edit`, each
   edit's first line in the file before the call and in the file it produced, in call order (empty
@@ -80,6 +131,22 @@ this policy.
 - An edit card's diff shows the file's real line numbers, live and in resumed sessions, and each
   edit's header names the line it starts at. Edits saved before this release keep numbering each
   fragment from 1.
+- Paste a screenshot, or paste or drag an image file's path, into the composer to attach it; each
+  shows as a chip such as `Image 1 · 640×480`, Backspace in an empty draft removes the newest
+  one, and the sent prompt shows a `[image 640×480 png]` line for each. Attaching is refused with a
+  notice when the model does not take images or the images would not fit one request. A queued
+  message popped back into the composer, or a prompt forked to edit, returns with its images. A tool
+  card whose result returned images ends its action row with the same label, or `[2 images]`.
+  (#942, #943, #948)
+- The TUI detects the terminal's colour depth and converts each frame to 256 or 16 colours where
+  truecolor is missing, such as older macOS Terminal.app and the Linux console, moving text that
+  would become hard to read to the nearest readable colour. `WISP_TUI_COLORS` (`auto`,
+  `truecolor`, `256` or `16`) overrides the detection. (#925)
+- The terminal title follows the run (`Wisp · working · <folder>`, `needs approval`, `needs trust`,
+  `error`, or `Wisp · <folder>`) and is restored on exit. When a run finishes, fails, or waits for
+  approval or trust while the terminal is in the background, Wisp sends a notification (OSC 9);
+  `WISP_TUI_NOTIFY=bell` rings the bell instead and `off` sends nothing. A pending approval's border
+  breathes while it waits. (#927)
 
 ### Prompt
 
@@ -100,6 +167,15 @@ this policy.
   about 12 KB; an embedding that builds `BashTool` without an output store has no saved copy.
   Polls of started processes and timeouts keep showing the end. The result's `stdout` and `stderr`
   data fields and the `ToolResultReady` event are unchanged.
+- An `edit` that replaces the start of a file with a UTF-8 byte-order mark keeps the mark. `read`
+  shows the mark as part of the first line, so an `oldText` copied from it matched the mark and a
+  `newText` without it removed it. Matching is unchanged, and a U+FEFF elsewhere is still text.
+  (#946)
+
+### Build
+
+- The Rust TUI moves to ratatui 0.30.2 and crossterm 0.29, and building it from source needs Rust
+  1.88 or later (was 1.85). Published wheels are unaffected. (#922)
 
 ### Skills
 
