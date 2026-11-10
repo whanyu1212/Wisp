@@ -393,9 +393,12 @@ class RpcWorkspaceReported(WispEvent):
 
     The host sends it at startup, as each prompt run starts, and as it finishes, so a
     frontend can show the folder and keep the branch current after a run switches
-    it. A run's tools may work outside the session folder (``/init`` works from the
-    project root); the report at its start names the folder they use. A branch
-    switched outside Wisp while idle shows after the next run.
+    it. It also sends one after ``change_directory`` moves the folder, and after a
+    session or a branch of it becomes active, since that restores the folder the
+    session last recorded. A run's tools may work outside the session folder
+    (``/init`` works from the project root); the report at its start names the
+    folder they use. A branch switched outside Wisp while idle shows after the next
+    run.
     """
 
     type: Literal["rpc.workspace"] = "rpc.workspace"

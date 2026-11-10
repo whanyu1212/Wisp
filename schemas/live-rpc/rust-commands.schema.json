@@ -237,6 +237,40 @@
       "title": "CancelCommand",
       "type": "object"
     },
+    "ChangeDirectoryCommand": {
+      "additionalProperties": false,
+      "description": "Move the session's working directory to another folder in its project.\n\nIt waits for running work and never applies in the middle of a prompt. The\nreply is the saved ``session.directory_changed`` move, when one was saved,\nthen ``rpc.workspace`` for the new folder.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "ChangeDirectoryCommandId"
+        },
+        "path": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "ChangeDirectoryCommandPath",
+          "type": "string"
+        },
+        "type": {
+          "const": "change_directory",
+          "default": "change_directory",
+          "title": "ChangeDirectoryCommandType",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "path"
+      ],
+      "title": "ChangeDirectoryCommand",
+      "type": "object"
+    },
     "ClearQueueCommand": {
       "additionalProperties": false,
       "description": "Clear one or both active queues.",
@@ -1981,6 +2015,7 @@
       "approval": "#/$defs/ApprovalCommand",
       "begin_device_code": "#/$defs/BeginDeviceCodeCommand",
       "cancel": "#/$defs/CancelCommand",
+      "change_directory": "#/$defs/ChangeDirectoryCommand",
       "clear_queue": "#/$defs/ClearQueueCommand",
       "clone_session": "#/$defs/CloneSessionCommand",
       "compact": "#/$defs/CompactCommand",
@@ -2160,6 +2195,9 @@
     },
     {
       "$ref": "#/$defs/ConfigureCommand"
+    },
+    {
+      "$ref": "#/$defs/ChangeDirectoryCommand"
     }
   ],
   "title": "Wisp typed-client RPC commands"

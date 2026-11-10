@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
@@ -27,6 +28,7 @@ from wisp.events import (
     RpcCommandFinished,
     RpcGitDiffReported,
     RpcProjectFilesReported,
+    SessionDirectoryChanged,
     SkillCatalogUpdated,
     TrustRequested,
     TrustResolved,
@@ -54,7 +56,7 @@ from wisp.rpc.handlers.mcp import RpcMcpServers, RpcToolSelection
 from wisp.rpc.handlers.project_files import RpcProjectFiles
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
-from wisp.sessions.jsonl import JsonlSessionStore
+from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 from wisp.skills.lifecycle import discover_skill_catalog
 from wisp.tools.approval import ToolApprovalDecision, ToolApprovalPolicy, confirms_every_call
 from wisp.tools.base import Tool, ToolSafety
@@ -692,6 +694,13 @@ class RpcHost:
             mcp_tool_exposure=config.mcp_tool_exposure,
             mcp_server_connected=runtime.mcp_server_connected,
         )
+        # A resumed session works from the folder it last recorded. This runs before
+        # the host indexes project files, so nothing needs refreshing yet.
+        restore_notice = (
+            await agent.restore_directory(session_state.session)
+            if session_state.session is not None
+            else None
+        )
 
         host: RpcHost | None = None
 
@@ -753,9 +762,23 @@ class RpcHost:
                     )
                 )
 
+        async def work_from_active_path(session: JsonlSession | None) -> None:
+            assert host is not None
+            notice = await host._refresh_working_directory(
+                partial(agent.restore_directory, session)
+            )
+            # Rendered now, before the command's own completion events, so a client
+            # knows the folder by the time the selection finishes.
+            events: tuple[WispEvent, ...] = (
+                *((ErrorEvent(message=notice),) if notice is not None else ()),
+                await rpc_workspace_report(agent.tool_context.cwd),
+            )
+            await host._render_event_batch(events)
+
         coordinator = RpcCoordinator(
             session_state,
             session_changed=end_session_scope,
+            session_activated=work_from_active_path,
             input_closed_handlers=(
                 approval_policy.deny_pending_on_input_closed,
                 trust_gate.deny_pending_on_input_closed,
@@ -792,7 +815,9 @@ class RpcHost:
             write_event(event)
         for notice in _broad_root_notices(project_context_root):
             write_event(ErrorEvent(message=notice))
-        write_event(await rpc_workspace_report(cwd))
+        if restore_notice is not None:
+            write_event(ErrorEvent(message=restore_notice))
+        write_event(await rpc_workspace_report(agent.tool_context.cwd))
         return host
 
     async def run_with_streams(
@@ -837,6 +862,7 @@ class RpcHost:
                 render_events=self._render_event_stream,
                 defer_until_after_flush=after_flush.append,
                 outbound_frame_limit=self._outbound_frame_limit,
+                change_directory=self._change_directory,
             )
             try:
                 result = await executor.dispatch_parsed(command, running_command)
@@ -925,6 +951,43 @@ class RpcHost:
         self._pending_published_events -= 1
         if self._pending_published_events == 0:
             self._published_events_drained.set()
+
+    async def _change_directory(self, path: str) -> SessionDirectoryChanged | None:
+        """Move the agent to ``path`` and save the move in the active session."""
+
+        session = self.coordinator.session_state.session
+        return await self._refresh_working_directory(
+            partial(self.agent.change_directory, path, session=session)
+        )
+
+    async def _refresh_working_directory[T](self, change: Callable[[], Awaitable[T]]) -> T:
+        """Run ``change``, which may move the agent's working directory, and re-index.
+
+        The project-file index is built from the working directory, so it is
+        invalidated first, under the publication lock like a trust change, and
+        settled with the agent's tool context afterwards, whether or not the
+        folder changed.
+
+        Args:
+            change (Callable[[], Awaitable[T]]): The agent call that moves the folder.
+
+        Returns:
+            T: What ``change`` returned.
+        """
+
+        try:
+            async with self._event_render_lock:
+                invalidated = self.project_files.begin_policy_transition()
+
+                async def invalidation_events() -> AsyncIterator[WispEvent]:
+                    yield invalidated
+
+                # Keep invalidation observable once its generation changed.
+                with anyio.CancelScope(shield=True):
+                    await self._render_events(invalidation_events())
+            return await change()
+        finally:
+            self.project_files.settle_policy(self.agent.tool_context)
 
     async def _publish_project_files(
         self, report: RpcProjectFilesReported | RpcGitDiffReported, scope: anyio.CancelScope

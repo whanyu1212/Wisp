@@ -31,6 +31,7 @@ from wisp.rpc.commands import (
     ApprovalScope,
     BeginDeviceCodeCommand,
     CancelCommand,
+    ChangeDirectoryCommand,
     ClearQueueCommand,
     CloneSessionCommand,
     CompactCommand,
@@ -200,6 +201,26 @@ class RpcController:
 
         selected_id = command_id or self._command_id_factory("permissions")
         await self._transport.send(SetPermissionsCommand(id=selected_id, mode=mode))
+        return selected_id
+
+    async def change_directory(self, path: str, *, command_id: str | None = None) -> str:
+        """Move the session's working directory to another folder in its project.
+
+        The backend waits for running work first. It replies with the saved
+        ``session.directory_changed`` move, when one was saved, then ``rpc.workspace``
+        for the new folder; a folder that does not exist, is not a directory, or lies
+        outside the project fails the command.
+
+        Args:
+            path (str): The folder: absolute, ``~``, or relative to the current one.
+            command_id (str | None): Optional identifier for matching the response.
+
+        Returns:
+            str: The submitted command identifier.
+        """
+
+        selected_id = command_id or self._command_id_factory("cd")
+        await self._transport.send(ChangeDirectoryCommand(id=selected_id, path=path))
         return selected_id
 
     async def get_commands(self, *, command_id: str | None = None) -> str:

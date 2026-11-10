@@ -140,6 +140,7 @@ from wisp.events.sessions import (
     RpcSessionTreeReported,
     RpcSessionTreeUnreverted,
     RpcSkillInvocationSnapshot,
+    SessionDirectoryChanged,
     SessionSaved,
     SkillInvoked,
     _RpcSessionDerived,
@@ -321,6 +322,7 @@ __all__ = [
     "RunOutcome",
     "RunSetup",
     "SessionCostSummary",
+    "SessionDirectoryChanged",
     "SessionSaved",
     "SessionBranchSummary",
     "SessionStats",
@@ -378,6 +380,7 @@ type KnownWispEvent = Annotated[
     | ToolResultReady
     | TurnCompleted
     | SessionSaved
+    | SessionDirectoryChanged
     | CompactionStarted
     | CompactionCompleted
     | AgentCompleted

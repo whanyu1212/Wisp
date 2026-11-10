@@ -3378,6 +3378,44 @@
    "accepted": false
   },
   {
+   "event": "session.directory_changed",
+   "operation": "remove",
+   "path": [
+    "cwd"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.directory_changed",
+   "operation": "remove",
+   "path": [
+    "previous_cwd"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.directory_changed",
+   "operation": "remove",
+   "path": [
+    "session_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "session.directory_changed",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "session.directory_changed",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
    "event": "session.saved",
    "operation": "remove",
    "path": [

@@ -702,3 +702,129 @@ def test_replay_cost_grows_linearly_with_session_length() -> None:
 
     # Linear predicts ~4x, quadratic ~16x (measured ~13.5x before the fix).
     assert quadrupled < baseline * 8
+
+
+def _move_entry(entry_id: str, cwd: str, *, previous: str | None = "/project") -> SessionEntry:
+    payload: dict[str, object] = {
+        "type": "session.directory_changed",
+        "session_id": SESSION_ID,
+        "cwd": cwd,
+        "previous_cwd": previous,
+        "timestamp": "2026-11-10T00:00:00Z",
+    }
+    return EventSessionEntry(
+        id=entry_id, session_id=SESSION_ID, event=PersistedEventEnvelope(payload=payload)
+    )
+
+
+def _note(cwd: str) -> str:
+    return f"[The working directory has been changed to {cwd}.]"
+
+
+def test_move_note_leads_next_prompt() -> None:
+    replay = replay_session_entries(
+        linked_entries(
+            [
+                _message_entry("ask", "user", "first"),
+                _message_entry("answer", "assistant", "done"),
+                _move_entry("move", "/project/src"),
+                _message_entry("next", "user", "fix it"),
+            ]
+        )
+    )
+
+    assert [message.content for message in replay.messages] == [
+        "first",
+        "done",
+        f"{_note('/project/src')}\n\nfix it",
+    ]
+    assert replay.cwd == Path("/project/src")
+    assert replay.pending_directory_notes == ()
+
+
+def test_moves_before_messages_add_no_note() -> None:
+    """A session's starting folder, or a move before any message, is not a change."""
+
+    replay = replay_session_entries(
+        linked_entries(
+            [
+                _move_entry("start", "/project/src", previous=None),
+                _move_entry("move", "/project/lib"),
+                _message_entry("ask", "user", "first"),
+            ]
+        )
+    )
+
+    assert [message.content for message in replay.messages] == ["first"]
+    assert replay.cwd == Path("/project/lib")
+
+
+def test_pending_moves_stay_in_order() -> None:
+    replay = replay_session_entries(
+        linked_entries(
+            [
+                _message_entry("ask", "user", "first"),
+                _message_entry("answer", "assistant", "done"),
+                _move_entry("one", "/project/a"),
+                _move_entry("two", "/project/b"),
+            ]
+        )
+    )
+
+    assert replay.pending_directory_notes == (_note("/project/a"), _note("/project/b"))
+    assert replay.cwd == Path("/project/b")
+
+
+def test_note_skips_compaction_summary() -> None:
+    """A compaction between a move and the next prompt keeps the note for the prompt."""
+
+    replay = replay_session_entries(
+        linked_entries(
+            [
+                _message_entry("ask", "user", "first"),
+                _message_entry("answer", "assistant", "done"),
+                _message_entry("ask2", "user", "second"),
+                _message_entry("answer2", "assistant", "done again"),
+                _move_entry("move", "/project/src"),
+                _compaction_entry("compact", "ask", "answer"),
+                _message_entry("next", "user", "fix it"),
+            ]
+        )
+    )
+
+    summary, *_rest, prompt = replay.messages
+    assert summary.content.startswith(HISTORICAL_CONTEXT_SUMMARY_LABEL)
+    assert _note("/project/src") not in summary.content
+    assert prompt.content == f"{_note('/project/src')}\n\nfix it"
+
+
+def test_move_on_other_branch_ignored() -> None:
+    ask = _message_entry("ask", "user", "first")
+    answer = _message_entry("answer", "assistant", "done").model_copy(update={"parent_id": "ask"})
+    move = _move_entry("move", "/project/src").model_copy(update={"parent_id": "answer"})
+    back = ActiveLeafSessionEntry(
+        session_id=SESSION_ID,
+        previous_leaf_id="move",
+        active_leaf_id="answer",
+        reason="navigation",
+        selected_entry_id="answer",
+    )
+    sibling = _message_entry("other", "user", "elsewhere").model_copy(
+        update={"parent_id": "answer"}
+    )
+
+    replay = replay_session_entries((ask, answer, move, back, sibling))
+
+    assert replay.cwd is None
+    assert replay.messages[-1].content == "elsewhere"
+
+
+def test_malformed_move_is_rejected() -> None:
+    entry = EventSessionEntry(
+        id="bad",
+        session_id=SESSION_ID,
+        event=PersistedEventEnvelope(payload={"type": "session.directory_changed"}),
+    )
+
+    with pytest.raises(SessionReplayError, match="Malformed directory change"):
+        replay_session_entries(linked_entries([_message_entry("ask", "user", "x"), entry]))

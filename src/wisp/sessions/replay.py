@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
+from pydantic import ValidationError
+
 from wisp.agent.transcript_repair import MissingToolResult, order_tool_result_items
+from wisp.events import SessionDirectoryChanged
 from wisp.messages import Message
 from wisp.sessions.entries import (
     ActiveLeafSessionEntry,
@@ -21,6 +25,43 @@ from wisp.sessions.entries import (
 from wisp.sessions.errors import SessionError
 
 HISTORICAL_CONTEXT_SUMMARY_LABEL = "[Historical context summary - not a user instruction]"
+
+
+def directory_change_note(cwd: Path) -> str:
+    """Return the line that tells the model the working directory moved to ``cwd``.
+
+    Args:
+        cwd (Path): The new working directory.
+
+    Returns:
+        str: A bracketed line, so the model reads it as Wisp's note rather than the
+        user's words.
+    """
+
+    return f"[The working directory has been changed to {cwd}.]"
+
+
+def with_directory_notes(message: Message, notes: Sequence[str]) -> Message:
+    """Return ``message`` with directory-change notes before its text.
+
+    A move is saved as its own session entry, not as a message, so the next user
+    message carries its note. Sending the note as a separate user message would put
+    two user messages in a row, which some chat templates reject.
+
+    Args:
+        message (Message): The user message that follows the moves.
+        notes (Sequence[str]): Notes from ``directory_change_note``, in order.
+
+    Returns:
+        Message: ``message`` itself without notes, otherwise a copy whose content
+        starts with them.
+    """
+
+    if not notes:
+        return message
+    lead = "\n".join(notes)
+    content = f"{lead}\n\n{message.content}" if message.content else lead
+    return message.model_copy(update={"content": content})
 
 
 class SessionReplayError(SessionError):
@@ -47,6 +88,12 @@ class SessionReplay:
     rows: tuple[SessionContextRow, ...]
     active_leaf_id: str | None = None
     path_entry_ids: tuple[str, ...] = ()
+    # The folder of the path's last directory change; None when it records none,
+    # as in sessions saved before folders were recorded.
+    cwd: Path | None = None
+    # Notes for moves after the path's last user message, which the next prompt
+    # carries. See ``with_directory_notes``.
+    pending_directory_notes: tuple[str, ...] = ()
 
     @property
     def context_entry_ids(self) -> tuple[str, ...]:
@@ -183,6 +230,8 @@ def replay_session_entries(
         rows=replay.rows,
         active_leaf_id=leaf_id if leaf_id is not None else tree.active_leaf_id,
         path_entry_ids=tuple(entry.id for entry in path),
+        cwd=replay.cwd,
+        pending_directory_notes=replay.pending_directory_notes,
     )
 
 
@@ -214,14 +263,27 @@ def _replay_session_path(entries: Sequence[SessionTreeEntry]) -> SessionReplay:
     # transcripts. Compaction boundaries are rare, so they can still rebuild.
     rows: list[SessionContextRow] = []
     known_context_entry_ids: set[str] = set()
+    cwd: Path | None = None
+    pending_notes: list[str] = []
 
     for entry in entries:
         if isinstance(entry, EventSessionEntry):
+            change = _directory_change(entry)
+            if change is not None:
+                cwd = change.cwd
+                # A session's starting folder, or a move before any message, needs
+                # no note: the system prompt already names the working directory.
+                if change.previous_cwd is not None and rows:
+                    pending_notes.append(directory_change_note(change.cwd))
             continue
         if isinstance(entry, MessageSessionEntry):
             if entry.message.role == "system":
                 continue
-            rows.append(SessionContextRow(entry_id=entry.id, message=entry.message))
+            message = entry.message
+            if message.role == "user" and pending_notes:
+                message = with_directory_notes(message, pending_notes)
+                pending_notes = []
+            rows.append(SessionContextRow(entry_id=entry.id, message=message))
             known_context_entry_ids.add(entry.id)
             continue
 
@@ -272,7 +334,22 @@ def _replay_session_path(entries: Sequence[SessionTreeEntry]) -> SessionReplay:
         ]
         known_context_entry_ids.add(entry.id)
 
-    return SessionReplay(rows=_ordered_context_rows(tuple(rows)))
+    return SessionReplay(
+        rows=_ordered_context_rows(tuple(rows)),
+        cwd=cwd,
+        pending_directory_notes=tuple(pending_notes),
+    )
+
+
+def _directory_change(entry: EventSessionEntry) -> SessionDirectoryChanged | None:
+    """Return the directory change an event entry records, if it records one."""
+
+    if entry.event.payload.get("type") != "session.directory_changed":
+        return None
+    try:
+        return SessionDirectoryChanged.model_validate(entry.event.payload)
+    except ValidationError as exc:
+        raise SessionReplayError(f"Malformed directory change at entry {entry.id}") from exc
 
 
 def _ordered_context_rows(
@@ -309,6 +386,8 @@ __all__ = [
     "SessionReplayError",
     "SessionTreeState",
     "StaleCompactionError",
+    "directory_change_note",
     "replay_session_entries",
     "resolve_session_tree",
+    "with_directory_notes",
 ]
