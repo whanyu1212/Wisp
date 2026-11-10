@@ -3,8 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import anyio
+import pytest
 
-from scripts.live_image_smoke import Target, smoke, two_colour_png
+from scripts.live_image_smoke import Target, _AliasAuth, smoke, two_colour_png
 from wisp.auth.storage import JsonAuthStore
 from wisp.images import inspect_image
 from wisp.providers.auth import StoredProviderAuthResolver
@@ -27,9 +28,26 @@ def test_swatch_is_valid_png() -> None:
     assert (image.media_type, image.width, image.height) == ("image/png", 32, 32)
 
 
-def test_scripted_targets_pass(tmp_path: Path) -> None:
-    """The three checks pass against a provider that answers as a vision model would."""
-
+@pytest.mark.parametrize(
+    ("native_history", "replay_works", "resume_answer", "resume_status"),
+    [
+        (False, True, "Yellow", "pass"),
+        # A summary-replay adapter cannot see the image again, which is expected.
+        (False, True, "unknown", "pass-no-replay"),
+        # An adapter with native tool history must resend the image and use it.
+        (True, True, "unknown", "wrong-answer"),
+        (True, False, "unknown", "no-replay"),
+    ],
+    ids=["summary-sees", "summary-unknown", "native-unknown", "native-not-resent"],
+)
+def test_scripted_checks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    native_history: bool,
+    replay_works: bool,
+    resume_answer: str,
+    resume_status: str,
+) -> None:
     read = ToolCall(call_id="call-1", name="read", arguments={"path": "swatch.png"})
     provider = ScriptedProvider(
         [
@@ -42,9 +60,19 @@ def test_scripted_targets_pass(tmp_path: Path) -> None:
                 ),
             ],
             _answer("Green"),
-            _answer("Yellow"),
+            _answer(resume_answer),
         ]
     )
+    if native_history:
+        provider.supports_structured_tool_replacement = (  # type: ignore[attr-defined]
+            lambda *, effort: True
+        )
+    if not replay_works:
+        # The session stops loading earlier tool images, as a replay regression would.
+        monkeypatch.setattr(
+            "wisp.coding.session.structured_tool_replacement_support",
+            lambda provider, *, effort: False,
+        )
     target = Target("scripted", "scripted", "scripted", lambda _: provider, use_catalog=False)
     auth = StoredProviderAuthResolver(JsonAuthStore(tmp_path / "auth.json"))
 
@@ -53,5 +81,14 @@ def test_scripted_targets_pass(tmp_path: Path) -> None:
     assert [(check.name, check.status) for check in checks] == [
         ("prompt", "pass"),
         ("tool", "pass"),
-        ("resume", "pass"),
+        ("resume", resume_status),
     ]
+
+
+def test_alias_reads_environment_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The xAI Chat target uses XAI_API_KEY when no xAI key is stored."""
+
+    monkeypatch.setenv("XAI_API_KEY", "test-key")
+    auth = _AliasAuth(StoredProviderAuthResolver(JsonAuthStore(tmp_path / "auth.json")), "xai")
+
+    assert anyio.run(auth.api_key, "xai-chat") == "test-key"

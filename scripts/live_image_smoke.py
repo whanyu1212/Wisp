@@ -25,6 +25,7 @@ Run from the repository root::
 from __future__ import annotations
 
 import argparse
+import os
 import struct
 import sys
 import tempfile
@@ -42,7 +43,11 @@ from wisp.coding.session import CodingSession, ImageInputUnsupportedError
 from wisp.config.runtime import default_auth_path
 from wisp.events import ToolResultReady, WispEvent
 from wisp.providers.auth import StoredProviderAuthResolver
-from wisp.providers.base import Provider, model_accepts_images
+from wisp.providers.base import (
+    Provider,
+    model_accepts_images,
+    structured_tool_replacement_support,
+)
 from wisp.providers.catalog import ModelRegistry, effective_catalog
 from wisp.providers.events import ProviderEvent
 from wisp.runtime.registry import ToolRegistry
@@ -89,7 +94,11 @@ class Target:
 
 
 class _AliasAuth:
-    """Resolve another provider's stored credential, for an OpenAI-compatible target."""
+    """Resolve another provider's credential, for an OpenAI-compatible target.
+
+    The compatible adapter looks up only its own environment variables, so the
+    other provider's variables are checked here before its stored credential.
+    """
 
     def __init__(self, inner: StoredProviderAuthResolver, provider: str) -> None:
         self._inner = inner
@@ -97,6 +106,9 @@ class _AliasAuth:
 
     async def api_key(self, provider: str) -> str | None:
         del provider
+        for name in API_KEY_ENVIRONMENT_VARIABLES.get(self._provider, ()):
+            if key := os.environ.get(name):
+                return key
         return await self._inner.api_key(self._provider)
 
     async def bearer_token(self, provider: str, **kwargs: object) -> object:
@@ -206,6 +218,11 @@ async def smoke(target: Target, auth: StoredProviderAuthResolver, workdir: Path)
     provider = _RecordingProvider(target.build(auth))
     models = ModelRegistry(effective_catalog()) if target.use_catalog else None
     sees_images = model_accepts_images(provider, target.model, models)  # type: ignore[arg-type]
+    # Only adapters with native tool history resend an earlier tool image; the
+    # others replay old tool calls as a summary that names it.
+    replays_tool_history = (
+        structured_tool_replacement_support(provider, effort=None) is True  # type: ignore[arg-type]
+    )
     (workdir / "swatch.png").write_bytes(two_colour_png("green", "yellow"))
     tools = ToolRegistry()
     tools.register(ReadTool())
@@ -270,8 +287,10 @@ async def smoke(target: Target, auth: StoredProviderAuthResolver, workdir: Path)
             return Check("resume", "pass", detail)
         if "yellow" in answer.lower():
             return Check("resume", "pass", detail)
+        if replays_tool_history:
+            return Check("resume", "wrong-answer" if replayed else "no-replay", detail)
         # A provider that summarizes earlier tool calls cannot see the image again.
-        return Check("resume", "pass-no-replay" if not replayed else "wrong-answer", detail)
+        return Check("resume", "pass-no-replay", detail)
 
     await attempt("prompt", prompt_check)
     await attempt("tool", tool_check)
@@ -280,8 +299,6 @@ async def smoke(target: Target, auth: StoredProviderAuthResolver, workdir: Path)
 
 
 async def _has_credentials(target: Target, auth: StoredProviderAuthResolver) -> bool:
-    import os
-
     if any(
         os.environ.get(name) for name in API_KEY_ENVIRONMENT_VARIABLES.get(target.credential, ())
     ):
