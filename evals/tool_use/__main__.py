@@ -27,6 +27,7 @@ from evals.tool_use.credentials import (
 )
 from evals.tool_use.report import build_report, load_rows, render_markdown
 from evals.tool_use.runner import (
+    CODEMODES,
     Budget,
     ModelSpec,
     RunContext,
@@ -64,6 +65,12 @@ def main(argv: list[str] | None = None) -> int:
         choices=MCP_TOOL_EXPOSURES,
         default="direct",
         help="how MCP tasks' tools reach the model (default: direct)",
+    )
+    run.add_argument(
+        "--codemode",
+        choices=CODEMODES,
+        default="off",
+        help="offer the experimental codemode tool, in this language (default: off)",
     )
 
     runs_help = "a results folder, its runs.jsonl, or a baseline .json file"
@@ -151,6 +158,7 @@ def _run(args: argparse.Namespace) -> int:
         credentials=credentials,
         results_dir=results_dir,
         mcp_tool_exposure=args.mcp_tool_exposure,
+        codemode=args.codemode,
     )
     runs_path = results_dir / "runs.jsonl"
     print(
@@ -179,6 +187,7 @@ def _run(args: argparse.Namespace) -> int:
         "git_commit": context.build.git_commit,
         "credential_sources": dict(credentials.sources),
         "mcp_tool_exposure": args.mcp_tool_exposure,
+        "codemode": args.codemode,
         "stopped_for_budget": result.stopped_for_budget,
         "skipped_runs": result.skipped_runs,
         "finished_at": datetime.now(UTC).isoformat(),

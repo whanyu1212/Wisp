@@ -67,6 +67,13 @@ this policy.
 
 ### Tools
 
+- An experimental `codemode` tool, off unless `"codemode": true` or `WISP_CODEMODE=1`: the model
+  writes a Python script that calls the run's read-only tools, and only what the script prints and
+  returns comes back. Scripts run in [monty](https://github.com/pydantic/monty)'s sandbox, from the
+  new `codemode` extra, with no files, network or environment, and are type-checked before they
+  run. Each call a script makes passes the same checks as a direct call; a call that would need an
+  approval fails, so approving the script grants nothing. Limits: 200 calls, 2 minutes, 10 seconds
+  of computing and 128 MiB per script. The tool-use evals gain `--codemode python`. (HY-495)
 - The file and search tools' boundary is the project root in a trusted project, instead of the
   working directory, so a session started in a subfolder can read, edit and search the rest of its
   project. Relative paths are still taken from the working directory, protected paths stay

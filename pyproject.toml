@@ -48,6 +48,10 @@ dependencies = [
     "typer>=0.26.8",
 ]
 
+[project.optional-dependencies]
+# The experimental `codemode` tool runs model-written scripts in monty's sandbox.
+codemode = ["pydantic-monty>=1.5,<2"]
+
 [project.urls]
 Homepage = "https://github.com/whanyu1212/Wisp"
 Repository = "https://github.com/whanyu1212/Wisp"
@@ -86,6 +90,7 @@ dev = [
     "psutil>=7.2.2",
     "pytest-timeout>=2.4",
     "pytest-xdist>=3.8",
+    "pydantic-monty>=1.5,<2",
 ]
 
 [tool.pytest.ini_options]

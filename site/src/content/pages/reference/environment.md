@@ -30,6 +30,7 @@ searchable: true
 | `WISP_CONTEXT_RESERVE_TOKENS` | Minimum tokens reserved outside estimated input context; defaults to `16384` |
 | `WISP_AUTO_COMPACTION` | Automatic threshold compaction and overflow recovery; defaults to `true` |
 | `WISP_WEB_SEARCH` | Offer the provider's built-in [web search](../guide/providers.md#web-search) to the model; defaults to `false` |
+| `WISP_CODEMODE` | Offer the experimental [codemode](../guide/tools-and-safety.md#scripting-tool-calls-with-codemode-experimental) tool; defaults to `false` |
 
 ## Provider credentials
 

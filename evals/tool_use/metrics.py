@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -18,11 +19,16 @@ from wisp.events import (
     ProviderRetrying,
     RunOutcome,
     RunSetup,
+    ToolExecutionEnded,
     ToolExecutionStarted,
     ToolResultReady,
     wisp_event_from_json,
 )
 from wisp.mcp.discovery import MCP_CALL
+from wisp.tools.codemode.calls import CODEMODE
+
+# The codemode result's summary, as `tools/summary.py` writes it.
+_NESTED_CALLS = re.compile(r"^codemode: (\d+) tool calls?\b")
 
 
 @dataclass(slots=True)
@@ -55,6 +61,11 @@ class RunMetrics:
             of whether proxied calls are harder to get right than direct ones.
         proxied_argument_errors (int): The subset Wisp's pre-check rejected
             because a required parameter was missing or arguments were not an object.
+        scripts (int): `codemode` calls. Each counts once in ``tool_calls``, however
+            many calls its script made.
+        failed_scripts (int): `codemode` calls that failed: a script that did not
+            type-check, raised, or hit a limit.
+        nested_calls (int): Tool calls the scripts that finished made.
     """
 
     setup: RunSetup | None = None
@@ -74,6 +85,9 @@ class RunMetrics:
     proxied_calls: int = 0
     proxied_errors: int = 0
     proxied_argument_errors: int = 0
+    scripts: int = 0
+    failed_scripts: int = 0
+    nested_calls: int = 0
 
     @property
     def last_error(self) -> str | None:
@@ -124,6 +138,7 @@ def measure(events: Iterable[KnownWispEvent]) -> RunMetrics:
             # A proxied call counts under the tool it ran, so modes compare like with like.
             metrics.tool_calls[event.target or event.name] += 1
             metrics.proxied_calls += event.name == MCP_CALL
+            metrics.scripts += event.name == CODEMODE
             command = event.arguments.get("command")
             if event.name == "bash" and isinstance(command, str):
                 metrics.commands.append(command)
@@ -133,6 +148,10 @@ def measure(events: Iterable[KnownWispEvent]) -> RunMetrics:
             metrics.proxied_argument_errors += (
                 event.name == MCP_CALL and event.failure_code == "invalid_arguments"
             )
+            metrics.failed_scripts += event.name == CODEMODE
+        elif isinstance(event, ToolExecutionEnded) and event.name == CODEMODE:
+            match = _NESTED_CALLS.match(event.summary or "")
+            metrics.nested_calls += int(match.group(1)) if match else 0
         elif isinstance(event, MessageCompleted | CompactionCompleted):
             # Compaction summarizes the conversation with its own paid request.
             _add_usage(metrics, event)

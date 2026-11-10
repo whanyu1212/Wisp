@@ -60,6 +60,7 @@ _USER_ONLY_SETTINGS_FIELDS = frozenset(
         "context_reserve_tokens",
         "auto_compaction_enabled",
         "web_search",
+        "codemode",
         "mcp_servers",
         "mcp_tool_exposure",
         "openai_compatible",
@@ -134,6 +135,7 @@ class WispSettings(BaseModel):
     context_reserve_tokens: int | None = Field(default=None, ge=0)
     auto_compaction_enabled: bool | None = None
     web_search: bool | None = None
+    codemode: bool | None = None
     mcp_servers: tuple[McpServerConfig, ...] | None = Field(
         default=None, max_length=MAX_MCP_SERVERS, repr=False
     )
@@ -232,6 +234,7 @@ class ResolvedSettings(BaseModel):
     context_reserve_tokens: int | None = Field(default=None, ge=0)
     auto_compaction_enabled: bool | None = None
     web_search: bool | None = None
+    codemode: bool | None = None
     mcp_servers: tuple[McpServerConfig, ...] | None = Field(default=None, repr=False)
     mcp_tool_exposure: McpToolExposure | None = None
     openai_compatible: OpenAICompatibleSettings | None = None
@@ -325,6 +328,7 @@ def resolve_settings(
         context_reserve_tokens=user_settings.context_reserve_tokens,
         auto_compaction_enabled=user_settings.auto_compaction_enabled,
         web_search=user_settings.web_search,
+        codemode=user_settings.codemode,
         mcp_servers=user_settings.mcp_servers,
         mcp_tool_exposure=user_settings.mcp_tool_exposure,
         openai_compatible=user_settings.openai_compatible,

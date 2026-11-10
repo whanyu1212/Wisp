@@ -38,6 +38,7 @@ uv run python -m evals.tool_use report evals/tool_use/results/<timestamp>
 | `--env-file`, `--auth-file` | Credential sources (default: the repo's `.env` and `~/.wisp/auth.json`) |
 | `--results` | Output folder (default: a new timestamped folder under `results/`) |
 | `--mcp-tool-exposure` | `direct` (default) sends every MCP tool's definition; `on_demand` gives the model `mcp_search`, `mcp_describe` and `mcp_call` instead; `auto`, Wisp's own default, picks one by catalog size |
+| `--codemode` | `off` (default), or `python` to offer the experimental `codemode` tool; rows then also count `scripts`, `failed_scripts` and `nested_calls` |
 
 Runs happen in rounds: one repetition of every task and model per round. The budget is checked
 before each round, so a stopped suite has the same number of runs for every pairing.
@@ -47,8 +48,9 @@ before each round, so a stopped suite has the same number of runs for every pair
 The runner follows Wisp's own resolution:
 
 - It always passes `WISP_AUTH_FILE`. Codex signs in with OAuth, which lives only in `auth.json`.
-- For the OpenAI API it passes `OPENAI_API_KEY` from the runner's environment or, failing that,
-  from the git-ignored `.env`. Wisp prefers that variable over a key stored in `auth.json`.
+- For the OpenAI API and Anthropic it passes `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` from the
+  runner's environment or, failing that, from the git-ignored `.env`. Wisp prefers those variables
+  over a key stored in `auth.json`.
 
 Wisp itself does not read `.env` files. The runner reads only an allowlist of provider key names
 from it, because a `.env` may also set `WISP_*` variables that would silently change the setup
@@ -147,6 +149,7 @@ the commit the change starts from, with the models the change will be measured o
 | `2026-11-08-mcp-direct.json`, `2026-11-08-mcp-on-demand.json` | The MCP tasks, 5 runs each, with every MCP tool's definition sent and with on-demand discovery |
 | `2026-11-09-mcp-sweep-direct.json`, `2026-11-09-mcp-sweep-on-demand.json` | The `mcp-sweep` tasks, 5 runs each in each mode: the inventory question with 6, 12, 20, 30 and 50 tools |
 | `2026-11-10-orchestration-direct.json` | The `orchestration` tasks, 5 runs each, with no codemode: the baseline codemode prototypes are compared against (HY-431) |
+| `2026-11-10-codemode-off.json`, `2026-11-10-codemode-python.json` | The `orchestration` tasks and `mcp-triage`, 5 runs each on gpt-6.1-sol, gpt-5.6-luna and claude-sonnet-5-5, without and with the Python codemode tool (HY-495). Sonnet's `mcp-flaky-comments` runs errored: Anthropic rejects the `bash` schema's top-level `oneOf` |
 
 On-demand discovery cut tokens per run by 76–77% on `mcp-triage` (102 tools) and 28–46% on
 `mcp-pick-tool` (50 tools), and cost 20–34% more on `mcp-similar-servers` (6 tools), with every run
