@@ -1,0 +1,12 @@
+id = "mcp-failing-lint"
+title = "Find every open pull request whose lint check fails, one check-runs call per pull request"
+tags = ["mcp", "orchestration"]
+prompt = "In the acme/api repository, which open pull requests have a failing `lint` check? Write their numbers to ANSWER.txt, one per line."
+verify = "{python} {task}/verify.py"
+timeout_seconds = 600
+# Two pages of pull requests and one check-runs call for each of 34 means up to 36
+# batches for a model that makes one call per turn.
+max_tool_iterations = 50
+tools = ["write", "read", "ls"]
+mcp_servers = ["devhub"]
+opt_in = true

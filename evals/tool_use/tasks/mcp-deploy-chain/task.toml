@@ -1,0 +1,10 @@
+id = "mcp-deploy-chain"
+title = "Follow a failed deploy to its commit, the pull request it merged, and that pull request's approver"
+tags = ["mcp", "orchestration"]
+prompt = "In the acme/api repository, find the most recent failed run of the `deploy` workflow on the `main` branch. It ran on a merge commit: which pull request did that commit merge, and who approved that pull request? Write ANSWER.txt with exactly two lines: `pr: N` and `approved by: LOGIN`."
+verify = "{python} {task}/verify.py"
+timeout_seconds = 420
+max_tool_iterations = 25
+tools = ["write", "read", "ls"]
+mcp_servers = ["devhub"]
+opt_in = true
