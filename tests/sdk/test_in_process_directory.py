@@ -437,6 +437,47 @@ def test_project_settings_follow_move(
     assert applied == models[1:]
 
 
+def test_credentials_stay_protected(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    """A credential file only the old project named stays protected after leaving it.
+
+    Moving from a nested project up to its parent puts the file inside the new
+    tools' reach, while the parent's settings no longer name it.
+    """
+
+    monkeypatch.setenv("WISP_PROVIDER", "fake")
+    monkeypatch.delenv("WISP_TRUST", raising=False)
+    parent = tmp_path / "parent"
+    child = parent / "child"
+    (child / ".wisp").mkdir(parents=True)
+    (parent / "README.md").write_text("parent\n", encoding="utf-8")
+    tokens = (child / "private-tokens.json").resolve()
+    (child / ".wisp" / "settings.json").write_text(json.dumps({"auth_path": str(tokens)}))
+    record_trust(child.resolve(), True)
+    record_trust(parent.resolve(), True)
+    protected: list[tuple[str, ...]] = []
+
+    async def scenario() -> None:
+        controller = await InProcessWisp.from_environment(
+            session_dir=tmp_path / "sessions",
+            options=InProcessOptions(project_context_root=child, cwd=child),
+        )
+        stream = controller.events()
+        agent = _host_agent(controller)
+        try:
+            protected.append(agent.tool_context.protected_paths)  # type: ignore[attr-defined]
+            command_id = await controller.change_directory(str(parent))
+            events = await _until_finished(controller, stream, command_id, trust_answer=None)
+            assert _finished(events).ok
+            assert _workspace(events) == parent.resolve()
+            protected.append(agent.tool_context.protected_paths)  # type: ignore[attr-defined]
+        finally:
+            await controller.aclose()
+
+    anyio.run(scenario)
+
+    assert all(tokens.as_posix() in paths for paths in protected)
+
+
 def _fail_project_entry(monkeypatch: MonkeyPatch) -> None:
     """Make entering another project fail after its move was saved."""
 

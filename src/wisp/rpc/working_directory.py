@@ -160,6 +160,7 @@ class RpcWorkingDirectory:
                 trusted=trusted,
                 runtime=self._runtime,
                 cwd=folder,
+                retained_protected_paths=agent.tool_context.protected_paths,
                 commit=lambda configuration: agent.move_into(
                     folder, configuration=configuration, project_root=root
                 ),

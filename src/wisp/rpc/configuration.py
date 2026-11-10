@@ -122,6 +122,7 @@ class RpcProjectConfiguration:
             trusted=True,
             runtime=runtime,
             cwd=agent.tool_context.cwd,
+            retained_protected_paths=agent.tool_context.protected_paths,
             commit=agent.reconfigure,
             reserve_protected_paths=reserve_protected_paths,
         )
@@ -133,6 +134,7 @@ class RpcProjectConfiguration:
         trusted: bool,
         runtime: WispRuntime,
         cwd: Path,
+        retained_protected_paths: tuple[str, ...],
         commit: Callable[[CodingSessionConfiguration], None],
         record: Callable[[], Awaitable[object]] | None = None,
         reserve_protected_paths: Callable[[tuple[str, ...]], None] | None = None,
@@ -151,6 +153,10 @@ class RpcProjectConfiguration:
                 no project settings layer, skills, or instruction files.
             runtime (WispRuntime): Live runtime whose provider configuration is adopted.
             cwd (Path): The working directory the new configuration's tools use.
+            retained_protected_paths (tuple[str, ...]): Paths the tools protect now.
+                They stay protected alongside the new configuration's, so a credential
+                file only the previous project's settings named (its ``auth_path``)
+                is not exposed by a move whose tools can reach it.
             commit (Callable): Applies the session configuration to the agent.
             record (Callable | None): Runs before any live change, such as saving a
                 move. Defaults to None.
@@ -205,7 +211,14 @@ class RpcProjectConfiguration:
                 )
             if overrides.web_search is not None:
                 configuration = replace(configuration, web_search=overrides.web_search)
-            return configuration
+            tool_context = configuration.tool_context
+            protected_paths = tuple(
+                dict.fromkeys((*tool_context.protected_paths, *retained_protected_paths))
+            )
+            return replace(
+                configuration,
+                tool_context=replace(tool_context, protected_paths=protected_paths),
+            )
 
         changed = config != self.active_config
         if not changed:
