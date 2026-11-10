@@ -149,7 +149,8 @@ the commit the change starts from, with the models the change will be measured o
 | `2026-11-08-mcp-direct.json`, `2026-11-08-mcp-on-demand.json` | The MCP tasks, 5 runs each, with every MCP tool's definition sent and with on-demand discovery |
 | `2026-11-09-mcp-sweep-direct.json`, `2026-11-09-mcp-sweep-on-demand.json` | The `mcp-sweep` tasks, 5 runs each in each mode: the inventory question with 6, 12, 20, 30 and 50 tools |
 | `2026-11-10-orchestration-direct.json` | The `orchestration` tasks, 5 runs each, with no codemode: the baseline codemode prototypes are compared against (HY-431) |
-| `2026-11-10-codemode-off.json`, `2026-11-10-codemode-python.json` | The `orchestration` tasks and `mcp-triage`, 5 runs each on gpt-6.1-sol, gpt-5.6-luna and claude-sonnet-5-5, without and with the Python codemode tool (HY-495). Sonnet's `mcp-flaky-comments` runs errored: Anthropic rejects the `bash` schema's top-level `oneOf` |
+| `2026-11-10-codemode-off.json`, `2026-11-10-codemode-python.json` | The `orchestration` tasks and `mcp-triage`, 5 runs each on gpt-6.1-sol, gpt-5.6-luna and claude-sonnet-5-5, without and with the Python codemode tool (HY-495). Sonnet's `mcp-flaky-comments` runs errored on a `bash` schema Anthropic rejected (fixed in #957) |
+| `2026-11-10-flaky-sonnet-codemode-off.json`, `2026-11-10-flaky-sonnet-codemode-python.json` | Sonnet's `mcp-flaky-comments` runs after that fix, 5 each, without and with codemode |
 
 On-demand discovery cut tokens per run by 76–77% on `mcp-triage` (102 tools) and 28–46% on
 `mcp-pick-tool` (50 tools), and cost 20–34% more on `mcp-similar-servers` (6 tools), with every run
