@@ -184,37 +184,6 @@ def test_run_elsewhere_records_move(project: Path, tmp_path: Path) -> None:
     assert _moves(session)[-1]["cwd"] == str(project)
 
 
-@pytest.mark.parametrize("folder_kept", [True, False], ids=["restored", "folder-gone"])
-def test_restore_recorded_folder(project: Path, tmp_path: Path, folder_kept: bool) -> None:
-    store = JsonlSessionStore(tmp_path / "sessions")
-    session = store.create()
-    first = _agent(project, _answers(1), store)
-    _run(first, "first", session)
-    anyio.run(lambda: first.change_directory("src", session=session))
-    if not folder_kept:
-        (project / "src").rmdir()
-
-    later = _agent(project, _answers(0), store)
-    notice = anyio.run(lambda: later.restore_directory(session))
-
-    if folder_kept:
-        assert (later.tool_context.cwd, notice) == (project / "src", None)
-    else:
-        assert later.tool_context.cwd == project
-        assert notice is not None and "No such folder" in notice
-
-
-def test_restore_without_record_uses_launch(project: Path, tmp_path: Path) -> None:
-    store = JsonlSessionStore(tmp_path / "sessions")
-    session = store.create()
-    _run(_agent(project, _answers(1), store), "first", session)
-    agent = _agent(project, _answers(0), store)
-    anyio.run(lambda: agent.change_directory("src", session=None))
-
-    assert anyio.run(lambda: agent.restore_directory(session)) is None
-    assert agent.tool_context.cwd == project
-
-
 def test_failed_save_keeps_folder(
     project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -234,24 +203,6 @@ def test_failed_save_keeps_folder(
         anyio.run(lambda: agent.change_directory("src", session=session))
 
     assert agent.tool_context.cwd == project
-
-
-def test_unreadable_session_restores_launch(project: Path, tmp_path: Path) -> None:
-    store = JsonlSessionStore(tmp_path / "sessions")
-    session = store.create()
-    first = _agent(project, _answers(1), store)
-    _run(first, "first", session)
-    anyio.run(lambda: first.change_directory("src", session=session))
-    # A move whose payload no longer validates makes the session unreadable here.
-    text = session.path.read_text(encoding="utf-8")
-    session.path.write_text(text.replace('"cwd":', '"cwd_was":'), encoding="utf-8")
-
-    later = _agent(project, _answers(0), store)
-    anyio.run(lambda: later.change_directory("src", session=None))
-    notice = anyio.run(lambda: later.restore_directory(session))
-
-    assert later.tool_context.cwd == project
-    assert notice is not None and "could not read" in notice
 
 
 def test_link_to_project_accepted(project: Path, tmp_path: Path) -> None:

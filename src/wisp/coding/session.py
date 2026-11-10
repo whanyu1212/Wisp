@@ -156,7 +156,7 @@ from wisp.sessions.entries import (
     SessionEntry,
     ToolResultPresentationSnapshot,
 )
-from wisp.sessions.errors import SessionError, StaleSessionWriterError
+from wisp.sessions.errors import StaleSessionWriterError
 from wisp.sessions.images import SessionImageError
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 from wisp.sessions.replay import (
@@ -981,15 +981,21 @@ class CodingSession:
         self.auto_compaction_enabled = configuration.auto_compaction_enabled
         self.web_search = configuration.web_search
 
+    @property
+    def launch_directory(self) -> Path:
+        """The folder Wisp started in, where a session that records no folder runs."""
+
+        return self._launch_cwd
+
     async def change_directory(
         self, path: str, *, session: JsonlSession | None
     ) -> SessionDirectoryChanged | None:
         """Move the working directory to another folder in the same project.
 
         The tools work from the new folder from the next operation on. When
-        ``session`` already has entries, the move is saved in it, so resuming the
-        session restores the folder and the next prompt tells the model; a session
-        that has none records its folder when its first prompt runs.
+        ``session`` already has entries, the move is saved in it first, so resuming
+        the session restores the folder and the next prompt tells the model; a
+        session that has none records its folder when its first prompt runs.
 
         Args:
             path (str): The folder: absolute, ``~``, or relative to the current one.
@@ -1007,59 +1013,134 @@ class CodingSession:
             OSError: When the session file cannot be written; the folder is unchanged.
         """
 
-        async with self._exclusive_operation():
-            target = self._directory_in_project(path)
-            previous = self.tool_context.cwd.resolve(strict=False)
-            if _same_folder(target, previous):
-                return None
-            change = None
-            if session is not None and session.path.exists():
-                change = SessionDirectoryChanged(
-                    session_id=session.session_id, previous_cwd=previous, cwd=target
-                )
-                # Saved before the folder changes, so a failed save leaves the
-                # session where it was rather than moved with no record.
-                await self._flush_pending_entries()
-                await session.append_event(change)
-            self.tool_context = replace(self.tool_context, cwd=target)
-            return change
+        if self.project_context_root is None:
+            raise DirectoryChangeError("This session has no project root to move within")
+        target = self.resolve_directory(path)
+        if not self.contains(target):
+            # Entering another project reruns its trust and configuration, which the
+            # RPC host does (see ``wisp.rpc.working_directory``).
+            raise DirectoryChangeError(f"{path} is outside the project {self.project_context_root}")
+        change = await self.record_directory_change(session, target)
+        self.move_into(target)
+        return change
 
-    async def restore_directory(self, session: JsonlSession | None) -> str | None:
-        """Work from the folder ``session`` last recorded, or from the launch folder.
-
-        Called when a session, or a branch of it, becomes the active one. A session
-        that records no folder ran in the folder Wisp started in, so it gets that
-        one; so does a session whose recorded folder can no longer be used, or that
-        cannot be read.
+    def resolve_directory(self, path: str) -> Path:
+        """Resolve ``path`` from the working directory to the folder it names.
 
         Args:
-            session (JsonlSession | None): The session that became active.
+            path (str): Absolute, ``~``, or relative to the working directory.
 
         Returns:
-            str | None: Why the recorded folder was not restored, or None when it
-            was, or when ``session`` records none.
+            Path: The folder's real path, after symbolic links.
+
+        Raises:
+            DirectoryChangeError: When the path holds a NUL character, does not
+                exist, or is not a directory.
+        """
+
+        if "\0" in path:
+            # The path functions below raise ValueError for it, which no caller expects.
+            raise DirectoryChangeError(f"Path contains a NUL character: {path!r}")
+        candidate = Path(path).expanduser()
+        if not candidate.is_absolute():
+            candidate = self.tool_context.cwd.resolve(strict=False) / candidate
+        # Only where the folder really is matters: a path through a symlinked parent
+        # such as /tmp, or spelled in another case, still names the same folder.
+        real = Path(os.path.realpath(candidate))
+        if not real.exists():
+            raise DirectoryChangeError(f"No such folder: {path}")
+        if not real.is_dir():
+            raise DirectoryChangeError(f"Not a folder: {path}")
+        return real
+
+    def contains(self, folder: Path) -> bool:
+        """Return whether existing ``folder`` lies inside this session's project root.
+
+        Containment is checked by file identity on real paths, so a link inside the
+        project cannot lead out, and case-insensitive file systems compare folders
+        the way they open them.
+        """
+
+        root = self.project_context_root
+        return root is not None and _inside_folder(folder, Path(os.path.realpath(root)))
+
+    async def record_directory_change(
+        self, session: JsonlSession | None, target: Path, *, previous: Path | None = None
+    ) -> SessionDirectoryChanged | None:
+        """Save a move to ``target`` in ``session``, before the folder changes.
+
+        Saving first means a failed save leaves the session where it was rather
+        than moved with no record.
+
+        Args:
+            session (JsonlSession | None): The session to record the move in.
+            target (Path): The folder the session is about to work in.
+            previous (Path | None): The folder the move leaves. Defaults to the
+                working directory; a caller undoing a saved move passes the folder
+                that move entered.
+
+        Returns:
+            SessionDirectoryChanged | None: The saved move, or None when the folder
+            would not change or ``session`` has no entries yet.
+
+        Raises:
+            RuntimeError: While a prompt, compaction, or another folder change runs.
+            SessionError: When the move cannot be saved.
+            OSError: When the session file cannot be written.
+        """
+
+        async with self._exclusive_operation():
+            if previous is None:
+                previous = self.tool_context.cwd.resolve(strict=False)
+            if _same_folder(target, previous) or session is None or not session.path.exists():
+                return None
+            change = SessionDirectoryChanged(
+                session_id=session.session_id, previous_cwd=previous, cwd=target
+            )
+            await self._flush_pending_entries()
+            await session.append_event(change)
+            return change
+
+    def move_into(
+        self,
+        target: Path,
+        *,
+        configuration: CodingSessionConfiguration | None = None,
+        project_root: Path | None = None,
+    ) -> None:
+        """Work from ``target``, optionally under another project's configuration.
+
+        A move into another project passes that project's ``configuration`` and
+        ``project_root``; its tool context keeps this session's working directory
+        as ``target``.
+
+        Args:
+            target (Path): The folder to work in.
+            configuration (CodingSessionConfiguration | None): The configuration to
+                apply with the move. Defaults to the current one.
+            project_root (Path | None): The project root that comes with
+                ``configuration``. Defaults to the current one.
 
         Raises:
             RuntimeError: While a prompt, compaction, or another folder change runs.
         """
 
-        async with self._exclusive_operation():
-            target = self._launch_cwd
-            notice = None
-            try:
-                recorded = await self._recorded_directory(session)
-            except (SessionError, OSError) as exc:
-                recorded = None
-                notice = f"Working in {target}: could not read the session's folder: {exc}"
-            if recorded is not None:
-                try:
-                    target = self._directory_in_project(str(recorded))
-                except DirectoryChangeError as exc:
-                    notice = f"Working in {target} instead of the session's folder: {exc}"
-            self.tool_context = replace(self.tool_context, cwd=target)
-            return notice
+        if self._operation_active:
+            raise RuntimeError("CodingSession is busy")
+        if configuration is not None:
+            self._apply_configuration(configuration)
+        if project_root is not None:
+            self.project_context_root = project_root
+        self.tool_context = replace(self.tool_context, cwd=target)
 
-    async def _recorded_directory(self, session: JsonlSession | None) -> Path | None:
+    async def recorded_directory(self, session: JsonlSession | None) -> Path | None:
+        """Return the folder ``session``'s active path last recorded, if any.
+
+        Raises:
+            SessionError: When the session cannot be replayed.
+            OSError: When the session file cannot be read.
+        """
+
         if session is None or not session.path.exists():
             return None
         snapshot = await anyio.to_thread.run_sync(session.read_run_snapshot)
@@ -1084,40 +1165,6 @@ class CodingSession:
         finally:
             self._operation_active = False
             self._operation_lock.release()
-
-    def _directory_in_project(self, path: str) -> Path:
-        """Resolve ``path`` from the working directory and check it stays in the project.
-
-        The folder's real path, after symbolic links, must lie inside the real
-        project root, so a link inside the project cannot lead out. Containment is
-        checked by file identity, so case-insensitive file systems compare folders
-        the way they open them.
-        """
-
-        if "\0" in path:
-            # The path functions below raise ValueError for it, which no caller expects.
-            raise DirectoryChangeError(f"Path contains a NUL character: {path!r}")
-        root = self.project_context_root
-        if root is None:
-            raise DirectoryChangeError("This session has no project root to move within")
-        real_root = Path(os.path.realpath(root))
-        cwd = self.tool_context.cwd.resolve(strict=False)
-        candidate = Path(path).expanduser()
-        if not candidate.is_absolute():
-            candidate = cwd / candidate
-        # Only where the folder really is matters: a path through a symlinked parent
-        # such as /tmp, or spelled in another case, still names a folder inside.
-        real = Path(os.path.realpath(candidate))
-        if not real.exists():
-            raise DirectoryChangeError(f"No such folder: {path}")
-        if not real.is_dir():
-            raise DirectoryChangeError(f"Not a folder: {path}")
-        if not _inside_folder(real, real_root):
-            raise DirectoryChangeError(
-                f"{path} is outside the project {real_root}; moving into another "
-                "project is not supported yet"
-            )
-        return real
 
     async def run(
         self,

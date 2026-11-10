@@ -166,6 +166,8 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
   state live in `rpc/session/` (`run.py`, `mutation.py`, `read.py`, `queue.py`, `state.py`);
   configuration, connection, control, inspection, and project-file handlers live in
   `rpc/handlers/`. Both subpackages re-export nothing; import from the defining module.
+  `working_directory.py` moves the session between folders and, outside the project root,
+  between projects, using `configuration.py`'s `apply_project` for the project switch.
 - Keep `wisp.agent.harness`, `wisp.agent.loop`, and `wisp.coding.prompt` as their public import
   surfaces; prompt building is coding-layer code, so do not restore `wisp.agent.prompt`.
   Within each package, import from defining modules. Use the current shared module names above;
