@@ -1501,7 +1501,6 @@ fn render_transcript_row(
     glow: Option<Color>,
     links: &mut Vec<crate::hyperlink::PaintedLink>,
 ) {
-    // A selected row looks like any other; its fold hint is the only cue.
     let selected = selected_row == Some(row.anchor);
     let user = user_surface;
     let code = row
@@ -1513,15 +1512,26 @@ fn render_transcript_row(
     } else {
         palette.base()
     };
-    // A card whose call just finished glows briefly under its action row.
+    // A card whose call just finished glows briefly under its action row; a selected
+    // row's band covers the glow and every fill below.
     let base = glow.map_or(base, |glow| base.bg(glow));
+    // Everything drawn on a selected row goes through its band, which keeps text
+    // readable on it.
+    let on_row = |style: Style| {
+        if selected {
+            palette.selected_row(style)
+        } else {
+            style
+        }
+    };
+    let base = on_row(base);
     frame.render_widget(Block::default().style(base), area);
     let mut content = content_area(area);
     // Use the existing inset: decoration must not shift wrapping, copied text, or
     // mouse hit targets.
     if let Some((glyph, color)) = rail.filter(|_| content.x > area.x) {
         frame.render_widget(
-            Paragraph::new(Span::styled(glyph, base.fg(color))),
+            Paragraph::new(Span::styled(glyph, on_row(base.fg(color)))),
             Rect::new(area.x, area.y, 1, 1),
         );
     }
@@ -1536,7 +1546,7 @@ fn render_transcript_row(
             .unwrap_or(u16::MAX)
             .min(content.width);
         frame.render_widget(
-            Paragraph::new(Span::styled(gutter, base.fg(palette.muted))),
+            Paragraph::new(Span::styled(gutter, on_row(base.fg(palette.muted)))),
             Rect::new(content.x, content.y, columns, 1),
         );
         content.x += columns;
@@ -1546,19 +1556,14 @@ fn render_transcript_row(
         // Preserve the existing viewport anchors, but separate routine tools with air.
         return;
     }
-    if code {
-        frame.render_widget(Block::default().style(palette.composer()), content);
-    } else if matches!(
+    let diff = matches!(
         row.tone,
-        TranscriptRowTone::DiffAddition
-            | TranscriptRowTone::DiffDeletion
-            | TranscriptRowTone::Surface
-            | TranscriptRowTone::SurfaceNote
-    ) {
-        frame.render_widget(
-            Block::default().style(base.patch(tone_style(row.tone, palette))),
-            content,
-        );
+        TranscriptRowTone::DiffAddition | TranscriptRowTone::DiffDeletion
+    );
+    // A selected row's band stands in for the code and diff fills; a reversed
+    // selection keeps them.
+    if !(selected && palette.shows_bands()) {
+        paint_row_fill(frame, content, &row, code, base, palette);
     }
     let style = match row.kind {
         TranscriptRowKind::Header
@@ -1612,6 +1617,10 @@ fn render_transcript_row(
             if span.style.inline == InlineStyle::ToolStatus {
                 semantic = semantic.patch(tone_style(row.tone, palette));
             }
+            if diff && span.style.inline == InlineStyle::DiffGutter {
+                semantic.bg = Some(base.bg.unwrap_or(Color::Reset));
+            }
+            let semantic = on_row(semantic);
             let painted = match &spinner {
                 Some(spinner) if span.style.inline == InlineStyle::ToolStatus => {
                     Span::styled(spinner.clone(), semantic)
@@ -1629,10 +1638,10 @@ fn render_transcript_row(
     if let Some(label) = label {
         // The chip has no fill, so the label's alignment padding can share its style.
         let chip = palette.chip(spans[label].content.trim());
-        spans[label].style = spans[label].style.patch(chip);
+        spans[label].style = on_row(spans[label].style.patch(chip));
     }
     if let Some(hint) = row.fold_hint.text().filter(|_| selected) {
-        spans.push(Span::styled(hint, base.fg(palette.muted)));
+        spans.push(Span::styled(hint, on_row(base.fg(palette.muted))));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), content);
     for (start, width, link) in linked {
@@ -1649,7 +1658,7 @@ fn render_transcript_row(
         if frame.buffer_mut()[position].symbol() == " " {
             frame.buffer_mut()[position]
                 .set_symbol(arrow.symbol())
-                .set_fg(palette.muted);
+                .set_style(on_row(Style::default().fg(palette.muted)));
         }
     }
     // A finished call's time is muted; a running call's ticks in the running colour.
@@ -1666,10 +1675,46 @@ fn render_transcript_row(
             .unwrap_or(u16::MAX)
             .min(content.width);
         frame.render_widget(
-            Paragraph::new(Span::styled(text.to_owned(), base.fg(color))),
+            Paragraph::new(Span::styled(text.to_owned(), on_row(base.fg(color)))),
             Rect::new(content.right() - columns, content.y, columns, 1),
         );
     }
+}
+
+/// Paints the fill under a code, diff or surface row. A changed line's band starts after
+/// its line numbers, which stay on the plain background beside it.
+fn paint_row_fill(
+    frame: &mut Frame<'_>,
+    content: Rect,
+    row: &TranscriptRow,
+    code: bool,
+    base: Style,
+    palette: Palette,
+) {
+    if code {
+        frame.render_widget(Block::default().style(palette.composer()), content);
+        return;
+    }
+    let line_numbers = match row.tone {
+        TranscriptRowTone::DiffAddition | TranscriptRowTone::DiffDeletion => row
+            .spans
+            .iter()
+            .take_while(|span| span.style.inline == InlineStyle::DiffGutter)
+            .map(|span| u16::try_from(span.text.width()).unwrap_or(u16::MAX))
+            .fold(0_u16, u16::saturating_add)
+            .min(content.width),
+        TranscriptRowTone::Surface | TranscriptRowTone::SurfaceNote => 0,
+        _ => return,
+    };
+    let band = Rect {
+        x: content.x + line_numbers,
+        width: content.width - line_numbers,
+        ..content
+    };
+    frame.render_widget(
+        Block::default().style(base.patch(tone_style(row.tone, palette))),
+        band,
+    );
 }
 
 /// How a frame moves: the motion the terminal and settings allow, and the tool cards
@@ -2509,7 +2554,7 @@ fn styled_composer_line(
             let end = column + grapheme.width();
             let selected = column < selection.end && end > selection.start;
             let style = if selected {
-                span.style.patch(palette.selection())
+                span.style.patch(palette.text_selection())
             } else {
                 span.style
             };
@@ -2526,7 +2571,7 @@ fn styled_composer_line(
     }
     // A selected newline needs a visible cell even on an otherwise empty line.
     if column >= selection.start && column < selection.end && column - row_start < width {
-        selected_spans.push(Span::styled(" ", palette.selection()));
+        selected_spans.push(Span::styled(" ", palette.text_selection()));
     }
     Line::from(selected_spans)
 }
@@ -5510,7 +5555,7 @@ mod tests {
             Palette::default(),
         );
         assert_eq!(line.spans[0].content, " ");
-        assert_eq!(line.spans[0].style, Palette::default().selection());
+        assert_eq!(line.spans[0].style, Palette::default().text_selection());
     }
 
     #[test]
@@ -5535,7 +5580,7 @@ mod tests {
                     palette,
                 );
                 for span in line.spans {
-                    assert_eq!(span.style, palette.selection());
+                    assert_eq!(span.style, palette.text_selection());
                 }
             }
         }
@@ -5568,10 +5613,10 @@ mod tests {
             "/theme"
         );
         assert_eq!(line.spans[1].content, "the");
-        assert_eq!(line.spans[1].style.bg, palette.selection().bg);
+        assert_eq!(line.spans[1].style.bg, palette.text_selection().bg);
         assert!(line.spans[1].style.add_modifier.contains(Modifier::BOLD));
-        assert_ne!(line.spans[0].style.bg, palette.selection().bg);
-        assert_ne!(line.spans[2].style.bg, palette.selection().bg);
+        assert_ne!(line.spans[0].style.bg, palette.text_selection().bg);
+        assert_ne!(line.spans[2].style.bg, palette.text_selection().bg);
     }
 
     #[test]
@@ -7444,7 +7489,7 @@ mod tests {
         let visible_text = selected.plain_text();
         let (_, selected_background, _) =
             style_at_text(browse_terminal.backend(), &visible_text).unwrap();
-        assert_eq!(selected_background, Palette::default().background);
+        assert_eq!(selected_background, Palette::default().selected);
         let (added_fg, added_background, _) =
             style_at_text(browse_terminal.backend(), "+ new value").unwrap();
         let (deleted_fg, deleted_background, _) =
@@ -7643,8 +7688,8 @@ mod tests {
                 trailing: None,
                 live_timer: false,
             };
-            // Browse marks a selection only with a fold hint; this row has none, so the
-            // selected and unselected renders match cell for cell.
+            // The selected row draws its band under the same text: only the background
+            // changes, or in monochrome the row reverses.
             terminal
                 .draw(|frame| {
                     for (y, selected) in [None, Some(anchor)].into_iter().enumerate() {
@@ -7667,7 +7712,21 @@ mod tests {
                 .unwrap();
             let buffer = terminal.backend().buffer();
             for x in 0..30 {
-                assert_eq!(buffer[(x, 0)], buffer[(x, 1)], "column {x}");
+                let (plain, chosen) = (&buffer[(x, 0)], &buffer[(x, 1)]);
+                assert_eq!(chosen.symbol(), plain.symbol(), "column {x}");
+                if no_color {
+                    // One reversed bar, not a block per span colour.
+                    assert_eq!(chosen.fg, palette.foreground, "column {x}");
+                    assert_eq!(chosen.modifier, plain.modifier | Modifier::REVERSED);
+                } else {
+                    assert_eq!(chosen.bg, palette.selected, "column {x}");
+                    assert_eq!(chosen.modifier, plain.modifier, "column {x}");
+                    // Text keeps its colour where it reads on the band.
+                    assert!(crate::theme::contrast_ratio(chosen.fg, palette.selected) >= 4.5);
+                    if crate::theme::contrast_ratio(plain.fg, palette.selected) >= 4.5 {
+                        assert_eq!(chosen.fg, plain.fg, "column {x}");
+                    }
+                }
             }
             assert!(
                 buffer[(1, 0)]

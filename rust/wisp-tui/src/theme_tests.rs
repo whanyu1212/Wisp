@@ -170,8 +170,13 @@ fn catalog_is_ordered_resolvable_and_monochrome_keeps_all_roles_achromatic() {
         assert!(theme::contrast_ratio(gray.addition, gray.addition_background) >= 4.5);
         assert!(theme::contrast_ratio(gray.deletion, gray.deletion_background) >= 4.5);
         assert!(gray.selection().add_modifier.contains(Modifier::REVERSED));
-        assert_eq!(color.selection().fg, Some(color.background));
-        assert_eq!(color.selection().bg, Some(color.primary));
+        assert!(
+            gray.text_selection()
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
+        assert_eq!(color.text_selection().bg, Some(color.primary));
+        assert_eq!(color.text_selection().fg, Some(color.background));
     }
     let glass = theme::resolve("glass").unwrap().palette(false);
     assert_eq!(glass.base().bg, None);
@@ -184,6 +189,108 @@ fn catalog_is_ordered_resolvable_and_monochrome_keeps_all_roles_achromatic() {
         theme::named("paper").is_none(),
         "stored names, not command aliases"
     );
+}
+
+#[test]
+fn selection_reverses_without_bands() {
+    use crate::color_depth::ColorDepth;
+    let vapor = theme::resolve("vapor").unwrap();
+    for depth in [ColorDepth::TrueColor, ColorDepth::Ansi256] {
+        let band = vapor.palette(false).for_depth(depth);
+        assert_eq!(band.selection().bg, Some(band.selected));
+        assert_eq!(band.selection().fg, Some(band.foreground));
+        assert!(band.selection().add_modifier.contains(Modifier::BOLD));
+        assert!(!band.selection().add_modifier.contains(Modifier::REVERSED));
+    }
+    for palette in [
+        vapor.palette(true),
+        vapor.palette(false).for_depth(ColorDepth::Ansi16),
+        theme::resolve("glass").unwrap().palette(false),
+    ] {
+        assert_eq!(palette.selection().bg, None);
+        assert!(
+            palette
+                .selection()
+                .add_modifier
+                .contains(Modifier::REVERSED | Modifier::BOLD)
+        );
+        // A list highlight patches the row after drawing it, so a coloured span would
+        // reverse into its own block unless the selection sets the foreground.
+        let item = ratatui::text::Line::from(vec![
+            ratatui::text::Span::raw("name "),
+            ratatui::text::Span::styled("detail", Style::default().fg(palette.muted)),
+        ]);
+        let mut terminal = Terminal::new(TestBackend::new(12, 1)).unwrap();
+        terminal
+            .draw(|frame| {
+                let list = ratatui::widgets::List::new([ratatui::widgets::ListItem::new(item)])
+                    .highlight_style(palette.selection());
+                let mut state = ratatui::widgets::ListState::default().with_selected(Some(0));
+                frame.render_stateful_widget(list, frame.area(), &mut state);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert!(
+            buffer
+                .content
+                .iter()
+                .all(|cell| cell.fg == palette.foreground),
+            "{buffer:?}"
+        );
+    }
+}
+
+#[test]
+fn band_text_stays_readable() {
+    use crate::color_depth::ColorDepth;
+    for theme in theme::themes() {
+        for depth in [ColorDepth::TrueColor, ColorDepth::Ansi256] {
+            let palette = theme.palette(false).for_depth(depth);
+            if !palette.shows_bands() {
+                continue;
+            }
+            let texts = [
+                palette.foreground,
+                palette.muted,
+                palette.primary,
+                palette.secondary,
+                palette.accent,
+                palette.success,
+                palette.warning,
+                palette.error,
+                palette.rail(),
+                palette.chip("Read").fg.unwrap(),
+                palette.chip("MCP").fg.unwrap(),
+            ];
+            for text in texts {
+                let shown = palette.selected_row(Style::default().fg(text)).fg.unwrap();
+                let ratio = theme::contrast_ratio(shown, palette.selected);
+                assert!(
+                    ratio >= 4.5,
+                    "{} {depth:?} {text:?}: {ratio:.2}",
+                    theme.slug
+                );
+            }
+            // Text that already reads keeps its colour.
+            let foreground = palette.selected_row(Style::default().fg(palette.foreground));
+            assert_eq!(foreground.fg, Some(palette.foreground));
+        }
+    }
+}
+
+#[test]
+fn monochrome_diff_bands_show() {
+    let level = |color: Color| match color {
+        Color::Rgb(value, _, _) => i16::from(value),
+        other => panic!("expected a gray, got {other:?}"),
+    };
+    for theme in theme::themes() {
+        let gray = theme.palette(true);
+        for band in [gray.addition_background, gray.deletion_background] {
+            let apart = (level(band) - level(gray.background)).abs();
+            assert!(apart >= 10, "{} {band:?}: {apart} levels", theme.slug);
+        }
+    }
 }
 
 #[test]

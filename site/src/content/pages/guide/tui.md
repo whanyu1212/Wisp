@@ -298,15 +298,17 @@ Presentation preferences never enter `settings.json`, RPC, or session history.
 
 Set `NO_COLOR` before launching Rust for deterministic grayscale, including code, diffs, and popups.
 The conversion uses Rec.709 grayscale and minimally adjusts native foregrounds when needed to retain
-a 4.5:1 contrast ratio against their rendered backgrounds. Selection uses reverse video as well as a
-marker; status labels, approval action words, shape-coded tool markers, and diff `+`/`-` signs
+a 4.5:1 contrast ratio against their rendered backgrounds. Selection uses reverse video instead of
+its band, as well as a marker; status labels, approval action words, shape-coded tool markers, and diff `+`/`-` signs
 remain visible without hue. The theme choice can still be changed and remembered while monochrome is
 active.
 
 Themes are drawn in 24-bit colour. Wisp switches to the nearest 256-colour palette in macOS
 Terminal.app (unless `COLORTERM` advertises truecolor), and to the 16 ANSI colours when `TERM` names
 a 16- or 8-colour terminal such as the Linux console. Text that would fall below 4.5:1 contrast
-after the switch moves to the nearest colour that keeps it readable. Inside tmux, Wisp keeps sending
+after the switch moves to the nearest colour that keeps it readable, and background tiers that
+would show as one gray at 256 colours move a step apart. At 16 colours, selected rows reverse
+instead of drawing a band. Inside tmux, Wisp keeps sending
 24-bit colour and tmux converts it for its outer terminal, without that contrast step; if that
 terminal lacks truecolor, set `WISP_TUI_COLORS=256` so Wisp converts instead. Set `WISP_TUI_COLORS`
 to `truecolor`, `256`, or `16` to choose the depth yourself, or to `auto` for detection; other

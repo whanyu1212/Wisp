@@ -75,6 +75,12 @@ def test_native_semantic_colors_are_readable(theme: dict[str, object]) -> None:
             )
     for operation in ("addition", "deletion"):
         assert _contrast_ratio(colors[operation], colors[f"{operation}_background"]) >= 4.5
+    # A selected transcript row keeps its own text colours on the selected band.
+    for foreground in ("foreground", "muted"):
+        assert _contrast_ratio(colors[foreground], colors["selected"]) >= 4.5, (
+            theme["slug"],
+            foreground,
+        )
 
 
 def _background(name: str, no_color: bool) -> tuple[int, int, int]:

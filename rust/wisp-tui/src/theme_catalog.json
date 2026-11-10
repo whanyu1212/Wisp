@@ -27,11 +27,12 @@
         "error": "#d97979",
         "surface": "#1e1e24",
         "panel": "#25252e",
+        "selected": "#36363f",
         "muted": "#a0a0a8",
         "addition": "#d4d4d4",
-        "addition_background": "#292a27",
+        "addition_background": "#063806",
         "deletion": "#d4d4d4",
-        "deletion_background": "#2b2227"
+        "deletion_background": "#521820"
       }
     },
     {
@@ -52,11 +53,12 @@
         "error": "#ffb0a8",
         "surface": "#252a35",
         "panel": "#2f3237",
+        "selected": "#414449",
         "muted": "#aab1c2",
         "addition": "#f7f8ff",
-        "addition_background": "#282d26",
+        "addition_background": "#063806",
         "deletion": "#f7f8ff",
-        "deletion_background": "#2d2728"
+        "deletion_background": "#5a1c22"
       }
     },
     {
@@ -77,11 +79,12 @@
         "error": "#ed8796",
         "surface": "#1e2030",
         "panel": "#2a2d3f",
+        "selected": "#3d4155",
         "muted": "#a5adcb",
         "addition": "#cad3f5",
-        "addition_background": "#23292e",
+        "addition_background": "#063806",
         "deletion": "#cad3f5",
-        "deletion_background": "#2d2431"
+        "deletion_background": "#5a1c22"
       }
     },
     {
@@ -102,11 +105,12 @@
         "error": "#e06c75",
         "surface": "#1c1b1a",
         "panel": "#1e1d1d",
+        "selected": "#393838",
         "muted": "#a7a29c",
         "addition": "#eeeeee",
-        "addition_background": "#1d221d",
+        "addition_background": "#063806",
         "deletion": "#eeeeee",
-        "deletion_background": "#251819"
+        "deletion_background": "#4a1218"
       }
     },
     {
@@ -127,11 +131,12 @@
         "error": "#f7768e",
         "surface": "#24283b",
         "panel": "#262f4b",
+        "selected": "#3a4361",
         "muted": "#a9b1d6",
         "addition": "#c0caf5",
-        "addition_background": "#272d2d",
+        "addition_background": "#063806",
         "deletion": "#c0caf5",
-        "deletion_background": "#302430"
+        "deletion_background": "#5a1c22"
       }
     },
     {
@@ -152,11 +157,12 @@
         "error": "#f5bdbe",
         "surface": "#333c43",
         "panel": "#333c43",
+        "selected": "#3d4449",
         "muted": "#aab3aa",
         "addition": "#d3c6aa",
-        "addition_background": "#3b4543",
+        "addition_background": "#1a5a1e",
         "deletion": "#d3c6aa",
-        "deletion_background": "#414348"
+        "deletion_background": "#9a2a2c"
       }
     },
     {
@@ -177,11 +183,12 @@
         "error": "#f07575",
         "surface": "#2a2a37",
         "panel": "#2d2d3a",
+        "selected": "#3d3c46",
         "muted": "#aaa89c",
         "addition": "#dcd7ba",
-        "addition_background": "#2d3031",
+        "addition_background": "#063806",
         "deletion": "#dcd7ba",
-        "deletion_background": "#342830"
+        "deletion_background": "#5a1c22"
       }
     },
     {
@@ -202,11 +209,12 @@
         "error": "#af3029",
         "surface": "#f2f0e5",
         "panel": "#f0eee2",
+        "selected": "#d5d3c9",
         "muted": "#575653",
         "addition": "#100f0f",
-        "addition_background": "#f3f2e0",
+        "addition_background": "#daf2d4",
         "deletion": "#100f0f",
-        "deletion_background": "#f9eee2"
+        "deletion_background": "#f8dad6"
       }
     },
     {
@@ -227,11 +235,12 @@
         "error": "#a95570",
         "surface": "#fffaf3",
         "panel": "#f5ede6",
+        "selected": "#e5dedb",
         "muted": "#646072",
         "addition": "#575279",
-        "addition_background": "#edeae1",
+        "addition_background": "#daf0da",
         "deletion": "#575279",
-        "deletion_background": "#f4e9e4"
+        "deletion_background": "#fee6e4"
       }
     }
   ]
