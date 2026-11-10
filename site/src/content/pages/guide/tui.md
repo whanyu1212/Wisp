@@ -72,7 +72,7 @@ walkthrough when you need more depth. These writing defaults apply wherever Wisp
 prompt, including the TUI and print mode; they do not truncate responses or rewrite existing history.
 
 Assistant replies render Markdown during streaming and when loading session history: headings,
-emphasis, links, lists, checklists, quotes, fenced code with syntax highlighting and continuous
+each level in its own colour without its `#` markers, emphasis, links, lists, checklists, quotes, fenced code with syntax highlighting and continuous
 backgrounds, and tables with aligned columns, borders, and bold headers. Descriptions wrap at word
 boundaries inside their cells; very narrow layouts stack cells within each row. Ordinary prose wraps
 at word boundaries within an 88-column reading width. In terminals that support OSC 8 hyperlinks,

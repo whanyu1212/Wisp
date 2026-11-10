@@ -294,6 +294,103 @@ fn monochrome_diff_bands_show() {
 }
 
 #[test]
+fn heading_levels_stay_apart() {
+    use crate::color_depth::ColorDepth;
+    for theme in theme::themes() {
+        let palette = theme.palette(false);
+        for depth in [ColorDepth::TrueColor, ColorDepth::Ansi256] {
+            let shown = [
+                palette.primary,
+                palette.heading_1,
+                palette.heading_2,
+                palette.heading_3,
+            ]
+            .map(|color| depth.downconvert(color));
+            for (index, colour) in shown.iter().enumerate() {
+                assert!(
+                    !shown[index + 1..].contains(colour),
+                    "{} {depth:?}: {shown:?}",
+                    theme.slug
+                );
+            }
+        }
+        // The levels a reply most often opens with stay off the speaker label's hue.
+        for heading in [palette.heading_1, palette.heading_2] {
+            let apart = hue_apart(heading, palette.primary);
+            assert!(apart >= 30.0, "{} {heading:?}: {apart:.0}°", theme.slug);
+        }
+        assert_eq!(palette.semantic_heading(5).fg, Some(palette.muted));
+    }
+}
+
+/// How far apart two colours' hues sit on the colour wheel, in degrees.
+fn hue_apart(a: Color, b: Color) -> f64 {
+    fn hue(color: Color) -> f64 {
+        let Color::Rgb(r, g, b) = color else {
+            panic!("expected RGB, got {color:?}");
+        };
+        let [r, g, b] = [r, g, b].map(|channel| f64::from(channel) / 255.0);
+        let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+        let chroma = max - min;
+        let sector = if chroma == 0.0 {
+            0.0
+        } else if max == r {
+            ((g - b) / chroma).rem_euclid(6.0)
+        } else if max == g {
+            (b - r) / chroma + 2.0
+        } else {
+            (r - g) / chroma + 4.0
+        };
+        sector * 60.0
+    }
+    let apart = (hue(a) - hue(b)).abs();
+    apart.min(360.0 - apart)
+}
+
+#[test]
+fn run_mode_colours() {
+    let palette = theme::default_theme().palette(false);
+    assert_eq!(palette.run_mode("Plan").fg, Some(palette.warning));
+    assert_eq!(palette.run_mode("Build").fg, Some(palette.accent));
+    assert!(
+        palette
+            .run_mode("Build")
+            .add_modifier
+            .contains(Modifier::BOLD)
+    );
+}
+
+#[test]
+fn inline_code_reads_apart() {
+    use crate::color_depth::ColorDepth;
+    for theme in theme::themes() {
+        // At 16 colours code must not turn the red that marks errors, after the same
+        // contrast repair a drawn frame gets.
+        // Replies draw on the background and the composer on the surface.
+        let palette = theme.palette(false);
+        for fill in [palette.background, palette.surface] {
+            let mut cell = Buffer::empty(ratatui::layout::Rect::new(0, 0, 1, 1));
+            cell[(0, 0)].set_fg(palette.code).set_bg(fill);
+            ColorDepth::Ansi16.downconvert_buffer(&mut cell);
+            let code = cell[(0, 0)].fg;
+            assert!(
+                !matches!(code, Color::Red | Color::LightRed),
+                "{} {code:?}",
+                theme.slug
+            );
+        }
+        // Monochrome grays alone would not set code apart from bold text.
+        let gray = theme.palette(true);
+        assert_eq!(
+            gray.semantic_inline_code().bg,
+            Some(gray.panel),
+            "{}",
+            theme.slug
+        );
+    }
+}
+
+#[test]
 fn chip_text_reads_everywhere() {
     for theme in crate::theme::themes() {
         let palette = theme.palette(false);

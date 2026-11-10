@@ -67,6 +67,10 @@ def test_native_semantic_colors_are_readable(theme: dict[str, object]) -> None:
             "warning",
             "error",
             "success",
+            "heading_1",
+            "heading_2",
+            "heading_3",
+            "code",
         ):
             assert _contrast_ratio(colors[foreground], colors[background]) >= 4.5, (
                 theme["slug"],

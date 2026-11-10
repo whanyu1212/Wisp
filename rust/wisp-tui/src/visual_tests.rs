@@ -21,6 +21,15 @@ struct Fixture {
     draft: String,
 }
 
+/// The totals closing the typography scenario's turn.
+fn typography_totals() -> crate::transcript::RunTotals {
+    crate::transcript::RunTotals {
+        mode: Some("plan".into()),
+        model: Some("demo".into()),
+        ..crate::transcript::RunTotals::finished(2_000, 0)
+    }
+}
+
 fn fixture(scenario: &str) -> LiveUi {
     let fixture: Fixture = serde_json::from_str(include_str!(
         "../../../tests/fixtures/tui_visual_conversation.json"
@@ -331,6 +340,24 @@ fn fixture(scenario: &str) -> LiveUi {
         ));
         ui.state.transcript.observe_tool_result(completed);
         ui.transcript_row_cache.fold_mut().expand(process);
+        ui.editor = PromptEditor::default();
+    }
+    if scenario == "typography" {
+        // A finished turn whose reply thought first, then answered with three heading
+        // levels and inline code, closed by its summary row.
+        ui.state.transcript = Default::default();
+        ui.state
+            .transcript
+            .append_prompt("Why is startup slow?".into());
+        ui.state
+            .transcript
+            .append_thinking_delta(1, "Check the config loader first.");
+        ui.state.transcript.complete_message(
+            1,
+            "# Startup review\n\nConfig loads twice.\n\n## Fixes\n\n- Call `load()` once\n\n### Risk\n\nPlugins read early."
+                .into(),
+        );
+        ui.state.transcript.attach_run_summary(typography_totals());
         ui.editor = PromptEditor::default();
     }
     if scenario == "diff-previews" {
@@ -994,6 +1021,123 @@ fn cells_on(buffer: &ratatui::buffer::Buffer, y: u16, fill: Color) -> usize {
         .count()
 }
 
+/// Where `text` starts on row `y`, in columns, if it is there.
+fn column_of_opt(buffer: &ratatui::buffer::Buffer, y: u16, text: &str) -> Option<u16> {
+    let line = (0..buffer.area.width)
+        .map(|x| buffer[(x, y)].symbol())
+        .collect::<String>();
+    line.find(text)
+        .map(|start| u16::try_from(line[..start].chars().count()).unwrap())
+}
+
+/// Where `text` starts on row `y`, in columns.
+fn column_of(buffer: &ratatui::buffer::Buffer, y: u16, text: &str) -> u16 {
+    column_of_opt(buffer, y, text).unwrap_or_else(|| panic!("{text:?} not on row {y}"))
+}
+
+#[test]
+fn headings_take_level_colours() {
+    for depth in [ColorDepth::TrueColor, ColorDepth::Ansi256] {
+        let mut ui = fixture("typography");
+        ui.color_depth = depth;
+        let palette = ui.palette();
+        let shown = |color| depth.downconvert(color);
+        let buffer = draw(&mut ui, 80, 30);
+        let screen = screen_text(&buffer);
+        // The `#` markers are not drawn.
+        assert!(!screen.contains("# "), "{screen}");
+        let cell_at = |text: &str| {
+            let y = row_containing(&buffer, text);
+            buffer[(column_of(&buffer, y, text), y)].clone()
+        };
+        let levels = [
+            ("Startup review", palette.heading_1),
+            ("Fixes", palette.heading_2),
+            ("Risk", palette.heading_3),
+        ];
+        for (text, color) in levels {
+            let cell = cell_at(text);
+            assert_eq!(cell.fg, shown(color), "{text} {depth:?}");
+            assert!(cell.modifier.contains(Modifier::BOLD), "{text}");
+        }
+        // Each level reads apart from the others and from the speaker label.
+        let colours = [
+            shown(palette.primary),
+            shown(palette.heading_1),
+            shown(palette.heading_2),
+            shown(palette.heading_3),
+        ];
+        for (index, colour) in colours.iter().enumerate() {
+            assert!(
+                !colours[index + 1..].contains(colour),
+                "{depth:?} {colours:?}"
+            );
+        }
+        let code = cell_at("load()");
+        assert_eq!(code.fg, shown(palette.code), "{depth:?}");
+        assert!(code.modifier.contains(Modifier::BOLD));
+    }
+}
+
+#[test]
+fn thought_label_is_quiet_bold() {
+    for depth in [ColorDepth::TrueColor, ColorDepth::Ansi256] {
+        let mut ui = fixture("typography");
+        ui.color_depth = depth;
+        let muted = depth.downconvert(ui.palette().muted);
+        let buffer = draw(&mut ui, 80, 30);
+        let y = row_containing(&buffer, "◆  Thought for ");
+        let label = column_of(&buffer, y, "Thought");
+        assert_eq!(buffer[(label, y)].fg, muted, "{depth:?}");
+        assert!(buffer[(label, y)].modifier.contains(Modifier::BOLD));
+        // Its time and summary are muted but not bold.
+        for text in ["for ", "Check the config"] {
+            let x = column_of(&buffer, y, text);
+            assert_eq!(buffer[(x, y)].fg, muted, "{text} {depth:?}");
+            assert!(!buffer[(x, y)].modifier.contains(Modifier::BOLD), "{text}");
+        }
+    }
+}
+
+#[test]
+fn footer_mode_takes_colour() {
+    for depth in [ColorDepth::TrueColor, ColorDepth::Ansi256] {
+        let mut ui = fixture("typography");
+        ui.color_depth = depth;
+        // A later turn with the same settings leaves them, and the mode, off its row.
+        ui.state.transcript.append_prompt("Again".into());
+        ui.state.transcript.complete_message(2, "Done.".into());
+        assert!(ui.state.transcript.attach_run_summary(typography_totals()));
+        ui.transcript_viewport.reduce(
+            TranscriptViewAction::Home,
+            &ui.state.transcript,
+            &mut ui.transcript_row_cache,
+        );
+        let palette = ui.palette();
+        let (warning, muted) = (
+            depth.downconvert(palette.warning),
+            depth.downconvert(palette.muted),
+        );
+        let buffer = draw(&mut ui, 80, 40);
+        let y = row_containing(&buffer, "Plan · demo");
+        let start = column_of(&buffer, y, "Plan");
+        for x in start..start + 4 {
+            assert_eq!(buffer[(x, y)].fg, warning, "column {x} {depth:?}");
+            assert!(buffer[(x, y)].modifier.contains(Modifier::BOLD));
+        }
+        assert_eq!(buffer[(start + 4, y)].fg, muted, "{depth:?}");
+        assert!(!buffer[(start + 4, y)].modifier.contains(Modifier::BOLD));
+        let later = (y + 1..buffer.area.height)
+            .find(|&row| column_of_opt(&buffer, row, "╰").is_some())
+            .expect("the later turn's summary row");
+        assert!(
+            (0..buffer.area.width).all(|x| buffer[(x, later)].fg != warning),
+            "{}",
+            screen_text(&buffer)
+        );
+    }
+}
+
 #[test]
 fn diff_band_skips_line_numbers() {
     for depth in [ColorDepth::TrueColor, ColorDepth::Ansi256] {
@@ -1526,6 +1670,7 @@ fn capture_conversation_screens() {
                 "activity-rail-expanded",
                 "showcase",
                 "welcome",
+                "typography",
             ] {
                 let mut ui = fixture(scenario);
                 ui.theme.active = selected;

@@ -120,11 +120,7 @@ impl RunTotals {
     pub(crate) fn summary_line(&self, with_settings: bool) -> String {
         let mut settings = Vec::new();
         if let Some(mode) = &self.mode {
-            settings.push(match mode.as_str() {
-                "build" => "Build".to_owned(),
-                "plan" => "Plan".to_owned(),
-                other => other.to_owned(),
-            });
+            settings.push(mode_label(mode).to_owned());
         }
         settings.extend(self.model.iter().cloned());
         settings.extend(self.effort.iter().cloned());
@@ -182,6 +178,15 @@ struct RunSummary {
     /// `totals.summary_line(with_settings)`, kept so drawing the row does not
     /// rebuild it.
     line: String,
+}
+
+/// How a summary row names a mode: `Build` and `Plan` capitalized, others as sent.
+fn mode_label(mode: &str) -> &str {
+    match mode {
+        "build" => "Build",
+        "plan" => "Plan",
+        other => other,
+    }
 }
 
 /// `31`, or `8.4` below ten, so a slow rate keeps a meaningful digit.
@@ -299,6 +304,13 @@ impl TranscriptEntry {
             .as_ref()
             .map(|summary| summary.line.as_str())
             .filter(|_| self.unrevealed.is_empty())
+    }
+
+    /// The mode this entry's summary row opens with, when the row names its settings.
+    pub(crate) fn run_summary_mode(&self) -> Option<&str> {
+        let summary = self.run_summary.as_ref()?;
+        let label = mode_label(summary.totals.mode.as_deref()?);
+        summary.line.starts_with(label).then_some(label)
     }
 
     /// The folder the session moved to after this entry, once the entry is fully
