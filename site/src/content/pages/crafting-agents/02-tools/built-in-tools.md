@@ -386,6 +386,13 @@ image instead. When a later session replays the call as a summary rather than as
 native tool history (Anthropic and Gemini do), the summary names the image but does
 not carry it; read the file again to see it.
 
+These formats are checked against the live APIs with `scripts/live_image_smoke.py`
+(see [Testing](../../contributing/testing.md#live-image-checks)). On 2026-11-10 it
+passed for the OpenAI Responses API, Codex, xAI (Responses and Chat Completions)
+and Anthropic, and DeepSeek got the note instead of the image, as a text-only model
+should. Gemini has not been checked live yet, in either its Gemini 3 or its earlier
+format; that work is ongoing.
+
 ## 4. `write`
 
 Arguments: `path`, `content`, and `overwrite` (default `true`; `false` fails if
