@@ -1,0 +1,11 @@
+id = "mcp-service-alerts"
+title = "Check the dependency alerts of every service a local file lists"
+tags = ["mcp", "orchestration"]
+prompt = "services.txt lists the services this team owns; each is a repository under the acme account. Which of them have an open dependency alert of high or critical severity? Write their names to ANSWER.txt, one per line."
+verify = "{python} {task}/verify.py"
+timeout_seconds = 600
+# One alerts call for each of 20 services, after reading the file.
+max_tool_iterations = 35
+tools = ["write", "read", "ls"]
+mcp_servers = ["devhub"]
+opt_in = true

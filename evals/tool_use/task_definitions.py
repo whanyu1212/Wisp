@@ -14,7 +14,9 @@ from evals.tool_use.servers.catalogs import CATALOGS
 
 TASKS_DIR = Path(__file__).parent / "tasks"
 
-type Tag = Literal["general", "long-output", "edit", "mcp", "mcp-sweep", "multi-read", "scale"]
+type Tag = Literal[
+    "general", "long-output", "edit", "mcp", "mcp-sweep", "multi-read", "orchestration", "scale"
+]
 type ToolName = Literal["read", "write", "edit", "bash", "grep", "find", "ls", "read_output"]
 
 

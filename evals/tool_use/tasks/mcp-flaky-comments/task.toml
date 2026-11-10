@@ -1,0 +1,12 @@
+id = "mcp-flaky-comments"
+title = "Total the comments on open flaky issues across two pages of results"
+tags = ["mcp", "orchestration"]
+prompt = "In the acme/api repository, how many comments are there in total across all open issues labelled `flaky`? Write just the number to ANSWER.txt."
+verify = "{python} {task}/verify.py"
+timeout_seconds = 420
+max_tool_iterations = 20
+# The only task here with `bash`: adding up 127 numbers is the work a model would
+# otherwise hand to a shell, so the control keeps that option.
+tools = ["write", "read", "ls", "bash"]
+mcp_servers = ["devhub"]
+opt_in = true

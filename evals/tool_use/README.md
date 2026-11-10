@@ -146,11 +146,20 @@ the commit the change starts from, with the models the change will be measured o
 | `2026-11-08-bash-preview.json` | All 12 tasks after it; compare tool changes against this |
 | `2026-11-08-mcp-direct.json`, `2026-11-08-mcp-on-demand.json` | The MCP tasks, 5 runs each, with every MCP tool's definition sent and with on-demand discovery |
 | `2026-11-09-mcp-sweep-direct.json`, `2026-11-09-mcp-sweep-on-demand.json` | The `mcp-sweep` tasks, 5 runs each in each mode: the inventory question with 6, 12, 20, 30 and 50 tools |
+| `2026-11-10-orchestration-direct.json` | The `orchestration` tasks, 5 runs each, with no codemode: the baseline codemode prototypes are compared against (HY-431) |
 
 On-demand discovery cut tokens per run by 76–77% on `mcp-triage` (102 tools) and 28–46% on
 `mcp-pick-tool` (50 tools), and cost 20–34% more on `mcp-similar-servers` (6 tools), with every run
 passing in both modes. On the one-question sweep it broke even at about 20 small tools, which placed
 the `auto` threshold; see [the tools guide](../../site/src/content/pages/guide/tools-and-safety.md#what-on-demand-discovery-saves).
+
+Without codemode, both models already batch: the 34 check-runs calls of `mcp-failing-lint` took
+4 to 7 turns, not 36, and no task needed more than 8. So a script's room to save round trips is
+small, and what it can save is tokens (100k–160k per run) and accuracy. gpt-6.1-sol passed every
+run. gpt-5.6-luna passed 55% of them: it matched check results to the wrong pull requests
+(0/5 on `mcp-failing-lint`), added up the comments wrongly (2/5 on `mcp-flaky-comments`), and once
+named the wrong service. Those are the mistakes keeping results and their calls together in a
+script should prevent.
 
 ## Add a task
 
@@ -163,7 +172,8 @@ Ruff and mypy skip `tasks/`, so fixtures stay byte-exact.
 ```toml
 id = "fix-failing-test"          # must match the folder name
 title = "One line saying what the task asks for"
-tags = ["general"]               # general, long-output, edit, mcp, mcp-sweep, multi-read, scale
+tags = ["general"]               # general, long-output, edit, mcp, mcp-sweep, multi-read,
+                                 # orchestration, scale
 prompt = "What the user types"
 setup = "optional command run after the fixture is committed"
 verify = "{python} -m unittest -q"   # exit 0 means passed
@@ -191,6 +201,19 @@ discovery tools.
 short. `devhub` (`servers/devhub.py`) is about 100 tools of a code-hosting API with descriptions
 of a few sentences and typed, partly nested parameters, close to real servers, so it measures
 what large catalogs cost; `mcp-triage` uses it over several steps.
+
+The `orchestration` tasks measure work a script could do in one tool call (HY-431, codemode):
+many calls, or calls that depend on earlier answers. Their repositories live in
+`servers/devhub_repos.py`, which answers only for them, so devhub's definitions and its `acme/web`
+answers stay what the earlier baselines measured. They are opt-in, so a whole-suite run does not
+pay for them: select them with `--tags orchestration`.
+
+| Task | What it takes |
+|---|---|
+| `mcp-failing-lint` | Two pages of open pull requests, then one check-runs call for each of 34 |
+| `mcp-flaky-comments` | Adding up the comments on 127 issues across two pages of 100 |
+| `mcp-deploy-chain` | Run, then its commit, then the pull request it merged, then that pull request's reviews |
+| `mcp-service-alerts` | A local list of 20 services, then one alerts call for each |
 
 Commands run with `bash -c` in the run's folder. `{python}` becomes the runner's interpreter and
 `{task}` the task's own folder, so a verifier script can live beside `task.toml`, out of the

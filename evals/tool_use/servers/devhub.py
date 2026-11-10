@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable
+from dataclasses import replace
 
+from evals.tool_use.servers import devhub_repos
 from evals.tool_use.servers.model import Arguments, Catalog, CatalogTool, Parameter
 
 # The triage task: in acme/web, the open `regression` issue with the most comments,
@@ -510,4 +512,26 @@ def _decoy_tools() -> tuple[CatalogTool, ...]:
     return tuple(tools)
 
 
-DEVHUB = Catalog(parameters=(), tools=(*_TASK_TOOLS, *_decoy_tools()))
+def _with_repositories(tool: CatalogTool) -> CatalogTool:
+    """Let the larger repositories in `devhub_repos` answer ``tool`` for themselves.
+
+    Only the answer changes: every tool keeps its name, description and parameters,
+    which are prompt text the existing baselines were measured with.
+    """
+
+    responder = devhub_repos.RESPONDERS.get(tool.name)
+    if responder is None:
+        return tool
+    fallback = tool.respond
+
+    def respond(arguments: Arguments) -> str:
+        answer = responder(arguments)
+        return fallback(arguments) if answer is None else answer
+
+    return replace(tool, respond=respond)
+
+
+DEVHUB = Catalog(
+    parameters=(),
+    tools=tuple(_with_repositories(tool) for tool in (*_TASK_TOOLS, *_decoy_tools())),
+)
