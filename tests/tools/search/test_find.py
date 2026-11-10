@@ -69,9 +69,9 @@ def test_find_tool_prepares_glob_once_and_reuses_display_paths(
         expanded.append(pattern)
         return original_expand(pattern)
 
-    def tracking_display(candidate: Path, resolved_cwd: Path) -> str:
+    def tracking_display(candidate: Path, resolved_cwd: Path, boundary: Path) -> str:
         displayed.append(candidate)
-        return original_display(candidate, resolved_cwd)
+        return original_display(candidate, resolved_cwd, boundary)
 
     monkeypatch.setattr(search_tools_module, "_expand_brace_alternatives", tracking_expand)
     monkeypatch.setattr(search_tools_module, "_display_walked_path", tracking_display)

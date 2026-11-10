@@ -90,9 +90,11 @@ class InProcessOptions:
     approval response unless ``approve_unsafe_tools`` is explicitly selected.
 
     ``cwd`` controls built-in tool path resolution and command execution.
-    ``project_context_root`` independently controls trust, project settings,
-    skills, and instruction discovery. When only a project root is supplied, it
-    also becomes the tool working directory.
+    ``project_context_root`` controls trust, project settings, skills, and
+    instruction discovery. Once the project is trusted, it is also the boundary of
+    the built-in file and search tools when it contains ``cwd`` and is not a broad
+    folder such as the home folder; otherwise the boundary is ``cwd``. When only a
+    project root is supplied, it also becomes the tool working directory.
     """
 
     all_tools: bool = False
@@ -670,6 +672,7 @@ class RpcHost:
             models=runtime.models,
             trusted=options.startup_trusted,
             cwd=cwd,
+            project_root=project_context_root,
             skill_catalog=skill_catalog,
         )
         agent = CodingSession.from_configuration(

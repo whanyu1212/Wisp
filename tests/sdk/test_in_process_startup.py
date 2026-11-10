@@ -334,7 +334,10 @@ def test_in_process_sdk_project_root_defaults_tool_cwd(tmp_path: Path) -> None:
     anyio.run(scenario)
 
 
-def test_in_process_sdk_explicit_cwd_preserves_project_subdirectory(tmp_path: Path) -> None:
+@pytest.mark.parametrize("trusted", [True, False])
+def test_in_process_sdk_explicit_cwd_preserves_project_subdirectory(
+    tmp_path: Path, trusted: bool
+) -> None:
     project = tmp_path / "project"
     working_directory = project / "src"
     working_directory.mkdir(parents=True)
@@ -343,7 +346,7 @@ def test_in_process_sdk_explicit_cwd_preserves_project_subdirectory(tmp_path: Pa
         controller = await InProcessWisp.start(
             WispConfig(provider="fake", session_dir=tmp_path / "sessions"),
             options=InProcessOptions(
-                startup_trusted=True,
+                startup_trusted=trusted,
                 project_context_root=project,
                 cwd=working_directory,
             ),
@@ -352,6 +355,9 @@ def test_in_process_sdk_explicit_cwd_preserves_project_subdirectory(tmp_path: Pa
             host = controller._in_process_transport._host
             assert host.agent.tool_context.cwd == working_directory.resolve(strict=False)
             assert host.agent.project_context_root == project.resolve(strict=False)
+            # Only a trusted project's file tools reach beyond the working directory.
+            expected = project if trusted else working_directory
+            assert host.agent.tool_context.boundary() == expected.resolve()
         finally:
             await controller.aclose()
 

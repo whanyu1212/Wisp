@@ -205,7 +205,7 @@ def test_native_literal_grep_falls_back_for_surrogateescaped_paths(
     monkeypatch.setattr(
         search_tools_module,
         "_display_walked_path",
-        lambda _path, _root: "file-\udcff.txt",
+        lambda _path, _root, _boundary: "file-\udcff.txt",
     )
 
     result = _run_grep(

@@ -366,6 +366,14 @@ def test_print_mode_loads_trusted_root_settings_from_subdirectory(
     monkeypatch.setenv("WISP_TRUST_FILE", str(trust_file))
     record_trust(project, True, trust_path=trust_file)
     monkeypatch.chdir(nested)
+    boundaries: list[Path] = []
+    from_configuration = CodingSession.from_configuration.__func__  # type: ignore[attr-defined]
+
+    def recording(cls: type[CodingSession], configuration: object, **kwargs: object) -> object:
+        boundaries.append(configuration.tool_context.boundary())  # type: ignore[attr-defined]
+        return from_configuration(cls, configuration, **kwargs)
+
+    monkeypatch.setattr(CodingSession, "from_configuration", classmethod(recording))
 
     result = CliRunner().invoke(
         app,
@@ -375,6 +383,8 @@ def test_print_mode_loads_trusted_root_settings_from_subdirectory(
 
     assert result.exit_code == 0, result.output
     assert len(list(sessions.glob("*.jsonl"))) == 1
+    # A trusted project's file tools reach its root from the subdirectory.
+    assert boundaries == [project.resolve()]
 
 
 def test_prompt_implies_text_mode_when_env_defaults_to_tui(tmp_path: Path) -> None:

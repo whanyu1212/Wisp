@@ -41,6 +41,7 @@ def resolve_coding_session_configuration(
     models: ModelRegistry | None,
     trusted: bool,
     cwd: Path | None = None,
+    project_root: Path | None = None,
     skill_catalog: SkillCatalog | None = None,
     provider_name: str | None = None,
     model: str | None = None,
@@ -53,6 +54,10 @@ def resolve_coding_session_configuration(
     Explicit in-session provider, model, and effort choices outrank the supplied
     config. Every effort remains scoped to its effective provider and model while
     catalog-unknown models stay permissive.
+
+    The file tools may reach the whole ``project_root`` only in a trusted session;
+    an untrusted one keeps them inside ``cwd``. Trusting a project is what widens
+    their reach, since the trust prompt names that root.
     """
 
     provider = providers.get(provider_name or config.provider)
@@ -75,7 +80,11 @@ def resolve_coding_session_configuration(
         model=selected_model,
         effort=selected_effort,
         models=models,
-        tool_context=ToolContext.from_config(config, cwd=cwd),
+        tool_context=ToolContext.from_config(
+            config,
+            cwd=cwd,
+            workspace_root=project_root if trusted else None,
+        ),
         skill_catalog=skill_catalog or SkillCatalog(),
         trusted=trusted,
         context_reserve_tokens=config.context_reserve_tokens,

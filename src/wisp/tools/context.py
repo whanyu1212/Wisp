@@ -11,6 +11,7 @@ from wisp.config.settings import DEFAULT_PROTECTED_PATHS, user_settings_path
 from wisp.mcp.credentials import mcp_auth_path
 from wisp.tools.seen_files import SeenFiles
 from wisp.trust.permissions import permissions_directory
+from wisp.trust.scope import is_broad_root
 
 if TYPE_CHECKING:
     from wisp.config.runtime import WispConfig
@@ -43,6 +44,12 @@ class ToolContext:
     """Ambient state shared with tool invocations."""
 
     cwd: Path
+    # The folder file and search tools may reach. None keeps them inside ``cwd``. A
+    # trusted project sets its root, so a session started in a subfolder, or moved
+    # into one, can still reach the rest of the project. A broad folder, such as the
+    # home folder or a filesystem root, is dropped when the context is built, so a
+    # caller-supplied root can never open the whole machine. See ``boundary``.
+    workspace_root: Path | None = None
     max_output_bytes: int = 50_000
     max_output_lines: int = 2_000
     allow_outside_cwd: bool = False
@@ -63,6 +70,30 @@ class ToolContext:
     # a frontend is listening; None means nobody is, and tools skip reporting.
     progress: ToolProgress | None = None
 
+    def __post_init__(self) -> None:
+        # Checked once here: ``boundary`` runs for every directory a search walks, and
+        # the broad-folder check reads the filesystem.
+        if self.workspace_root is not None and is_broad_root(self.workspace_root):
+            object.__setattr__(self, "workspace_root", None)
+
+    def boundary(self) -> Path:
+        """Return the resolved folder the file and search tools must stay inside.
+
+        The workspace root applies only while it contains ``cwd`` and is not a broad
+        folder; otherwise the tools stay inside ``cwd``, so a root that does not fit
+        never widens access.
+        ``allow_outside_cwd`` lifts the boundary separately.
+
+        Returns:
+            Path: The resolved workspace root, or the resolved ``cwd``.
+        """
+
+        cwd = self.cwd.resolve(strict=False)
+        if self.workspace_root is None:
+            return cwd
+        root = self.workspace_root.resolve(strict=False)
+        return root if cwd.is_relative_to(root) else cwd
+
     @classmethod
     def default(cls) -> ToolContext:
         """Create a context rooted at the current working directory."""
@@ -70,10 +101,17 @@ class ToolContext:
         return cls(cwd=Path.cwd())
 
     @classmethod
-    def from_config(cls, config: WispConfig, *, cwd: Path | None = None) -> ToolContext:
+    def from_config(
+        cls,
+        config: WispConfig,
+        *,
+        cwd: Path | None = None,
+        workspace_root: Path | None = None,
+    ) -> ToolContext:
         """Create a context that honors a config's protected-path policy.
 
-        ``cwd`` defaults to the current working directory. The protected-path
+        ``cwd`` defaults to the current working directory, and ``workspace_root``
+        to none, which keeps the file tools inside ``cwd``. The protected-path
         globs come from the resolved config so file tools deny reads of secrets
         (``.env`` and friends) unless the policy is relaxed.
 
@@ -105,6 +143,7 @@ class ToolContext:
         endpoint = config.openai_compatible
         return cls(
             cwd=cwd if cwd is not None else Path.cwd(),
+            workspace_root=workspace_root,
             protected_paths=protected_paths,
             seen_files=SeenFiles(),
             withheld_environment=(

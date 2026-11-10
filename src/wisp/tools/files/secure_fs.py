@@ -70,8 +70,10 @@ def secure_tool_path(
     write: bool = False,
     follow_links: bool = False,
 ) -> SecureToolPath:
-    """Validate a tool path against the working directory and protected paths.
+    """Validate a tool path against the workspace boundary and protected paths.
 
+    A relative path is taken from the working directory. The path must stay inside
+    ``context.boundary()``: the trusted project's root, or the working directory.
     The path as written is checked first. On POSIX, when ``follow_links`` or
     ``write`` is set and the path goes through a symbolic link, the resolved path
     must pass the same checks. A read then uses the resolved path; a write is
@@ -80,7 +82,7 @@ def secure_tool_path(
 
     Args:
         selected (str | None): The path the caller gave, or ``None`` for ``default``.
-        context (ToolContext): Working directory and path policy.
+        context (ToolContext): Working directory, boundary, and path policy.
         default (str): Path used when ``selected`` is ``None``.
         write (bool): Whether the path will be written.
         follow_links (bool): Whether a read may go through symbolic links.
@@ -90,28 +92,26 @@ def secure_tool_path(
 
     Raises:
         ToolArgumentError: When the path contains a NUL character.
-        ToolError: When the path or its resolved target is outside the working
-            directory or protected, or a write goes through a symbolic link.
+        ToolError: When the path or its resolved target is outside the boundary
+            or protected, or a write goes through a symbolic link.
     """
 
     raw = selected if selected is not None else default
     if "\0" in raw:
         raise ToolArgumentError(f"Path contains a NUL character: {raw!r}")
     cwd = context.cwd.resolve(strict=False)
+    boundary = context.boundary()
     candidate = Path(raw).expanduser()
     if not candidate.is_absolute():
         candidate = cwd / candidate
     # abspath/normpath are lexical; unlike Path.resolve they do not dereference links.
     absolute = Path(os.path.abspath(os.path.normpath(candidate)))
-    if not context.allow_outside_cwd:
-        try:
-            absolute.relative_to(cwd)
-        except ValueError as exc:
-            raise ToolError(
-                f"Path is outside the tool working directory: {raw}",
-                failure_code="path_outside_workspace",
-                recovery_hint="Use a path inside the session working directory.",
-            ) from exc
+    if not context.allow_outside_cwd and not absolute.is_relative_to(boundary):
+        raise ToolError(
+            f"Path is outside the workspace: {raw}",
+            failure_code="path_outside_workspace",
+            recovery_hint=f"Use a path inside {boundary}.",
+        )
     if is_protected_path(absolute, context):
         raise ToolError(f"Access to protected path denied: {raw}")
     constraint = context.write_constraint
@@ -128,7 +128,7 @@ def secure_tool_path(
     if (follow_links or write) and os.name != "nt":
         resolved = Path(os.path.realpath(absolute))
         if resolved != absolute:
-            _check_resolved_target(resolved, raw, cwd, context)
+            _check_resolved_target(resolved, raw, boundary, context)
             if write:
                 raise ToolError(
                     f"Path goes through a symbolic link: {raw}",
@@ -142,13 +142,13 @@ def secure_tool_path(
     return SecureToolPath(absolute, raw, display)
 
 
-def _check_resolved_target(resolved: Path, raw: str, cwd: Path, context: ToolContext) -> None:
+def _check_resolved_target(resolved: Path, raw: str, boundary: Path, context: ToolContext) -> None:
     # Errors name only the path the caller gave, never the target it resolves to.
-    if not context.allow_outside_cwd and not resolved.is_relative_to(cwd):
+    if not context.allow_outside_cwd and not resolved.is_relative_to(boundary):
         raise ToolError(
-            f"Symbolic link points outside the tool working directory: {raw}",
+            f"Symbolic link points outside the workspace: {raw}",
             failure_code="path_outside_workspace",
-            recovery_hint="Use a path inside the session working directory.",
+            recovery_hint=f"Use a path inside {boundary}.",
         )
     if is_protected_path(resolved, context):
         raise ToolError(f"Access to protected path denied: {raw}")
