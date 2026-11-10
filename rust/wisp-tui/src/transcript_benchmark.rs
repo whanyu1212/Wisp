@@ -611,6 +611,7 @@ fn tool_result(call_id: &str, name: &str, output: &str) -> ToolResultInput {
         process_started_at_ms: None,
         process_ended_at_ms: None,
         edit_locations: Vec::new(),
+        images: Vec::new(),
     }
 }
 

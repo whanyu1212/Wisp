@@ -3269,6 +3269,22 @@ fn push_status_note(action: &mut String, note: Option<&str>) -> usize {
     start
 }
 
+/// Name the images a tool returned at the end of its action line, such as
+/// `[image 640×480 png]`, or how many there are when it returned several. Returns
+/// where the note starts, like [`push_status_note`], or `usize::MAX` without images.
+fn push_image_note(action: &mut String, images: &[String]) -> usize {
+    let start = action.len();
+    match images {
+        [] => return usize::MAX,
+        [image] => {
+            action.push_str("  ");
+            action.push_str(image);
+        }
+        images => action.push_str(&format!("  [{} images]", images.len())),
+    }
+    start
+}
+
 fn card_projection(entry: &TranscriptEntry, expanded_output: bool) -> Option<CardProjection> {
     match &entry.kind {
         TranscriptEntryKind::Message => None,
@@ -3281,7 +3297,8 @@ fn card_projection(entry: &TranscriptEntry, expanded_output: bool) -> Option<Car
                 action_argument_style,
             ) = tool_action_projection(card);
             let action_link = card_file_link(card);
-            let note_start = push_status_note(&mut action, card.status_note().or(card.live_line()));
+            let note_start = push_status_note(&mut action, card.status_note().or(card.live_line()))
+                .min(push_image_note(&mut action, &card.images));
             if let DetailAvailability::LiveRetained(detail) = &card.structured_detail {
                 let diff = matches!(
                     detail.kind,
@@ -5997,6 +6014,7 @@ mod tests {
             process_started_at_ms: None,
             process_ended_at_ms: None,
             edit_locations: Vec::new(),
+            images: Vec::new(),
         }
     }
 

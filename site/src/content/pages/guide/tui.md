@@ -89,6 +89,11 @@ Replies that omit a table header are also supported: a paragraph beginning with 
 complete, pipe-enclosed rows with the same number of columns renders as a table without a header.
 Single rows, mismatched columns, and pipe syntax inside code remain literal.
 
+Images are named rather than drawn. An image pasted or dragged into the composer shows as a chip
+such as `Image 1 · 640×480`, and the sent prompt shows a `[image 640×480 png]` line for it. A tool
+card whose result returned images, such as a `read` of a PNG, ends its action row with the same
+label, or with `[2 images]` when there are several; the label stays whole when the row is cut short.
+
 Providers send replies in bursts, so the TUI reveals streamed text at an even pace instead of as
 each burst arrives. Text shows a word at a time, about a tenth of a second behind the stream, and
 an unfinished `**bold**`, `` `code` `` or `~~strike~~` span, table row, or code fence line waits
