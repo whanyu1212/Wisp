@@ -243,6 +243,10 @@ pub struct TranscriptEntry {
     cost: Option<crate::web_search::MessageCost>,
     /// Display-only summary closing the last reply of a finished run.
     run_summary: Option<RunSummary>,
+    /// The folder the session moved to after this entry, drawn as a divider below it.
+    moved_to: Option<String>,
+    /// The folder the first of those moves left, when known.
+    moved_from: Option<String>,
     /// How the run this prompt started ended, for the side panel's turn list.
     run_result: Option<RunResult>,
     pub state: TranscriptEntryState,
@@ -294,6 +298,14 @@ impl TranscriptEntry {
         self.run_summary
             .as_ref()
             .map(|summary| summary.line.as_str())
+            .filter(|_| self.unrevealed.is_empty())
+    }
+
+    /// The folder the session moved to after this entry, once the entry is fully
+    /// shown. The transcript view draws it as a divider after the turn's summary.
+    pub(crate) fn moved_to(&self) -> Option<&str> {
+        self.moved_to
+            .as_deref()
             .filter(|_| self.unrevealed.is_empty())
     }
 
@@ -681,6 +693,49 @@ impl Transcript {
         // The entry's last row now leads to the summary row, so cached rows rebuild.
         Self::bump_revision(entry);
         self.refresh_run_summaries();
+        true
+    }
+
+    /// Show a move from `previous` to `cwd` below the last entry, replacing an earlier
+    /// move shown there, as the next prompt follows both. Moves that end where the
+    /// first of them started show nothing, as a resumed session's history does.
+    /// `previous` is None for a move from history, which reports only where its moves
+    /// ended. Returns false when no reply or card shows yet, or the last entry is a
+    /// prompt, whose highlighted surface a divider must not split from its reply.
+    pub(crate) fn attach_directory_change(
+        &mut self,
+        previous: Option<String>,
+        cwd: String,
+    ) -> bool {
+        let last = self
+            .entries
+            .iter()
+            .rev()
+            .find(|entry| {
+                !(entry.role == TranscriptRole::Assistant
+                    && matches!(entry.kind, TranscriptEntryKind::Message)
+                    && entry.content.is_empty()
+                    && entry.searches.is_empty()
+                    && entry.unrevealed.is_empty())
+            })
+            .filter(|entry| entry.role != TranscriptRole::User)
+            .map(|entry| entry.id);
+        let Some(id) = last else {
+            return false;
+        };
+        let entry = self.entry_mut(id);
+        if entry.moved_to.is_none() {
+            entry.moved_from = previous;
+        }
+        if entry.moved_from.as_ref() == Some(&cwd) {
+            entry.moved_to = None;
+            entry.moved_from = None;
+        } else {
+            entry.moved_to = Some(cwd);
+        }
+        // The entry's last row now leads to or away from the divider, so cached rows
+        // rebuild.
+        Self::bump_revision(entry);
         true
     }
 
@@ -1877,6 +1932,8 @@ impl Transcript {
                 searches: Vec::new(),
                 cost: None,
                 run_summary: None,
+                moved_to: None,
+                moved_from: None,
                 run_result: None,
                 thinking_started: None,
                 running_since: None,
@@ -2573,6 +2630,8 @@ impl Transcript {
             searches: Vec::new(),
             cost: None,
             run_summary: None,
+            moved_to: None,
+            moved_from: None,
             run_result: None,
             thinking_started: None,
             running_since: None,
@@ -2669,6 +2728,8 @@ impl Transcript {
             searches: Vec::new(),
             cost: None,
             run_summary: None,
+            moved_to: None,
+            moved_from: None,
             run_result: None,
             thinking_started: None,
             running_since: None,

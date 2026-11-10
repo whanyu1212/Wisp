@@ -199,6 +199,15 @@ def builtin_command_descriptors() -> tuple[CommandDescriptor, ...]:
             order=44,
         ),
         CommandDescriptor(
+            name="cd",
+            title="Change directory",
+            description="Work from another folder, entering its project if it is outside this one",
+            category=CommandCategory.session,
+            arguments=(CommandArgument("path", "Folder: absolute, relative, or ~", required=True),),
+            accepts_arguments=True,
+            order=45,
+        ),
+        CommandDescriptor(
             name="provider",
             title="Provider",
             description="Show or switch the active provider",

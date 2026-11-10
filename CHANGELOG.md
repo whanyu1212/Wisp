@@ -45,6 +45,13 @@ this policy.
   records its starting folder, and a session continued from another folder (`wisp -p --resume`)
   records that move. Session files keep `schema_version` 6, and 0.7 reads a session with moves; it
   ignores the event entries, so it works from its launch folder.
+- The Rust TUI has `/cd <path>`. It completes folder names from the local file system as you type
+  the path: `Tab` fills in the selected folder, and `Enter` moves once the path names one. Like
+  other configuration, `/cd` is refused until the session is idle rather than queued behind a run.
+  Each move draws a `── Working in <folder> ──` divider below the last reply, unless it ends where
+  the moves before it started, in the live session and when a session is resumed; the footer, side
+  panel, and permission badge follow the new folder and project. A move before any reply shows only
+  in the footer. (HY-478)
 
 ### Events
 
@@ -52,6 +59,11 @@ this policy.
   (`null` for the folder a new session started in), and `cwd`. `change_directory` is a new
   command. `rpc.workspace` is now also sent after a move and after a session becomes active. The
   schema bundle and conformance fixture are regenerated; the same-release rule applies.
+- `rpc.messages` message snapshots carry `moved_to`: the folder the session moved to after that
+  message and before the next one, where the moves in between ended, or `null` when there were none
+  or they ended where they started. A session's starting-folder record is not a move. The TUI draws
+  it as the divider. (HY-478)
+- `/cd` is in the `get_commands` catalog, with one required `path` argument.
 
 ### Tools
 

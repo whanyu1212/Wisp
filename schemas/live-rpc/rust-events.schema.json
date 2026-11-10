@@ -3019,6 +3019,19 @@
           "default": null,
           "title": "RpcMessageSnapshotIsError"
         },
+        "moved_to": {
+          "anyOf": [
+            {
+              "format": "path",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "RpcMessageSnapshotMovedTo"
+        },
         "operation_id": {
           "anyOf": [
             {
@@ -3187,6 +3200,7 @@
         "cost",
         "web_searches",
         "run_completed",
+        "moved_to",
         "tool_result",
         "skill_invocation"
       ],

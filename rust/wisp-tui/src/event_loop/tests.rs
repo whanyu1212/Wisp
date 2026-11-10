@@ -1109,7 +1109,7 @@ async fn rebound_submit_does_not_let_enter_activate_a_completion_first_painted_w
         ..LiveUi::default()
     };
     ui.editor.insert_paste("/the");
-    ui.completion.sync(&ui.editor);
+    ui.completion.sync(&ui.editor, None);
     let pending = PendingInput::capture(key(KeyCode::Enter), &ui, 16);
     draw(&mut ui);
     assert!(ui.completion.rendered_selection().is_some());

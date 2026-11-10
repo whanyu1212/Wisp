@@ -8,7 +8,7 @@ byte budgets so a large session cannot produce an unbounded response.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -23,6 +23,7 @@ from wisp.events import (
     RpcMessageToolCallSnapshot,
     RpcMessageToolResultSnapshot,
     RpcSkillInvocationSnapshot,
+    SessionDirectoryChanged,
     ToolCallSnapshot,
     WebSearchPerformed,
     WebSearchSource,
@@ -74,6 +75,9 @@ class MessagePageIndex:
     web_searches: dict[str, tuple[WebSearchPerformed, ...]]
     # A run's totals, keyed by the last message the run persisted.
     run_totals: dict[str, AgentCompleted]
+    # The folder the moves after a message ended in, keyed by that message, when they
+    # left the session somewhere other than where they started.
+    moves: dict[str, Path]
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +127,11 @@ def message_page_index_from_entries(
     searches: dict[str, tuple[WebSearchPerformed, ...]] = {}
     pending: list[WebSearchPerformed] = []
     run_totals: dict[str, AgentCompleted] = {}
+    # The folder before the first move after each message, and the folder the latest
+    # one entered.
+    move_spans: dict[str, tuple[Path, Path]] = {}
+    # The latest message on the path, which a move after it follows.
+    last_message: str | None = None
     # The run's latest message, which its `agent.completed` closes. A run that persisted
     # no message of its own (its prompt rolled back) must not claim an earlier run's.
     run_last_message: str | None = None
@@ -143,6 +152,16 @@ def message_page_index_from_entries(
             operation_id = entry.operation_id
         if isinstance(entry, MessageSessionEntry):
             run_last_message = entry.id
+            last_message = entry.id
+        if (
+            isinstance(entry, EventSessionEntry)
+            and entry.event.payload.get("type") == "session.directory_changed"
+            and last_message is not None
+        ):
+            move = _directory_move(entry.event.payload)
+            if move is not None:
+                started, _ = move_spans.get(last_message, move)
+                move_spans[last_message] = (started, move[1])
         if isinstance(entry, EventSessionEntry) and entry.event.payload.get("type") == "web.search":
             if len(pending) < 32:
                 pending.append(WebSearchPerformed.model_validate(entry.event.payload))
@@ -165,7 +184,30 @@ def message_page_index_from_entries(
         positions={entry.id: index for index, entry in enumerate(messages)},
         web_searches=searches,
         run_totals=run_totals,
+        # Moves that end where they started, such as a failed move into another project
+        # and the move back saved after it, changed nothing to show.
+        moves={
+            message: entered
+            for message, (started, entered) in move_spans.items()
+            if entered != started
+        },
     )
+
+
+def _directory_move(payload: Mapping[str, object]) -> tuple[Path, Path] | None:
+    """Return the folders a saved move left and entered, or None for one not shown.
+
+    A record with no previous folder is a session's starting folder, saved before its
+    first prompt, not a move.
+    """
+
+    try:
+        change = SessionDirectoryChanged.model_validate(payload)
+    except ValidationError:
+        return None
+    if change.previous_cwd is None:
+        return None
+    return change.previous_cwd, change.cwd
 
 
 def message_page_from_index(
@@ -229,6 +271,7 @@ def message_page_from_index(
             text_budget=text_budget,
             web_searches=index.web_searches.get(entry.id, ()),
             run_completed=index.run_totals.get(entry.id),
+            moved_to=index.moves.get(entry.id),
             complete_structure=complete_structure or full_content,
         )
         for entry in reversed(selected)
@@ -259,6 +302,7 @@ def _rpc_message_snapshot(
     complete_structure: bool = False,
     web_searches: tuple[WebSearchPerformed, ...] = (),
     run_completed: AgentCompleted | None = None,
+    moved_to: Path | None = None,
 ) -> RpcMessageSnapshot:
     message = entry.message
     skill_invocation = _rpc_skill_invocation_snapshot(
@@ -310,6 +354,7 @@ def _rpc_message_snapshot(
         cost=message.cost,
         web_searches=tuple(_bounded_search(search, text_budget) for search in web_searches),
         run_completed=run_completed,
+        moved_to=moved_to,
         tool_result=tool_result,
         skill_invocation=skill_invocation,
     )

@@ -20,6 +20,7 @@ impl UiState {
     pub(crate) fn configuration_active(&self) -> bool {
         self.mode_change.is_some()
             || self.search_change.is_some()
+            || self.directory_change.is_some()
             || self.model_configuration_active()
             || self.context.configuring()
             // A read of the mode, which the composer refreshes in the background,

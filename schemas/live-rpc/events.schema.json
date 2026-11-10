@@ -3233,6 +3233,19 @@
           "default": null,
           "title": "Is Error"
         },
+        "moved_to": {
+          "anyOf": [
+            {
+              "format": "path",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Moved To"
+        },
         "operation_id": {
           "anyOf": [
             {
@@ -3397,6 +3410,7 @@
         "cost",
         "web_searches",
         "run_completed",
+        "moved_to",
         "tool_result",
         "skill_invocation"
       ],

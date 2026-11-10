@@ -341,6 +341,15 @@ fn tui_command_builders_preserve_the_canonical_wire_contract() {
         serde_json::json!({"type": "set_session_name", "id": "name-2", "name": ""})
     );
 
+    let moved = commands::WispTypedClientRpcCommands::change_directory("cd-1", "~/work/app")
+        .unwrap()
+        .into_value()
+        .unwrap();
+    assert_eq!(
+        moved,
+        serde_json::json!({"type": "change_directory", "id": "cd-1", "path": "~/work/app"})
+    );
+
     let cloned = commands::WispTypedClientRpcCommands::clone_session("clone-1")
         .unwrap()
         .into_value()

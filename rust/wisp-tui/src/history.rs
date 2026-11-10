@@ -154,6 +154,10 @@ pub(crate) fn project_chronological_history<'a>(
         if let Some(totals) = run_totals(message, index)? {
             transcript.attach_run_summary(totals);
         }
+        // A move after this message: the divider the live session drew after it.
+        if let Some(folder) = optional_string(message, index, "moved_to")? {
+            transcript.attach_directory_change(None, folder.to_owned());
+        }
         durable_entry_ids.push(durable_entry_id.to_owned());
     }
     transcript.finish_history_projection(MISSING_TOOL_RESULT);
@@ -1699,6 +1703,30 @@ mod tests {
             panic!("expected a finished run");
         };
         assert_eq!(live.summary_line(true), line);
+    }
+
+    #[test]
+    fn reopened_move_keeps_divider() {
+        let mut reply = message("assistant", "Pushed.");
+        reply["run_completed"] = finished_run();
+        reply["moved_to"] = json!("/work/app");
+        let mut prompt = message("user", "next");
+        prompt["moved_to"] = json!("/work/ignored");
+        let restored = project_rpc_messages(&[message("user", "push it"), reply, prompt]).unwrap();
+        // The divider sits on the entry the live move chose; none splits a prompt.
+        let mut live = crate::transcript::Transcript::default();
+        live.append_prompt("push it".into());
+        live.complete_message(1, "Pushed.".into());
+        live.attach_directory_change(Some("/work".into()), "/work/app".into());
+        let moves = |transcript: &crate::transcript::Transcript| {
+            transcript
+                .entries()
+                .iter()
+                .map(|entry| entry.moved_to().map(str::to_owned))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(moves(&restored)[..2], moves(&live)[..]);
+        assert_eq!(moves(&restored), [None, Some("/work/app".into()), None]);
     }
 
     /// The totals line of [`finished_run`] without its settings.

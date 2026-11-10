@@ -101,6 +101,20 @@ impl<T> Inspection<T> {
         }
     }
 
+    /// Take a report sent for another command, such as a move into another project,
+    /// as the state in effect. A request already in flight was answered for the
+    /// older state, so its own report no longer replaces this one.
+    pub fn adopt(&mut self, report: &Result<Arc<T>, String>) {
+        let Ok(snapshot) = report else {
+            return;
+        };
+        if let Some(pending) = &mut self.pending {
+            pending.superseded = true;
+        }
+        self.snapshot = Some(Arc::clone(snapshot));
+        self.error = None;
+    }
+
     /// Finish a change that may have reported the state it reached before
     /// failing: an MCP change can save its settings and then fail to restart.
     /// That state replaces the older snapshot, alongside the error.
