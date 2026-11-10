@@ -63,6 +63,34 @@ trust, set it via `monkeypatch.setenv`.
 Prefer `ScriptedProvider` / `FakeProvider` from `wisp.providers.fake` for new provider-facing tests
 rather than live models.
 
+## Live image checks
+
+Unit tests pin each adapter's image request shape, but only a live API shows whether the provider
+accepts it. `scripts/live_image_smoke.py` runs three checks per provider: an image attached to the
+prompt, an image `read` returns, and a resumed session that asks about that image again. It uses the
+credentials Wisp already has, skips providers without any, costs a few cents per provider, and is
+not part of CI:
+
+```bash
+uv run python scripts/live_image_smoke.py
+uv run python scripts/live_image_smoke.py --only anthropic google
+```
+
+Run it after changing how an adapter encodes images. Results from 2026-11-10:
+
+| Provider | Prompt image | Tool image | Resume |
+| -- | -- | -- | -- |
+| OpenAI Responses (`gpt-5.6-sol`) | pass | pass | pass, image resent |
+| Codex (`gpt-5.6-sol`) | pass | pass | pass, image resent |
+| xAI Responses (`grok-4.6`) | pass | pass | pass, image resent |
+| xAI Chat Completions (`grok-4.6`) | pass | pass | pass, image resent |
+| Anthropic (`claude-sonnet-5`) | pass | pass | pass; summary names the image |
+| DeepSeek (`deepseek-v4-pro`, text-only) | refused before sending | note sent instead | pass |
+| Gemini 3 (`gemini-3.6-flash`) | not checked yet | not checked yet | not checked yet |
+| Gemini 2.5 (`gemini-2.5-flash`) | not checked yet | not checked yet | not checked yet |
+
+Checking Gemini live is ongoing work: the run above could not reach the API.
+
 ## Harness interruption and recovery
 
 For changes to conversation orchestration, start with:
