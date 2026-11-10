@@ -1094,6 +1094,9 @@ class CodingSession:
         the way they open them.
         """
 
+        if "\0" in path:
+            # The path functions below raise ValueError for it, which no caller expects.
+            raise DirectoryChangeError(f"Path contains a NUL character: {path!r}")
         root = self.project_context_root
         if root is None:
             raise DirectoryChangeError("This session has no project root to move within")

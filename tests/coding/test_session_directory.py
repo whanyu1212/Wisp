@@ -99,8 +99,9 @@ def test_move_notes_next_prompt(project: Path, tmp_path: Path) -> None:
         ("missing", "No such folder"),
         ("README.md", "Not a folder"),
         ("escape", "outside the project"),
+        ("src\x00/../..", "NUL character"),
     ],
-    ids=["parent", "absolute", "missing", "file", "link-out"],
+    ids=["parent", "absolute", "missing", "file", "link-out", "nul"],
 )
 def test_bad_folder_refused(project: Path, tmp_path: Path, path: str, error: str) -> None:
     (project / "escape").symlink_to(tmp_path)
