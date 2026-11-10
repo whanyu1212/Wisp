@@ -633,6 +633,7 @@ async def _run_print_with_runtime(
         providers=runtime.providers,
         models=runtime.models,
         trusted=trusted,
+        project_root=project_context_root,
         skill_catalog=skill_catalog,
     )
     agent = CodingSession.from_configuration(

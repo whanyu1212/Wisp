@@ -12,9 +12,12 @@ searchable: true
 # Tools & safety
 
 Wisp includes built-in local tools for reading files, editing files, searching projects, and running
-shell commands. File tools are sandboxed to the tool context's working directory. On macOS and
-Linux, `read`, `grep`, `find`, and `ls` follow a symbolic link you name when its target is also
-inside that directory and not protected; `write` and `edit` refuse links and name the target to use
+shell commands. File tools are sandboxed to the workspace. In a trusted project the workspace is
+the project root, so a session started in `src/` can still read and edit `tests/`. Otherwise, or
+when no project root contains the working directory, it is the working directory itself. Relative
+paths are always taken from the working directory. On macOS and Linux, `read`, `grep`, `find`, and
+`ls` follow a symbolic link you name when its target is also inside the workspace and not
+protected; `write` and `edit` refuse links and name the target to use
 instead. Links found while searching a directory are skipped.
 
 | Category | Tools | Approval |
@@ -126,7 +129,7 @@ written and the file a symlink points to. `read`, `write`, and `edit` refuse a p
 `grep`, `find`, and `ls` leave protected files out of their results.
 
 Protection goes by path. A hard link is another path to the same file, so a hard link inside the
-working directory to a protected file, or to a file outside it, is read and changed like any other
+workspace to a protected file, or to a file outside it, is read and changed like any other
 file. Git does not store hard links, so one has to be created on your machine, usually by a `bash`
 command you approve.
 

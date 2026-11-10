@@ -488,7 +488,7 @@ def test_path_walk_resolves_nested_short_name(tmp_path: Path, monkeypatch: Monke
             context,
             ignore_specs=(),
             ignore_override_matcher=None,
-            resolved_cwd=tmp_path.resolve(),
+            boundary=tmp_path.resolve(),
         )
     ]
 

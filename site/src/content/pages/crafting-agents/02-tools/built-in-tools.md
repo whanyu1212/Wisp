@@ -190,23 +190,27 @@ def secure_tool_path(selected, context, *, default=".", write=False, follow_link
         candidate = cwd / candidate
     # Lexical: collapses "a/../b" without asking the filesystem about links.
     absolute = Path(os.path.abspath(os.path.normpath(candidate)))
-    if not context.allow_outside_cwd:
-        absolute.relative_to(cwd)  # ValueError becomes "path_outside_workspace"
+    # The workspace: the trusted project's root, or the working directory.
+    boundary = context.boundary()
+    if not context.allow_outside_cwd and not absolute.is_relative_to(boundary):
+        raise ToolError(...)  # failure_code "path_outside_workspace"
     if is_protected_path(absolute, context):
         raise ToolError(f"Access to protected path denied: {raw}")
     # ... a write constraint may limit writes to an exact list of paths
     if (follow_links or write) and os.name != "nt":
         resolved = Path(os.path.realpath(absolute))
         if resolved != absolute:  # some component is a symbolic link
-            _check_resolved_target(resolved, raw, cwd, context)  # same two checks again
+            _check_resolved_target(resolved, raw, boundary, context)  # same two checks again
             if write:
                 raise ToolError(f"Path goes through a symbolic link: {raw}", ...)
             absolute = resolved
     return SecureToolPath(absolute, raw, display)
 ```
 
-Both the path as written and the path after following links must stay inside the
-working directory and avoid protected patterns. A link named `notes.txt` that
+Relative paths are taken from the working directory, but the boundary is the workspace: the
+project root when the project is trusted, so a session in `src/` can still reach `tests/`, and the
+working directory otherwise. Both the path as written and the path after following links must stay
+inside the workspace and avoid protected patterns. A link named `notes.txt` that
 points at `~/.ssh/id_rsa` fails the second check. Reads continue with the
 resolved path. Writes refuse links, with a hint naming the target: the atomic
 replace described in section 4 would replace the link itself rather than the file it

@@ -289,9 +289,9 @@ def test_grep_tool_prepares_glob_once_and_reuses_display_path(
         expanded.append(pattern)
         return original_expand(pattern)
 
-    def tracking_display(candidate: Path, resolved_cwd: Path) -> str:
+    def tracking_display(candidate: Path, resolved_cwd: Path, boundary: Path) -> str:
         displayed.append(candidate)
-        return original_display(candidate, resolved_cwd)
+        return original_display(candidate, resolved_cwd, boundary)
 
     monkeypatch.setattr(search_tools_module, "_expand_brace_alternatives", tracking_expand)
     monkeypatch.setattr(search_tools_module, "_display_walked_path", tracking_display)
@@ -324,7 +324,7 @@ def test_grep_tool_no_match_without_glob_skips_display_path_work(
 ) -> None:
     (tmp_path / "alpha.txt").write_text("haystack\n", encoding="utf-8")
 
-    def unexpected_display(_candidate: Path, _resolved_cwd: Path) -> str:
+    def unexpected_display(_candidate: Path, _resolved_cwd: Path, _boundary: Path) -> str:
         raise AssertionError("a no-match grep should not compute a display path")
 
     monkeypatch.setattr(search_tools_module, "_display_walked_path", unexpected_display)

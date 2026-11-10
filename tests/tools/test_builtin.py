@@ -86,11 +86,11 @@ def test_file_tools_reject_paths_outside_cwd(tmp_path: Path) -> None:
     )
 
     for tool, arguments in cases:
-        with pytest.raises(ToolError, match="outside the tool working directory") as raised:
+        with pytest.raises(ToolError, match="outside the workspace") as raised:
             run_tool(tool, arguments, context)
         assert raised.value.failure_code == "path_outside_workspace"
         assert raised.value.retryable is False
-        assert raised.value.recovery_hint == "Use a path inside the session working directory."
+        assert raised.value.recovery_hint == f"Use a path inside {workspace.resolve()}."
 
 
 def test_file_tools_allow_absolute_paths_inside_cwd(tmp_path: Path) -> None:

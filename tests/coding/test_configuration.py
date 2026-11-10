@@ -282,3 +282,25 @@ def test_web_search_setting_carries_into_the_session(tmp_path: Path) -> None:
     assert configuration.web_search is True
     assert agent.web_search is True
     assert agent.configuration.web_search is True
+
+
+@pytest.mark.parametrize(("trusted", "reach_root"), [(True, True), (False, False)])
+def test_trust_widens_tool_boundary(tmp_path: Path, trusted: bool, reach_root: bool) -> None:
+    """Only a trusted session's file tools reach the whole project root."""
+
+    providers = ProviderRegistry()
+    providers.register(FakeProvider())
+    subfolder = tmp_path / "src"
+    subfolder.mkdir()
+
+    configuration = resolve_coding_session_configuration(
+        WispConfig(provider="fake", auth_path=tmp_path / "auth.json"),
+        providers=providers,
+        models=None,
+        trusted=trusted,
+        cwd=subfolder,
+        project_root=tmp_path,
+    )
+
+    expected = tmp_path if reach_root else subfolder
+    assert configuration.tool_context.boundary() == expected.resolve()

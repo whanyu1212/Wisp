@@ -61,7 +61,7 @@ def test_repository_search_rejects_root_outside_selected_cwd(tmp_path: Path) -> 
     outside = tmp_path / "outside"
     outside.mkdir()
 
-    with pytest.raises(ToolError, match="outside the tool working directory"):
+    with pytest.raises(ToolError, match="outside the workspace"):
         run_benchmark(BenchmarkConfig(cwd=inside, root=outside, iterations=1))
 
 

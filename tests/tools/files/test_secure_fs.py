@@ -119,7 +119,7 @@ def test_link_outside_workspace_denied(tmp_path: Path, selected: str) -> None:
     (workspace / "dir-link").symlink_to(outside, target_is_directory=True)
     (workspace / "chain").symlink_to(workspace / "file-link")
 
-    with pytest.raises(ToolError, match="points outside the tool working directory") as raised:
+    with pytest.raises(ToolError, match="points outside the workspace") as raised:
         run_tool(ReadTool(), {"path": selected}, ToolContext(cwd=workspace))
 
     assert raised.value.failure_code == "path_outside_workspace"
@@ -929,7 +929,7 @@ def test_path_fallback_propagates_nested_ignore_file_limit(
                 context,
                 ignore_specs=(),
                 ignore_override_matcher=None,
-                resolved_cwd=tmp_path.resolve(),
+                boundary=tmp_path.resolve(),
             )
         )
 
@@ -1381,5 +1381,5 @@ def test_ls_displays_but_does_not_follow_symlink(tmp_path: Path) -> None:
     listing = run_tool(LsTool(), {"path": "."}, ToolContext(cwd=workspace))
     assert listing.text == "linked"
 
-    with pytest.raises(ToolError, match="points outside the tool working directory"):
+    with pytest.raises(ToolError, match="points outside the workspace"):
         run_tool(LsTool(), {"path": "linked"}, ToolContext(cwd=workspace))

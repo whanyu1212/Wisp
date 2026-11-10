@@ -68,6 +68,8 @@ def test_trusted_project_provider_refresh_does_not_restart_mcp_servers(tmp_path:
         )
 
         await transition.apply_trusted_project(runtime=runtime, agent=agent)
+        # The rebuilt configuration carries the trusted root to the file tools.
+        assert agent.tool_context.workspace_root == project
         await runtime.aclose()
 
     anyio.run(scenario)
@@ -108,12 +110,15 @@ def test_no_settings_trust_transition_updates_session_without_rebuilding(
         )
 
         transition.configure_overrides.web_search = True
+        assert agent.tool_context.boundary() == workspace.resolve()
         event = await transition.apply_trusted_project(runtime=runtime, agent=agent)
 
         assert agent.web_search is True
         assert event is None
         assert agent.trusted is True
         assert agent.tool_context.cwd == workspace
+        # Trusting the project lets the file tools reach its whole root.
+        assert agent.tool_context.boundary() == tmp_path.resolve()
 
     anyio.run(scenario)
 

@@ -10,6 +10,22 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
+## Unreleased
+
+### Tools
+
+- The file and search tools' boundary is the project root in a trusted project, instead of the
+  working directory, so a session started in a subfolder can read, edit and search the rest of its
+  project. Relative paths are still taken from the working directory, protected paths stay
+  protected wherever they are, and symbolic links must still resolve inside the boundary. An
+  untrusted session keeps the working directory as the boundary, as does one whose project root
+  does not contain the working directory or is a broad folder (the home folder, a folder above it,
+  a filesystem root, or a temporary folder), including a `project_context_root` an SDK caller
+  supplies. `grep` and `find` show files above the working directory as `../` paths, which globs
+  can match, and a search inside the working directory returns the same files whether or not the
+  project is trusted. A refused path now reads `Path is outside the workspace`, and its hint names
+  the boundary. `ToolContext` gains `workspace_root` and `boundary()`. (HY-475)
+
 <!-- Keeps links to the pre-release "0.7.0 — Unreleased" heading working. -->
 <a id="070--unreleased"></a>
 

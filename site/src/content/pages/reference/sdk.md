@@ -107,6 +107,13 @@ runtime resources are retained.
 When `cwd` is omitted and `project_context_root` is supplied, the project root also becomes the tool
 working directory.
 
+Relative tool paths are taken from `cwd`. Once the project is trusted, through `startup_trusted` or
+an approved trust request, the built-in file and search tools may reach the whole project root: the
+supplied `project_context_root`, or the one Wisp finds from `cwd`. The root applies only when it
+contains `cwd` and is not the home folder, a folder above it, a filesystem root, or a temporary
+folder; otherwise the tools stay inside `cwd`. To keep them inside `cwd` in a trusted project, pass
+`project_context_root` equal to `cwd`.
+
 Tool visibility does not imply tool approval. Unsafe tools still request approval unless
 `approve_unsafe_tools=True`.
 

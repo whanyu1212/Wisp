@@ -635,6 +635,7 @@ def _python_grep(
     findings = _GrepFindings(context_lines=effective_context_lines)
     glob_matcher = _prepare_glob_matcher(glob) if glob is not None else None
     walked_display_root = context.cwd.resolve(strict=False)
+    walked_boundary = context.boundary()
     cached_file_path: Path | None = None
     cached_display_path = ""
 
@@ -642,7 +643,9 @@ def _python_grep(
         nonlocal cached_file_path, cached_display_path
         if file_path != cached_file_path:
             cached_file_path = file_path
-            cached_display_path = _display_walked_path(file_path, walked_display_root)
+            cached_display_path = _display_walked_path(
+                file_path, walked_display_root, walked_boundary
+            )
         return cached_display_path
 
     ignore_override_matcher = _glob_ignore_override(glob, glob_matcher, display_path)
@@ -1017,18 +1020,32 @@ _SKIPPED_NOTICE_NAMES = 5
 _SPLITLINES_BOUNDARIES = frozenset("\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
 
 
-def _display_walked_path(path: Path, resolved_cwd: Path) -> str:
-    """Display a secure-walk candidate without resolving the same file again."""
+def _display_walked_path(path: Path, resolved_cwd: Path, boundary: Path) -> str:
+    """Display a secure-walk candidate without resolving the same file again.
+
+    A file below ``resolved_cwd`` is shown relative to it. A file elsewhere inside
+    ``boundary``, such as a sibling folder of a trusted project, is shown as a
+    ``../`` path from the working directory, so the model can pass it back to a
+    tool and a glob such as ``../tests/*.py`` matches it. Anything else, reachable
+    only with ``allow_outside_cwd``, stays absolute.
+    """
 
     if os.name == "nt":
         # WindowsPath.relative_to ignores case, which a string prefix would not.
         try:
             return str(path.relative_to(resolved_cwd))
         except ValueError:
-            return str(path)
-    # Walked paths are built from the resolved root, so the prefix is lexical.
-    # Path.relative_to costs more than the rest of the walk per file.
-    return str(path).removeprefix(str(resolved_cwd).rstrip("/") + "/")
+            pass
+    else:
+        # Walked paths are built from the resolved root, so the prefix is lexical.
+        # Path.relative_to costs more than the rest of the walk per file.
+        prefix = str(resolved_cwd).rstrip("/") + "/"
+        text = str(path)
+        if text.startswith(prefix):
+            return text[len(prefix) :]
+    if path.is_relative_to(boundary):
+        return os.path.relpath(path, resolved_cwd)
+    return str(path)
 
 
 @dataclass(slots=True)
@@ -1175,6 +1192,7 @@ def _python_find(
     # lookahead in memory.
     glob_matcher = _prepare_glob_matcher(pattern)
     resolved_cwd = context.cwd.resolve(strict=False)
+    boundary = context.boundary()
 
     report = _WalkReport()
 
@@ -1185,7 +1203,7 @@ def _python_find(
             cancel_event=cancel_event,
             report=report,
         ):
-            display_path = _display_walked_path(candidate, resolved_cwd)
+            display_path = _display_walked_path(candidate, resolved_cwd, boundary)
             if glob_matcher(display_path):
                 yield display_path
 
@@ -1369,7 +1387,7 @@ def _iter_walked_files(
                 context,
                 cancel_event=cancel_event,
             )
-            resolved_cwd = context.cwd.resolve(strict=False)
+            boundary = context.boundary()
             native = _NATIVE_WALK
             native_walk = (
                 None
@@ -1390,7 +1408,7 @@ def _iter_walked_files(
                     secure_path.path,
                     context,
                     ignore_override_matcher=ignore_override_matcher,
-                    resolved_cwd=resolved_cwd,
+                    boundary=boundary,
                     cancel_event=cancel_event,
                     report=report,
                 )
@@ -1401,7 +1419,7 @@ def _iter_walked_files(
                 context,
                 ignore_specs=ancestor_specs,
                 ignore_override_matcher=ignore_override_matcher,
-                resolved_cwd=resolved_cwd,
+                boundary=boundary,
                 in_git_repository=in_git_repository,
                 cancel_event=cancel_event,
                 report=report,
@@ -1470,7 +1488,7 @@ def _native_walk_directory(
     context: ToolContext,
     *,
     ignore_override_matcher: PathMatcher | None,
-    resolved_cwd: Path,
+    boundary: Path,
     cancel_event: Event | None,
     report: _WalkReport | None = None,
 ) -> Iterator[_WalkedFile]:
@@ -1483,9 +1501,9 @@ def _native_walk_directory(
     # Entries opened through a descriptor are never links, so each one's real path
     # is the root's real path plus its relative path.
     real_root = Path(os.path.realpath(root))
-    in_cwd = context.allow_outside_cwd or real_root.is_relative_to(resolved_cwd)
+    in_boundary = context.allow_outside_cwd or real_root.is_relative_to(boundary)
     cancelled = cancel_event is not None and cancel_event.is_set()
-    if cancelled or not in_cwd:
+    if cancelled or not in_boundary:
         walk.close()
         return
     already_skipped = 0 if report is None else report.deep_directories_skipped
@@ -1574,15 +1592,19 @@ def _ancestor_ignore_specs(
     *,
     cancel_event: Event | None = None,
 ) -> tuple[tuple[_IgnoreSpec, ...], bool]:
+    # A path below the working directory reads ignore files from there down, as it
+    # always has, so trust does not change what a search inside it returns. A path
+    # elsewhere in a trusted project reads them from the project root down.
     cwd = context.cwd.resolve(strict=False)
+    base = cwd if path.is_relative_to(cwd) else context.boundary()
     try:
-        relative = path.relative_to(cwd)
+        relative = path.relative_to(base)
     except ValueError:
         return (), False
-    enclosing = _enclosing_repository_ignore_specs(cwd, context, cancel_event=cancel_event)
+    enclosing = _enclosing_repository_ignore_specs(base, context, cancel_event=cancel_event)
     specs = list(enclosing or ())
     in_git_repository = enclosing is not None
-    current = cwd
+    current = base
     for part in relative.parts:
         if cancel_event is not None and cancel_event.is_set():
             return tuple(specs), in_git_repository
@@ -1690,7 +1712,7 @@ def _walk_directory(
     *,
     ignore_specs: tuple[_IgnoreSpec, ...],
     ignore_override_matcher: PathMatcher | None,
-    resolved_cwd: Path,
+    boundary: Path,
     real_directory: Path | None = None,
     in_git_repository: bool = False,
     cancel_event: Event | None = None,
@@ -1725,7 +1747,7 @@ def _walk_directory(
     # reached by path need resolving.
     if real_directory is None:
         real_directory = Path(os.path.realpath(path))
-    directory_in_cwd = context.allow_outside_cwd or real_directory.is_relative_to(resolved_cwd)
+    directory_in_boundary = context.allow_outside_cwd or real_directory.is_relative_to(boundary)
     directory_flags = (
         os.O_RDONLY
         | getattr(os, "O_DIRECTORY", 0)
@@ -1766,7 +1788,7 @@ def _walk_directory(
                             context,
                             ignore_specs=ignore_specs,
                             ignore_override_matcher=ignore_override_matcher,
-                            resolved_cwd=resolved_cwd,
+                            boundary=boundary,
                             in_git_repository=in_git_repository,
                             cancel_event=cancel_event,
                             depth=depth + 1,
@@ -1793,7 +1815,7 @@ def _walk_directory(
                     context,
                     ignore_specs=ignore_specs,
                     ignore_override_matcher=ignore_override_matcher,
-                    resolved_cwd=resolved_cwd,
+                    boundary=boundary,
                     real_directory=real_directory / name,
                     in_git_repository=in_git_repository,
                     cancel_event=cancel_event,
@@ -1816,7 +1838,7 @@ def _walk_directory(
                 )
                 or (ignore_override_matcher is not None and ignore_override_matcher(candidate))
             )
-            and directory_in_cwd
+            and directory_in_boundary
             and not _is_protected_walked_file(candidate, real_directory / name, context)
         ):
             yield _WalkedFile(
@@ -2087,11 +2109,7 @@ def _is_path_within_tool_cwd(path: Path, context: ToolContext) -> bool:
         return False
     if context.allow_outside_cwd:
         return True
-    try:
-        path.resolve(strict=False).relative_to(context.cwd.resolve(strict=False))
-    except ValueError:
-        return False
-    return True
+    return path.resolve(strict=False).is_relative_to(context.boundary())
 
 
 def _is_protected_walked_file(path: Path, real_path: Path, context: ToolContext) -> bool:
