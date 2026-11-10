@@ -96,6 +96,17 @@ this policy.
   green and red rather than gray.
 - Glass, which draws on the terminal's own background, shows your prompt in bold instead of on a
   band. (HY-483)
+- Reply headings take a colour per level, all bold: three of teal, blue and purple for the first
+  three levels, then grays stepping down to muted text. Each theme orders the three so the first
+  two levels sit away from its speaker label's hue, so in truecolor and at 256 colours a reply's
+  first heading no longer looks like the `wisp` label. Every theme sets the three heading colours
+  and a new `code` colour.
+- Inline code in replies and the composer is bold in the theme's code colour instead of sitting on
+  a raised surface; monochrome keeps the surface.
+- A thought's row reads `◆ Thought for 2.0s`: the label in bold muted text, its time beside it
+  instead of in the right-hand column, then its first line as before.
+- A turn's summary row opens with its mode in a colour of its own: the warning colour for Plan and
+  the accent for other modes. (HY-484)
 
 <!-- Keeps links to the pre-release "0.7.0 — Unreleased" heading working. -->
 <a id="070--unreleased"></a>
