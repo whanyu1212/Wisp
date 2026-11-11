@@ -10,7 +10,13 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## Unreleased
+## 0.8.1 — Unreleased
+
+0.8.1 is a patch release on 0.8.0 for the terminal UI. It centres the welcome card and its tip, and
+draws footer key hints without a background, which some terminals stretched into blocks reaching
+the window's bottom edge. It changes no command, event, handshake, session, settings, credential,
+or trust format, so 0.8.0 and 0.8.1 read each other's sessions. The backend and frontend must come
+from the same release.
 
 ### TUI
 
