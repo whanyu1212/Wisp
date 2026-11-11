@@ -148,9 +148,9 @@ def test_running_bash_card_shows_progress_until_its_result_arrives(tmp_path: Pat
                 last_submit = time.monotonic()
             if prompt_sent and not progress_seen and screen_shows(output, "LIVEPROGRESS"):
                 progress_seen = True
-            # The completed card collapses to its checked action row; the live line
+            # The completed card collapses to its finished action row; the live line
             # beside it must be gone.
-            if progress_seen and not result_seen and screen_shows(output, "✓  Bash"):
+            if progress_seen and not result_seen and screen_shows(output, "• Ran"):
                 result_seen = True
                 assert not screen_shows(output, "LIVEPROGRESS"), bytes(output)
                 os.write(terminal_fd, b"\x03")

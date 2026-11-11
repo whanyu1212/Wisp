@@ -218,7 +218,7 @@ for line in sys.stdin:
                 prompt_sent = True
             # The backend emits the edit card after the process completes, so once
             # demo.txt is painted every card holds its final state. A running process card
-            # already shows the same `Process` chip, so the chip alone proves nothing.
+            # already shows the same `Background` label, so the label alone proves nothing.
             if cards_redraw_offset is None and all(
                 marker in rendered_without_spacing(output) for marker in (b"README.md", b"demo.txt")
             ):
@@ -310,9 +310,8 @@ for line in sys.stdin:
     assert resized_detail_at is not None, bytes(output)
     assert quit_sent, bytes(output)
     assert b"README.md" in output
-    # The resize repaints whole frames, where the completed marker sits beside the chip
-    # and the fold arrow before the task.
-    assert "✓Process▸Backgroundcommand".encode() in rendered_without_spacing(cards_frame)
+    # The resize repaints whole frames, where the completed marker sits beside the label.
+    assert "•Backgroundcommand".encode() in rendered_without_spacing(cards_frame)
     assert b"safe" in output
     assert b"safe\xef\xbf\xbd[2J" in output
     assert b"safe\x1b[2J" not in output
