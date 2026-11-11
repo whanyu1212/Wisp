@@ -4,7 +4,7 @@ use crate::markdown::{BlockStyle, InlineStyle, TranscriptSpanStyle};
 use crate::mouse;
 use crate::prompt_editor::{PromptEditor, PromptProjection};
 use crate::prompt_highlighting::{self, Highlight, Kind as PromptHighlightKind};
-use crate::reducer::{UiState, ViewStatus};
+use crate::reducer::{AgentMode, UiState, ViewStatus};
 use crate::side_panel::{self, SidePanel};
 use crate::startup_logo::{self, LogoChoice};
 use crate::syntax::SyntaxClass;
@@ -27,13 +27,6 @@ use wisp_protocol::commands::PermissionMode;
 
 const MIN_TERMINAL_WIDTH: u16 = 30;
 const MIN_TERMINAL_HEIGHT: u16 = 8;
-/// The composer's ceiling with its frame and blank row. A framed composer without the
-/// blank row stops one row lower, and an unframed one two rows lower, so neither
-/// spends the rows they leave out on more draft.
-const MAX_COMPOSER_HEIGHT: u16 = 10;
-/// From this conversation height the framed composer leaves a blank row between the
-/// draft and its identity; a shorter screen keeps that row for the transcript.
-const COMPOSER_GAP_MIN_HEIGHT: u16 = 24;
 const COMPOSER_TAB_WIDTH: usize = 4;
 const DECISION_PREVIEW_GRAPHEMES: usize = 160;
 const DECISION_PREVIEW_JSON_BYTES: usize = 1024;
@@ -63,35 +56,26 @@ pub fn decision_context_visible(area: Rect) -> bool {
 
 fn composer_height(area: Rect, state: &UiState, layout: Option<&ComposerLayout>) -> u16 {
     let framed = area.height >= 16;
-    let gap = composer_gap(area);
-    // The footer, the transcript's two rows, and the status line while running.
-    let ceiling = area
-        .height
-        .saturating_sub(3 + status_line_height(state))
-        .clamp(
-            2,
-            MAX_COMPOSER_HEIGHT - u16::from(!framed) - u16::from(!(framed && gap)),
-        );
+    // A draft grows to half the conversation, and never past the footer, the
+    // transcript's two rows, and the status line while running.
+    let ceiling = (area.height / 2)
+        .min(area.height.saturating_sub(3 + status_line_height(state)))
+        .max(2);
     if editable(state) {
         u16::try_from(
             layout
                 .map_or(1, |layout| {
                     layout.rows.len() + usize::from(!layout.chips.is_empty())
                 })
-                // A framed composer adds its borders and the identity row, and on a
-                // tall screen a blank row between the draft and the identity.
-                .saturating_add(if framed { 3 + usize::from(gap) } else { 0 }),
+                // A framed composer adds its two borders; the bottom one carries
+                // the model and mode.
+                .saturating_add(if framed { 2 } else { 0 }),
         )
-        .unwrap_or(MAX_COMPOSER_HEIGHT)
+        .unwrap_or(u16::MAX)
         .clamp(2, ceiling)
     } else {
         2
     }
-}
-
-/// Whether a conversation this tall gives the framed composer its blank row.
-fn composer_gap(area: Rect) -> bool {
-    area.height >= COMPOSER_GAP_MIN_HEIGHT
 }
 
 fn conversation_surface(area: Rect) -> Rect {
@@ -406,7 +390,6 @@ pub fn render_interactive(
         composer_layout,
         composer_focused,
         padded,
-        composer_gap(area),
         palette,
         bindings,
     );
@@ -1955,89 +1938,119 @@ fn markdown_span_style(base: Style, semantic: TranscriptSpanStyle, palette: Pale
 /// Whether the composer draws its frame, whose bottom border then names the mode
 /// and model in place of the footer.
 fn composer_framed(state: &UiState, padded: bool, area: Rect) -> bool {
-    editable(state) && padded && area.height >= 4
+    editable(state) && padded && area.height >= 3
 }
 
-/// The framed composer's last row: mode and YOLO first so narrow widths cut the
-/// model and effort, never the modes.
-fn composer_identity_line(state: &UiState, palette: Palette) -> Line<'static> {
-    let separator = || Span::styled(" · ", Style::default().fg(palette.muted));
-    let mut spans = Vec::new();
+/// The framed composer's bottom-border label, fitted to `room` columns: the model and
+/// its effort, then the mode and YOLO (`gpt-6 (high) · build · YOLO`). A narrow composer
+/// drops the model first, so the modes stay; None when even they do not fit.
+fn composer_border_label(state: &UiState, palette: Palette, room: usize) -> Option<Line<'static>> {
+    let muted = Style::default().fg(palette.muted);
+    let mut modes = Vec::new();
     if state.mode_confirmed {
-        let mut letters = state.mode.as_str().chars();
-        let label = letters
-            .next()
-            .map(|first| first.to_uppercase().chain(letters).collect::<String>())
-            .unwrap_or_default();
-        spans.push(Span::styled(
-            label,
-            Style::default()
-                .fg(palette.primary)
-                .add_modifier(Modifier::BOLD),
+        // Plan mode keeps the full warning colour; its border carries a dimmer amber.
+        let color = if state.mode == AgentMode::Plan {
+            palette.warning
+        } else {
+            palette.primary
+        };
+        modes.push(Span::styled(
+            state.mode.as_str().to_owned(),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
         ));
     }
     if let Some(yolo) = yolo_label(state) {
-        if !spans.is_empty() {
-            spans.push(separator());
+        if !modes.is_empty() {
+            modes.push(Span::styled(" · ", muted));
         }
-        spans.push(Span::styled(yolo, yolo_style(palette)));
+        modes.push(Span::styled(yolo, yolo_style(palette)));
     }
+    let mut full = Vec::new();
     if let Some(provider) = state.provider.as_deref() {
-        if !spans.is_empty() {
-            spans.push(separator());
-        }
-        if let Some(model) = state
+        // The model names its provider; a provider with no model yet names itself.
+        let model = state
             .model_catalog
             .as_ref()
             .and_then(|catalog| catalog.selection.effective_model.as_deref())
             .or(state.model.as_deref())
-        {
-            spans.push(Span::styled(
-                sanitize_for_terminal(model),
-                Style::default().fg(palette.foreground),
-            ));
-            spans.push(Span::raw(" "));
-        }
-        spans.push(Span::styled(
-            sanitize_for_terminal(provider),
-            Style::default().fg(palette.muted),
+            .unwrap_or(provider);
+        full.push(Span::styled(
+            sanitize_for_terminal(model),
+            Style::default().fg(palette.foreground),
         ));
         if let Some(effort) = shown_effort(state) {
-            spans.push(separator());
             // A chosen level stands out; the model's default stays quiet.
             let style = if effort.is_default {
-                Style::default().fg(palette.muted)
+                muted
             } else {
                 Style::default()
-                    .fg(palette.warning)
+                    .fg(palette.foreground)
                     .add_modifier(Modifier::BOLD)
             };
-            spans.push(Span::styled(sanitize_for_terminal(effort.level), style));
+            full.push(Span::styled(" (", muted));
+            full.push(Span::styled(sanitize_for_terminal(effort.level), style));
+            full.push(Span::styled(")", muted));
         }
         if state.model_selection_stale {
-            spans.push(Span::styled(
-                " (last confirmed; selection unavailable)",
-                Style::default().fg(palette.muted),
-            ));
+            full.push(Span::styled(" (last confirmed)", muted));
+        }
+        if !modes.is_empty() {
+            full.push(Span::styled(" · ", muted));
         }
     }
-    Line::from(spans)
+    full.extend(modes.iter().cloned());
+    [full, modes]
+        .into_iter()
+        .map(Line::from)
+        .find(|line| line.width() > 0 && line.width() <= room)
 }
 
-/// The framed composer's last row: its identity on the left and, during a run, the
-/// keys that follow up or steer on the right when both fit.
-fn render_composer_identity_row(
+/// The columns a composer border row leaves for text: a corner and a dash on each
+/// side, and a space either side of the text.
+fn composer_border_room(area: Rect) -> usize {
+    usize::from(area.width).saturating_sub(6)
+}
+
+/// Write `text` into the composer border row at `y`, right-aligned before one last
+/// `─` and the corner, so the frame keeps its corners at any width. The caller fits
+/// `text` to [`composer_border_room`].
+fn render_composer_border_text(frame: &mut Frame<'_>, area: Rect, y: u16, text: Line<'static>) {
+    let width = u16::try_from(text.width() + 2).unwrap_or(u16::MAX);
+    let mut spans = vec![Span::raw(" ")];
+    spans.extend(text.spans);
+    spans.push(Span::raw(" "));
+    frame.render_widget(
+        Paragraph::new(Line::from(spans).style(text.style)),
+        Rect {
+            x: area.right().saturating_sub(2 + width),
+            y,
+            width,
+            height: 1,
+        },
+    );
+}
+
+/// The model and mode, in the composer's bottom border.
+fn render_composer_border_label(
     frame: &mut Frame<'_>,
     area: Rect,
     state: &UiState,
+    palette: Palette,
+) {
+    if let Some(label) = composer_border_label(state, palette, composer_border_room(area)) {
+        render_composer_border_text(frame, area, area.bottom().saturating_sub(1), label);
+    }
+}
+
+/// During a run that takes input, the keys that follow up or steer, in the
+/// composer's top border. They stay beside the draft they act on, whatever notice
+/// the footer is showing; a composer too narrow for both leaves them out.
+fn render_composer_run_keys(
+    frame: &mut Frame<'_>,
+    area: Rect,
     bindings: &Bindings,
     palette: Palette,
 ) {
-    let identity = composer_identity_line(state, palette);
-    frame.render_widget(Paragraph::new(identity.clone()), area);
-    if !state.active_prompt_editable() {
-        return;
-    }
     let keys = keycap_hints(
         &format!(
             "{} follow-up · {} steer",
@@ -2047,17 +2060,8 @@ fn render_composer_identity_row(
         palette,
     )
     .style(Style::default().fg(palette.muted));
-    let keys_width = u16::try_from(keys.width()).unwrap_or(u16::MAX);
-    let identity_width = u16::try_from(identity.width()).unwrap_or(u16::MAX);
-    if identity_width.saturating_add(2).saturating_add(keys_width) <= area.width {
-        frame.render_widget(
-            Paragraph::new(keys),
-            Rect {
-                x: area.right() - keys_width,
-                width: keys_width,
-                ..area
-            },
-        );
+    if keys.width() <= composer_border_room(area) {
+        render_composer_border_text(frame, area, area.y, keys);
     }
 }
 
@@ -2108,21 +2112,27 @@ fn render_composer(
     layout: Option<&ComposerLayout>,
     focused: bool,
     padded: bool,
-    gap: bool,
     palette: Palette,
     bindings: &Bindings,
 ) -> Option<mouse::Editor> {
     // The border stays quiet while idle or running and takes the waiting or error
-    // colour; the accent bar carries the run's state.
+    // colour; the accent bar carries the run's state. Plan mode tints the border amber
+    // so the mode reads from the frame alone.
     let status = status_color(state, palette);
     let alerting = status == palette.warning || status == palette.error;
-    let border_style = Style::default().fg(if alerting { status } else { palette.muted });
+    let border_color = if alerting {
+        status
+    } else if state.mode_confirmed && state.mode == AgentMode::Plan {
+        palette.plan_border()
+    } else {
+        palette.muted
+    };
     let framed_input = composer_framed(state, padded, area);
     let block = if framed_input {
         Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(border_style)
+            .border_style(Style::default().fg(border_color))
     } else {
         Block::default().padding(Padding::horizontal(CONTENT_PADDING))
     }
@@ -2141,24 +2151,10 @@ fn render_composer(
                 palette.accent
             };
             paint_composer_accent(frame, area, accent);
-            // On a tall screen a blank row separates the draft from the identity,
-            // when the composer has room for both and one draft row.
-            let gap = u16::from(gap && inner.height >= 3);
-            inner.height = inner.height.saturating_sub(1 + gap);
-            // Indented past the prompt prefix so it lines up with the draft.
-            let prefix_width = u16::try_from(COMPOSER_PREFIX.width()).unwrap_or(2);
-            render_composer_identity_row(
-                frame,
-                Rect {
-                    x: inner.x.saturating_add(prefix_width).min(inner.right()),
-                    y: inner.bottom() + gap,
-                    width: inner.width.saturating_sub(prefix_width),
-                    height: 1,
-                },
-                state,
-                bindings,
-                palette,
-            );
+            render_composer_border_label(frame, area, state, palette);
+            if state.active_prompt_editable() {
+                render_composer_run_keys(frame, area, bindings, palette);
+            }
         }
         let layout = layout.expect("editable composer requires a visual layout");
         let prefix_width = u16::try_from(COMPOSER_PREFIX.width()).unwrap_or(2);
@@ -2970,7 +2966,7 @@ fn footer_hint_parts(state: &UiState, bindings: &Bindings, mut panel: Vec<String
     } else if matches!(state.view_status, ViewStatus::Running)
         || state.interaction_status == crate::reducer::InteractionStatus::Compacting
     {
-        // The composer names the keys that follow up or steer.
+        // The composer's top border names the keys that follow up or steer.
         let mut parts = vec!["Esc interrupt".into()];
         parts.extend(std::mem::take(&mut panel));
         parts.push(browse_hint(state, bindings));
@@ -3143,9 +3139,12 @@ fn render_footer(
     };
     if !hints.is_empty() {
         if !right.is_empty() {
-            right.push(Span::styled(" · ", Style::default().fg(palette.muted)));
+            right.push(Span::styled(
+                HINT_SEPARATOR,
+                Style::default().fg(palette.muted),
+            ));
         }
-        right.extend(keycap_hints(&hints, palette).spans);
+        right.extend(keycap_hints_separated(&hints, HINT_SEPARATOR, palette).spans);
     }
     let right = Line::from(right).style(Style::default().fg(palette.muted));
     let right_width = right.width();
@@ -3286,10 +3285,20 @@ pub(crate) const CONTEXT_WARNING_FILL: f64 = 0.7;
 /// Style joined `key action` hints with each key as a keycap. Keys never contain
 /// spaces, so the first space ends the key; widths match the plain string.
 pub(crate) fn keycap_hints(hints: &str, palette: Palette) -> Line<'static> {
+    keycap_hints_separated(hints, " · ", palette)
+}
+
+/// The footer's divider between key hints, and between its status and the hints, so
+/// the keys read apart from the ` · `-joined status. It is as wide as ` · `, so the
+/// footer fits the same hints as before.
+const HINT_SEPARATOR: &str = " │ ";
+
+/// [`keycap_hints`] with each ` · ` between hints drawn as `separator` instead.
+fn keycap_hints_separated(hints: &str, separator: &'static str, palette: Palette) -> Line<'static> {
     let mut spans = Vec::new();
     for (index, hint) in hints.split(" · ").enumerate() {
         if index > 0 {
-            spans.push(Span::raw(" · "));
+            spans.push(Span::raw(separator));
         }
         match hint.split_once(' ') {
             Some((key, action)) => {
@@ -4245,7 +4254,7 @@ mod tests {
         let mut editor = PromptEditor::default();
         editor.insert_paste("hello");
         let rendered = render_to_string(80, 18, &state, &editor);
-        assert!(rendered.contains("model-x fake"));
+        assert!(rendered.contains("─ model-x ─╯"), "{rendered}");
         assert!(rendered.contains("hello"));
         assert!(rendered.contains("Ctrl+G help"), "{rendered}");
         assert!(!rendered.contains("Enter send"), "{rendered}");
@@ -4276,7 +4285,7 @@ mod tests {
         assert!(rendered.contains("Browse commands"));
         assert!(rendered.contains("Mention a project file"));
         assert!(!rendered.contains("Connect a provider"));
-        assert!(rendered.contains("model-x fake"));
+        assert!(rendered.contains("─ model-x ─╯"), "{rendered}");
 
         let compact = render_to_string(30, 8, &state, &PromptEditor::default());
         assert!(compact.contains("Wisp 0.9.0"));
@@ -4286,7 +4295,7 @@ mod tests {
 
         let mut unconfigured = state;
         unconfigured.provider = None;
-        // The framed composer's identity row leaves 13 transcript rows at 18; the
+        // A one-line framed composer leaves 15 transcript rows at 19; the
         // action list is guaranteed from 14 (see the welcome height contract).
         let rendered = render_to_string(80, 19, &unconfigured, &PromptEditor::default());
         assert!(rendered.contains("Connect a provider"));
@@ -4415,13 +4424,11 @@ mod tests {
             Some("Model catalog unavailable. Use /model <model> or press r to retry."),
         );
         assert!(
-            rendered.contains("Plan · custom-model fake · effort"),
+            rendered.contains("custom-model (effort) · plan ─╯"),
             "{rendered}"
         );
         assert!(rendered.contains("ctx"), "{rendered}");
         assert!(rendered.contains('~'), "{rendered}");
-        assert!(rendered.contains("custom-model fake"), "{rendered}");
-        assert!(rendered.contains("effort"), "{rendered}");
         assert!(rendered.contains("Model catalog unavailable"), "{rendered}");
 
         state.context.compaction_notice =
@@ -4906,7 +4913,7 @@ mod tests {
     }
 
     #[test]
-    fn composer_cap_follows_gap() {
+    fn composer_grows_to_half_screen() {
         let state = UiState::new("fake".into(), None, None);
         let mut editor = PromptEditor::default();
         editor.insert_paste(&"line\n".repeat(20));
@@ -4916,11 +4923,16 @@ mod tests {
             let layout = cache.layout(&editor, composer_editor_width(area.width));
             composer_height(area, &state, Some(layout))
         };
-        // A framed composer shows six rows of a long draft with or without the blank
-        // row, which is the only row the higher ceiling adds.
-        assert_eq!(height(14), 8);
-        assert_eq!(height(20), 9);
-        assert_eq!(height(30), 10);
+        // A 21-row draft takes half the screen, until its 21 rows and two borders fit.
+        assert_eq!(height(14), 7);
+        assert_eq!(height(20), 10);
+        assert_eq!(height(30), 15);
+        assert_eq!(height(60), 23);
+        // A one-line draft is its borders and one row.
+        let mut short = ComposerLayoutCache::default();
+        let area = Rect::new(0, 0, 60, 30);
+        let layout = short.layout(&PromptEditor::default(), composer_editor_width(area.width));
+        assert_eq!(composer_height(area, &state, Some(layout)), 3);
     }
 
     #[test]
@@ -5096,17 +5108,38 @@ mod tests {
 
         let empty = render_to_string(100, 20, &state, &PromptEditor::default());
         assert!(empty.contains("Message to steer or follow up…"), "{empty}");
+        // The composer's top border names the keys that follow up or steer.
+        let top = empty
+            .lines()
+            .find(|line| line.contains('╭'))
+            .unwrap_or_else(|| panic!("{empty}"));
         assert!(
-            empty.contains("Enter follow-up · Alt+Enter steer"),
+            top.trim_matches('"')
+                .trim_end()
+                .ends_with("─ Enter follow-up · Alt+Enter steer ─╮"),
             "{empty}"
+        );
+        // The footer keeps the hints a run needs and leaves status to the line above.
+        let footer = empty.lines().last().unwrap();
+        assert!(footer.contains("Esc interrupt"), "{empty}");
+        assert!(!footer.contains("working"), "{empty}");
+        // A notice takes the footer's hints, and the border still names the keys.
+        let noticed = render_to_string_with_notice(
+            100,
+            20,
+            &state,
+            &PromptEditor::default(),
+            Some("Model selection applied."),
+        );
+        assert!(!noticed.contains("Esc interrupt"), "{noticed}");
+        assert!(
+            noticed.contains("─ Enter follow-up · Alt+Enter steer ─╮"),
+            "{noticed}"
         );
         // The status line counts the queue; the composer no longer lists it.
         assert!(empty.contains("2 queued"), "{empty}");
         assert!(!empty.contains("spoof"), "{empty}");
         assert!(!empty.contains("later one"), "{empty}");
-        // The footer keeps the hints a run needs and leaves status to the line above.
-        assert!(empty.contains("Esc interrupt"), "{empty}");
-        assert!(!empty.contains("working"), "{empty}");
 
         let mut editor = PromptEditor::default();
         editor.insert_paste("new steering");
@@ -5719,12 +5752,12 @@ mod tests {
     }
 
     #[test]
-    fn tall_composer_spaces_identity() {
-        let rows = |height: u16| {
+    fn idle_composer_is_three_rows() {
+        let rows = |width: u16| {
             let mut state =
-                UiState::new("fake".into(), Some("model-x".into()), Some("high".into()));
+                UiState::new("fake".into(), Some("model-xyz".into()), Some("high".into()));
             state.mode_confirmed = true;
-            let mut terminal = Terminal::new(TestBackend::new(100, height)).unwrap();
+            let mut terminal = Terminal::new(TestBackend::new(width, 30)).unwrap();
             terminal
                 .draw(|frame| {
                     render(
@@ -5739,7 +5772,7 @@ mod tests {
                 })
                 .unwrap();
             let buffer = terminal.backend().buffer().clone();
-            (0..height)
+            (0..30)
                 .map(|y| {
                     (0..buffer.area.width)
                         .map(|x| buffer[(x, y)].symbol())
@@ -5747,27 +5780,25 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        // From 24 rows a blank row sits between the draft and the identity.
-        let tall = rows(30);
-        assert!(tall[25].contains("› Ask Wisp anything"), "{}", tall[25]);
-        let gap = tall[26].trim();
+        // The top border, the draft, then a bottom border naming the model and mode.
+        let wide = rows(100);
+        assert!(wide[26].trim().starts_with('╭'), "{}", wide[26]);
+        assert!(wide[27].contains("› Ask Wisp anything"), "{}", wide[27]);
         assert!(
-            gap.starts_with('│') && gap.trim_matches('│').trim().is_empty(),
-            "{gap}"
-        );
-        assert!(
-            tall[27].contains("Build · model-x fake · high"),
+            wide[28]
+                .trim_end()
+                .ends_with("─ model-xyz (high) · build ─╯"),
             "{}",
-            tall[27]
+            wide[28]
         );
-        // A shorter screen keeps that row for the transcript.
-        let short = rows(20);
-        assert!(short[16].contains("› Ask Wisp anything"), "{}", short[16]);
+        // A narrow composer keeps the mode and drops the model.
+        let narrow = rows(30);
         assert!(
-            short[17].contains("Build · model-x fake · high"),
+            narrow[28].trim_end().ends_with("─ build ─╯"),
             "{}",
-            short[17]
+            narrow[28]
         );
+        assert!(!narrow[28].contains("model-xyz"), "{}", narrow[28]);
     }
 
     #[test]
@@ -5798,15 +5829,13 @@ mod tests {
                     .map(|x| buffer[(x, y)].symbol())
                     .collect::<String>()
             };
-            (row(height - 3), row(height - 1))
+            (row(height - 2), row(height - 1))
         };
 
-        let (identity, footer) = draw(20);
+        let (border, footer) = draw(20);
         assert!(
-            identity
-                .trim_start()
-                .starts_with("│  Build · model-x fake · high"),
-            "{identity}"
+            border.trim_end().ends_with("─ model-x (high) · build ─╯"),
+            "{border}"
         );
         assert!(
             footer.trim_start().starts_with("/srv/wisp · feat/x"),
@@ -5942,9 +5971,21 @@ mod tests {
         assert_eq!(color(&idle, "╭"), palette.accent);
         assert_eq!(color(&idle, "╰"), palette.accent);
         assert_eq!(color(&idle, "│›"), palette.accent);
-        assert_eq!(color(&idle, "high"), palette.warning);
+        assert_eq!(color(&idle, "high"), palette.foreground);
         // An 80% full window turns the meter amber.
         assert_eq!(color(&idle, "▰"), palette.warning);
+        // Plan mode tints the whole border, and its word keeps the full warning colour.
+        state.mode = AgentMode::Plan;
+        state.mode_confirmed = true;
+        let plan = border(&state);
+        assert_ne!(palette.plan_border(), palette.muted);
+        assert_eq!(color(&plan, "╮"), palette.plan_border());
+        assert_eq!(color(&plan, "─╯"), palette.plan_border());
+        assert_eq!(color(&plan, "plan"), palette.warning);
+        state.mode = AgentMode::Build;
+        let build = border(&state);
+        assert_eq!(color(&build, "╮"), palette.muted);
+        assert_eq!(color(&build, "build"), palette.primary);
         state.view_status = ViewStatus::Running;
         state.interaction_status = InteractionStatus::Running;
         state.current_command = Some(ActiveCommand {
@@ -7455,7 +7496,7 @@ mod tests {
         assert!(collapsed.contains("+ new value"));
         // The browse hint lives once in the footer, not under each card.
         assert!(!collapsed.contains("Enter details"), "{collapsed}");
-        assert!(collapsed.contains("Ctrl+G help · F6 browse"), "{collapsed}");
+        assert!(collapsed.contains("Ctrl+G help │ F6 browse"), "{collapsed}");
         assert!(collapsed.contains("Ctrl+G help"));
         assert!(!collapsed.contains('\u{1b}'));
 
@@ -8338,6 +8379,32 @@ mod tests {
     }
 
     #[test]
+    fn footer_hints_stay_whole() {
+        let mut state = UiState::new("fake".into(), Some("model-x".into()), None);
+        state.workspace_cwd = Some("/srv/wisp".into());
+        state.git_branch = Some("feat/footer".into());
+        state.transcript.append_prompt("hello".into());
+        for width in [80, 150] {
+            let screen = render_to_string(width, 20, &state, &PromptEditor::default());
+            let footer = screen.lines().last().unwrap().trim_matches('"');
+            assert!(footer.contains("idle · ctx"), "{footer}");
+            // Each hint after the status is a whole key and action, set apart by `│`.
+            let hints = footer
+                .split(" │ ")
+                .skip(1)
+                .map(str::trim)
+                .collect::<Vec<_>>();
+            assert!(!hints.is_empty(), "{footer}");
+            for hint in hints {
+                assert!(
+                    ["Ctrl+G help", "F6 browse", "Ctrl+B panel"].contains(&hint),
+                    "{width}: {hint:?} in {footer}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn running_footer_orders_panel_hint() {
         let mut state = UiState::new("fake".into(), None, None);
         state.view_status = ViewStatus::Running;
@@ -8356,26 +8423,27 @@ mod tests {
         };
         let wide = footer(140);
         assert!(
-            wide.contains("Esc interrupt · Ctrl+B panel · F6 browse"),
+            wide.contains("Esc interrupt │ Ctrl+B panel │ F6 browse"),
             "{wide}"
         );
         // A narrow row drops the panel hint before the others.
         let narrow = footer(40);
-        assert!(narrow.contains("Esc interrupt · F6 browse"), "{narrow}");
+        assert!(narrow.contains("Esc interrupt │ F6 browse"), "{narrow}");
         assert!(!narrow.contains("panel"), "{narrow}");
     }
 
     #[test]
-    fn composer_effort_is_bold_warning() {
+    fn composer_effort_is_bold() {
         let mut state = UiState::new("fake".into(), Some("model-x".into()), None);
         state.effort = Some("high".into());
-        let line = composer_identity_line(&state, Palette::default());
+        let line = composer_border_label(&state, Palette::default(), usize::MAX).unwrap();
         let effort = line
             .spans
             .iter()
             .find(|span| span.content == "high")
             .unwrap();
-        assert_eq!(effort.style.fg, Some(Palette::default().warning));
+        // Amber is left to plan mode and YOLO beside it.
+        assert_eq!(effort.style.fg, Some(Palette::default().foreground));
         assert!(effort.style.add_modifier.contains(Modifier::BOLD));
     }
 
@@ -8408,11 +8476,11 @@ mod tests {
             let mut state = UiState::new("fake".into(), Some("model-x".into()), None);
             state.mode_confirmed = true;
             with_permissions(&mut state, mode, saved, session_only);
-            let line = composer_identity_line(&state, Palette::default());
+            let line = composer_border_label(&state, Palette::default(), usize::MAX).unwrap();
             let text = line.to_string();
             match shown {
                 Some(label) => {
-                    assert_eq!(text, format!("Build · {label} · model-x fake"));
+                    assert_eq!(text, format!("model-x · build · {label}"));
                     let span = line
                         .spans
                         .iter()
@@ -8420,7 +8488,7 @@ mod tests {
                         .unwrap();
                     assert_eq!(span.style.fg, Some(Palette::default().warning));
                 }
-                None => assert_eq!(text, "Build · model-x fake"),
+                None => assert_eq!(text, "model-x · build"),
             }
         }
     }
@@ -8442,9 +8510,9 @@ mod tests {
             );
             render_to_string(width, height, &state, &PromptEditor::default())
         };
-        // Framed: the identity row cuts the model and effort before YOLO.
+        // Framed: the border label drops the model and effort before YOLO.
         let framed = draw(32, 20);
-        assert!(framed.contains("Build · YOLO"), "{framed}");
+        assert!(framed.contains("─ build · YOLO ─╯"), "{framed}");
         assert!(!framed.contains("high"), "{framed}");
         // Too short to frame the composer: the footer names YOLO beside the mode.
         let short = draw(100, 12);
@@ -8494,17 +8562,21 @@ mod tests {
                 }))
                 .unwrap(),
             );
-            let line = composer_identity_line(&state, palette);
-            let effort = line.spans.last().unwrap();
+            let line = composer_border_label(&state, palette, usize::MAX).unwrap();
             match shown {
                 Some(level) => {
-                    assert_eq!(effort.content, level, "{model}");
+                    assert_eq!(line.to_string(), format!("{model} ({level})"));
+                    let effort = line
+                        .spans
+                        .iter()
+                        .find(|span| span.content == level)
+                        .unwrap();
                     assert_eq!(effort.style.fg, Some(palette.muted), "{model}");
                     assert!(!effort.style.add_modifier.contains(Modifier::BOLD));
                     let identity = header_identity(&state).unwrap();
                     assert!(identity.ends_with(&format!(" · {level}")), "{identity}");
                 }
-                None => assert_eq!(effort.content, "alpha", "{model}"),
+                None => assert_eq!(line.to_string(), model),
             }
         }
     }

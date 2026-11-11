@@ -1854,7 +1854,7 @@ mod tests {
             .chars()
             .take(usize::from(200 - auto_width(200)))
             .collect();
-        assert!(conversation.contains("idle ·"), "{conversation}");
+        assert!(conversation.contains("idle │"), "{conversation}");
         assert!(!conversation.contains("/srv/wisp"), "{conversation}");
         assert!(!conversation.contains("ctx"), "{conversation}");
     }

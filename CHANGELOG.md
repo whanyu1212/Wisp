@@ -144,6 +144,17 @@ this policy.
   repeats its command on a row of its own.
 - Tool and group lines no longer draw a `▸`/`▾` fold arrow; clicking a line, `→`/`←` in browse,
   and the selected line's hint still fold it. (HY-489)
+- The composer's bottom border names the model, effort, and mode (`claude-opus-5-5 (high) ·
+  build`), replacing the identity row inside it, so a one-line draft takes three rows instead of
+  five. A narrow composer keeps the mode and drops the model, and the provider is no longer shown
+  there. A draft now grows to half the conversation's height instead of ten rows.
+- Plan mode turns the composer's whole border amber (the terminal's yellow at 16 colours), with
+  `plan` in the full warning colour. YOLO
+  follows the mode in the label. A chosen effort is bold body text rather than amber, which is left
+  to plan mode and YOLO.
+- During a run that takes input, the keys that follow up or steer sit in the composer's top border.
+- Footer key hints are set apart by `│` instead of `·`, which now only joins the status and context.
+  (HY-485)
 
 <!-- Keeps links to the pre-release "0.7.0 — Unreleased" heading working. -->
 <a id="070--unreleased"></a>
