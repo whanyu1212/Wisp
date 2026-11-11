@@ -456,6 +456,22 @@ def test_failure_keeps_call_list() -> None:
     assert len(message) < 2_000
 
 
+def test_many_tools_keep_error() -> None:
+    """A script that called many distinct tools still shows why it failed."""
+
+    names = [f"mcp__production_database__query_table_{index}" for index in range(60)]
+    code = "\n".join(f"await {name}(table='a')" for name in names)
+    code += "\nraise ValueError('CAUSE' + 'e' * 5000)"
+
+    with pytest.raises(ToolError) as raised:
+        _run_tool(_tool(tools=[_Tool(name) for name in names]), code)
+
+    message = str(raised.value)
+    assert "ValueError: CAUSE" in message and names[0] in message
+    assert message.endswith("more tools") and "60 tool calls" in message
+    assert len(message) < 2_000
+
+
 def test_type_errors_keep_room() -> None:
     """Without a printout, the error has all the room: several type errors show."""
 

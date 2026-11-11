@@ -37,6 +37,8 @@ _JSON_TYPES = {
 _FAILURE_MESSAGE_CHARS = 1_900
 # Room for the "[N more characters]" markers that shortened parts carry.
 _SHORTENED_MARKER_CHARS = 64
+# The most a failure's list of calls may take, so the error always keeps room.
+_FAILURE_CALLS_CHARS = 600
 
 CODEMODE_PROMPT = ToolPromptMetadata(
     prompt_snippet="codemode: run a Python script that calls the read-only tools.",
@@ -80,15 +82,29 @@ class _CallLog:
     def total(self) -> int:
         return sum(self.by_tool.values())
 
-    def line(self) -> str:
+    def line(self, max_chars: int | None = None) -> str:
+        """Summarize the calls, naming tools until ``max_chars`` and counting the rest."""
+
         if not self.by_tool:
             return "No tool calls."
-        calls = ", ".join(
-            name if count == 1 else f"{name} ×{count}" for name, count in self.by_tool.items()
-        )
         noun = "call" if self.total == 1 else "calls"
         failed = f" ({self.failed} failed)" if self.failed else ""
-        return f"{self.total} tool {noun}{failed}: {calls}"
+        head = f"{self.total} tool {noun}{failed}: "
+        entries = [
+            name if count == 1 else f"{name} ×{count}" for name, count in self.by_tool.items()
+        ]
+        line = head + ", ".join(entries)
+        if max_chars is None or len(line) <= max_chars:
+            return line
+        # Leave room for the ", and N more tools" that ends a shortened list.
+        budget = max_chars - len(head) - len(f", and {len(entries)} more tools")
+        named: list[str] = []
+        for entry in entries:
+            if len(", ".join([*named, entry])) > budget:
+                break
+            named.append(entry)
+        rest = f"{len(entries) - len(named)} more tools"
+        return head + (f"{', '.join(named)}, and {rest}" if named else rest)
 
 
 class CodemodeTool:
@@ -206,7 +222,7 @@ def _failure_message(run: ScriptRun, log: _CallLog) -> str:
 
     heading = f"Script failed ({run.failure}): "
     printed_label = "Printed before it failed:\n"
-    calls = f"Calls made before it failed: {log.line()}"
+    calls = f"Calls made before it failed: {log.line(_FAILURE_CALLS_CHARS)}"
     room = _FAILURE_MESSAGE_CHARS - len(heading) - len(calls) - _SHORTENED_MARKER_CHARS
     if not run.printed:
         return "\n".join([heading + _head(run.error or "", room), calls])
