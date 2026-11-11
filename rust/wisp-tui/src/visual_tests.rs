@@ -2242,3 +2242,282 @@ fn image_label_survives_narrow_row() {
     assert!(row.contains("[image 640×480 png]"), "{row:?}");
     assert!(!row.contains("before-and-after.png"), "{row:?}");
 }
+
+/// Feed `event` to the UI as the backend would send it.
+async fn deliver(ui: &mut LiveUi, writer: &mpsc::Sender<WriterMessage>, event: serde_json::Value) {
+    let event = BackendEvent::from_projection_value(&event).unwrap();
+    ui.dispatch(UiAction::BackendEvent(event), writer, 8192)
+        .await
+        .unwrap();
+}
+
+async fn press(ui: &mut LiveUi, writer: &mpsc::Sender<WriterMessage>, code: KeyCode) {
+    ui.handle_input(
+        Input::Key(KeyEvent::new(code, KeyModifiers::NONE)),
+        writer,
+        8192,
+    )
+    .await
+    .unwrap();
+}
+
+/// Select the script card with `F6` and open its details with `Enter`.
+async fn open_script_details(ui: &mut LiveUi, writer: &mpsc::Sender<WriterMessage>) {
+    draw(ui, 100, 40);
+    press(ui, writer, KeyCode::F(6)).await;
+    draw(ui, 100, 40);
+    press(ui, writer, KeyCode::Enter).await;
+    assert!(ui.detail_view.is_open());
+}
+
+fn screen_rows(buffer: &ratatui::buffer::Buffer) -> String {
+    (0..buffer.area.height)
+        .map(|y| buffer_row(buffer, y))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn assert_shows(text: &str, expected: &[&str]) {
+    for expected in expected {
+        assert!(
+            text.contains(expected),
+            "{expected:?} missing from:\n{text}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn running_script_details_update() {
+    let mut ui = LiveUi::default();
+    let (writer, _receiver) = mpsc::channel(8);
+    deliver(&mut ui, &writer, script_call(Some("count TODOs"))).await;
+    deliver(
+        &mut ui,
+        &writer,
+        json!({"type": "tool.nested.started", "parent_call_id": "script-1", "call_id": "n1",
+               "name": "grep", "arguments": {"pattern": "TODO", "path": "src"}}),
+    )
+    .await;
+    open_script_details(&mut ui, &writer).await;
+
+    let text = screen_rows(&draw(&mut ui, 100, 40));
+    assert_shows(
+        &text,
+        &[
+            "Scripting count TODOs  1 call · grep",
+            "Script · 6 lines",
+            "1 import asyncio",
+            "6 texts",
+            "Calls · 1",
+            "1 ● Searching",
+            "pattern: \"TODO\"",
+            "No output yet.",
+        ],
+    );
+
+    // New calls and the result arrive while the view is open; it stays open, asks for a
+    // new frame, and shows them.
+    ui.render_pending = false;
+    deliver(
+        &mut ui,
+        &writer,
+        json!({"type": "tool.nested.ended", "parent_call_id": "script-1",
+               "call": nested("n1", "grep", json!({"pattern": "TODO", "path": "src"}), None)}),
+    )
+    .await;
+    deliver(
+        &mut ui,
+        &writer,
+        json!({"type": "tool.nested.started", "parent_call_id": "script-1", "call_id": "n2",
+               "name": "read", "arguments": {"path": "src/a.rs"}}),
+    )
+    .await;
+    assert!(ui.detail_view.is_open() && ui.render_pending);
+    let text = screen_rows(&draw(&mut ui, 100, 40));
+    assert_shows(&text, &["Calls · 2", "1 • Searched", "path: \"src/a.rs\""]);
+
+    deliver(
+        &mut ui,
+        &writer,
+        finished_script("12\n[4 tool calls (1 failed)]", false),
+    )
+    .await;
+    assert!(ui.detail_view.is_open());
+    let text = screen_rows(&draw(&mut ui, 100, 40));
+    assert_shows(
+        &text,
+        &[
+            "Scripted count TODOs",
+            "Calls · 4, 1 failed",
+            "Output · 2 lines",
+        ],
+    );
+}
+
+#[tokio::test]
+async fn finished_script_details() {
+    let mut ui = LiveUi::default();
+    let (writer, _receiver) = mpsc::channel(8);
+    deliver(&mut ui, &writer, script_call(None)).await;
+    let output = (1..=30)
+        .map(|line| format!("result {line}"))
+        .collect::<Vec<_>>();
+    deliver(&mut ui, &writer, finished_script(&output.join("\n"), false)).await;
+    open_script_details(&mut ui, &writer).await;
+
+    let text = screen_rows(&draw(&mut ui, 100, 40));
+    assert_shows(
+        &text,
+        &[
+            "• Scripted Python script, 6 lines  4 calls (1 failed) · read ×3, grep",
+            "1 import asyncio",
+            "6 texts",
+            "Calls · 4, 1 failed",
+            "1 • Searched",
+            "3 • Read src/b.rs <0.1s",
+            "path: \"src/b.rs\"",
+            "4 ✗ Read ../vendor/c.rs",
+            "error: path outside the project",
+        ],
+    );
+
+    // Every line of the output, which the card itself cuts at 8.
+    press(&mut ui, &writer, KeyCode::End).await;
+    let text = screen_rows(&draw(&mut ui, 100, 40));
+    assert_shows(&text, &["result 30", "result 9"]);
+    assert!(!text.contains("import asyncio"), "{text}");
+    press(&mut ui, &writer, KeyCode::Home).await;
+    let text = screen_rows(&draw(&mut ui, 100, 40));
+    assert_shows(&text, &["1 import asyncio"]);
+
+    press(&mut ui, &writer, KeyCode::Esc).await;
+    assert!(!ui.detail_view.is_open());
+}
+
+#[tokio::test]
+async fn failed_script_details() {
+    let mut ui = LiveUi::default();
+    let (writer, _receiver) = mpsc::channel(8);
+    deliver(&mut ui, &writer, script_call(Some("scan"))).await;
+    let output = "Script failed (limit): The script made more than 200 tool calls.\nCalls made before it failed: 4 tool calls";
+    deliver(&mut ui, &writer, finished_script(output, true)).await;
+    open_script_details(&mut ui, &writer).await;
+
+    let buffer = draw(&mut ui, 100, 40);
+    let text = screen_rows(&buffer);
+    assert_shows(
+        &text,
+        &[
+            "✗ Scripted scan",
+            "4 ✗ Read ../vendor/c.rs",
+            "error: path outside the project",
+            "Output · 2 lines",
+            "Script failed (limit): The script made more than 200 tool calls.",
+        ],
+    );
+    let failure = row_containing(&buffer, "Script failed (limit)");
+    let x = buffer_row(&buffer, failure).find("Script failed").unwrap();
+    let x = u16::try_from(buffer_row(&buffer, failure)[..x].chars().count()).unwrap();
+    assert_eq!(buffer[(x, failure)].fg, Palette::default().error);
+}
+
+#[tokio::test]
+async fn reopened_script_details() {
+    let mut assistant = json!({
+        "entry_id": "entry-call", "role": "assistant", "content": "", "content_truncated": false,
+        "is_error": null, "tool_name": null, "tool_call_id": null, "tool_result": null,
+        "tool_calls": [{"call_id": "script-1", "name": "codemode",
+                        "arguments": {"code": SCRIPT, "title": "count TODOs"}}],
+    });
+    assistant["tool_calls"][0]["arguments"]["code"] = json!(SCRIPT);
+    let result = json!({
+        "entry_id": "entry-result", "role": "tool", "content": "12", "content_truncated": false,
+        "is_error": null, "tool_name": "codemode", "tool_call_id": "script-1", "tool_calls": [],
+        "tool_result": {"status": "done", "nested_calls": [
+            nested("n1", "read", json!({"path": "src/a.rs"}), None),
+            {"call_id": "n2", "name": "grep", "arguments": null, "is_error": true,
+             "error": "invalid pattern", "started_at": "2026-01-02T03:04:05Z", "duration_ms": 1},
+        ], "nested_calls_omitted": 3},
+    });
+    let mut ui = LiveUi::default();
+    ui.state.transcript = crate::history::project_rpc_messages(&[assistant, result]).unwrap();
+    let (writer, _receiver) = mpsc::channel(8);
+    open_script_details(&mut ui, &writer).await;
+
+    let text = screen_rows(&draw(&mut ui, 100, 40));
+    assert_shows(
+        &text,
+        &[
+            "Scripted count TODOs",
+            "1 import asyncio",
+            "Calls · 5, 1 failed",
+            "path: \"src/a.rs\"",
+            "Arguments not kept.",
+            "error: invalid pattern",
+            "… 3 more calls the record leaves out",
+            "Output · 1 line",
+        ],
+    );
+}
+
+#[tokio::test]
+async fn script_details_stay_sanitized() {
+    // The most a card keeps, with terminal controls in every field.
+    let hostile = "\u{1b}]52;c;eA==\u{7}\u{1b}[2J\u{202e}";
+    let line = format!("x = '{hostile}'  # {hostile}\n");
+    let code = line.repeat(crate::script_card::SCRIPT_MAX_BYTES / line.len() + 1);
+    let mut ui = LiveUi::default();
+    let (writer, _receiver) = mpsc::channel(8);
+    deliver(
+        &mut ui,
+        &writer,
+        json!({"type": "tool.call", "call_id": "script-1", "name": "codemode",
+               "arguments": {"code": code, "title": hostile}}),
+    )
+    .await;
+    let calls: Vec<_> = (0..250)
+        .map(|index| {
+            nested(
+                &format!("n{index}"),
+                "mcp__db__query",
+                json!({"sql": hostile, "index": index}),
+                (index % 2 == 0).then_some(hostile),
+            )
+        })
+        .collect();
+    let output = format!("{hostile}{}\n", "y".repeat(200)).repeat(400);
+    deliver(
+        &mut ui,
+        &writer,
+        json!({"type": "tool.result", "message_entry_id": null, "call_id": "script-1",
+               "name": "codemode", "output": output, "is_error": false,
+               "nested_calls": calls, "nested_calls_omitted": 7}),
+    )
+    .await;
+    open_script_details(&mut ui, &writer).await;
+
+    for key in [
+        KeyCode::PageDown,
+        KeyCode::PageDown,
+        KeyCode::End,
+        KeyCode::PageUp,
+    ] {
+        press(&mut ui, &writer, key).await;
+        let text = screen_text(&draw(&mut ui, 60, 30));
+        assert!(
+            !text.contains(['\u{1b}', '\u{7}', '\u{202e}']),
+            "control reached the screen:\n{text}"
+        );
+    }
+    press(&mut ui, &writer, KeyCode::End).await;
+    let text = screen_rows(&draw(&mut ui, 60, 30));
+    assert!(text.contains("more not kept"), "{text}");
+    let script = ui.state.transcript.entries()[0]
+        .tool_card()
+        .unwrap()
+        .script
+        .as_deref()
+        .unwrap();
+    assert_eq!(script.calls.len(), crate::script_card::MAX_SCRIPT_CALLS);
+    assert!(script.code.len() <= crate::script_card::SCRIPT_MAX_BYTES);
+}

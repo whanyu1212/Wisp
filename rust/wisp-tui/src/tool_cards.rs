@@ -1763,19 +1763,23 @@ fn format_generic_value(arguments: &Value) -> String {
     let Some(object) = arguments.as_object() else {
         return clip_chars(&scalar_value(arguments), GENERIC_VALUE_MAX_CHARS);
     };
-    let wrapped = object.len() == 2
-        && object.get(GENERIC_ITEMS_KEY).is_some_and(Value::is_object)
-        && object.get(GENERIC_OMITTED_KEY).is_some_and(Value::is_u64);
-    if wrapped {
-        let items = object[GENERIC_ITEMS_KEY]
-            .as_object()
-            .expect("validated generic items wrapper");
-        let omitted = object[GENERIC_OMITTED_KEY]
-            .as_u64()
-            .expect("validated generic omission wrapper");
+    if let Some((items, omitted)) = generic_argument_items(object) {
         return format_generic(items, usize::try_from(omitted).unwrap_or(usize::MAX));
     }
     format_generic(object, object.len().saturating_sub(GENERIC_MAX_ITEMS))
+}
+
+/// The arguments a generic tool's bounded record keeps, and how many it left out;
+/// `None` when `object` is not such a record.
+pub(crate) fn generic_argument_items(
+    object: &Map<String, Value>,
+) -> Option<(&Map<String, Value>, u64)> {
+    if object.len() != 2 {
+        return None;
+    }
+    let items = object.get(GENERIC_ITEMS_KEY)?.as_object()?;
+    let omitted = object.get(GENERIC_OMITTED_KEY)?.as_u64()?;
+    Some((items, omitted))
 }
 
 fn format_generic(arguments: &Map<String, Value>, omitted: usize) -> String {

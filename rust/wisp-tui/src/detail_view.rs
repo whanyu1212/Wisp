@@ -43,6 +43,8 @@ struct DetailCacheKey {
 #[derive(Debug)]
 pub struct DetailView {
     pub(crate) review: crate::diff_review::DiffReview,
+    /// Scroll state when the open card is a codemode script.
+    pub(crate) script: crate::script_detail::ScriptDetailView,
     selected_entry: Option<TranscriptEntryId>,
     top: Option<DetailAnchor>,
     width: usize,
@@ -58,6 +60,7 @@ impl Default for DetailView {
     fn default() -> Self {
         Self {
             review: crate::diff_review::DiffReview::default(),
+            script: crate::script_detail::ScriptDetailView::default(),
             selected_entry: None,
             top: None,
             width: 1,
@@ -82,6 +85,7 @@ impl DetailView {
 
     pub fn open(&mut self, entry_id: TranscriptEntryId, presentation: &ToolDetailPresentation) {
         self.review.reset();
+        self.script.reset();
         self.selected_entry = Some(entry_id);
         self.top = presentation.rows.first().map(|row| DetailAnchor {
             row_key: row.key,
@@ -96,8 +100,18 @@ impl DetailView {
         debug_assert!(self.retained_bytes <= DETAIL_CACHE_MAX_BYTES);
     }
 
+    /// Open a codemode script card's details, which are built from the card as drawn.
+    pub fn open_script(&mut self, entry_id: TranscriptEntryId) {
+        self.review.reset();
+        self.script.reset();
+        self.selected_entry = Some(entry_id);
+        self.top = None;
+        self.clear_cache();
+    }
+
     pub fn close(&mut self) {
         self.review.reset();
+        self.script.reset();
         self.selected_entry = None;
         self.top = None;
         self.clear_cache();
