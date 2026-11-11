@@ -629,9 +629,10 @@ def _plain_text(output: bytes | bytearray) -> str:
 
 def _ready(plain: str, renderer: Renderer) -> bool:
     compact = "".join(plain.split())
-    # A framed composer names "model provider"; a short terminal's footer names
+    # A framed composer's bottom border names the model, then its effort, the mode, or
+    # the border's last dash ("fake · build ─╯"); a short terminal's footer names
     # "provider/model".
-    provider_ready = re.search(r"fake(?:/|\s*)fake", plain) is not None
+    provider_ready = re.search(r"fake/fake|fake\s*[(·─]", plain) is not None
     # Incremental repaints can reach the PTY with cursor moves instead of spaces,
     # so "ctx ▰▱ ~35%" may arrive as "ctx▰▱~35%" once escapes are stripped.
     context_hydrated = re.search(r"ctx\s*[▰▱]*\s*~?[0-9]", plain) is not None
