@@ -69,6 +69,18 @@ switching to another session. Changing the default clears temporary grants. Star
 is not saved. These choices do not change project trust or protected paths. In the home folder or a
 folder above it, YOLO applies for the session only and the panel says so; Ask is still saved.
 
+Use `/codemode` to choose when runs offer the [codemode](.././tools-and-safety#scripting-tool-calls-with-codemode-experimental)
+tool: automatic (when a run finds its MCP tools on demand), always, or never. `/codemode always`
+and the other settings apply one directly. The panel docks above the composer like
+`/permissions`, marks the current setting, and says whether the next prompt offers the tool.
+Choose with `1`–`3`, or highlight with `↑`/`↓` and press `Enter`. The choice applies from the
+next prompt and is saved as the user `codemode` setting in `~/.wisp/settings.json`, so it
+survives restarts; wait for the current operation to finish before changing it. `WISP_CODEMODE`
+still decides the setting when Wisp starts, and the panel says so when it is set. Without the
+`codemode` extra installed, the panel says the extra is needed, and no run offers the tool. The
+side panel names codemode as on or off for the next prompt, except while the automatic setting
+leaves it off.
+
 ## Managing MCP servers
 
 `/mcp` lists the configured MCP servers with their status. `↑`/`↓` select a server; below the list
@@ -132,6 +144,7 @@ reconnect.
 /plan                                     switch to read-only planning mode
 /build                                    switch to normal build mode
 /permissions [ask|yolo]                   inspect or change the project permission default
+/codemode [automatic|always|never]        inspect or save when runs offer the codemode tool
 /history                                  search prompts submitted in this TUI run
 /theme [name]                             preview or select a curated color theme
 /logo [name]                              preview or select a startup logo

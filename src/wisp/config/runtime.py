@@ -43,6 +43,7 @@ DEFAULT_WEB_SEARCH_ENABLED = False
 OPENAI_COMPATIBLE_CONFIG_ENV = "WISP_OPENAI_COMPATIBLE_CONFIG"
 _DEFAULT_AUTH_PATH = Path("~/.wisp/auth.json")
 _DEFAULT_SESSION_DIR = Path("~/.wisp/sessions")
+_CODEMODE_ENV = "WISP_CODEMODE"
 
 
 class WispConfig(BaseModel):
@@ -285,9 +286,7 @@ class WispConfig(BaseModel):
                 codemode
                 if codemode is not None
                 else _resolve_optional_bool(
-                    os.environ.get("WISP_CODEMODE"),
-                    settings.codemode,
-                    name="WISP_CODEMODE",
+                    os.environ.get(_CODEMODE_ENV), settings.codemode, name=_CODEMODE_ENV
                 )
             ),
             mcp_servers=mcp_servers if mcp_servers is not None else settings.mcp_servers or (),
@@ -392,6 +391,19 @@ def _resolve_bool(
 ) -> bool:
     resolved = _resolve_optional_bool(env_value, saved_value, name=name)
     return default if resolved is None else resolved
+
+
+def codemode_from_env() -> bool | None:
+    """Return the codemode setting ``WISP_CODEMODE`` gives, which outranks the saved one.
+
+    Returns:
+        bool | None: True or False to always or never offer the tool, or None when
+        the variable is unset.
+
+    Raises:
+        ValueError: If the variable is set to something other than a boolean word.
+    """
+    return _resolve_optional_bool(os.environ.get(_CODEMODE_ENV), None, name=_CODEMODE_ENV)
 
 
 def _resolve_optional_bool(

@@ -62,10 +62,13 @@ from wisp.events.rpc import (
     MAX_RPC_OAUTH_EXPIRY_CHARS,
     MAX_RPC_PROVIDER_ID_CHARS,
     AgentMode,
+    CodemodeSetting,
+    CodemodeState,
     CodingSessionState,
     PermissionMode,
     PermissionState,
     ProjectFilesInvalidated,
+    RpcCodemodeReported,
     RpcCommandArgument,
     RpcCommandDescriptor,
     RpcCommandFinished,
@@ -230,6 +233,8 @@ __all__ = [
     "AgentMode",
     "AgentStarted",
     "BillableTokenUsage",
+    "CodemodeSetting",
+    "CodemodeState",
     "CodingSessionState",
     "CompactionCompleted",
     "CompactionPolicyStatus",
@@ -275,6 +280,7 @@ __all__ = [
     "QueueMode",
     "QueueUpdated",
     "RetryReason",
+    "RpcCodemodeReported",
     "RpcCommandArgument",
     "RpcCommandDescriptor",
     "RpcCommandFinished",
@@ -405,6 +411,7 @@ KnownWispEvent = TypeAliasType(
         | RpcStateReported
         | RpcWorkspaceReported
         | RpcPermissionsReported
+        | RpcCodemodeReported
         | RpcCommandsReported
         | RpcModelCatalogReported
         | RpcConnectionCatalogReported

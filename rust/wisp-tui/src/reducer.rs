@@ -847,6 +847,7 @@ pub struct UiState {
     /// An MCP sign-in waiting for the user's browser.
     pub(crate) mcp_sign_in: Option<McpSignInState>,
     pub(crate) permissions: discovery::Inspection<wisp_protocol::events::PermissionState>,
+    pub(crate) codemode: discovery::Inspection<wisp_protocol::events::CodemodeState>,
     pub(crate) git_diff: git_diff::GitDiff,
     /// Whether the side panel is on screen, so the changed files stay loaded and
     /// refresh after each run.
@@ -935,6 +936,7 @@ impl UiState {
             mcp_preview: discovery::Inspection::default(),
             mcp_sign_in: None,
             permissions: discovery::Inspection::default(),
+            codemode: discovery::Inspection::default(),
             project_files: project_files::ProjectFiles::default(),
             git_diff: git_diff::GitDiff::default(),
             side_panel_visible: false,
@@ -1096,6 +1098,7 @@ pub enum CommandKind {
     PreviewMcpSnippet,
     ChangeMcpServers,
     Permissions,
+    Codemode,
     GetProjectFiles,
     GetGitDiff,
     GetSessions,
@@ -1140,6 +1143,7 @@ impl CommandKind {
             Self::PreviewMcpSnippet => "preview_mcp_snippet",
             Self::ChangeMcpServers => "mcp_change",
             Self::Permissions => "permissions",
+            Self::Codemode => "codemode",
             Self::GetGitDiff => "get_git_diff",
             Self::GetProjectFiles => "get_project_files",
             Self::GetSessions => "get_sessions",
@@ -1222,6 +1226,10 @@ pub enum BackendEvent {
     PermissionsReported {
         command_id: String,
         permissions: Result<std::sync::Arc<wisp_protocol::events::PermissionState>, String>,
+    },
+    CodemodeReported {
+        command_id: String,
+        codemode: Result<std::sync::Arc<wisp_protocol::events::CodemodeState>, String>,
     },
     McpStatusReported {
         command_id: String,
@@ -1423,6 +1431,8 @@ pub enum UiAction {
     /// Stop waiting for an MCP sign-in.
     CancelMcpSignIn,
     Permissions(Option<wisp_protocol::commands::PermissionMode>),
+    /// Read the codemode setting, or apply and save a new one.
+    Codemode(Option<wisp_protocol::commands::CodemodeSetting>),
     SetProjectFilesOpen(bool),
     LoadContext,
     SetGitDiffOpen(bool),
@@ -1634,6 +1644,7 @@ pub fn reduce(
         UiAction::ChangeMcpServers(change) => Ok(discovery::change_mcp(state, change, ids)?),
         UiAction::CancelMcpSignIn => Ok(discovery::cancel_mcp_sign_in(state, ids)?),
         UiAction::Permissions(mode) => Ok(discovery::permissions(state, mode, ids)?),
+        UiAction::Codemode(setting) => Ok(discovery::codemode(state, setting, ids)?),
         UiAction::SetProjectFilesOpen(open) => {
             state.project_files.set_open(open);
             Ok(vec![UiEffect::ProjectFilesChanged, UiEffect::RequestRender])
@@ -1815,6 +1826,7 @@ fn close_transport(state: &mut UiState) -> Vec<UiEffect> {
     state.mcp.close();
     state.mcp_preview.close();
     state.permissions.close();
+    state.codemode.close();
     state.project_files.close();
     state.git_diff.close();
     state.model_operation = None;
@@ -1940,6 +1952,7 @@ fn set_side_panel_visible(
     if visible {
         effects.extend(discovery::load_mcp(state, ids)?);
         effects.extend(discovery::permissions(state, None, ids)?);
+        effects.extend(discovery::codemode(state, None, ids)?);
     }
     Ok(effects)
 }
@@ -5518,6 +5531,7 @@ fn handle_backend_event(
         | BackendEvent::McpSnippetPreviewed { .. }
         | BackendEvent::McpLoginStarted { .. }
         | BackendEvent::PermissionsReported { .. }
+        | BackendEvent::CodemodeReported { .. }
         | BackendEvent::SessionStatsReported { .. }
         | BackendEvent::ContextEstimated(_)
         | BackendEvent::CompactionStarted(_)
@@ -5569,6 +5583,11 @@ fn observe_backend_event(
     }
     if let Some(mut effects) = discovery::observe(state, event) {
         effects.extend(discovery::read_permissions_again(state, ids)?);
+        // Connecting or changing MCP servers changes whether automatic codemode is on.
+        if state.side_panel_visible && matches!(event, BackendEvent::McpStatusReported { .. }) {
+            effects.extend(discovery::codemode(state, None, ids)?);
+        }
+        effects.extend(discovery::read_codemode_again(state, ids)?);
         return Ok(Some(effects));
     }
     if let Some(effects) = context::observe(state, event, ids)? {
@@ -5890,6 +5909,10 @@ fn finish_current_command(
     // The run may have changed files; the panel's list catches up once it ends.
     state.git_diff.refresh_for_panel();
     let mut effects = context::start_refresh(state, history_sync_follows, ids)?;
+    // A run can connect MCP servers, which changes whether the next one offers codemode.
+    if state.side_panel_visible {
+        effects.extend(discovery::codemode(state, None, ids)?);
+    }
     if let Some(message) = init_failure {
         effects.push(UiEffect::Notice(message));
         effects.push(UiEffect::RequestRender);
@@ -6191,7 +6214,12 @@ mod tests {
         let shown = reduce(&mut state, UiAction::SetSidePanelVisible(true), &mut ids).unwrap();
         assert_eq!(
             sent(&shown),
-            ["get_mcp_status", "get_permissions", "get_git_diff"]
+            [
+                "get_mcp_status",
+                "get_permissions",
+                "get_codemode",
+                "get_git_diff"
+            ]
         );
         let again = reduce(&mut state, UiAction::SetSidePanelVisible(true), &mut ids).unwrap();
         assert!(again.is_empty());
@@ -6580,6 +6608,122 @@ mod tests {
         )
         .unwrap();
         assert!(sent(&effects).contains(&"get_permissions".to_owned()));
+    }
+
+    #[test]
+    fn codemode_change_round_trip() {
+        use wisp_protocol::commands::CodemodeSetting;
+        let mut state = UiState::new("fake".into(), None, None);
+        state.input_ready = true;
+        let mut ids = DeterministicIds::default();
+        let change = reduce(
+            &mut state,
+            UiAction::Codemode(Some(CodemodeSetting::Always)),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(sent(&change), ["set_codemode"]);
+        let id = sent_id(&change, "set_codemode");
+        let snapshot = wisp_protocol::events::CodemodeState {
+            setting: CodemodeSetting::Always,
+            available: true,
+            offered: true,
+            env_setting: None,
+        };
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::CodemodeReported {
+                command_id: id.clone(),
+                codemode: Ok(std::sync::Arc::new(snapshot.clone())),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(state.codemode.loading());
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished(&id, "set_codemode", true)),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(!state.codemode.loading());
+        assert_eq!(state.codemode.snapshot.as_deref(), Some(&snapshot));
+    }
+
+    #[test]
+    fn codemode_change_waits_for_run() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.input_ready = true;
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = InteractionStatus::Running;
+        let mut ids = DeterministicIds::default();
+        let change = reduce(
+            &mut state,
+            UiAction::Codemode(Some(wisp_protocol::commands::CodemodeSetting::Never)),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(sent(&change).is_empty());
+        assert!(change.iter().any(
+            |effect| matches!(effect, UiEffect::Notice(text) if text.contains("Finish the current"))
+        ));
+    }
+
+    #[test]
+    fn codemode_read_during_read_waits() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.input_ready = true;
+        let mut ids = DeterministicIds::default();
+        let shown = reduce(&mut state, UiAction::SetSidePanelVisible(true), &mut ids).unwrap();
+        let first = sent_id(&shown, "get_codemode");
+        // The run ends while the panel's first read is in flight: no second read yet.
+        assert!(!sent(&end_run(&mut state, &mut ids)).contains(&"get_codemode".to_owned()));
+        let finished = reduce(
+            &mut state,
+            UiAction::BackendEvent(finished(&first, "get_codemode", false)),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(sent(&finished), ["get_codemode"]);
+        assert_ne!(sent_id(&finished, "get_codemode"), first);
+    }
+
+    #[test]
+    fn mcp_report_rereads_codemode() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.input_ready = true;
+        let mut ids = DeterministicIds::default();
+        let shown = reduce(&mut state, UiAction::SetSidePanelVisible(true), &mut ids).unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished(
+                &sent_id(&shown, "get_codemode"),
+                "get_codemode",
+                false,
+            )),
+            &mut ids,
+        )
+        .unwrap();
+        let reported = reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::McpStatusReported {
+                command_id: sent_id(&shown, "get_mcp_status"),
+                status: Err("unavailable".into()),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(sent(&reported), ["get_codemode"]);
+    }
+
+    #[test]
+    fn run_end_rereads_codemode_for_panel() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.input_ready = true;
+        let mut ids = DeterministicIds::default();
+        assert!(!sent(&end_run(&mut state, &mut ids)).contains(&"get_codemode".to_owned()));
+        state.side_panel_visible = true;
+        assert!(sent(&end_run(&mut state, &mut ids)).contains(&"get_codemode".to_owned()));
     }
 
     #[test]

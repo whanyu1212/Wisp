@@ -27,6 +27,10 @@ AgentMode = TypeAliasType("AgentMode", Literal["build", "plan"])
 
 DEFAULT_AGENT_MODE: AgentMode = "build"
 
+# When a run offers the codemode tool: "automatic" when it finds its MCP tools on demand,
+# or "always" or "never". Saved as the user setting ``codemode`` (unset, true or false).
+CodemodeSetting = TypeAliasType("CodemodeSetting", Literal["automatic", "always", "never"])
+
 MAX_RPC_MODEL_CATALOG_PROVIDERS = 128
 MAX_RPC_CONNECTION_PROVIDERS = 32
 MAX_RPC_CONNECTION_METHODS = 64
@@ -387,6 +391,28 @@ class RpcPermissionsReported(WispEvent):
     type: Literal["rpc.permissions"] = "rpc.permissions"
     command_id: str
     permissions: PermissionState
+
+
+class CodemodeState(BaseModel):
+    """The session's codemode setting and whether its next run would offer the tool."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    setting: CodemodeSetting
+    # Whether the `codemode` extra is installed; without it no run offers the tool.
+    available: bool
+    # Whether a run started now would offer the tool, given its tools and MCP exposure.
+    offered: bool
+    # The setting `WISP_CODEMODE` gives, which outranks the saved one at startup.
+    env_setting: CodemodeSetting | None = None
+
+
+class RpcCodemodeReported(WispEvent):
+    """Codemode snapshot returned by a codemode inspection or change."""
+
+    type: Literal["rpc.codemode"] = "rpc.codemode"
+    command_id: str
+    codemode: CodemodeState
 
 
 class RpcWorkspaceReported(WispEvent):

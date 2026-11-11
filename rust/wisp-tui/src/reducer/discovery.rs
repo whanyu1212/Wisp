@@ -357,6 +357,56 @@ pub(super) fn permissions(
     ])
 }
 
+/// Read the codemode setting, or apply and save `setting`. The setting changes
+/// what a run offers, so it waits for the current operation, like permissions.
+pub(super) fn codemode(
+    state: &mut UiState,
+    setting: Option<wisp_protocol::commands::CodemodeSetting>,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    if state.exit_requested {
+        return Ok(Vec::new());
+    }
+    if state.codemode.loading() {
+        if setting.is_some() {
+            return Ok(vec![UiEffect::Notice(
+                "Codemode is still loading; try again.".into(),
+            )]);
+        }
+        // The answer in flight may predate the run or MCP change that asked for this read.
+        state.codemode.read_again = true;
+        return Ok(Vec::new());
+    }
+    if setting.is_some() && (!state.can_select_model() || super::session_sync_pending(state)) {
+        return Ok(vec![UiEffect::Notice(
+            "Finish the current operation before changing codemode.".into(),
+        )]);
+    }
+    let id = ids.next_id(CommandKind::Codemode);
+    let command = WispTypedClientRpcCommands::codemode(&id, setting)?;
+    if setting.is_some() {
+        state.codemode.start_change(id);
+    } else {
+        state.codemode.start(id);
+    }
+    Ok(vec![
+        UiEffect::SendCommand(command),
+        UiEffect::RequestRender,
+    ])
+}
+
+/// Send the codemode read that was asked for while another request was in flight,
+/// once that request has finished.
+pub(super) fn read_codemode_again(
+    state: &mut UiState,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    if state.codemode.loading() || !std::mem::take(&mut state.codemode.read_again) {
+        return Ok(Vec::new());
+    }
+    codemode(state, None, ids)
+}
+
 /// Send the permission read that was asked for while another request was in flight,
 /// once that request has finished.
 pub(super) fn read_permissions_again(
@@ -385,6 +435,23 @@ pub(super) fn observe(state: &mut UiState, event: &BackendEvent) -> Option<Vec<U
             error,
         } if matches!(command_type.as_str(), "get_permissions" | "set_permissions")
             && state.permissions.finish(command_id, *ok, error.as_deref()) =>
+        {
+            Some(vec![UiEffect::RequestRender])
+        }
+        BackendEvent::CodemodeReported {
+            command_id,
+            codemode,
+        } => {
+            state.codemode.report(command_id, codemode);
+            Some(Vec::new())
+        }
+        BackendEvent::CommandFinished {
+            command_id,
+            command_type,
+            ok,
+            error,
+        } if matches!(command_type.as_str(), "get_codemode" | "set_codemode")
+            && state.codemode.finish(command_id, *ok, error.as_deref()) =>
         {
             Some(vec![UiEffect::RequestRender])
         }

@@ -116,6 +116,15 @@ def builtin_command_descriptors() -> tuple[CommandDescriptor, ...]:
             order=28,
         ),
         CommandDescriptor(
+            name="codemode",
+            title="Codemode",
+            description="View or save when runs offer the codemode tool",
+            category=CommandCategory.configuration,
+            arguments=(CommandArgument("setting", "Optional 'automatic', 'always' or 'never'"),),
+            accepts_arguments=True,
+            order=28,
+        ),
+        CommandDescriptor(
             name="plan",
             title="Plan mode",
             description="Switch to read-only planning mode",

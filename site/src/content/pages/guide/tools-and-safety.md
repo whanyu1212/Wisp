@@ -499,7 +499,10 @@ most, so on-demand discovery with codemode is the recommended setup for a large 
 tool-use evals' orchestration tasks it was the cheapest setup measured, and its accuracy matched or
 beat every other setup on every model. `"codemode": true` in `~/.wisp/settings.json`, or
 `WISP_CODEMODE=1`, offers it in every run; `"codemode": false`, or `WISP_CODEMODE=0`, never does.
-Without the extra installed, codemode is simply not offered.
+In the terminal UI, `/codemode` shows and saves this setting. RPC and SDK clients use the
+`get_codemode` and `set_codemode` commands, which report the setting, whether the next run would
+offer the tool, and any `WISP_CODEMODE` value. Without the extra installed, codemode is simply not
+offered.
 
 ## Saved project permissions
 

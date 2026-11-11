@@ -347,6 +347,14 @@
       "title": "CloneSessionCommand",
       "type": "object"
     },
+    "CodemodeSetting": {
+      "enum": [
+        "automatic",
+        "always",
+        "never"
+      ],
+      "type": "string"
+    },
     "CompactCommand": {
       "additionalProperties": false,
       "description": "Compact the active persisted session context.",
@@ -593,6 +601,33 @@
         "entry_id"
       ],
       "title": "ForkSessionCommand",
+      "type": "object"
+    },
+    "GetCodemodeCommand": {
+      "additionalProperties": false,
+      "description": "Read the codemode setting and whether the next run would offer the tool.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "GetCodemodeCommandId"
+        },
+        "type": {
+          "const": "get_codemode",
+          "default": "get_codemode",
+          "title": "GetCodemodeCommandType",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "GetCodemodeCommand",
       "type": "object"
     },
     "GetCommandsCommand": {
@@ -1630,6 +1665,38 @@
       "title": "SelectSessionCommand",
       "type": "object"
     },
+    "SetCodemodeCommand": {
+      "additionalProperties": false,
+      "description": "Apply a codemode setting from the next run and save it as the user setting.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "SetCodemodeCommandId"
+        },
+        "setting": {
+          "$ref": "#/$defs/CodemodeSetting",
+          "title": "SetCodemodeCommandSetting"
+        },
+        "type": {
+          "const": "set_codemode",
+          "default": "set_codemode",
+          "title": "SetCodemodeCommandType",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "setting"
+      ],
+      "title": "SetCodemodeCommand",
+      "type": "object"
+    },
     "SetMcpServerEnabledCommand": {
       "additionalProperties": false,
       "description": "Enable or disable an MCP server in the user settings, then restart MCP servers.\n\nEnabling a server is the user's decision, as adding one is. ``expected`` is\nrequired when enabling: it is the ``launch`` from the ``rpc.mcp`` status that the\nuser was shown and confirmed, and the server is enabled only if its saved\nsettings still match it.",
@@ -2023,6 +2090,7 @@
       "disconnect_provider": "#/$defs/DisconnectProviderCommand",
       "follow_up": "#/$defs/FollowUpCommand",
       "fork_session": "#/$defs/ForkSessionCommand",
+      "get_codemode": "#/$defs/GetCodemodeCommand",
       "get_commands": "#/$defs/GetCommandsCommand",
       "get_connection_catalog": "#/$defs/GetConnectionCatalogCommand",
       "get_git_diff": "#/$defs/GetGitDiffCommand",
@@ -2048,6 +2116,7 @@
       "reconnect_mcp": "#/$defs/ReconnectMcpCommand",
       "remove_mcp_server": "#/$defs/RemoveMcpServerCommand",
       "select_session": "#/$defs/SelectSessionCommand",
+      "set_codemode": "#/$defs/SetCodemodeCommand",
       "set_mcp_server_enabled": "#/$defs/SetMcpServerEnabledCommand",
       "set_permissions": "#/$defs/SetPermissionsCommand",
       "set_queue_mode": "#/$defs/SetQueueModeCommand",
@@ -2081,6 +2150,12 @@
     },
     {
       "$ref": "#/$defs/SetPermissionsCommand"
+    },
+    {
+      "$ref": "#/$defs/GetCodemodeCommand"
+    },
+    {
+      "$ref": "#/$defs/SetCodemodeCommand"
     },
     {
       "$ref": "#/$defs/GetCommandsCommand"

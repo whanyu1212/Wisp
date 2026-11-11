@@ -1213,6 +1213,80 @@
    "accepted": false
   },
   {
+   "event": "rpc.codemode",
+   "operation": "remove",
+   "path": [
+    "codemode"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.codemode",
+   "operation": "remove",
+   "path": [
+    "command_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.codemode",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.codemode",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "rpc.codemode",
+   "operation": "remove",
+   "path": [
+    "codemode",
+    "available"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.codemode",
+   "operation": "remove",
+   "path": [
+    "codemode",
+    "env_setting"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.codemode",
+   "operation": "remove",
+   "path": [
+    "codemode",
+    "offered"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.codemode",
+   "operation": "remove",
+   "path": [
+    "codemode",
+    "setting"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.codemode",
+   "operation": "add_unknown",
+   "path": [
+    "codemode"
+   ],
+   "accepted": false
+  },
+  {
    "event": "rpc.command.finished",
    "operation": "remove",
    "path": [

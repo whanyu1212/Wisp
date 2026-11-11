@@ -388,8 +388,27 @@ def try_persist_user_model_selection(
     )
 
 
+def try_persist_user_codemode(codemode: bool | None, *, home_dir: Path | None = None) -> bool:
+    """Save the user's codemode setting, keeping every other user setting.
+
+    Args:
+        codemode (bool | None): True or False to always or never offer the tool, or
+            None to remove the key so the automatic default applies.
+        home_dir (Path | None): User home override, primarily for isolated callers.
+
+    Returns:
+        bool: Whether the atomic settings update succeeded. Failures also warn;
+        unreadable settings are preserved rather than replaced.
+    """
+    return _persist_user_settings(
+        {"codemode": codemode},
+        home_dir=home_dir,
+        preference="codemode setting",
+    )
+
+
 def _persist_user_settings(
-    updates: Mapping[str, str | None],
+    updates: Mapping[str, str | bool | None],
     *,
     home_dir: Path | None,
     preference: str,

@@ -25,7 +25,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Padding, Paragraph};
 use unicode_width::UnicodeWidthStr;
-use wisp_protocol::commands::PermissionMode;
+use wisp_protocol::commands::{CodemodeSetting, PermissionMode};
 use wisp_protocol::events::{McpServerStatus, SessionBranchSummary};
 
 /// The panel's width, its border included: the overlay's width, and the docked
@@ -900,6 +900,7 @@ fn header_lines(
             Style::default().fg(palette.muted),
         ));
     }
+    lines.extend(codemode_line(state, width, palette));
     if let Some(branch) = state
         .context
         .stats
@@ -920,6 +921,30 @@ fn header_lines(
         ));
     }
     lines
+}
+
+/// Whether the next prompt offers codemode, and which setting decides it. The
+/// automatic setting has no row while it leaves codemode off, which is the usual case
+/// without MCP tools found on demand.
+fn codemode_line(state: &UiState, width: usize, palette: Palette) -> Option<Line<'static>> {
+    let snapshot = state.codemode.snapshot.as_deref()?;
+    let setting = crate::discovery_view::codemode_label(snapshot.setting);
+    let (text, color) = if !snapshot.available && snapshot.setting == CodemodeSetting::Always {
+        (
+            format!("codemode {setting} · needs wisp-ai[codemode]"),
+            palette.warning,
+        )
+    } else if snapshot.offered {
+        (format!("codemode on · {setting}"), palette.muted)
+    } else if snapshot.setting == CodemodeSetting::Automatic {
+        return None;
+    } else {
+        (format!("codemode off · {setting}"), palette.muted)
+    };
+    Some(Line::styled(
+        ui::clip_columns(&text, width),
+        Style::default().fg(color),
+    ))
 }
 
 /// Where the active path sits in the session tree: `branched from turn 4 · 2
@@ -1767,6 +1792,55 @@ mod tests {
         lone.view_status = ViewStatus::Running;
         let text = panel_text(&screen(&lone, &mut SidePanel::default(), 200), 200);
         assert!(!text.contains("Recent turns"), "{text}");
+    }
+
+    #[test]
+    fn codemode_row_names_setting() {
+        use wisp_protocol::events::CodemodeState;
+        let cases = [
+            (
+                CodemodeSetting::Automatic,
+                true,
+                true,
+                Some("codemode on · automatic"),
+            ),
+            (CodemodeSetting::Automatic, true, false, None),
+            (
+                CodemodeSetting::Always,
+                true,
+                true,
+                Some("codemode on · always"),
+            ),
+            (
+                CodemodeSetting::Never,
+                true,
+                false,
+                Some("codemode off · never"),
+            ),
+            (
+                CodemodeSetting::Always,
+                false,
+                false,
+                Some("codemode always · needs wisp-ai[codemode]"),
+            ),
+        ];
+        for (setting, available, offered, expected) in cases {
+            let mut state = UiState::unconfigured();
+            assert!(codemode_line(&state, 44, Palette::default()).is_none());
+            state.codemode.snapshot = Some(Arc::new(CodemodeState {
+                setting,
+                available,
+                offered,
+                env_setting: None,
+            }));
+            let text = codemode_line(&state, 44, Palette::default()).map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            });
+            assert_eq!(text.as_deref(), expected, "{setting:?}");
+        }
     }
 
     #[test]

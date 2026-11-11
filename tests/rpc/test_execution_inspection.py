@@ -171,6 +171,7 @@ def test_executor_reports_commands_from_runtime_registry_without_replacing_runni
             "history",
             "update",
             "skills",
+            "codemode",
             "mcp",
             "permissions",
             "plan",
