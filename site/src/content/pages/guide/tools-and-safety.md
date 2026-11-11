@@ -481,7 +481,8 @@ it adds [monty](https://github.com/pydantic/monty), the sandbox scripts run in.
   `tool.nested.started` and `tool.nested.ended` events, on a best-effort basis. The model still
   reads only what the script prints and returns. A run cancelled while a script is running
   records that script as interrupted, with no calls listed; its live events are then the only
-  trace. The terminal UI does not show these calls yet.
+  trace. The terminal UI shows each script as one card that lists these calls when opened, and
+  a script's optional `title` names it there.
 - **A sandbox, not a shell.** Scripts run in a separate process with no files, network, environment
   or third-party packages, in a subset of Python. They are type-checked against the tools'
   declarations before anything runs.

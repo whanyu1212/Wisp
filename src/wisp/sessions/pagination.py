@@ -19,6 +19,7 @@ from pydantic import ValidationError
 from wisp.events import (
     AgentCompleted,
     JsonObject,
+    NestedToolCall,
     RpcMessageSnapshot,
     RpcMessageToolCallSnapshot,
     RpcMessageToolResultSnapshot,
@@ -50,6 +51,11 @@ MESSAGE_CONTENT_BYTE_LIMIT = 64 * 1024
 TOOL_ARGUMENTS_BYTE_LIMIT = 64 * 1024
 MESSAGE_TOOL_CALL_LIMIT = 16
 MESSAGE_PAGE_TEXT_BYTE_LIMIT = 512 * 1024
+# The most of a codemode script's title a clipped call keeps.
+SCRIPT_TITLE_BYTE_LIMIT = 256
+# The codemode tool's name, as `wisp.tools.codemode.calls.CODEMODE` defines it; sessions sit
+# below the tools package, which imports them.
+_CODEMODE = "codemode"
 
 
 @dataclass(frozen=True, slots=True)
@@ -450,6 +456,13 @@ def _rpc_tool_result_snapshot(
         before_text = None if before_text_truncated else clipped_before_text
         projection_truncated = projection_truncated or before_text_truncated
         truncated = truncated or before_text_truncated
+    # Shortening the calls leaves the message itself whole, so it marks nothing cut:
+    # their count still says how many the script made.
+    nested_calls, nested_calls_omitted = _rpc_nested_calls(
+        tool_result.nested_calls,
+        tool_result.nested_calls_omitted,
+        text_budget=text_budget,
+    )
     summary = tool_result.summary
     if summary is not None and text_budget is not None:
         summary, _, summary_truncated = _clip_text_with_budget(
@@ -473,9 +486,41 @@ def _rpc_tool_result_snapshot(
             process_ended_at=tool_result.process_ended_at,
             target=tool_result.target,
             edit_locations=tool_result.edit_locations,
+            nested_calls=nested_calls,
+            nested_calls_omitted=nested_calls_omitted,
         ),
         projection_truncated,
     )
+
+
+def _rpc_nested_calls(
+    calls: tuple[NestedToolCall, ...] | None,
+    omitted: int | None,
+    *,
+    text_budget: _MessagePageTextBudget | None,
+) -> tuple[tuple[NestedToolCall, ...] | None, int | None]:
+    """A codemode script's calls as one page can carry them.
+
+    The whole list when the page's text budget allows it; otherwise the list without
+    arguments and summaries, which keeps each call's tool, outcome and timing; and
+    when even that does not fit, no list, every call counted as omitted.
+
+    Returns:
+        tuple[tuple[NestedToolCall, ...] | None, int | None]: The calls, and how
+        many were left out.
+    """
+
+    if not calls or text_budget is None:
+        return calls, omitted
+    for shown in (
+        calls,
+        tuple(c.model_copy(update={"arguments": None, "summary": None}) for c in calls),
+    ):
+        size = sum(len(call.model_dump_json().encode("utf-8")) for call in shown)
+        if size <= text_budget.remaining:
+            text_budget.remaining -= size
+            return shown, omitted
+    return None, (omitted or 0) + len(calls)
 
 
 def _rpc_tool_call_snapshot(
@@ -516,6 +561,13 @@ def _rpc_tool_call_snapshot(
             limit=TOOL_ARGUMENTS_BYTE_LIMIT,
             text_budget=text_budget,
         )
+        title = tool_call.arguments.get("title")
+        if truncated and tool_call.name == _CODEMODE and isinstance(title, str):
+            # The card is named by its title; the clipped script is only a preview.
+            kept, _, _ = _clip_text_with_budget(
+                title, limit=SCRIPT_TITLE_BYTE_LIMIT, text_budget=text_budget
+            )
+            clipped_arguments = {**clipped_arguments, "title": kept}
     return RpcMessageToolCallSnapshot(
         call_id=tool_call.call_id,
         name=tool_call.name,

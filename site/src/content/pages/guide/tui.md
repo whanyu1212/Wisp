@@ -106,6 +106,13 @@ with a count; opening a group hangs its calls under it on `└` rows. Collapsed 
 blank row between them. A failed command also shows the last line it printed and how many more
 there are. Select a line with `F6` and press `→`, or click it, to show its details.
 
+A [codemode](tools-and-safety.md#scripting-tool-calls-with-codemode-experimental) script is one
+line that names what it does and counts the calls it makes as they finish, such as
+`• Scripted count TODOs per crate · 14 calls (1 failed) · read ×12, grep ×2`. Opening it shows
+the script's first lines, numbered, then one `└` row per call (repeated calls to one tool share a
+row, and a failed one says why), then what the script returned. A failed script shows what
+stopped it under its line, like a failed command. Scripts are never folded into other groups.
+
 Images are named rather than drawn. An image pasted or dragged into the composer shows as a chip
 such as `Image 1 · 640×480`, and the sent prompt shows a `[image 640×480 png]` line for it. A tool
 card whose result returned images, such as a `read` of a PNG, ends its action row with the same

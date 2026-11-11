@@ -578,6 +578,7 @@ fn add_diff_card(transcript: &mut Transcript) -> TranscriptEntryId {
 
 fn tool_result(call_id: &str, name: &str, output: &str) -> ToolResultInput {
     ToolResultInput {
+        nested: Default::default(),
         call_id: call_id.into(),
         name: name.into(),
         output: output.into(),

@@ -1193,6 +1193,18 @@ pub enum BackendEvent {
         call_id: String,
         progress: ToolProgressInput,
     },
+    /// A codemode script made a call, which may still be waiting to run.
+    ScriptCallStarted {
+        parent_call_id: String,
+        call_id: String,
+        tool: String,
+        arguments: serde_json::Value,
+    },
+    /// A call a codemode script made finished.
+    ScriptCallEnded {
+        parent_call_id: String,
+        call: crate::script_card::ScriptCall,
+    },
     GitDiffReported {
         command_id: String,
         snapshot: git_diff::GitDiffReport,
@@ -5383,6 +5395,36 @@ fn handle_backend_event(
         }
         BackendEvent::ToolExecutionProgress { call_id, progress } => {
             let changed = state.transcript.observe_tool_progress(&call_id, &progress);
+            Ok(if changed {
+                vec![UiEffect::RequestRender]
+            } else {
+                Vec::new()
+            })
+        }
+        BackendEvent::ScriptCallStarted {
+            parent_call_id,
+            call_id,
+            tool,
+            arguments,
+        } => {
+            let changed = state
+                .transcript
+                .observe_script_call(&parent_call_id, |script| {
+                    script.call_started(&call_id, &tool, arguments)
+                });
+            Ok(if changed {
+                vec![UiEffect::RequestRender]
+            } else {
+                Vec::new()
+            })
+        }
+        BackendEvent::ScriptCallEnded {
+            parent_call_id,
+            call,
+        } => {
+            let changed = state
+                .transcript
+                .observe_script_call(&parent_call_id, |script| script.call_ended(call));
             Ok(if changed {
                 vec![UiEffect::RequestRender]
             } else {

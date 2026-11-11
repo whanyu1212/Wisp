@@ -1822,6 +1822,7 @@ fn complete_tool(ui: &mut LiveUi, call_id: &str, name: &str, output: &str) {
     ui.state
         .transcript
         .observe_tool_result(crate::tool_cards::ToolResultInput {
+            nested: Default::default(),
             call_id: call_id.into(),
             name: name.into(),
             output: output.into(),

@@ -20,7 +20,7 @@ from wisp.events._base import (
     _MessageOriginEvent,
 )
 from wisp.events.run import AgentCompleted, WebSearchPerformed
-from wisp.events.tools import MAX_EDIT_LOCATIONS, EditLocation
+from wisp.events.tools import MAX_EDIT_LOCATIONS, MAX_NESTED_CALLS, EditLocation, NestedToolCall
 from wisp.events.usage import TokenUsage, UsageCost
 from wisp.skills.models import SkillInvocationEvidence
 
@@ -59,6 +59,13 @@ class RpcMessageToolResultSnapshot(BaseModel):
     edit_locations: tuple[EditLocation, ...] | None = Field(
         default=None, max_length=MAX_EDIT_LOCATIONS
     )
+    # The calls a codemode script made; None for other tools. On a page with little
+    # text budget left their arguments and summaries are left out, and with none
+    # left the list is too, every call then counted in `nested_calls_omitted`.
+    nested_calls: tuple[NestedToolCall, ...] | None = Field(
+        default=None, max_length=MAX_NESTED_CALLS
+    )
+    nested_calls_omitted: int | None = Field(default=None, ge=1)
 
 
 class RpcSkillInvocationSnapshot(BaseModel):

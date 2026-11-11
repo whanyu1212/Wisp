@@ -4325,6 +4325,7 @@ mod tests {
 
     fn tool_result(call_id: &str, output: &str) -> crate::tool_cards::ToolResultInput {
         crate::tool_cards::ToolResultInput {
+            nested: Default::default(),
             call_id: call_id.into(),
             name: "read".into(),
             output: output.into(),

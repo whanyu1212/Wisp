@@ -71,8 +71,12 @@ this policy.
   running records no calls for that script. While a script runs, two new transient events, `tool.nested.started`
   (`ToolNestedCallStarted`) and `tool.nested.ended` (`ToolNestedCallEnded`), reach RPC clients, the
   SDK's live sink and `--mode json`; like tool progress they are never saved or sent to the model.
-  The schema bundle and conformance fixture are regenerated; the same-release rule applies. The
-  terminal UI does not show nested calls yet. (HY-505)
+  The schema bundle and conformance fixture are regenerated; the same-release rule applies.
+  (HY-505)
+- `rpc.messages` tool-result snapshots carry a codemode script's `nested_calls` and
+  `nested_calls_omitted`, so a reopened session shows what each script called. A page short of
+  text budget drops the calls' arguments and summaries first, then the list, counting every call
+  in `nested_calls_omitted`. The schema bundle is regenerated. (HY-499)
 - `session.directory_changed` (`SessionDirectoryChanged`) is new: `session_id`, `previous_cwd`
   (`null` for the folder a new session started in), and `cwd`. `change_directory` is a new
   command. `rpc.workspace` is now also sent after a move and after a session becomes active. The
@@ -127,6 +131,13 @@ this policy.
 
 ### TUI
 
+- A codemode script has its own card. Its line names what the script does, from its new optional
+  `title` argument or as `Python script, N lines`, then counts its calls as they finish:
+  `⠹ Scripting count TODOs per crate · 9 calls · read ×7, grep ×2`. Opening it shows the script's
+  first lines, numbered and highlighted, one `└` row per call it made (a run of one tool on one
+  row, a failed call with why), then what it returned. A failed script shows what stopped it.
+  Scripts never join `Explored` or `Ran N` groups, and a reopened session draws the same card.
+  The model can give each script a `title`, which only the card shows. (HY-499)
 - A selected row is drawn as a full-width band in a new `selected` theme tier, one step past the
   prompt's band, with bold text in pickers and lists. It replaces the primary-colour fill, and the
   row picked in browse mode now shows the band too. Text on the band keeps its colour where it

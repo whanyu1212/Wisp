@@ -672,6 +672,9 @@ struct ErrorPeek {
 impl ErrorPeek {
     /// The peek for a card, if it is a command that failed and printed something.
     fn of(card: &crate::tool_cards::ToolCardSnapshot) -> Option<Self> {
+        if card.script.is_some() {
+            return Self::of_script(card);
+        }
         if card.name != "bash" || card.status != ToolStatus::Error {
             return None;
         }
@@ -698,6 +701,66 @@ impl ErrorPeek {
                 + output.dropped_lines,
         })
     }
+}
+
+impl ErrorPeek {
+    /// A failed script's cause: the first line of its failure, after the
+    /// `Script failed (kind): ` the marker already says. Its other lines, what it
+    /// printed and the calls it made, show when the card is opened.
+    fn of_script(card: &crate::tool_cards::ToolCardSnapshot) -> Option<Self> {
+        if card.status != ToolStatus::Error {
+            return None;
+        }
+        // A card that failed without output, such as one with conflicting metadata,
+        // has only its own message.
+        let text = if card.retained_output.text.trim().is_empty() {
+            &card.detail
+        } else {
+            &card.retained_output.text
+        };
+        let first = text.lines().find(|line| !line.trim().is_empty())?;
+        let cause = first
+            .strip_prefix("Script failed (")
+            .and_then(|rest| rest.split_once("): "))
+            .map_or(first, |(_, cause)| cause);
+        let hidden = failure_rows(text).count().saturating_sub(1);
+        Some(Self {
+            line: cause.trim().to_owned(),
+            hidden_lines: u64::try_from(hidden).unwrap_or(u64::MAX),
+        })
+    }
+}
+
+/// What a finished script gave back, as the model read it: everything it printed,
+/// then its last expression, without the `[N tool calls: …]` line that ends its
+/// output and the blank lines around it.
+fn script_returned(output: &str) -> Vec<&str> {
+    let mut lines: Vec<&str> = output.lines().collect();
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+    if lines.last().is_some_and(|line| {
+        let line = line.trim();
+        line.starts_with('[')
+            && line.ends_with(']')
+            && (line.contains(" tool call") || line == "[No tool calls.]")
+    }) {
+        lines.pop();
+    }
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+    let first = lines
+        .iter()
+        .position(|line| !line.trim().is_empty())
+        .unwrap_or(lines.len());
+    lines.split_off(first)
+}
+
+/// A failed script's message without its list of calls, which the card shows as rows.
+fn failure_rows(text: &str) -> impl Iterator<Item = &str> {
+    text.lines()
+        .filter(|line| !line.trim().is_empty() && !line.starts_with("Calls made before it failed"))
 }
 
 impl CardProjection {
@@ -3451,6 +3514,269 @@ fn tool_action_projection(
     )
 }
 
+/// Script lines an opened script card shows before `+ N more lines`.
+const SCRIPT_PREVIEW_LINES: usize = 4;
+/// Call rows an opened script card shows before `… N more calls`.
+const SCRIPT_CALL_ROWS: usize = 12;
+/// Lines of what a script returned an opened card shows before `+ N more lines`.
+const SCRIPT_RETURN_LINES: usize = 8;
+
+/// A codemode script's card: `Scripted <title> · 9 calls · read ×7, grep ×2` on its
+/// action line, and when opened, the start of the script, one row per call it made
+/// (a run of the same tool on one row), then what it returned or why it failed.
+fn script_projection(card: &crate::tool_cards::ToolCardSnapshot) -> CardProjection {
+    let script = card
+        .script
+        .as_deref()
+        .expect("script projection is only built for script cards");
+    let (mut action, action_marker_end, action_label_end, action_argument_start, _) =
+        tool_action_projection(card);
+    let tally = script.tally();
+    let suffix_start = push_status_note(&mut action, (!tally.is_empty()).then_some(tally.as_str()))
+        .min(push_status_note(&mut action, card.status_note()));
+    let mut detail = String::new();
+    let mut detail_tones = Vec::new();
+    let mut detail_syntax = Vec::new();
+    let mut detail_gutters = Vec::new();
+    push_script_preview(
+        &mut detail,
+        &mut detail_syntax,
+        &mut detail_gutters,
+        &script.code,
+    );
+    push_script_calls(&mut detail, &mut detail_tones, card, script);
+    match card.status {
+        ToolStatus::Done => {
+            // Its first lines under `Returned`, aligned after the label; the rest
+            // counted, since the card keeps only the start of a long result.
+            let returned = script_returned(&card.retained_output.text);
+            for (index, line) in returned.iter().take(SCRIPT_RETURN_LINES).enumerate() {
+                let label = if index == 0 { "Returned " } else { "         " };
+                push_detail_row(&mut detail, &format!("{label}{}", line.trim_end()));
+            }
+            let more = returned.len().saturating_sub(SCRIPT_RETURN_LINES);
+            if more > 0 {
+                let noun = if more == 1 { "line" } else { "lines" };
+                push_detail_row(&mut detail, &format!("         + {more} more {noun}"));
+            }
+        }
+        ToolStatus::Error => {
+            let start = detail.len();
+            for line in failure_rows(&card.retained_output.text) {
+                push_detail_row(&mut detail, line);
+            }
+            if detail.len() > start {
+                detail_tones.push(CardDetailTone {
+                    start,
+                    end: detail.len(),
+                    tone: TranscriptRowTone::Error,
+                });
+            }
+        }
+        _ => {}
+    }
+    CardProjection {
+        action,
+        action_marker_end,
+        action_label_end,
+        action_argument_start,
+        action_argument_style: crate::markdown::InlineStyle::ToolArgument,
+        action_link: None,
+        action_syntax: Vec::new(),
+        // A script that never ran, or failed without output, says why on its own row.
+        metadata: if card.retained_output.text.trim().is_empty() {
+            card.detail.clone()
+        } else {
+            String::new()
+        },
+        detail,
+        detail_base: 0,
+        detail_tones,
+        detail_emphasis: Vec::new(),
+        detail_syntax,
+        detail_gutters,
+        action_suffix_start: suffix_start,
+        inline_detail: false,
+        omission: None,
+        omission_before_detail: false,
+        output_toggle: false,
+        footer: None,
+        framed: false,
+        action_tone: tool_status_tone(card.status),
+        error_peek: ErrorPeek::of(card),
+    }
+}
+
+/// Append one row to an opened card's detail.
+fn push_detail_row(detail: &mut String, row: &str) {
+    if !detail.is_empty() {
+        detail.push('\n');
+    }
+    detail.push_str(row);
+}
+
+/// The script's first lines, numbered and highlighted as Python, then how many
+/// more there are.
+fn push_script_preview(
+    detail: &mut String,
+    syntax: &mut Vec<crate::syntax::SyntaxToken>,
+    gutters: &mut Vec<std::ops::Range<usize>>,
+    code: &str,
+) {
+    let lines: Vec<&str> = code.lines().collect();
+    if lines.is_empty() {
+        return;
+    }
+    let shown = &lines[..lines.len().min(SCRIPT_PREVIEW_LINES)];
+    let width = lines.len().to_string().len();
+    let source = shown.join("\n");
+    let tokens = crate::syntax::highlight_fence("python", &source)
+        .map(|highlight| highlight.tokens)
+        .unwrap_or_default();
+    let mut source_start = 0;
+    for (index, line) in shown.iter().enumerate() {
+        let prefix = format!("{:>width$} ", index + 1);
+        push_detail_row(detail, &prefix);
+        let gutter_end = detail.len();
+        gutters.push(gutter_end - prefix.len()..gutter_end);
+        detail.push_str(line);
+        // The highlighter saw the shown lines joined; move each token onto its row.
+        let source_end = source_start + line.len();
+        for token in &tokens {
+            let start = token.range.start.max(source_start);
+            let end = token.range.end.min(source_end);
+            if start < end {
+                syntax.push(crate::syntax::SyntaxToken {
+                    range: gutter_end + (start - source_start)..gutter_end + (end - source_start),
+                    class: token.class,
+                });
+            }
+        }
+        source_start = source_end + 1;
+    }
+    let more = lines.len() - shown.len();
+    if more > 0 {
+        let noun = if more == 1 { "line" } else { "lines" };
+        push_detail_row(detail, &format!("+ {more} more {noun}"));
+    }
+}
+
+/// One row per call the script made, or per run of calls to the same tool that
+/// ended the same way; a failed call keeps its own row and says why.
+fn push_script_calls(
+    detail: &mut String,
+    tones: &mut Vec<CardDetailTone>,
+    card: &crate::tool_cards::ToolCardSnapshot,
+    script: &crate::script_card::ScriptCard,
+) {
+    use crate::script_card::ScriptCallState;
+    let mut rows = 0;
+    let mut index = 0;
+    let calls = &script.calls;
+    while index < calls.len() {
+        let call = &calls[index];
+        let mut run = 1;
+        if call.state != ScriptCallState::Failed {
+            while calls
+                .get(index + run)
+                .is_some_and(|next| next.tool == call.tool && next.state == call.state)
+            {
+                run += 1;
+            }
+        }
+        if rows == SCRIPT_CALL_ROWS {
+            let rest = calls.len() - index + usize::try_from(script.omitted).unwrap_or(usize::MAX);
+            push_detail_row(detail, &format!("… {rest} more calls"));
+            return;
+        }
+        let start = detail.len() + usize::from(!detail.is_empty());
+        let mut row = script_call_action(card, call);
+        if run > 1 {
+            row.push_str(&format!(" · +{} more {}", run - 1, call_noun(&call.tool)));
+        }
+        match call.state {
+            ScriptCallState::Failed => {
+                if let Some(error) = &call.error {
+                    row.push_str(" · ");
+                    row.push_str(error);
+                }
+            }
+            ScriptCallState::Unfinished => row.push_str(" · script ended first"),
+            ScriptCallState::Running | ScriptCallState::Done => {}
+        }
+        if let Some(duration) = call.duration_ms.filter(|_| run == 1) {
+            row.push(' ');
+            row.push_str(&crate::tool_cards::format_duration(u64::from(duration)));
+        }
+        push_detail_row(detail, &row);
+        let tone = match call.state {
+            ScriptCallState::Failed => Some(TranscriptRowTone::Error),
+            ScriptCallState::Unfinished => Some(TranscriptRowTone::Muted),
+            ScriptCallState::Running | ScriptCallState::Done => None,
+        };
+        if let Some(tone) = tone {
+            tones.push(CardDetailTone {
+                start,
+                end: detail.len(),
+                tone,
+            });
+        }
+        rows += 1;
+        index += run;
+    }
+    if script.omitted > 0 {
+        push_detail_row(detail, &format!("… {} more calls", script.omitted));
+    }
+}
+
+/// A call's row as a direct call of the same tool would read: its mark, verb and
+/// what it acted on, relative to the script's own folder.
+fn script_call_action(
+    card: &crate::tool_cards::ToolCardSnapshot,
+    call: &crate::script_card::ScriptCall,
+) -> String {
+    use crate::script_card::ScriptCallState;
+    let status = match call.state {
+        ScriptCallState::Running => ToolStatus::Running,
+        ScriptCallState::Done => ToolStatus::Done,
+        ScriptCallState::Failed => ToolStatus::Error,
+        ScriptCallState::Unfinished => ToolStatus::Cancelled,
+    };
+    let input = crate::tool_cards::ToolCallInput {
+        call_id: call.call_id.clone(),
+        name: call.tool.clone(),
+        arguments: if call.arguments.is_object() {
+            call.arguments.clone()
+        } else {
+            serde_json::Value::Object(serde_json::Map::new())
+        },
+        detail_source: crate::tool_detail::ToolDetailSource::None,
+    };
+    let mut row_card = crate::tool_cards::ToolCardSnapshot::requested(&input, status);
+    row_card.display_base.clone_from(&card.display_base);
+    if !call.arguments.is_object() {
+        // Its arguments were too large to keep: name the tool alone.
+        let target = row_card.mcp_target().map(|target| format!(" {target}"));
+        return format!(
+            "{}{}{}",
+            status_marker(status),
+            row_card.action_verb(),
+            target.unwrap_or_default()
+        );
+    }
+    tool_action_projection(&row_card).0
+}
+
+/// What `+N more` counts for a run of calls to one tool.
+fn call_noun(tool: &str) -> &'static str {
+    match tool {
+        "read" => "reads",
+        "grep" | "find" => "searches",
+        "ls" => "listings",
+        _ => "calls",
+    }
+}
+
 /// Syntax classes for a shell command on its action line, which starts at
 /// `argument_start`, offset into `action`. Other tools, and commands the highlighter
 /// declines, get none.
@@ -3512,6 +3838,7 @@ fn push_image_note(action: &mut String, images: &[String]) -> usize {
 fn card_projection(entry: &TranscriptEntry, expanded_output: bool) -> Option<CardProjection> {
     match &entry.kind {
         TranscriptEntryKind::Message => None,
+        TranscriptEntryKind::Tool(card) if card.script.is_some() => Some(script_projection(card)),
         TranscriptEntryKind::Tool(card) => {
             let (
                 mut action,
@@ -5428,7 +5755,9 @@ enum CardGroupKey {
 /// The specialized group a card can join.
 fn card_group_key(entry: &TranscriptEntry) -> Option<CardGroupKey> {
     let card = entry.tool_card()?;
-    if matches!(card.name.as_str(), "read" | "grep" | "find" | "ls") {
+    if card.script.is_some() {
+        None
+    } else if matches!(card.name.as_str(), "read" | "grep" | "find" | "ls") {
         Some(CardGroupKey::Explore)
     } else if card.mcp_target().is_some() {
         Some(CardGroupKey::Mcp(card.name.clone()))
@@ -6412,6 +6741,7 @@ mod tests {
 
     fn tool_result(call_id: &str, output: &str) -> crate::tool_cards::ToolResultInput {
         crate::tool_cards::ToolResultInput {
+            nested: Default::default(),
             call_id: call_id.into(),
             name: "read".into(),
             output: output.into(),

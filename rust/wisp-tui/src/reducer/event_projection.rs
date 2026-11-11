@@ -511,6 +511,39 @@ impl BackendEvent {
             "tool.execution.ended" => Self::ToolExecutionEnded {
                 call_id: bounded_identity(&string_field(value, &event_type, "call_id")?),
             },
+            // A script's calls attach to the script's own card, by its call id.
+            "tool.nested.started" => {
+                let name = string_field_ref(value, &event_type, "name")?;
+                let target = optional_string_field(value, &event_type, "target")?;
+                Self::ScriptCallStarted {
+                    parent_call_id: bounded_identity(&string_field(
+                        value,
+                        &event_type,
+                        "parent_call_id",
+                    )?),
+                    call_id: string_field(value, &event_type, "call_id")?,
+                    tool: target.clone().unwrap_or_else(|| name.to_owned()),
+                    arguments: crate::script_card::call_arguments(
+                        name,
+                        target.as_deref(),
+                        value.get("arguments"),
+                    ),
+                }
+            }
+            "tool.nested.ended" => Self::ScriptCallEnded {
+                parent_call_id: bounded_identity(&string_field(
+                    value,
+                    &event_type,
+                    "parent_call_id",
+                )?),
+                call: value
+                    .get("call")
+                    .and_then(crate::script_card::ScriptCall::from_record)
+                    .ok_or_else(|| EventProjectionError::InvalidField {
+                        event_type: event_type.clone(),
+                        field: "call",
+                    })?,
+            },
             "tool.execution.progress" => Self::ToolExecutionProgress {
                 call_id: bounded_identity(&string_field(value, &event_type, "call_id")?),
                 progress: ToolProgressInput {
@@ -550,6 +583,10 @@ impl BackendEvent {
                     .ok()
                     .flatten();
                 Self::ToolResult(Box::new(ToolResultInput {
+                    nested: crate::script_card::ScriptResult::from_fields(
+                        value.get("nested_calls"),
+                        value.get("nested_calls_omitted"),
+                    ),
                     images: composer_images::reported_image_lines(value.get("images")),
                     call_id: bounded_identity(&string_field(value, &event_type, "call_id")?),
                     name: bounded_tool_name(raw_name),

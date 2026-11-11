@@ -14,6 +14,7 @@ from wisp.events import (
     AgentCompleted,
     EditLocation,
     ErrorEvent,
+    NestedToolCall,
     RpcMessageToolResultSnapshot,
     RunOutcome,
     SessionDirectoryChanged,
@@ -559,6 +560,94 @@ def test_projects_tool_result_presentation_metadata(
         truncated=True,
         edit_locations=(EditLocation(old_line=4, new_line=5),),
     )
+
+
+_NESTED_CALLS = tuple(
+    NestedToolCall(
+        call_id=f"nested-{index}",
+        name="read",
+        arguments={"path": "x" * 300},
+        summary="12 lines",
+        started_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+        duration_ms=5,
+    )
+    for index in range(3)
+)
+_SLIM_CALLS = tuple(
+    c.model_copy(update={"arguments": None, "summary": None}) for c in _NESTED_CALLS
+)
+
+
+def _json_bytes(calls: Sequence[NestedToolCall]) -> int:
+    return sum(len(call.model_dump_json().encode("utf-8")) for call in calls)
+
+
+@pytest.mark.parametrize(
+    ("budget", "calls", "omitted"),
+    [
+        (_json_bytes(_NESTED_CALLS), _NESTED_CALLS, None),
+        (_json_bytes(_SLIM_CALLS), _SLIM_CALLS, None),
+        (_json_bytes(_SLIM_CALLS) - 1, None, 3),
+    ],
+    ids=["whole", "without-arguments", "left-out"],
+)
+def test_pages_fit_nested_calls(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+    budget: int,
+    calls: tuple[NestedToolCall, ...] | None,
+    omitted: int | None,
+) -> None:
+    """A script's calls shed arguments, then the list itself, to fit the page."""
+
+    session = JsonlSessionStore(tmp_path).create()
+    entry = MessageSessionEntry(
+        session_id=session.session_id,
+        message=Message(role="tool", content="ran", tool_call_id="c", tool_name="codemode"),
+        tool_result=ToolResultPresentationSnapshot(status="done", nested_calls=_NESTED_CALLS),
+    )
+    anyio.run(session.append_entry, entry)
+    # The page text budget also pays for the message's own content first.
+    monkeypatch.setattr(pagination, "MESSAGE_PAGE_TEXT_BYTE_LIMIT", budget + len("ran"))
+
+    (message,) = session.read_message_page().messages
+
+    assert message.tool_result is not None
+    assert (message.tool_result.nested_calls, message.tool_result.nested_calls_omitted) == (
+        calls,
+        omitted,
+    )
+    # The message itself is whole; the count says how many calls were left out.
+    assert message.content_truncated is False
+
+
+def test_clipped_script_keeps_title(tmp_path: Path) -> None:
+    """A codemode call too large for the page still names its script."""
+
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def write() -> None:
+        await session.append_message(
+            Message(
+                role="assistant",
+                content="",
+                tool_calls=(
+                    ToolCallSnapshot(
+                        call_id="script-1",
+                        name="codemode",
+                        arguments={"code": "x = 1\n" * 20_000, "title": "count TODOs"},
+                    ),
+                ),
+                finish_reason="tool_calls",
+            )
+        )
+
+    anyio.run(write)
+
+    (tool_call,) = session.read_message_page().messages[0].tool_calls
+    assert tool_call.arguments_truncated is True
+    assert tool_call.arguments["title"] == "count TODOs"
+    assert "truncated_json_preview" in tool_call.arguments
 
 
 def test_pages_keep_process_times(tmp_path: Path) -> None:

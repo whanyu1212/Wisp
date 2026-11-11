@@ -55,6 +55,7 @@ pub mod reducer;
 mod runtime;
 #[cfg(test)]
 mod runtime_tests;
+mod script_card;
 #[cfg(test)]
 mod session_catalog_tests;
 mod session_picker;

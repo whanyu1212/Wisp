@@ -1045,6 +1045,40 @@ impl Transcript {
         changed
     }
 
+    /// Apply a live update from a running codemode script to its card.
+    ///
+    /// `parent_call_id` names the script's own call; the ids of the calls it makes
+    /// are only unique within it, so they are never bound to entries. An update for
+    /// a script that is unknown, not a script, or already finished is ignored.
+    /// Returns whether the card changed.
+    pub fn observe_script_call(
+        &mut self,
+        parent_call_id: &str,
+        update: impl FnOnce(&mut crate::script_card::ScriptCard) -> bool,
+    ) -> bool {
+        let Some(binding) = self.call_entries.get(parent_call_id).copied() else {
+            return false;
+        };
+        if binding.resolved || binding.kind != ToolBindingKind::Tool {
+            return false;
+        }
+        let entry = self.entry_mut(binding.entry_id);
+        let TranscriptEntryKind::Tool(card) = &mut entry.kind else {
+            unreachable!("tool binding must target a tool card")
+        };
+        if card.status.terminal() {
+            return false;
+        }
+        let Some(script) = card.script.as_deref_mut() else {
+            return false;
+        };
+        let changed = update(script);
+        if changed {
+            self.bump_card(binding.entry_id);
+        }
+        changed
+    }
+
     pub fn observe_tool_result(&mut self, input: ToolResultInput) -> TranscriptEntryId {
         let Some(binding) = self.call_entries.get(&input.call_id).copied() else {
             self.prepare_non_message_entry();
@@ -2927,6 +2961,7 @@ mod tests {
 
     fn result(call_id: &str, output: &str) -> ToolResultInput {
         ToolResultInput {
+            nested: Default::default(),
             call_id: call_id.into(),
             name: "read".into(),
             output: output.into(),

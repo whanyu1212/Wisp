@@ -3439,6 +3439,35 @@
           "default": null,
           "title": "RpcMessageToolResultSnapshotExitCode"
         },
+        "nested_calls": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/NestedToolCall"
+              },
+              "maxItems": 200,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "RpcMessageToolResultSnapshotNestedCalls"
+        },
+        "nested_calls_omitted": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "RpcMessageToolResultSnapshotNestedCallsOmitted"
+        },
         "output_has_exit_status": {
           "default": false,
           "title": "RpcMessageToolResultSnapshotOutputHasExitStatus",
@@ -3530,7 +3559,9 @@
         "process_started_at",
         "process_ended_at",
         "target",
-        "edit_locations"
+        "edit_locations",
+        "nested_calls",
+        "nested_calls_omitted"
       ],
       "title": "RpcMessageToolResultSnapshot",
       "type": "object"

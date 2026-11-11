@@ -47,6 +47,7 @@ fn fixture(scenario: &str) -> LiveUi {
         detail_source: tool_detail::ToolDetailSource::None,
     });
     let result = ToolResultInput {
+        nested: Default::default(),
         call_id: "visual-tool".into(),
         name: fixture.tool_name,
         output_source_bytes: fixture.tool_output.len() as u64,
@@ -642,6 +643,7 @@ fn showcase_state(worked: bool) -> UiState {
             arguments: tool_cards::bounded_tool_arguments(name, &arguments),
         });
         state.transcript.observe_tool_result(ToolResultInput {
+            nested: Default::default(),
             call_id: id.into(),
             name: name.into(),
             output: if name == "bash" {
@@ -1889,6 +1891,323 @@ fn image_read_card(images: serde_json::Value, width: u16) -> ratatui::buffer::Bu
         }
     }
     draw(&mut ui, width, 12)
+}
+
+/// The script every script-card test runs: six lines, so an opened card shows four.
+const SCRIPT: &str = "import asyncio\nhits = await grep(pattern=\"TODO\", path=\"src\")\nfiles = sorted(hits)\ntexts = await asyncio.gather(*[read(path=f) for f in files])\nlen(texts)\ntexts";
+
+fn script_call(title: Option<&str>) -> serde_json::Value {
+    let mut arguments = json!({"code": SCRIPT});
+    if let Some(title) = title {
+        arguments["title"] = json!(title);
+    }
+    json!({"type": "tool.call", "call_id": "script-1", "name": "codemode", "arguments": arguments})
+}
+
+fn nested(
+    call_id: &str,
+    name: &str,
+    arguments: serde_json::Value,
+    error: Option<&str>,
+) -> serde_json::Value {
+    json!({"call_id": call_id, "name": name, "arguments": arguments,
+           "is_error": error.is_some(), "error": error,
+           "started_at": "2026-01-02T03:04:05Z", "duration_ms": 12})
+}
+
+/// Draw a script card after `events`, opened when `open` is set.
+fn script_card(events: &[serde_json::Value], open: bool, width: u16) -> ratatui::buffer::Buffer {
+    let mut ui = LiveUi::default();
+    let mut card = None;
+    for event in events {
+        match BackendEvent::from_projection_value(event).unwrap() {
+            BackendEvent::ToolCall(call) => {
+                card = Some(ui.state.transcript.observe_tool_call(call))
+            }
+            BackendEvent::ToolResult(result) => {
+                ui.state.transcript.observe_tool_result(*result);
+            }
+            BackendEvent::ScriptCallStarted {
+                parent_call_id,
+                call_id,
+                tool,
+                arguments,
+            } => {
+                ui.state
+                    .transcript
+                    .observe_script_call(&parent_call_id, |script| {
+                        script.call_started(&call_id, &tool, arguments)
+                    });
+            }
+            BackendEvent::ScriptCallEnded {
+                parent_call_id,
+                call,
+            } => {
+                ui.state
+                    .transcript
+                    .observe_script_call(&parent_call_id, |script| script.call_ended(call));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    if open {
+        ui.transcript_row_cache
+            .fold_mut()
+            .expand(card.expect("a script call"));
+    }
+    draw(&mut ui, width, 24)
+}
+
+fn finished_script(output: &str, is_error: bool) -> serde_json::Value {
+    json!({"type": "tool.result", "message_entry_id": null, "call_id": "script-1",
+    "name": "codemode", "output": output, "is_error": is_error,
+    "nested_calls": [
+        nested("n1", "grep", json!({"pattern": "TODO", "path": "src"}), None),
+        nested("n2", "read", json!({"path": "src/a.rs"}), None),
+        nested("n3", "read", json!({"path": "src/b.rs"}), None),
+        nested("n4", "read", json!({"path": "../vendor/c.rs"}), Some("path outside the project")),
+    ]})
+}
+
+#[test]
+fn script_tallies_calls_while_running() {
+    let buffer = script_card(
+        &[
+            script_call(Some("count TODOs")),
+            json!({"type": "tool.nested.started", "parent_call_id": "script-1", "call_id": "n1",
+                   "name": "grep", "arguments": {"pattern": "TODO"}}),
+            json!({"type": "tool.nested.ended", "parent_call_id": "script-1",
+                   "call": nested("n1", "grep", json!({"pattern": "TODO"}), None)}),
+            json!({"type": "tool.nested.started", "parent_call_id": "script-1", "call_id": "n2",
+                   "name": "read", "arguments": {"path": "a.rs"}}),
+        ],
+        false,
+        100,
+    );
+
+    let row = buffer_row(&buffer, row_containing(&buffer, "Scripting"));
+    assert!(
+        row.contains("Scripting count TODOs · 2 calls · grep, read"),
+        "{row:?}"
+    );
+    assert!(!screen_text(&buffer).contains("import asyncio"));
+}
+
+#[test]
+fn finished_script_folds_to_one_line() {
+    let buffer = script_card(
+        &[
+            script_call(Some("count TODOs")),
+            finished_script("12\n[4 tool calls (1 failed)]", false),
+        ],
+        false,
+        100,
+    );
+
+    let row = buffer_row(&buffer, row_containing(&buffer, "Scripted"));
+    assert!(
+        row.contains("• Scripted count TODOs · 4 calls (1 failed) · read ×3, grep"),
+        "{row:?}"
+    );
+    assert!(!screen_text(&buffer).contains("Returned"));
+}
+
+#[test]
+fn opened_script_shows_code_calls_and_result() {
+    let buffer = script_card(
+        &[
+            script_call(None),
+            finished_script("12\n[4 tool calls (1 failed)]", false),
+        ],
+        true,
+        100,
+    );
+
+    let text = screen_text(&buffer);
+    for expected in [
+        "Scripted Python script, 6 lines",
+        "1 import asyncio",
+        "+ 2 more lines",
+        "• Searched",
+        "• Read src/a.rs · +1 more reads",
+        "✗ Read ../vendor/c.rs · path outside the project",
+        "Returned 12",
+    ] {
+        assert!(
+            text.contains(expected),
+            "{expected:?} missing from:\n{text}"
+        );
+    }
+    assert!(
+        !text.contains("5 len(texts)"),
+        "only four lines show:\n{text}"
+    );
+}
+
+#[test]
+fn failed_script_peeks_at_its_cause() {
+    let output = "Script failed (limit): The script made more than 200 tool calls.\nCalls made before it failed: 4 tool calls";
+    let buffer = script_card(
+        &[script_call(Some("scan")), finished_script(output, true)],
+        false,
+        100,
+    );
+
+    assert!(buffer_row(&buffer, row_containing(&buffer, "Scripted")).contains("✗ Scripted scan"));
+    let peek = buffer_row(&buffer, row_containing(&buffer, "more than 200"));
+    assert!(
+        peek.contains("The script made more than 200 tool calls."),
+        "{peek:?}"
+    );
+    assert!(!peek.contains("Script failed"), "{peek:?}");
+}
+
+#[test]
+fn script_text_is_sanitized() {
+    let buffer = script_card(
+        &[
+            script_call(Some("evil\u{1b}[31m\u{202e}title")),
+            finished_script("ok", false),
+        ],
+        true,
+        100,
+    );
+
+    let text = screen_text(&buffer);
+    assert!(text.contains("Scripted evil[31mtitle"), "{text}");
+    assert!(!text.contains('\u{1b}') && !text.contains('\u{202e}'));
+}
+
+#[test]
+fn scripts_never_group() {
+    let mut events = Vec::new();
+    for id in ["script-1", "script-2"] {
+        events.push(
+            json!({"type": "tool.call", "call_id": id, "name": "codemode",
+                           "arguments": {"code": "1", "title": id}}),
+        );
+        events.push(
+            json!({"type": "tool.result", "message_entry_id": null, "call_id": id,
+                           "name": "codemode", "output": "1", "is_error": false}),
+        );
+    }
+
+    let text = screen_text(&script_card(&events, false, 100));
+
+    assert!(
+        text.contains("Scripted script-1") && text.contains("Scripted script-2"),
+        "{text}"
+    );
+    assert!(!text.contains("2 calls"), "{text}");
+}
+
+#[test]
+fn interrupted_script_closes_running_calls() {
+    let mut ui = LiveUi::default();
+    for event in [
+        script_call(Some("scan")),
+        json!({"type": "tool.nested.started", "parent_call_id": "script-1", "call_id": "n1",
+               "name": "read", "arguments": {"path": "a.rs"}}),
+    ] {
+        match BackendEvent::from_projection_value(&event).unwrap() {
+            BackendEvent::ToolCall(call) => {
+                ui.state.transcript.observe_tool_call(call);
+            }
+            BackendEvent::ScriptCallStarted {
+                parent_call_id,
+                call_id,
+                tool,
+                arguments,
+            } => {
+                ui.state
+                    .transcript
+                    .observe_script_call(&parent_call_id, |script| {
+                        script.call_started(&call_id, &tool, arguments)
+                    });
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    ui.state
+        .transcript
+        .settle_unresolved_tools("Agent run cancelled");
+
+    let card = ui.state.transcript.entries()[0].tool_card().unwrap();
+    let states: Vec<_> = card
+        .script
+        .as_ref()
+        .unwrap()
+        .calls
+        .iter()
+        .map(|call| call.state)
+        .collect();
+    assert_eq!(states, [crate::script_card::ScriptCallState::Unfinished]);
+    // A late event for the finished script changes nothing.
+    assert!(
+        !ui.state
+            .transcript
+            .observe_script_call("script-1", |script| {
+                script.call_started("n2", "read", serde_json::Value::Null)
+            })
+    );
+}
+
+#[test]
+fn returned_row_shows_the_value() {
+    // What the script printed comes first, then its value, then the call count.
+    let output = "scanning\n[\"a.rs\", \"b.rs\"]\n[2 tool calls: read ×2]";
+    let buffer = script_card(
+        &[script_call(Some("list")), finished_script(output, false)],
+        true,
+        100,
+    );
+
+    let text = screen_text(&buffer);
+    assert!(text.contains("Returned scanning"), "{text}");
+    assert!(text.contains(r#"         ["a.rs", "b.rs"]"#), "{text}");
+    assert!(!text.contains("[2 tool calls"), "{text}");
+}
+
+#[test]
+fn returned_row_keeps_every_line() {
+    // A multi-line value shows whole up to the cap, then counts the rest.
+    let value: Vec<String> = (1..=10).map(|n| format!("line {n}")).collect();
+    let output = format!("{}\n[1 tool call: read]", value.join("\n"));
+    let buffer = script_card(
+        &[script_call(Some("lines")), finished_script(&output, false)],
+        true,
+        100,
+    );
+
+    let text = screen_text(&buffer);
+    assert!(
+        text.contains("Returned line 1") && text.contains("line 8"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("line 9") && text.contains("+ 2 more lines"),
+        "{text}"
+    );
+}
+
+#[test]
+fn cancelled_script_says_why() {
+    let mut ui = LiveUi::default();
+    let BackendEvent::ToolCall(call) =
+        BackendEvent::from_projection_value(&script_call(Some("scan"))).unwrap()
+    else {
+        panic!("a tool call");
+    };
+    let card = ui.state.transcript.observe_tool_call(call);
+    ui.state
+        .transcript
+        .settle_unresolved_tools("Agent run cancelled");
+    ui.transcript_row_cache.fold_mut().expand(card);
+
+    let text = screen_text(&draw(&mut ui, 100, 24));
+    assert!(text.contains("⊘ Script scan · cancelled"), "{text}");
+    assert!(text.contains("Agent run cancelled"), "{text}");
 }
 
 fn buffer_row(buffer: &ratatui::buffer::Buffer, y: u16) -> String {
