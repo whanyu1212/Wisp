@@ -822,13 +822,18 @@ def test_bash_tool_reports_process_tree_cleanup_failure(
     command = f"{shlex.quote(sys.executable)} -c {shlex.quote(source)}"
     tool = BashTool()
 
-    with pytest.raises(ToolError, match="Failed to terminate process tree"):
-        run_tool(tool, {"command": command, "timeout": 5}, context)
-    supervisor = tool._process_supervisor  # noqa: SLF001
-    assert supervisor is not None
-    assert len(supervisor._one_shot) == 1  # noqa: SLF001
-    anyio.run(tool.aclose)
-    assert len(supervisor._one_shot) == 0  # noqa: SLF001
+    # Run and close on one event loop, as a session does: before Python 3.12, gathering a
+    # finished task from a closed loop raises, so closing on a second loop would fail.
+    async def run_then_close() -> None:
+        with pytest.raises(ToolError, match="Failed to terminate process tree"):
+            await tool.run({"command": command, "timeout": 5}, context)
+        supervisor = tool._process_supervisor  # noqa: SLF001
+        assert supervisor is not None
+        assert len(supervisor._one_shot) == 1  # noqa: SLF001
+        await tool.aclose()
+        assert len(supervisor._one_shot) == 0  # noqa: SLF001
+
+    anyio.run(run_then_close)
     assert cleanup_attempts == 2
 
 
@@ -1065,9 +1070,10 @@ def test_direct_bash_cleanup_finishes_before_raw_task_cancellation(
     monkeypatch.setattr(process_tools_module, "_terminate_process_tree", delayed_terminate)
 
     async def run_and_cancel() -> None:
+        script = shlex.quote("print('done')")
         task = asyncio.create_task(
             BashTool(None).run(
-                {"command": f"{python} -c {shlex.quote("print('done')")}", "timeout": 10},
+                {"command": f"{python} -c {script}", "timeout": 10},
                 context,
             )
         )

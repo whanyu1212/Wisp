@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from wisp.tools.files.paths import is_junction
+
 DIRECTORY_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 FILE_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
 OPEN_SUPPORTS_DIR_FD = os.open in os.supports_dir_fd
@@ -35,7 +37,7 @@ def open_relative(
 
 
 def is_link_like(path: Path) -> bool:
-    return path.is_symlink() or path.is_junction()
+    return path.is_symlink() or is_junction(path)
 
 
 def open_path_file(path: Path) -> int:

@@ -33,6 +33,7 @@ from openai.types.responses import (
     ToolParam,
 )
 from openai.types.responses.response_input_param import ResponseInputItemParam, ResponseInputParam
+from typing_extensions import TypeAliasType
 
 from wisp.messages import Message, NativeOutput, Role
 from wisp.providers.auth import ProviderAuthResolver
@@ -72,7 +73,9 @@ OpenAIRole = Literal["user", "assistant", "system", "developer"]
 # Sessions also save each response's items with its row (see native_output_for).
 _NATIVE_OUTPUT_CAPACITY = 2048
 
-type _NativeOutputLookup = Callable[[Message], tuple[dict[str, object], ...] | None]
+_NativeOutputLookup = TypeAliasType(
+    "_NativeOutputLookup", Callable[[Message], tuple[dict[str, object], ...] | None]
+)
 
 
 @runtime_checkable

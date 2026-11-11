@@ -16,6 +16,7 @@ from typing import Literal, cast
 
 import anyio
 import httpx
+from typing_extensions import TypeAliasType
 
 from wisp.auth.openai_codex import account_id_from_access_token, refresh_openai_codex_token
 from wisp.auth.storage import JsonAuthStore
@@ -63,7 +64,9 @@ _STREAM_DRAIN_SECONDS = 0.25
 # so this bound matters only for callers that keep transcripts without a session.
 _NATIVE_OUTPUT_CAPACITY = 2048
 
-type _NativeOutputLookup = Callable[[Message], tuple[dict[str, object], ...] | None]
+_NativeOutputLookup = TypeAliasType(
+    "_NativeOutputLookup", Callable[[Message], tuple[dict[str, object], ...] | None]
+)
 
 
 class _CodexHTTPError(ProviderError):

@@ -5,10 +5,12 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from inspect import isawaitable
 
+from typing_extensions import TypeAliasType
+
 from wisp.events import WispEvent
 
-type EventHandlerResult = Awaitable[None] | None
-type EventHandler = Callable[[WispEvent], EventHandlerResult]
+EventHandlerResult = TypeAliasType("EventHandlerResult", Awaitable[None] | None)
+EventHandler = TypeAliasType("EventHandler", Callable[[WispEvent], EventHandlerResult])
 
 
 class EventBus:

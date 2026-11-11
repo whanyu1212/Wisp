@@ -94,7 +94,7 @@ and cancellation during approval belong to chapter 6.
 
 ## 4. Run the experiments
 
-From the checkout with Python 3.12+:
+From the checkout with Python 3.11+:
 
 ```bash
 python3 -m examples.crafting_agents.checkpoint_05

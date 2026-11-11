@@ -12,12 +12,13 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, TypeVar, cast
 from uuid import uuid4
 
 import anyio
 from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectSendStream
+from typing_extensions import TypeAliasType
 
 from wisp.coding import CodingSession, resolve_coding_session_configuration
 from wisp.coding.prompt import resolve_project_context_root
@@ -80,14 +81,18 @@ from wisp.trust.records import (
 )
 from wisp.trust.scope import BROAD_FOLDER_DESCRIPTION, is_broad_root
 
+T = TypeVar("T")
+
 _logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from wisp.providers.anthropic import AnthropicCacheTtl
 
-type RpcEventWriter = Callable[[WispEvent], None]
-type RpcEventRenderer = Callable[[AsyncIterator[WispEvent]], Awaitable[None]]
-type RuntimeBuilder = Callable[[WispConfig], Awaitable[WispRuntime]]
+RpcEventWriter = TypeAliasType("RpcEventWriter", Callable[[WispEvent], None])
+RpcEventRenderer = TypeAliasType(
+    "RpcEventRenderer", Callable[[AsyncIterator[WispEvent]], Awaitable[None]]
+)
+RuntimeBuilder = TypeAliasType("RuntimeBuilder", Callable[[WispConfig], Awaitable[WispRuntime]])
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,7 +144,9 @@ class _PendingApproval:
     arguments: Mapping[str, object] | None = None
 
 
-type ConfirmationHandler = Callable[[str, Mapping[str, object]], str | None]
+ConfirmationHandler = TypeAliasType(
+    "ConfirmationHandler", Callable[[str, Mapping[str, object]], str | None]
+)
 
 
 def _broad_root_notices(project: Path) -> tuple[str, ...]:
@@ -1070,7 +1077,7 @@ class RpcHost:
             )
         )
 
-    async def _refresh_working_directory[T](self, change: Callable[[], Awaitable[T]]) -> T:
+    async def _refresh_working_directory(self, change: Callable[[], Awaitable[T]]) -> T:
         """Run ``change``, which may move the agent's working directory, and re-index.
 
         The project-file index is built from the working directory, so it is

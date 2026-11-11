@@ -12,6 +12,13 @@ this policy.
 
 ## Unreleased
 
+### Packaging
+
+- Wisp now supports Python 3.11 as well as 3.12 and newer. The native wheels, which carry the
+  Rust terminal UI, are tagged `cp311-abi3`, so a 3.11 install gets the terminal UI too.
+  The `codemode` extra still needs Python 3.12: on 3.11 it installs nothing, and the model is not
+  offered `codemode`. Wisp now depends on `typing-extensions` directly. (HY-500)
+
 ### Sessions
 
 - A session can move its working directory to another folder: the new `change_directory {path}`

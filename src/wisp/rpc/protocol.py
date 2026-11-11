@@ -15,6 +15,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from typing_extensions import TypeAliasType
 
 MAX_HANDSHAKE_FRAME_BYTES = 64 * 1024
 MAX_LIVE_RPC_FRAME_BYTES = 64 * 1024 * 1024
@@ -31,18 +32,24 @@ _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 _VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+_-]{0,127}$")
 _BIDI_CONTROL_CLASSES = frozenset({"LRE", "RLE", "LRO", "RLO", "PDF", "LRI", "RLI", "FSI", "PDI"})
 
-type RpcCapability = Annotated[
-    str,
-    StringConstraints(
-        min_length=1,
-        max_length=64,
-        pattern=r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
-    ),
-]
-type RpcHandshakeRejectionCode = Literal[
-    "invalid_handshake",
-    "unsupported_capability",
-]
+RpcCapability = TypeAliasType(
+    "RpcCapability",
+    Annotated[
+        str,
+        StringConstraints(
+            min_length=1,
+            max_length=64,
+            pattern=r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$",
+        ),
+    ],
+)
+RpcHandshakeRejectionCode = TypeAliasType(
+    "RpcHandshakeRejectionCode",
+    Literal[
+        "invalid_handshake",
+        "unsupported_capability",
+    ],
+)
 
 
 class _ProtocolModel(BaseModel):
@@ -165,10 +172,13 @@ class RpcHandshakeRejected(_ProtocolModel):
         return value
 
 
-type RpcHandshakeResponse = Annotated[
-    RpcHandshakeAccepted | RpcHandshakeRejected,
-    Field(discriminator="type"),
-]
+RpcHandshakeResponse = TypeAliasType(
+    "RpcHandshakeResponse",
+    Annotated[
+        RpcHandshakeAccepted | RpcHandshakeRejected,
+        Field(discriminator="type"),
+    ],
+)
 RpcHandshakeRequestAdapter: TypeAdapter[RpcHandshakeRequest] = TypeAdapter(RpcHandshakeRequest)
 RpcHandshakeResponseAdapter: TypeAdapter[RpcHandshakeResponse] = TypeAdapter(RpcHandshakeResponse)
 

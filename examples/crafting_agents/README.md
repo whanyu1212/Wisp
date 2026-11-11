@@ -1,7 +1,7 @@
 # Crafting Coding Agents checkpoints
 
 Runnable sources for the first five chapters of the [Wisp documentation](../../site/src/content/pages/crafting-agents/index.md).
-Use Python 3.12+ from the checkout root; no package installation, API key, network,
+Use Python 3.11+ from the checkout root; no package installation, API key, network,
 or third-party dependency is needed:
 
 ```bash

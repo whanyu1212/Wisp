@@ -20,8 +20,8 @@ _CARGO_PRERELEASE = re.compile(
 )
 _CARGO_TO_PYTHON_PRERELEASE = {"alpha": "a", "beta": "b", "rc": "rc"}
 _NATIVE_RELEASE_TARGETS = {
-    "manylinux-x86-64": "cp312-abi3-manylinux_2_28_x86_64",
-    "macos-arm64": "cp312-abi3-macosx_11_0_arm64",
+    "manylinux-x86-64": "cp311-abi3-manylinux_2_28_x86_64",
+    "macos-arm64": "cp311-abi3-macosx_11_0_arm64",
 }
 
 

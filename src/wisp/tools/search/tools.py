@@ -25,6 +25,7 @@ import regex as bounded_regex
 from pathspec import GitIgnoreSpec
 from pathspec.patterns.gitignore import GitIgnorePatternError
 from pathspec.patterns.gitignore.spec import GitIgnoreSpecPattern
+from typing_extensions import TypeAliasType
 
 from wisp.tools.base import ToolArguments, ToolInputSchema, ToolSafety
 from wisp.tools.common import _optional_bool, _optional_int, _optional_string, _required_string
@@ -108,7 +109,7 @@ class _SearchStopped(Exception):
     """Stop grep mid-file because the awaiting task cancelled it or its deadline passed."""
 
 
-type _GrepScannerBackend = Literal["auto", "python", "native"]
+_GrepScannerBackend = TypeAliasType("_GrepScannerBackend", Literal["auto", "python", "native"])
 
 
 class _NativeGrepCancellation(Protocol):
@@ -163,7 +164,9 @@ class _NativeGrepModule(Protocol):
     ) -> _NativeGrepScanResult: ...
 
 
-type _NativeWalkBatch = tuple[int, str, list[tuple[str, int, int, bool]]]
+_NativeWalkBatch = TypeAliasType(
+    "_NativeWalkBatch", tuple[int, str, list[tuple[str, int, int, bool]]]
+)
 
 
 class _NativeWalk(Protocol):
@@ -2447,10 +2450,10 @@ def _plain_group_opening_length(pattern: str, index: int) -> int | None:
     return None
 
 
-type BlockMatcher = Callable[[list[str]], bool]
-type CallableMatcher = Callable[[str], bool]
-type GlobMatcher = Callable[[str], bool]
-type PathMatcher = Callable[[Path], bool]
+BlockMatcher = TypeAliasType("BlockMatcher", Callable[[list[str]], bool])
+CallableMatcher = TypeAliasType("CallableMatcher", Callable[[str], bool])
+GlobMatcher = TypeAliasType("GlobMatcher", Callable[[str], bool])
+PathMatcher = TypeAliasType("PathMatcher", Callable[[Path], bool])
 
 
 def _grep_result(

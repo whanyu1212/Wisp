@@ -11,6 +11,8 @@ from typing import TypeVar
 
 T = TypeVar("T")
 
+T = TypeVar("T")
+
 
 @dataclass(frozen=True)
 class Measurement:
@@ -31,7 +33,7 @@ def environment() -> dict[str, str]:
     }
 
 
-def measure[T](
+def measure(
     operation: Callable[[], T],
     *,
     iterations: int = 1,
@@ -59,7 +61,7 @@ def measure[T](
     return result, _measurement(iterations, wall_ns, cpu_ns, peak_memory)
 
 
-async def measure_async[T](
+async def measure_async(
     operation: Callable[[], Awaitable[T]],
     *,
     iterations: int = 1,

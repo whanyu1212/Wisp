@@ -29,9 +29,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal, cast
 
+from typing_extensions import TypeAliasType
+
 from benchmarks.support import environment
 
-type Renderer = Literal["rust"]
+Renderer = TypeAliasType("Renderer", Literal["rust"])
 
 START_TOKEN = "WISP_E2E_START_7F3A"
 FINAL_TOKEN = "WISP_E2E_FINAL_9C2D"

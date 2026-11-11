@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import re
+import stat
+import sys
 import unicodedata
 from dataclasses import dataclass
 from fnmatch import translate
@@ -11,6 +13,27 @@ from functools import lru_cache
 from pathlib import Path
 
 from wisp.tools.context import ToolContext
+
+
+def is_junction(path: Path) -> bool:
+    """Return whether ``path`` is a Windows directory junction, as ``Path.is_junction`` does.
+
+    Python 3.11 has no ``Path.is_junction``, so there the reparse tag is read directly.
+
+    Args:
+        path (Path): Path to inspect without following a final link.
+
+    Returns:
+        bool: Whether the path is a junction; always false outside Windows.
+    """
+    if sys.version_info >= (3, 12):
+        return path.is_junction()
+    if sys.platform != "win32":
+        return False
+    try:
+        return path.lstat().st_reparse_tag == stat.IO_REPARSE_TAG_MOUNT_POINT
+    except (OSError, ValueError):
+        return False
 
 
 def is_protected_path(path: Path, context: ToolContext) -> bool:

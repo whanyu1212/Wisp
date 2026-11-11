@@ -214,7 +214,7 @@ supervision will require additional mechanisms in later chapters.
 
 ## 5. Run the offline failure laboratory
 
-These commands require only Python 3.12+ and the checkout. They import no SDK,
+These commands require only Python 3.11+ and the checkout. They import no SDK,
 read no API credentials, and make no network requests:
 
 ```bash

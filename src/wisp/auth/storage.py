@@ -15,6 +15,8 @@ from typing import Literal
 from uuid import uuid4
 from weakref import WeakValueDictionary
 
+from typing_extensions import TypeAliasType
+
 PRIVATE_DIR_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
 
@@ -64,7 +66,7 @@ class OAuthCredential:
         return data
 
 
-type AuthCredential = ApiKeyCredential | OAuthCredential
+AuthCredential = TypeAliasType("AuthCredential", ApiKeyCredential | OAuthCredential)
 
 
 class _AuthFileState:

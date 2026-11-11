@@ -6,16 +6,21 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
+from typing_extensions import TypeAliasType
+
 from wisp.agent.request_boundary import ContextOverflowHook, RequestBoundaryHook
 from wisp.agent.tool_contracts import ToolExecutor
 from wisp.agent.validation import validate_agent_runtime_limits, validate_non_negative_integer
 from wisp.events import TokenUsage, UsageCost
 from wisp.providers.base import Provider, ToolCallResult, ToolSpec
 
-type UsageCostEstimator = Callable[[str, str | None, str | None, TokenUsage], UsageCost]
-type ToolResultImageLoader = Callable[
-    [Sequence[ToolCallResult]], Awaitable[tuple[ToolCallResult, ...]]
-]
+UsageCostEstimator = TypeAliasType(
+    "UsageCostEstimator", Callable[[str, str | None, str | None, TokenUsage], UsageCost]
+)
+ToolResultImageLoader = TypeAliasType(
+    "ToolResultImageLoader",
+    Callable[[Sequence[ToolCallResult]], Awaitable[tuple[ToolCallResult, ...]]],
+)
 """Give a tool batch's results the image bytes the next request can carry."""
 
 DEFAULT_CONTEXT_RESERVE_TOKENS = 16_384

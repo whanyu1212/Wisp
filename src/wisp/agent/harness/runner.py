@@ -7,6 +7,7 @@ from dataclasses import dataclass, field, replace
 from enum import Enum, auto
 
 import anyio
+from typing_extensions import TypeAliasType
 
 from wisp.agent.loop import AgentLoopEvent, run_agent_loop
 from wisp.agent.request_boundary import ContextOverflowHook
@@ -33,7 +34,9 @@ from .boundaries import HarnessBoundaryPreparer, _HarnessBoundaryCoordinator
 from .config import AgentHarnessConfig, _build_loop_config
 from .queues import QueuedMessages, _QueueStore
 
-type AgentHarnessEvent = AgentLoopEvent | QueueMessageInjected | QueueUpdated
+AgentHarnessEvent = TypeAliasType(
+    "AgentHarnessEvent", AgentLoopEvent | QueueMessageInjected | QueueUpdated
+)
 
 
 class RunCancellationToken:

@@ -26,6 +26,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import IO, Literal
 
+from typing_extensions import TypeAliasType
+
 from evals.tool_use.credentials import REPO_ROOT, Credentials
 from evals.tool_use.metrics import RunMetrics, measure, parse_events
 from evals.tool_use.servers.catalogs import CATALOGS
@@ -35,9 +37,9 @@ from wisp.mcp.discovery import DISCOVERY_TOOL_NAMES
 from wisp.mcp.tool import mcp_tool_name
 
 # Whether runs offer the experimental codemode tool, and in which language.
-type Codemode = Literal["off", "python"]
+Codemode = TypeAliasType("Codemode", Literal["off", "python"])
 CODEMODES: tuple[Codemode, ...] = ("off", "python")
-type RunStatus = Literal["passed", "failed", "errored"]
+RunStatus = TypeAliasType("RunStatus", Literal["passed", "failed", "errored"])
 
 DEADLINE_EXIT_CODE = 124
 # Wisp stops a run at its own --timeout, allows 10 s to wind down and 10 s more

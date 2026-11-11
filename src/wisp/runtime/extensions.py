@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import anyio
+from typing_extensions import TypeAliasType
 
 from wisp.auth.storage import JsonAuthStore
 from wisp.config.runtime import default_auth_path
@@ -35,7 +36,9 @@ if TYPE_CHECKING:
     from wisp.providers.anthropic import AnthropicCacheTtl
 from wisp.tools.shell.supervisor import ProcessSupervisor
 
-type ExtensionFactory = Callable[[ExtensionAPI], Awaitable[None] | None]
+ExtensionFactory = TypeAliasType(
+    "ExtensionFactory", Callable[[ExtensionAPI], Awaitable[None] | None]
+)
 
 
 async def build_runtime(

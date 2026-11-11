@@ -6,6 +6,8 @@ from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from typing_extensions import TypeAliasType
+
 import wisp.providers.events as provider_events
 from wisp.events import (
     MessageDelta,
@@ -78,11 +80,16 @@ class CancelledModelResponse:
     pass
 
 
-type ModelResponseOutcome = (
-    CompletedProviderResponse | FailedModelResponse | OverflowModelResponse | CancelledModelResponse
+ModelResponseOutcome = TypeAliasType(
+    "ModelResponseOutcome",
+    CompletedProviderResponse
+    | FailedModelResponse
+    | OverflowModelResponse
+    | CancelledModelResponse,
 )
-type ModelResponseEvent = (
-    MessageStarted | ProviderRetrying | MessageDelta | WebSearchPerformed | CancelledModelResponse
+ModelResponseEvent = TypeAliasType(
+    "ModelResponseEvent",
+    MessageStarted | ProviderRetrying | MessageDelta | WebSearchPerformed | CancelledModelResponse,
 )
 
 

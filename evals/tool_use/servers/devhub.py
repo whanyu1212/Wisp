@@ -13,9 +13,12 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Callable
 from dataclasses import replace
+from typing import TypeVar
 
 from evals.tool_use.servers import devhub_repos
 from evals.tool_use.servers.model import Arguments, Catalog, CatalogTool, Parameter
+
+T = TypeVar("T")
 
 # The triage task: in acme/web, the open `regression` issue with the most comments,
 # the open pull request that fixes it, and that pull request's failing check.
@@ -167,7 +170,7 @@ def _int(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
-def _page[T](items: list[T], arguments: Arguments) -> list[T]:
+def _page(items: list[T], arguments: Arguments) -> list[T]:
     """The page of ``items`` that `page` and `per_page` select, as a real API pages."""
 
     per_page = _int(arguments.get("per_page")) or 30

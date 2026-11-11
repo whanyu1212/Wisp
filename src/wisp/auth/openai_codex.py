@@ -11,6 +11,7 @@ from typing import Any, cast
 
 import anyio
 import httpx
+from typing_extensions import TypeAliasType
 
 from wisp.auth.storage import OAuthCredential
 
@@ -35,8 +36,8 @@ class DeviceCodeInfo:
     expires_in_seconds: int
 
 
-type DeviceCodeCallback = Callable[[DeviceCodeInfo], None]
-type DeviceCodeProgressCallback = Callable[[int], None]
+DeviceCodeCallback = TypeAliasType("DeviceCodeCallback", Callable[[DeviceCodeInfo], None])
+DeviceCodeProgressCallback = TypeAliasType("DeviceCodeProgressCallback", Callable[[int], None])
 
 
 async def login_openai_codex_device_code(

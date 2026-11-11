@@ -11,7 +11,7 @@ name = "_native"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { workspace = true, features = ["abi3-py312", "extension-module"] }
+pyo3 = { workspace = true, features = ["abi3-py311", "extension-module"] }
 wisp-process-text = { path = "../wisp-process-text" }
 wisp-search = { path = "../wisp-search" }
 

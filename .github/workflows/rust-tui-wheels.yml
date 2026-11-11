@@ -71,7 +71,7 @@ jobs:
     timeout-minutes: 30
     container: quay.io/pypa/manylinux_2_28_x86_64@sha256:53390351aeb4688114b02c36a23b3e6ce1166ee9b7afc5df1a4f776354fc764c
     env:
-      WISP_RUST_TUI_WHEEL_TAG: cp312-abi3-manylinux_2_28_x86_64
+      WISP_RUST_TUI_WHEEL_TAG: cp311-abi3-manylinux_2_28_x86_64
 
     steps:
       - name: Check out repository
@@ -88,7 +88,7 @@ jobs:
       - name: Build and verify candidate
         shell: bash
         run: |
-          python=/opt/python/cp312-cp312/bin/python
+          python=/opt/python/cp311-cp311/bin/python
           "$python" -m pip install --quiet auditwheel==6.8.2 hatchling==1.27.0 twine==6.2.0
           "$python" -m pip install --quiet uv==0.9.8
           "$python" -m uv build --no-sources --wheel --out-dir reference-dist
@@ -210,7 +210,7 @@ jobs:
           - name: macOS arm64
             runner: macos-15
             architecture: arm64
-            tag: cp312-abi3-macosx_11_0_arm64
+            tag: cp311-abi3-macosx_11_0_arm64
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
       WISP_RUST_TUI_WHEEL_TAG: ${{ matrix.tag }}

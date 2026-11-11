@@ -7,11 +7,13 @@ from dataclasses import dataclass
 from typing import Protocol, Self
 from uuid import uuid4
 
+from typing_extensions import TypeAliasType
+
 from wisp.events import ErrorEvent, RpcCommandFinished, RpcCommandStarted, WispEvent
 
 _MAX_RPC_COMMAND_ERROR_CHARS = 1_000
 
-type RpcEventWriter = Callable[[WispEvent], None]
+RpcEventWriter = TypeAliasType("RpcEventWriter", Callable[[WispEvent], None])
 
 
 class RpcLifecycleCommand(Protocol):

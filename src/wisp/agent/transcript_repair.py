@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from typing import TypeVar
 
 from wisp.events import ToolCallSnapshot
 from wisp.messages import Message
+
+TranscriptItem = TypeVar("TranscriptItem")
 
 INTERRUPTED_TOOL_RESULT_TEXT = (
     "Tool call interrupted before completion; execution outcome is unknown."
@@ -28,7 +31,7 @@ class MissingToolResult:
     tool_call: ToolCallSnapshot
 
 
-def order_tool_result_items[TranscriptItem](
+def order_tool_result_items(
     items: Sequence[TranscriptItem],
     *,
     message_of: Callable[[TranscriptItem], Message],

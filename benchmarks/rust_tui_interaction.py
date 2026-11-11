@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Literal, cast
 
 import psutil
+from typing_extensions import TypeAliasType
 
 from benchmarks.rust_tui_e2e import (
     START_TOKEN,
@@ -47,8 +48,8 @@ from benchmarks.rust_tui_e2e import (
 from benchmarks.support import environment
 from scripts.smoke_installed_rust_tui import _seed_history
 
-type ProbePhase = Literal["idle", "streaming"]
-type NavigationDirection = Literal["page_up", "page_down"]
+ProbePhase = TypeAliasType("ProbePhase", Literal["idle", "streaming"])
+NavigationDirection = TypeAliasType("NavigationDirection", Literal["page_up", "page_down"])
 _RESPONSE_SUFFIX = "WISP_INTERACTION_RESPONSE_DONE_6E2C"
 _RESPONSE_PREFIX = "WISP_INTERACTION_RESPONSE_BEGIN_A7C8D9E01234"
 _HISTORY_READY = "RC2 saved history ready"

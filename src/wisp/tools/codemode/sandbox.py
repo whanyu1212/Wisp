@@ -17,9 +17,12 @@ from dataclasses import dataclass
 from typing import Literal
 
 import anyio
+from typing_extensions import TypeAliasType
 
-type ScriptFunction = Callable[..., Awaitable[str]]
-type ScriptFailure = Literal["unavailable", "syntax", "type", "runtime", "timeout"]
+ScriptFunction = TypeAliasType("ScriptFunction", Callable[..., Awaitable[str]])
+ScriptFailure = TypeAliasType(
+    "ScriptFailure", Literal["unavailable", "syntax", "type", "runtime", "timeout"]
+)
 
 
 @dataclass(frozen=True, slots=True)

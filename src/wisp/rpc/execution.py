@@ -8,6 +8,7 @@ from typing import assert_never
 
 from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectSendStream
+from typing_extensions import TypeAliasType
 
 from wisp.coding import CodingSession
 from wisp.coding.session import DirectoryChangeError
@@ -134,12 +135,16 @@ from .session.state import rpc_session_state, updated_rpc_session_state
 
 _logger = logging.getLogger(__name__)
 
-type RpcEventRenderer = Callable[[AsyncIterator[WispEvent]], Awaitable[None]]
-type RunningCommandFactory = Callable[..., _RpcRunningCommand]
-type CommandCompletedFactory = Callable[..., _RpcCommandCompleted]
+RpcEventRenderer = TypeAliasType(
+    "RpcEventRenderer", Callable[[AsyncIterator[WispEvent]], Awaitable[None]]
+)
+RunningCommandFactory = TypeAliasType("RunningCommandFactory", Callable[..., _RpcRunningCommand])
+CommandCompletedFactory = TypeAliasType(
+    "CommandCompletedFactory", Callable[..., _RpcCommandCompleted]
+)
 
 
-type DirectoryChanger = Callable[[str], Awaitable[DirectoryMove]]
+DirectoryChanger = TypeAliasType("DirectoryChanger", Callable[[str], Awaitable[DirectoryMove]])
 """Moves the agent's working directory, and project, and refreshes what depends on it."""
 
 

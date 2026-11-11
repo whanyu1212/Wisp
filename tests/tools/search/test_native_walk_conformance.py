@@ -17,6 +17,7 @@ from typing import Literal
 
 import pytest
 from pytest import MonkeyPatch
+from typing_extensions import TypeAliasType
 
 from wisp.tools.context import ToolContext
 from wisp.tools.files.secure_fs import secure_tool_path
@@ -28,8 +29,8 @@ if not hasattr(native, "NativeWalk"):
     pytest.skip("installed native extension does not include the walk", allow_module_level=True)
 
 _NATIVE_WALK = search_tools_module._load_native_walk()
-type _Backend = Literal["python", "native"]
-type _Walked = list[tuple[str, tuple[int, int] | None]] | str
+_Backend = TypeAliasType("_Backend", Literal["python", "native"])
+_Walked = TypeAliasType("_Walked", list[tuple[str, tuple[int, int] | None]] | str)
 
 _NAMES = (
     "a",

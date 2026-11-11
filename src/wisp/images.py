@@ -14,6 +14,8 @@ import zlib
 from collections.abc import Callable
 from typing import Literal
 
+from typing_extensions import TypeAliasType
+
 from wisp.events import ImageMediaType, ImagePart
 
 # Claude accepts at most 10 MB of base64 per image, the tightest per-image limit
@@ -22,13 +24,16 @@ MAX_IMAGE_BYTES = 7_500_000
 # Claude rejects images larger than 8000x8000 px.
 MAX_IMAGE_SIDE = 8000
 
-type ImageRejectionReason = Literal[
-    "empty",
-    "too_large",
-    "unsupported_format",
-    "malformed",
-    "dimensions_too_large",
-]
+ImageRejectionReason = TypeAliasType(
+    "ImageRejectionReason",
+    Literal[
+        "empty",
+        "too_large",
+        "unsupported_format",
+        "malformed",
+        "dimensions_too_large",
+    ],
+)
 
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _PNG_IEND_CHUNK = b"\x00\x00\x00\x00IEND\xaeB`\x82"

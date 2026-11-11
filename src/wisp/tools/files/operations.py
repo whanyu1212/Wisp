@@ -25,6 +25,7 @@ from wisp.images import (
 from wisp.tools.base import ToolArguments, ToolInputSchema, ToolSafety
 from wisp.tools.common import _optional_bool, _optional_int, _required_string
 from wisp.tools.context import ToolContext
+from wisp.tools.files.paths import is_junction
 from wisp.tools.files.secure_fs import (
     OpenParent,
     SecureToolPath,
@@ -877,7 +878,7 @@ def _windows_leaf_info(path: SecureToolPath) -> os.stat_result | None:
         return None
     except OSError as exc:
         raise ToolError(f"Could not inspect path {path.display}: {exc}") from exc
-    if path.path.is_symlink() or path.path.is_junction():
+    if path.path.is_symlink() or is_junction(path.path):
         raise ToolError(f"Symbolic links and junctions are not allowed: {path.selected}")
     return info
 

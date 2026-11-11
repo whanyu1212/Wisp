@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Literal, Protocol, cast
 
 import anyio
+from typing_extensions import TypeAliasType
 
 from wisp.events import WispEvent
 from wisp.messages import Message
@@ -18,30 +19,33 @@ from wisp.sessions.jsonl import JsonlSession
 _PROMPT_RUN_COMMAND_TYPES = frozenset({"prompt", "init"})
 
 
-type _SequentialRpcCommandType = Literal[
-    "prompt",
-    "compact",
-    "begin_device_code",
-    "get_session_stats",
-    "get_messages",
-    "get_project_files",
-    "get_git_diff",
-    "get_sessions",
-    "new_session",
-    "select_session",
-    "clone_session",
-    "fork_session",
-    "get_session_tree",
-    "navigate_session_tree",
-    "unrevert_session_tree",
-    "set_session_name",
-    "add_mcp_server",
-    "remove_mcp_server",
-    "set_mcp_server_enabled",
-    "reconnect_mcp",
-    "login_mcp_server",
-    "logout_mcp_server",
-]
+_SequentialRpcCommandType = TypeAliasType(
+    "_SequentialRpcCommandType",
+    Literal[
+        "prompt",
+        "compact",
+        "begin_device_code",
+        "get_session_stats",
+        "get_messages",
+        "get_project_files",
+        "get_git_diff",
+        "get_sessions",
+        "new_session",
+        "select_session",
+        "clone_session",
+        "fork_session",
+        "get_session_tree",
+        "navigate_session_tree",
+        "unrevert_session_tree",
+        "set_session_name",
+        "add_mcp_server",
+        "remove_mcp_server",
+        "set_mcp_server_enabled",
+        "reconnect_mcp",
+        "login_mcp_server",
+        "logout_mcp_server",
+    ],
+)
 
 
 # Commands after which the session's active path may record another folder.
@@ -113,15 +117,22 @@ class _RpcCancelResult:
     command: ParsedRpcCommand | None = field(default=None, repr=False)
 
 
-type _RpcControlEvent = _RpcInputCommand | _RpcInputClosed | _RpcCommandCompleted | _RpcPromptReady
-type RpcDispatch = Callable[
-    [ParsedRpcCommand, _RpcRunningCommand | None],
-    Awaitable[_RpcDispatchResult],
-]
-type RpcReject = Callable[[ParsedRpcCommand, str], Awaitable[None]]
-type RpcCompletionEventWriter = Callable[[WispEvent], None]
-type RpcCompletionEventRenderer = Callable[[tuple[WispEvent, ...]], Awaitable[None]]
-type RpcQueuedMessageRejection = Callable[[int], str | None]
+_RpcControlEvent = TypeAliasType(
+    "_RpcControlEvent", _RpcInputCommand | _RpcInputClosed | _RpcCommandCompleted | _RpcPromptReady
+)
+RpcDispatch = TypeAliasType(
+    "RpcDispatch",
+    Callable[
+        [ParsedRpcCommand, _RpcRunningCommand | None],
+        Awaitable[_RpcDispatchResult],
+    ],
+)
+RpcReject = TypeAliasType("RpcReject", Callable[[ParsedRpcCommand, str], Awaitable[None]])
+RpcCompletionEventWriter = TypeAliasType("RpcCompletionEventWriter", Callable[[WispEvent], None])
+RpcCompletionEventRenderer = TypeAliasType(
+    "RpcCompletionEventRenderer", Callable[[tuple[WispEvent, ...]], Awaitable[None]]
+)
+RpcQueuedMessageRejection = TypeAliasType("RpcQueuedMessageRejection", Callable[[int], str | None])
 
 _MAX_QUEUED_RPC_COMMANDS = 100
 _QUEUED_MESSAGE_COMMAND_TYPES = frozenset({"steer", "follow_up"})

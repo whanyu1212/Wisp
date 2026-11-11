@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from typing_extensions import TypeAliasType
 
 from wisp.events._base import QueueMode, WispEvent
 from wisp.project_files import (
@@ -18,11 +19,11 @@ from wisp.skills.models import SkillDiagnosticCode, SkillDiagnosticSeverity, Ski
 
 # The tool-approval posture a frontend selects; persisted per project by ``wisp.trust``.
 # A ``type`` alias so the schema bundle keeps its named ``PermissionMode`` definition.
-type PermissionMode = Literal["ask", "yolo"]
+PermissionMode = TypeAliasType("PermissionMode", Literal["ask", "yolo"])
 
 # Whether the agent may change the project ("build") or only inspect it and plan ("plan").
 # A ``type`` alias for the same reason as ``PermissionMode``.
-type AgentMode = Literal["build", "plan"]
+AgentMode = TypeAliasType("AgentMode", Literal["build", "plan"])
 
 DEFAULT_AGENT_MODE: AgentMode = "build"
 

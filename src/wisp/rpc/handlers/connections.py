@@ -7,6 +7,7 @@ from collections.abc import Callable
 import anyio
 from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectSendStream
+from typing_extensions import TypeAliasType
 
 from wisp.auth.connections import (
     DEVICE_CODE_PROVIDER,
@@ -37,8 +38,10 @@ from wisp.rpc.handlers.inspection import _sanitized_auth_error, rpc_connection_c
 from wisp.rpc.lifecycle import RpcCommandLifecycle, RpcEventWriter
 from wisp.runtime.api import WispRuntime
 
-type RunningCommandFactory = Callable[..., _RpcRunningCommand]
-type CommandCompletedFactory = Callable[..., _RpcCommandCompleted]
+RunningCommandFactory = TypeAliasType("RunningCommandFactory", Callable[..., _RpcRunningCommand])
+CommandCompletedFactory = TypeAliasType(
+    "CommandCompletedFactory", Callable[..., _RpcCommandCompleted]
+)
 
 
 def handle_rpc_store_api_key_command(

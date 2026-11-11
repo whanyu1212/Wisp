@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from typing_extensions import TypeAliasType
+
 from wisp.auth.storage import AuthStorageError, JsonAuthStore
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -28,7 +30,7 @@ PROVIDER_KEY_VARIABLES: Mapping[str, str] = {
 # Providers that need no credential; the runner's own tests use `fake`.
 CREDENTIAL_FREE_PROVIDERS = frozenset({"fake"})
 
-type CredentialSource = Literal["environment", "stored", "none"]
+CredentialSource = TypeAliasType("CredentialSource", Literal["environment", "stored", "none"])
 
 
 class CredentialError(RuntimeError):

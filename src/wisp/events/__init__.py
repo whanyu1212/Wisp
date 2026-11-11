@@ -22,6 +22,7 @@ from __future__ import annotations
 from typing import Annotated
 
 from pydantic import Field, TypeAdapter
+from typing_extensions import TypeAliasType
 
 from wisp.events._base import (
     CompactionReason,
@@ -357,69 +358,72 @@ __all__ = [
 ]
 
 
-type KnownWispEvent = Annotated[
-    AgentStarted
-    | TurnStarted
-    | ProviderRetrying
-    | MessageStarted
-    | MessageDelta
-    | WebSearchPerformed
-    | MessageCompleted
-    | ContextEstimated
-    | ContextPressure
-    | ContextOverflow
-    | ToolCallRequested
-    | ToolExecutionStarted
-    | ToolApprovalRequested
-    | ToolApprovalResolved
-    | TrustRequested
-    | TrustResolved
-    | ProjectConfigApplied
-    | ToolExecutionProgress
-    | ToolExecutionEnded
-    | ToolResultReady
-    | TurnCompleted
-    | SessionSaved
-    | SessionDirectoryChanged
-    | CompactionStarted
-    | CompactionCompleted
-    | AgentCompleted
-    | RpcCommandStarted
-    | RpcCommandFinished
-    | SessionStatsReported
-    | RpcStateReported
-    | RpcWorkspaceReported
-    | RpcPermissionsReported
-    | RpcCommandsReported
-    | RpcModelCatalogReported
-    | RpcConnectionCatalogReported
-    | RpcDeviceCodeReported
-    | RpcDeviceCodeProgressReported
-    | RpcSkillsReported
-    | RpcGitDiffReported
-    | RpcProjectFilesReported
-    | ProjectFilesInvalidated
-    | RpcMcpStatusReported
-    | RpcMcpSnippetPreviewed
-    | RpcMcpLoginStarted
-    | SkillCatalogUpdated
-    | RpcMessagesReported
-    | RpcSessionsReported
-    | RpcSessionSelected
-    | RpcSessionCloned
-    | RpcSessionForked
-    | RpcSessionNameChanged
-    | RpcSessionTreeReported
-    | RpcSessionTreeNavigated
-    | RpcSessionTreeUnreverted
-    | QueueUpdated
-    | QueueItemsRemoved
-    | QueueMessageInjected
-    | SkillInvoked
-    | ModelProviderAutoSwitched
-    | ErrorEvent,
-    Field(discriminator="type"),
-]
+KnownWispEvent = TypeAliasType(
+    "KnownWispEvent",
+    Annotated[
+        AgentStarted
+        | TurnStarted
+        | ProviderRetrying
+        | MessageStarted
+        | MessageDelta
+        | WebSearchPerformed
+        | MessageCompleted
+        | ContextEstimated
+        | ContextPressure
+        | ContextOverflow
+        | ToolCallRequested
+        | ToolExecutionStarted
+        | ToolApprovalRequested
+        | ToolApprovalResolved
+        | TrustRequested
+        | TrustResolved
+        | ProjectConfigApplied
+        | ToolExecutionProgress
+        | ToolExecutionEnded
+        | ToolResultReady
+        | TurnCompleted
+        | SessionSaved
+        | SessionDirectoryChanged
+        | CompactionStarted
+        | CompactionCompleted
+        | AgentCompleted
+        | RpcCommandStarted
+        | RpcCommandFinished
+        | SessionStatsReported
+        | RpcStateReported
+        | RpcWorkspaceReported
+        | RpcPermissionsReported
+        | RpcCommandsReported
+        | RpcModelCatalogReported
+        | RpcConnectionCatalogReported
+        | RpcDeviceCodeReported
+        | RpcDeviceCodeProgressReported
+        | RpcSkillsReported
+        | RpcGitDiffReported
+        | RpcProjectFilesReported
+        | ProjectFilesInvalidated
+        | RpcMcpStatusReported
+        | RpcMcpSnippetPreviewed
+        | RpcMcpLoginStarted
+        | SkillCatalogUpdated
+        | RpcMessagesReported
+        | RpcSessionsReported
+        | RpcSessionSelected
+        | RpcSessionCloned
+        | RpcSessionForked
+        | RpcSessionNameChanged
+        | RpcSessionTreeReported
+        | RpcSessionTreeNavigated
+        | RpcSessionTreeUnreverted
+        | QueueUpdated
+        | QueueItemsRemoved
+        | QueueMessageInjected
+        | SkillInvoked
+        | ModelProviderAutoSwitched
+        | ErrorEvent,
+        Field(discriminator="type"),
+    ],
+)
 KnownWispEventAdapter: TypeAdapter[KnownWispEvent] = TypeAdapter(KnownWispEvent)
 JsonObjectAdapter: TypeAdapter[JsonObject] = TypeAdapter(JsonObject)
 

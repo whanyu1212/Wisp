@@ -6,6 +6,8 @@ from collections.abc import Callable
 from functools import partial
 from typing import Protocol, assert_never
 
+from typing_extensions import TypeAliasType
+
 from wisp.events import PermissionMode, PermissionState
 from wisp.rpc.commands import (
     ApprovalCommand,
@@ -17,7 +19,9 @@ from wisp.rpc.commands import (
 from wisp.rpc.coordinator import RpcCoordinator, _RpcRunningCommand
 from wisp.rpc.lifecycle import RpcCommandLifecycle, RpcEventWriter
 
-type _RpcControlCommand = CancelCommand | ApprovalCommand | TrustCommand | ShutdownCommand
+_RpcControlCommand = TypeAliasType(
+    "_RpcControlCommand", CancelCommand | ApprovalCommand | TrustCommand | ShutdownCommand
+)
 
 
 class RpcApprovalResolver(Protocol):
