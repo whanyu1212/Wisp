@@ -5,13 +5,13 @@ import json
 import random
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Protocol, cast
-
-from typing_extensions import TypeAliasType
+from typing import Protocol, TypeAlias, cast
 
 from examples.crafting_agents.core import Message, ToolCall, ToolSpec
 
-Payload = TypeAliasType("Payload", dict[str, object])
+# The curriculum runs on the standard library alone, so this is a plain alias rather than
+# typing_extensions.TypeAliasType.
+Payload: TypeAlias = dict[str, object]
 
 
 class ResponseFailure(Exception):
