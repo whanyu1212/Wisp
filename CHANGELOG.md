@@ -173,6 +173,12 @@ this policy.
   a dozen steps: teal through blue to purple from the theme's heading colours, or light to deep
   pink for the Adal logos. The `Wisp` name under it takes the tip's colour. The `/logo` preview
   matches, and the logo keeps one colour at 16 colours and without colour. (HY-503)
+- The startup logo makes an entrance on the first welcome screen of a launch: its dots gather into
+  place in a fixed scattered order over 0.75 s, then, in truecolor, a light band crosses it once
+  from the tip over 0.5 s. Any key, paste, or resize shows the finished logo at once, and so does
+  choosing a logo. 256 and 16 colours and `NO_COLOR` gather without the band;
+  `WISP_TUI_MOTION=off` or a terminal in the background shows the finished logo. The screen stops
+  redrawing once it ends. (HY-479)
 
 <!-- Keeps links to the pre-release "0.7.0 — Unreleased" heading working. -->
 <a id="070--unreleased"></a>

@@ -616,6 +616,8 @@ struct LiveUi {
     /// Tool cards whose call finished lately, each with the activity frame it finished
     /// on, which glow until they fade.
     finished_cards: Vec<(TranscriptEntryId, u8)>,
+    /// The welcome logo's entrance, played once per launch.
+    logo_entrance: LogoEntrance,
     /// The command whose run the working row times, and when it was first drawn.
     activity_clock: Option<(String, std::time::Instant)>,
     /// The footer notice as first drawn, and when, which paces its ticker.
@@ -688,6 +690,7 @@ impl Default for LiveUi {
             render_pending: true,
             activity_frame: 0,
             finished_cards: Vec::new(),
+            logo_entrance: LogoEntrance::Done,
             activity_clock: None,
             notice_clock: None,
             notice_scrolling: false,
@@ -715,6 +718,17 @@ impl Default for LiveUi {
             stream_trace: None,
         }
     }
+}
+
+/// Where the welcome logo's once-per-launch entrance is.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LogoEntrance {
+    /// Waiting for the first welcome screen.
+    Pending,
+    /// Playing since the activity frame `started`.
+    Playing { started: u8 },
+    /// Played, skipped, or not shown this launch.
+    Done,
 }
 
 /// Shown when scrolling reaches live history evicted from memory while a reply runs.
@@ -1859,6 +1873,12 @@ impl LiveUi {
         let activity_elapsed = self.activity_elapsed();
         let notice_shown_for = self.notice_shown_for();
         let motion_mode = self.motion_mode();
+        // A welcome screen that went away without input, as when history loads, ends the
+        // entrance; it never resumes.
+        if matches!(self.logo_entrance, LogoEntrance::Playing { .. }) && !self.welcome_visible() {
+            self.logo_entrance = LogoEntrance::Done;
+        }
+        let logo_entrance = self.logo_entrance();
         self.transcript_row_cache
             .fold_mut()
             .set_click_hints(self.mouse_enabled);
@@ -1904,6 +1924,7 @@ impl LiveUi {
                 ui::Motion {
                     mode: motion_mode,
                     finished: &self.finished_cards,
+                    logo: logo_entrance,
                 },
                 activity_elapsed,
                 Some(&self.side_panel),
@@ -2203,15 +2224,79 @@ impl LiveUi {
             self.state.view_status,
             ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
         );
-        !self.state.configuration_active()
-            && (self.state.view_status == ViewStatus::Running
-                || self.state.interaction_status == InteractionStatus::Compacting
-                // The side panel times how long an approval has waited.
-                || (self.state.view_status == ViewStatus::WaitingForApproval
-                    && self.state.side_panel_visible)
-                || (decision_pending && self.decision_pulse())
-                // A finished card's glow fades on its own, even after the run ends.
-                || !self.finished_cards.is_empty())
+        // The welcome logo's entrance plays whenever the welcome screen shows it.
+        self.logo_entrance() != startup_logo::Entrance::Finished
+            || (!self.state.configuration_active()
+                && (self.state.view_status == ViewStatus::Running
+                    || self.state.interaction_status == InteractionStatus::Compacting
+                    // The side panel times how long an approval has waited.
+                    || (self.state.view_status == ViewStatus::WaitingForApproval
+                        && self.state.side_panel_visible)
+                    || (decision_pending && self.decision_pulse())
+                    // A finished card's glow fades on its own, even after the run ends.
+                    || !self.finished_cards.is_empty()))
+    }
+
+    /// Whether the welcome logo's entrance shows its sheen as well as its gather, since
+    /// the sheen blends colours. None when the logo appears finished: motion is off or
+    /// the terminal is in the background. Without colour the dots still gather.
+    fn logo_entrance_sheen(&self) -> Option<bool> {
+        (self.motion_allowed && !self.attention.focus_lost())
+            .then(|| self.motion_mode() == MotionMode::Smooth)
+    }
+
+    /// Whether the welcome screen, and the logo on it, is showing.
+    fn welcome_visible(&self) -> bool {
+        self.state.transcript.entries().is_empty()
+            && self.state.editor_editable()
+            && !self.state.context.loading()
+    }
+
+    /// The entrance frame to draw: its first frame while it waits for the first tick,
+    /// then the frames since it started, and the finished logo once it is done.
+    fn logo_entrance(&self) -> startup_logo::Entrance {
+        let Some(sheen) = self.logo_entrance_sheen() else {
+            return startup_logo::Entrance::Finished;
+        };
+        let frame = match self.logo_entrance {
+            LogoEntrance::Pending if self.welcome_visible() => 0,
+            LogoEntrance::Playing { started } if self.welcome_visible() => {
+                self.activity_frame.wrapping_sub(started)
+            }
+            _ => return startup_logo::Entrance::Finished,
+        };
+        if frame >= startup_logo::Entrance::length(sheen) {
+            return startup_logo::Entrance::Finished;
+        }
+        startup_logo::Entrance::Playing { frame, sheen }
+    }
+
+    /// Moves the entrance on after an activity tick: it starts on the first tick the
+    /// welcome screen shows, and is done once its frames have played.
+    fn advance_logo_entrance(&mut self) {
+        match self.logo_entrance {
+            LogoEntrance::Pending if self.logo_entrance() != startup_logo::Entrance::Finished => {
+                // Frame 0 was drawn while waiting, so this tick shows frame 1.
+                self.logo_entrance = LogoEntrance::Playing {
+                    started: self.activity_frame.wrapping_sub(1),
+                };
+            }
+            LogoEntrance::Playing { .. }
+                if self.logo_entrance() == startup_logo::Entrance::Finished =>
+            {
+                self.logo_entrance = LogoEntrance::Done;
+            }
+            _ => {}
+        }
+    }
+
+    /// Shows the finished logo from now on, for the rest of the launch: any input,
+    /// a resize, losing focus, or a new logo ends the entrance.
+    fn finish_logo_entrance(&mut self) {
+        if self.logo_entrance != LogoEntrance::Done {
+            self.logo_entrance = LogoEntrance::Done;
+            self.render_pending = true;
+        }
     }
 
     /// How live indicators move. Motion needs colour and to be left on, and it rests
@@ -2321,6 +2406,7 @@ impl LiveUi {
             return false;
         }
         self.activity_frame = self.activity_frame.wrapping_add(1);
+        self.advance_logo_entrance();
         let frame = self.activity_frame;
         self.finished_cards
             .retain(|(_, finished)| frame.wrapping_sub(*finished) < theme::FINISH_GLOW_FRAMES);
@@ -4436,9 +4522,19 @@ impl LiveUi {
         writer: &mpsc::Sender<WriterMessage>,
         limit: usize,
     ) -> Result<LoopControl, Error> {
+        // Typing, pasting, or resizing during the entrance shows the logo finished at once.
+        // Before the welcome screen first shows, as at a trust prompt, the entrance waits.
+        if matches!(input, Input::Key(_) | Input::Paste(_) | Input::Redraw)
+            && self.logo_entrance() != startup_logo::Entrance::Finished
+        {
+            self.finish_logo_entrance();
+        }
         // Focus only decides whether to notify; it never reaches a view.
         if let Input::Focus(focused) = input {
             self.attention.set_focus(focused);
+            if !focused {
+                self.finish_logo_entrance();
+            }
             return Ok(LoopControl::Continue);
         }
         if let Input::Mouse(event) = &input {
@@ -4692,6 +4788,7 @@ impl LiveUi {
     fn apply_resolved_logo_choice(&mut self, choice: LogoChoice, resolved: LogoChoice) {
         self.logo_choice = choice;
         self.startup_logo = resolved;
+        self.finish_logo_entrance();
         let saved = self
             .theme_preferences
             .as_ref()
@@ -5902,6 +5999,11 @@ where
                 editor_command: external_editor::editor_command(|name| std::env::var(name).ok()),
                 input_gate: Some(input_gate),
                 mouse_enabled,
+                logo_entrance: if motion_allowed {
+                    LogoEntrance::Pending
+                } else {
+                    LogoEntrance::Done
+                },
                 ..LiveUi::default()
             };
             // `WISP_TUI_STREAM_PACING=0` shows each streamed delta as it arrives.
@@ -6563,6 +6665,129 @@ mod tests {
                 assert!(ui.notice.as_deref().unwrap().contains("Wait"));
             }
         }
+    }
+
+    /// A launch on the welcome screen, its logo entrance still to play.
+    fn welcome_ui() -> LiveUi {
+        let ui = LiveUi {
+            state: UiState::new("fake".into(), Some("model-x".into()), None),
+            color_depth: ColorDepth::TrueColor,
+            logo_entrance: LogoEntrance::Pending,
+            ..LiveUi::default()
+        };
+        assert!(ui.welcome_visible());
+        ui
+    }
+
+    #[test]
+    fn logo_entrance_plays_once() {
+        let mut ui = welcome_ui();
+        let length = startup_logo::Entrance::length(true);
+        let mut frames = vec![ui.logo_entrance()];
+        // It ticks only while it plays, gather then sheen, one frame per tick.
+        while ui.advance_activity_animation() {
+            frames.push(ui.logo_entrance());
+        }
+        let expected = (0..length)
+            .map(|frame| startup_logo::Entrance::Playing { frame, sheen: true })
+            .chain([startup_logo::Entrance::Finished])
+            .collect::<Vec<_>>();
+        assert_eq!(frames, expected);
+        assert_eq!(ui.logo_entrance, LogoEntrance::Done);
+        assert!(!ui.activity_animation_active());
+        // A later welcome screen, after /new, keeps the finished logo.
+        ui.state.transcript.append_prompt("hello".into());
+        ui.state.transcript = Default::default();
+        assert_eq!(ui.logo_entrance(), startup_logo::Entrance::Finished);
+    }
+
+    #[test]
+    fn logo_entrance_follows_motion() {
+        // Smooth motion adds the sheen; other colour settings gather only; motion off
+        // or a terminal in the background shows the finished logo.
+        let first = |ui: &LiveUi| ui.logo_entrance();
+        let playing = |sheen| startup_logo::Entrance::Playing { frame: 0, sheen };
+        assert_eq!(first(&welcome_ui()), playing(true));
+        for setting in [
+            LiveUi {
+                color_depth: ColorDepth::Ansi256,
+                ..welcome_ui()
+            },
+            LiveUi {
+                color_depth: ColorDepth::Ansi16,
+                ..welcome_ui()
+            },
+            LiveUi {
+                no_color: true,
+                ..welcome_ui()
+            },
+        ] {
+            assert_eq!(first(&setting), playing(false));
+        }
+        let off = LiveUi {
+            motion_allowed: false,
+            ..welcome_ui()
+        };
+        assert_eq!(first(&off), startup_logo::Entrance::Finished);
+        assert!(!off.activity_animation_active());
+        let mut background = welcome_ui();
+        background.attention.set_focus(false);
+        assert_eq!(first(&background), startup_logo::Entrance::Finished);
+    }
+
+    #[tokio::test]
+    async fn input_finishes_logo_entrance() {
+        let (writer, _receiver) = mpsc::channel(8);
+        for input in [
+            Input::Key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE)),
+            Input::Paste("hello".into()),
+            Input::Redraw,
+            Input::Focus(false),
+        ] {
+            let mut ui = welcome_ui();
+            ui.advance_activity_animation();
+            assert!(matches!(ui.logo_entrance, LogoEntrance::Playing { .. }));
+            ui.handle_input(input, &writer, 8192).await.unwrap();
+            assert_eq!(ui.logo_entrance(), startup_logo::Entrance::Finished);
+            assert!(!ui.activity_animation_active());
+        }
+        // So does choosing a logo, which shows the new one finished.
+        let mut ui = welcome_ui();
+        ui.apply_resolved_logo_choice(LogoChoice::Classic, LogoChoice::Classic);
+        assert_eq!(ui.logo_entrance, LogoEntrance::Done);
+    }
+
+    #[tokio::test]
+    async fn logo_entrance_waits_for_welcome() {
+        let (writer, _receiver) = mpsc::channel(8);
+        let mut ui = welcome_ui();
+        // Keys before the welcome screen shows, as on a resumed session, leave it waiting.
+        ui.state.transcript.append_prompt("earlier".into());
+        assert!(!ui.activity_animation_active());
+        let key = Input::Key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        ui.handle_input(key, &writer, 8192).await.unwrap();
+        assert_eq!(ui.logo_entrance, LogoEntrance::Pending);
+        // The first welcome screen plays it.
+        ui.state.transcript = Default::default();
+        ui.editor = PromptEditor::default();
+        assert_eq!(
+            ui.logo_entrance(),
+            startup_logo::Entrance::Playing {
+                frame: 0,
+                sheen: true
+            }
+        );
+        // A welcome screen that goes away mid-play, without input, ends it for good.
+        ui.advance_activity_animation();
+        ui.state.transcript.append_prompt("loaded".into());
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let connection = ConnectionInfo {
+            backend_version: "0.0.0".into(),
+        };
+        ui.draw(&mut terminal, &connection).unwrap();
+        assert_eq!(ui.logo_entrance, LogoEntrance::Done);
+        ui.state.transcript = Default::default();
+        assert_eq!(ui.logo_entrance(), startup_logo::Entrance::Finished);
     }
 
     #[tokio::test]

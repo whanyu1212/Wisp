@@ -334,12 +334,120 @@ fn is_ink(cell: char) -> bool {
     !matches!(cell, ' ' | '\u{2800}')
 }
 
+/// Frames the entrance's gather takes at the 125 ms activity tick: 0.75 s.
+pub(crate) const GATHER_FRAMES: u8 = 6;
+/// Frames the sheen after it takes: 0.5 s.
+pub(crate) const SHEEN_FRAMES: u8 = 4;
+/// Half the sheen band's width, in the gradient's 0 to 1 distance from the tip.
+const SHEEN_HALF_WIDTH: f64 = 0.15;
+
+/// How much of the welcome logo's entrance a frame shows.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum Entrance {
+    /// The finished logo.
+    #[default]
+    Finished,
+    /// The entrance at `frame`, counted from 0. The logo's dots gather over the first
+    /// [`GATHER_FRAMES`]; then, with `sheen`, a light band crosses it once from the tip
+    /// over [`SHEEN_FRAMES`].
+    Playing { frame: u8, sheen: bool },
+}
+
+impl Entrance {
+    /// How many frames an entrance plays, with or without its sheen.
+    pub(crate) const fn length(sheen: bool) -> u8 {
+        if sheen {
+            GATHER_FRAMES + SHEEN_FRAMES
+        } else {
+            GATHER_FRAMES
+        }
+    }
+
+    /// The share of dots this frame shows, from a sixth on the first frame to all.
+    fn gathered(self) -> f64 {
+        match self {
+            Self::Finished => 1.0,
+            Self::Playing { frame, .. } => {
+                (f64::from(frame) + 1.0).min(f64::from(GATHER_FRAMES)) / f64::from(GATHER_FRAMES)
+            }
+        }
+    }
+
+    /// Where the sheen band's centre is on this frame, along the gradient's 0 to 1
+    /// distance from the tip, while it crosses the logo.
+    fn sheen_centre(self) -> Option<f64> {
+        let Self::Playing { frame, sheen: true } = self else {
+            return None;
+        };
+        let step = frame
+            .checked_sub(GATHER_FRAMES)
+            .filter(|step| *step < SHEEN_FRAMES)?;
+        let travel = 1.0 + 2.0 * SHEEN_HALF_WIDTH;
+        Some(-SHEEN_HALF_WIDTH + travel * (f64::from(step) + 0.5) / f64::from(SHEEN_FRAMES))
+    }
+}
+
+/// A fixed threshold in [0, 1) for one dot of a cell, so every launch gathers the dots
+/// in the same scattered order. Dot 8 stands for a whole character with no dots.
+fn gather_threshold(row: usize, column: usize, dot: u32) -> f64 {
+    let mut hash = (row as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ (column as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
+        ^ u64::from(dot).wrapping_mul(0x1656_67B1_9E37_79F9);
+    hash ^= hash >> 33;
+    hash = hash.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+    hash ^= hash >> 33;
+    (hash >> 11) as f64 / (1_u64 << 53) as f64
+}
+
+/// The part of `cell` a gather at `progress` shows: the braille dots whose threshold it
+/// has passed, or, for a character without dots, all of it or none.
+fn gathered_cell(cell: char, row: usize, column: usize, progress: f64) -> char {
+    if progress >= 1.0 {
+        return cell;
+    }
+    let braille = u32::from(cell)
+        .checked_sub(0x2800)
+        .filter(|dots| *dots <= 0xFF);
+    match braille {
+        Some(dots) => {
+            let kept = (0..8)
+                .filter(|dot| dots & (1 << dot) != 0)
+                .filter(|dot| gather_threshold(row, column, *dot) < progress)
+                .fold(0, |kept, dot| kept | (1 << dot));
+            char::from_u32(0x2800 + kept).unwrap_or(cell)
+        }
+        None if is_ink(cell) && gather_threshold(row, column, 8) >= progress => ' ',
+        None => cell,
+    }
+}
+
+/// The lighter of the theme's foreground and background, which the sheen blends toward:
+/// a bright band on a dark theme, a pale one on a light theme.
+fn sheen_tone(palette: Palette) -> Option<Color> {
+    let luminance = |color| match color {
+        Color::Rgb(red, green, blue) => {
+            Some(0.2126 * f64::from(red) + 0.7152 * f64::from(green) + 0.0722 * f64::from(blue))
+        }
+        _ => None,
+    };
+    let (foreground, background) = (
+        luminance(palette.foreground)?,
+        luminance(palette.background)?,
+    );
+    Some(if foreground >= background {
+        palette.foreground
+    } else {
+        palette.background
+    })
+}
+
 pub(crate) fn preview_lines(
     choice: LogoChoice,
     width: u16,
     height: u16,
     palette: Palette,
     no_color: bool,
+    entrance: Entrance,
 ) -> Vec<Line<'static>> {
     let width = usize::from(width);
     let art = art(choice);
@@ -375,11 +483,23 @@ pub(crate) fn preview_lines(
         .fold(0.0, f64::max)
         .max(1.0);
     let paint = paint(art, palette, no_color);
-    let color = |row: usize, column: usize| match paint {
-        Paint::Flat(color) => color,
-        Paint::Gradient(stops) => {
-            let step = (distance(row, column) / farthest * GRADIENT_STEPS).round();
-            ramp(&stops, step / GRADIENT_STEPS)
+    let progress = entrance.gathered();
+    let sheen = entrance
+        .sheen_centre()
+        .and_then(|centre| Some((centre, sheen_tone(palette)?)));
+    let color = |row: usize, column: usize| {
+        let along = (distance(row, column) / farthest * GRADIENT_STEPS).round() / GRADIENT_STEPS;
+        let color = match paint {
+            Paint::Flat(color) => color,
+            Paint::Gradient(stops) => ramp(&stops, along),
+        };
+        // The band lightens each cell's own colour, most at its centre.
+        match sheen {
+            Some((centre, tone)) if (along - centre).abs() < SHEEN_HALF_WIDTH => {
+                let strength = 0.6 * (1.0 - (along - centre).abs() / SHEEN_HALF_WIDTH);
+                mix(tone, color, strength)
+            }
+            _ => color,
         }
     };
     rows.iter()
@@ -390,7 +510,8 @@ pub(crate) fn preview_lines(
             let mut run = String::new();
             let mut run_color = None;
             for (column, cell) in cells.iter().enumerate() {
-                let cell_color = is_ink(*cell).then(|| color(row, column));
+                let shown = gathered_cell(*cell, row, column, progress);
+                let cell_color = is_ink(shown).then(|| color(row, column));
                 if let (Some(current), Some(next)) = (run_color, cell_color) {
                     if current != next {
                         let text = std::mem::take(&mut run);
@@ -398,7 +519,7 @@ pub(crate) fn preview_lines(
                     }
                 }
                 run_color = cell_color.or(run_color);
-                run.push(*cell);
+                run.push(shown);
             }
             if !run.is_empty() {
                 let color = run_color.unwrap_or(match paint {
@@ -420,7 +541,14 @@ mod tests {
     fn all_logos_fit_each_supported_preview() {
         for choice in LogoChoice::ALL {
             for (width, height) in [(30, 8), (40, 14), (80, 30)] {
-                let lines = preview_lines(choice, width, height, Palette::default(), false);
+                let lines = preview_lines(
+                    choice,
+                    width,
+                    height,
+                    Palette::default(),
+                    false,
+                    Entrance::Finished,
+                );
                 assert!(!lines.is_empty(), "{} at {width}x{height}", choice.name());
                 assert!(lines.len() <= usize::from(height));
                 assert!(lines.iter().all(|line| line.width() <= usize::from(width)));
@@ -443,8 +571,14 @@ mod tests {
             (8, 4, 0),
         ] {
             for no_color in [false, true] {
-                let lines =
-                    preview_lines(LogoChoice::WispBraille, width, height, palette, no_color);
+                let lines = preview_lines(
+                    LogoChoice::WispBraille,
+                    width,
+                    height,
+                    palette,
+                    no_color,
+                    Entrance::Finished,
+                );
                 assert_eq!(lines.len(), expected_rows, "{width}x{height}");
                 for line in lines {
                     assert!(line.width() <= usize::from(width));
@@ -468,7 +602,14 @@ mod tests {
     #[test]
     fn gradient_runs_tip_to_far_end() {
         let palette = Palette::default();
-        let lines = preview_lines(LogoChoice::WispBraille, 80, 30, palette, false);
+        let lines = preview_lines(
+            LogoChoice::WispBraille,
+            80,
+            30,
+            palette,
+            false,
+            Entrance::Finished,
+        );
         // The flame's tip, the top row's last ink, takes the first stop.
         assert_eq!(
             lines[0].spans.last().unwrap().style.fg,
@@ -490,7 +631,7 @@ mod tests {
         for theme in [crate::theme::default_theme(), crate::theme::paper_theme()] {
             let palette = theme.palette(false);
             for choice in [LogoChoice::WispBraille, LogoChoice::Classic] {
-                let lines = preview_lines(choice, 80, 30, palette, false);
+                let lines = preview_lines(choice, 80, 30, palette, false, Entrance::Finished);
                 assert_eq!(
                     lines[0].spans.last().unwrap().style.fg,
                     Some(palette.heading_1),
@@ -513,7 +654,14 @@ mod tests {
             (palette, true),
         ] {
             for choice in [LogoChoice::WispBraille, LogoChoice::Classic] {
-                let colors = ink_colors(&preview_lines(choice, 80, 30, palette, no_color));
+                let colors = ink_colors(&preview_lines(
+                    choice,
+                    80,
+                    30,
+                    palette,
+                    no_color,
+                    Entrance::Finished,
+                ));
                 assert!(colors.iter().all(|color| *color == palette.primary));
                 assert_eq!(name_color(choice, palette, no_color), palette.primary);
             }
@@ -526,7 +674,14 @@ mod tests {
         let palette = Palette::default();
         for choice in [LogoChoice::AdalBraille, LogoChoice::AdalMarkBraille] {
             // Lighter pink at the tip, deeper toward the far end, never another hue.
-            let colors = ink_colors(&preview_lines(choice, 80, 30, palette, false));
+            let colors = ink_colors(&preview_lines(
+                choice,
+                80,
+                30,
+                palette,
+                false,
+                Entrance::Finished,
+            ));
             assert!(colors.contains(&ADAL_BACKGROUND), "{}", choice.name());
             for color in &colors {
                 let Color::Rgb(red, green, blue) = *color else {
@@ -534,15 +689,127 @@ mod tests {
                 };
                 assert!(red > green && red > blue, "{} {color:?}", choice.name());
             }
-            let flat = preview_lines(choice, 80, 30, palette.for_depth(ColorDepth::Ansi16), false);
+            let flat = preview_lines(
+                choice,
+                80,
+                30,
+                palette.for_depth(ColorDepth::Ansi16),
+                false,
+                Entrance::Finished,
+            );
             assert!(
                 ink_colors(&flat)
                     .iter()
                     .all(|color| *color == ADAL_BACKGROUND)
             );
-            let monochrome = ink_colors(&preview_lines(choice, 80, 30, palette, true));
+            let monochrome = ink_colors(&preview_lines(
+                choice,
+                80,
+                30,
+                palette,
+                true,
+                Entrance::Finished,
+            ));
             assert!(monochrome.iter().all(|color| *color == palette.primary));
         }
+    }
+
+    fn frame(choice: LogoChoice, entrance: Entrance) -> Vec<Line<'static>> {
+        preview_lines(choice, 80, 30, Palette::default(), false, entrance)
+    }
+
+    /// Each cell's dots: braille dot bits, or 1 for any other ink character.
+    fn dots(lines: &[Line<'static>]) -> Vec<u32> {
+        lines
+            .iter()
+            .flat_map(|line| line.to_string().chars().collect::<Vec<_>>())
+            .map(|cell| match u32::from(cell).checked_sub(0x2800) {
+                Some(bits) if bits <= 0xFF => bits,
+                _ => u32::from(is_ink(cell)),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn gather_builds_up_dots() {
+        for choice in [LogoChoice::WispBraille, LogoChoice::Classic] {
+            let finished = dots(&frame(choice, Entrance::Finished));
+            let total = finished.iter().map(|bits| bits.count_ones()).sum::<u32>();
+            let mut shown = vec![0; finished.len()];
+            for step in 0..GATHER_FRAMES {
+                let entrance = Entrance::Playing {
+                    frame: step,
+                    sheen: false,
+                };
+                let next = dots(&frame(choice, entrance));
+                // Dots only arrive, each into its own place, and the same way every launch.
+                for ((before, now), done) in shown.iter().zip(&next).zip(&finished) {
+                    assert_eq!(before & now, *before, "{}", choice.name());
+                    assert_eq!(now & done, *now, "{}", choice.name());
+                }
+                assert_eq!(next, dots(&frame(choice, entrance)));
+                let count = next.iter().map(|bits| bits.count_ones()).sum::<u32>();
+                let expected = f64::from(total) * f64::from(step + 1) / f64::from(GATHER_FRAMES);
+                assert!(
+                    (f64::from(count) - expected).abs() < f64::from(total) * 0.15,
+                    "{} frame {step}: {count} of {total}",
+                    choice.name()
+                );
+                shown = next;
+            }
+            // The gather's last frame is the finished logo.
+            assert_eq!(shown, finished, "{}", choice.name());
+        }
+    }
+
+    #[test]
+    fn sheen_crosses_from_tip() {
+        let finished = frame(LogoChoice::WispBraille, Entrance::Finished);
+        let colors = |lines: &[Line<'static>]| -> Vec<Option<Color>> {
+            lines
+                .iter()
+                .flat_map(|line| {
+                    line.spans.iter().skip(1).flat_map(|span| {
+                        span.content
+                            .chars()
+                            .map(move |cell| is_ink(cell).then_some(span.style.fg).flatten())
+                    })
+                })
+                .collect()
+        };
+        let base = colors(&finished);
+        // The cells each sheen frame lightens, by row: the band starts at the tip's row
+        // and moves away from it.
+        let mut first_rows = Vec::new();
+        for step in 0..SHEEN_FRAMES {
+            let entrance = Entrance::Playing {
+                frame: GATHER_FRAMES + step,
+                sheen: true,
+            };
+            let lit = frame(LogoChoice::WispBraille, entrance);
+            assert_eq!(lit.len(), finished.len());
+            let width = finished[0].width().max(1);
+            let changed = colors(&lit)
+                .iter()
+                .zip(&base)
+                .enumerate()
+                .filter(|(_, (now, before))| now != before)
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            assert!(!changed.is_empty(), "step {step}");
+            first_rows.push(changed.iter().map(|index| index / width).min().unwrap());
+        }
+        assert!(
+            first_rows.windows(2).all(|pair| pair[0] <= pair[1]),
+            "{first_rows:?}"
+        );
+        assert!(first_rows.first() < first_rows.last(), "{first_rows:?}");
+        // Without the sheen, those frames are the finished logo.
+        let plain = Entrance::Playing {
+            frame: GATHER_FRAMES,
+            sheen: false,
+        };
+        assert_eq!(frame(LogoChoice::WispBraille, plain), finished);
     }
 
     #[test]

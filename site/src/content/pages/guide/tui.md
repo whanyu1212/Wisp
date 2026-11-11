@@ -303,6 +303,9 @@ process, so terminal redraws and resizes do not change it. Each logo is shaded f
 tip, the Wisp flame, toward its far end: the theme's heading colours run from teal through blue to
 purple, and the Adal variants from light to deep pink over the terminal background. The `Wisp` name
 under the logo takes the tip's colour. At 16 colours and without colour the logo keeps one colour.
+On the first welcome screen of a launch the logo's dots gather into place, and in truecolor a light
+band then crosses it once, about 1.25 s in all. Any key, paste, or resize shows the finished logo at
+once; `WISP_TUI_MOTION=off` or a terminal in the background shows it finished from the start.
 
 Rust stores theme preferences in `~/.wisp/tui.json` (`theme`, `last_dark_theme`, and
 `startup_logo`). It preserves unrelated keys and writes atomically. Missing, unknown, or unusable
@@ -348,7 +351,8 @@ colours the indicator steps between bold and dim instead, and the glow and the b
 theme that draws on the terminal's own background also steps the indicator and shows no glow. All
 of it stops in the background, under
 `NO_COLOR`, and with `WISP_TUI_MOTION=off`, and none of it redraws an idle screen once a glow has
-faded.
+faded. The startup logo's entrance follows the same rules, except that its dots still gather under
+`NO_COLOR`, which changes which dots show rather than their colour.
 
 ## Modes {#modes}
 
