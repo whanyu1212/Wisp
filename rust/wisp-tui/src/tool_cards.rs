@@ -226,6 +226,8 @@ pub struct ToolResultInput {
     pub edit_locations: Vec<crate::tool_detail::EditLocation>,
     /// Each image the result returned, as a `[image 640×480 png]` line, in order.
     pub images: Vec<String>,
+    /// The calls a codemode script made, as its result records them.
+    pub nested: crate::script_card::ScriptResult,
 }
 
 /// A running call's output so far, from one `tool.execution.progress` event.
@@ -323,6 +325,8 @@ pub struct ToolCardSnapshot {
     /// Each image the result returned, as a `[image 640×480 png]` line. The
     /// backend sends at most six.
     pub images: Vec<String>,
+    /// A codemode call's script and the calls it made; None for every other tool.
+    pub script: Option<Box<crate::script_card::ScriptCard>>,
 }
 
 /// The longest path a file reference keeps, the usual `PATH_MAX`.
@@ -401,6 +405,7 @@ impl ToolCardSnapshot {
             live_line: None,
             file_reference: FileReference::of_call(&input.name, &input.arguments),
             images: Vec::new(),
+            script: script_of_call(input),
         }
     }
 
@@ -435,8 +440,14 @@ impl ToolCardSnapshot {
         }
         let name = bounded_tool_name(&input.name);
         let action_arguments = format_tool_arguments(&input.name, &input.arguments);
+        // A script's line shows only its title, so its code is compared on its own.
+        let script_differs = self.arguments_available
+            && match (&self.script, script_of_call(input)) {
+                (Some(known), Some(incoming)) => known.code != incoming.code,
+                _ => false,
+            };
         if self.arguments_available
-            && (self.name != name || self.action_arguments != action_arguments)
+            && (self.name != name || self.action_arguments != action_arguments || script_differs)
         {
             self.status = ToolStatus::Error;
             self.detail = "conflicting tool lifecycle metadata".into();
@@ -457,6 +468,16 @@ impl ToolCardSnapshot {
         self.command_summary = command_summary(input);
         self.mcp_subject = mcp_subject(input);
         self.arguments_available = true;
+        // A script's calls may already be on the card, from before its arguments.
+        if let Some(arguments) = script_of_call(input) {
+            let calls = self.script.take();
+            let mut script = arguments;
+            if let Some(calls) = calls {
+                script.calls = calls.calls;
+                script.omitted = calls.omitted;
+            }
+            self.script = Some(script);
+        }
         true
     }
 
@@ -571,6 +592,9 @@ impl ToolCardSnapshot {
         self.detail = preferred_result_detail(input, &preview.text, self.status);
         self.backend_truncated = input.truncated;
         self.images.clone_from(&input.images);
+        if let Some(script) = &mut self.script {
+            script.settle(&input.nested);
+        }
         self.failure_code = input.failure_code.as_deref().map(bounded_reason);
         self.retryable = input.retryable;
         let result_name_matches = self.name == bounded_tool_name(&input.name);
@@ -677,6 +701,9 @@ impl ToolCardSnapshot {
         if self.status.terminal() {
             return false;
         }
+        if let Some(script) = &mut self.script {
+            script.close_running();
+        }
         self.status = ToolStatus::Cancelled;
         self.detail = bounded_reason(reason);
         self.detail_source = ToolDetailSource::None;
@@ -720,6 +747,7 @@ impl ToolCardSnapshot {
             "ls" => "List".into(),
             "edit" => "Edit".into(),
             "write" => "Write".into(),
+            crate::script_card::CODEMODE => "Script".into(),
             _ if self.mcp_target().is_some() => "MCP".into(),
             name => clip_chars(&one_line(name), TOOL_LABEL_MAX_CHARS),
         }
@@ -736,6 +764,7 @@ impl ToolCardSnapshot {
             "ls" => ("Listing", "Listed", "List"),
             "edit" => ("Editing", "Edited", "Edit"),
             "write" => ("Writing", "Wrote", "Write"),
+            crate::script_card::CODEMODE => ("Scripting", "Scripted", "Script"),
             _ if self.mcp_target().is_some() => ("Calling", "Called", "Call"),
             name => return clip_chars(&one_line(name), TOOL_LABEL_MAX_CHARS),
         };
@@ -820,6 +849,11 @@ impl ToolCardSnapshot {
     pub fn action_line_arguments(&self) -> String {
         if let Some(subject) = &self.mcp_subject {
             return subject.clone();
+        }
+        // Worked out here rather than stored, so a script's line count never makes
+        // its live and reopened cards disagree about their arguments.
+        if let Some(script) = &self.script {
+            return script.subject();
         }
         let cwd = self.display_base.as_deref().map(str::to_owned).or_else(|| {
             std::env::current_dir()
@@ -1323,6 +1357,20 @@ pub fn bounded_tool_arguments(name: &str, arguments: &Value) -> Value {
             "yield_seconds",
         ],
         "edit" | "write" => &["path"],
+        crate::script_card::CODEMODE => {
+            let mut bounded = Map::new();
+            if let Some(code) = arguments.get("code").and_then(Value::as_str) {
+                let mut end = code.len().min(crate::script_card::SCRIPT_MAX_BYTES);
+                while !code.is_char_boundary(end) {
+                    end -= 1;
+                }
+                bounded.insert("code".into(), Value::String(code[..end].to_owned()));
+            }
+            if let Some(title) = arguments.get("title") {
+                bounded.insert("title".into(), bounded_argument_value(title, 256));
+            }
+            return Value::Object(bounded);
+        }
         _ => {
             let mut bounded = Map::new();
             let mut selected: Vec<&String> = Vec::with_capacity(GENERIC_MAX_ITEMS);
@@ -1543,7 +1591,22 @@ fn known_tool(name: &str) -> bool {
     )
 }
 
+/// The script card for a codemode call; None for any other tool.
+fn script_of_call(input: &ToolCallInput) -> Option<Box<crate::script_card::ScriptCard>> {
+    (input.name == crate::script_card::CODEMODE).then(|| {
+        Box::new(crate::script_card::ScriptCard::from_arguments(
+            &input.arguments,
+        ))
+    })
+}
+
 fn format_tool_arguments(name: &str, arguments: &Value) -> String {
+    // A script's line shows its title, or how long it is (worked out when shown).
+    if name == crate::script_card::CODEMODE {
+        return crate::script_card::ScriptCard::from_arguments(arguments)
+            .title
+            .unwrap_or_else(|| "Python script".to_owned());
+    }
     if !known_tool(name) {
         return format_generic_value(arguments);
     }
@@ -2234,6 +2297,7 @@ mod tests {
 
     fn result(output: &str) -> ToolResultInput {
         ToolResultInput {
+            nested: Default::default(),
             call_id: "call-1".into(),
             name: "read".into(),
             output: output.into(),

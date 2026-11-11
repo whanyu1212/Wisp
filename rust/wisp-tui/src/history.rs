@@ -473,6 +473,10 @@ fn tool_result(message: &Value, index: usize) -> Result<ToolResultInput, History
         .map(bounded_identity)
         .unwrap_or_else(|| format!("s:history-result-boundary-{index}"));
     Ok(ToolResultInput {
+        nested: crate::script_card::ScriptResult::from_fields(
+            result.and_then(|result| result.get("nested_calls")),
+            result.and_then(|result| result.get("nested_calls_omitted")),
+        ),
         images: composer_images::reported_image_lines(message.get("images")),
         call_id,
         name: bounded_tool_name(name),
@@ -912,6 +916,41 @@ mod tests {
             assert!(restored.entries()[0].content.is_empty());
             assert_eq!(restored.entries()[0].searches()[0].argument, "docs");
         }
+    }
+
+    #[test]
+    fn history_restores_script_calls() {
+        let mut result = message("tool", "12");
+        let entry_id = result["entry_id"].as_str().unwrap().to_owned();
+        result["tool_call_id"] = json!("script-1");
+        result["tool_name"] = json!("codemode");
+        // As a page carries them when its budget is short: no arguments, one omitted.
+        result["tool_result"] = json!({
+            "status": "done",
+            "nested_calls": [
+                {"call_id": "n1", "name": "read", "arguments": null, "is_error": false,
+                 "started_at": "2026-01-02T03:04:05Z", "duration_ms": 3},
+                {"call_id": "n2", "name": "grep", "arguments": null, "is_error": true,
+                 "error": "invalid pattern", "started_at": "2026-01-02T03:04:05Z",
+                 "duration_ms": 1},
+            ],
+            "nested_calls_omitted": 1,
+        });
+
+        let projected = project_rpc_exact_tool_result(&[result], &entry_id).unwrap();
+
+        let tools: Vec<_> = projected
+            .nested
+            .calls
+            .iter()
+            .map(|call| call.tool.as_str())
+            .collect();
+        assert_eq!(tools, ["read", "grep"]);
+        assert_eq!(projected.nested.omitted, 1);
+        assert_eq!(
+            projected.nested.calls[1].error.as_deref(),
+            Some("invalid pattern")
+        );
     }
 
     #[test]

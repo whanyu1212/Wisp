@@ -1194,6 +1194,7 @@ fn finished_edit(ui: &mut LiveUi, call_id: &str) -> crate::transcript::Transcrip
     ui.state
         .transcript
         .observe_tool_result(tool_cards::ToolResultInput {
+            nested: Default::default(),
             call_id: call_id.into(),
             name: "edit".into(),
             output: "Applied 1 edit(s) to src/lib.rs".into(),

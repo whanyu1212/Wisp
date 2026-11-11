@@ -119,7 +119,12 @@ class CodemodeTool:
             "code": {
                 "type": "string",
                 "description": "The Python script. Its last expression is its result.",
-            }
+            },
+            "title": {
+                "type": "string",
+                "description": "What the script does, in a few words, such as "
+                "'count TODOs per crate'. Shown to the user.",
+            },
         },
         "required": ["code"],
         "additionalProperties": False,
