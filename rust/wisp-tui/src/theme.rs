@@ -107,10 +107,10 @@ impl Palette {
         self
     }
 
-    /// The welcome card's frame: the muted grey blended about halfway into the
-    /// background, so the card reads as a soft outline under its logo.
+    /// The welcome card's frame: the muted grey blended a little into the background,
+    /// so the card reads as an outline that holds its menu's selection band.
     pub fn card_border(self) -> Color {
-        mix(self.muted, self.background, 0.45)
+        mix(self.muted, self.background, 0.7)
     }
 
     /// Whether a gradient can show: not in monochrome, and not at 16 colours, where
@@ -411,12 +411,16 @@ impl Palette {
         })
     }
 
-    /// The key of a shortcut hint, on a raised surface so it reads apart from its action.
+    /// The key of a shortcut hint: bold body text, so it reads apart from its muted
+    /// action. It has no background because the footer sits on the terminal's last row,
+    /// and terminals that extend edge cells into their window padding would stretch a
+    /// keycap's background down to the window's edge.
     pub fn keycap(self) -> Style {
+        let style = Style::default().add_modifier(Modifier::BOLD);
         if self.monochrome {
-            return Style::default().add_modifier(Modifier::BOLD);
+            return style;
         }
-        Style::default().fg(self.foreground).bg(self.panel)
+        style.fg(self.foreground)
     }
 
     /// The composer's border in plan mode: the warning colour blended 70% into the
