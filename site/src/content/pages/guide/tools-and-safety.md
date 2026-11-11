@@ -478,8 +478,10 @@ or newer; on 3.11 the extra installs nothing and the model is not offered `codem
 - **A sandbox, not a shell.** Scripts run in a separate process with no files, network, environment
   or third-party packages, in a subset of Python. They are type-checked against the tools'
   declarations before anything runs.
-- **Limits.** 200 tool calls, 2 minutes, 10 seconds of the script's own computing and 128 MiB per
-  script. A script cannot start another script, and cancelling a run kills it.
+- **Limits.** 200 tool calls, 2 minutes, 10 seconds of the script's own computing, 128 MiB and
+  1 MiB of printed output per script. A script that reaches one fails with the limit named. A
+  script cannot start another script, and cancelling a run kills it along with the calls it has
+  running.
 
 It is off by default while its effect is measured on the tool-use evals (HY-431).
 

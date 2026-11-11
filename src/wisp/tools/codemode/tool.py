@@ -18,7 +18,7 @@ from typing import Protocol
 from wisp.tool_types import ToolSafety
 from wisp.tools.base import ToolArguments, ToolInputSchema, ToolPromptMetadata
 from wisp.tools.codemode.calls import CODEMODE, NestedToolCaller
-from wisp.tools.codemode.sandbox import ScriptFunction, ScriptLimits, run_script
+from wisp.tools.codemode.sandbox import ScriptFunction, ScriptLimits, ScriptRun, run_script
 from wisp.tools.context import ToolContext
 from wisp.tools.result import ToolError, ToolResult
 from wisp.tools.truncation import truncate_text
@@ -31,6 +31,14 @@ _JSON_TYPES = {
     "array": "list[object]",
     "object": "dict[str, object]",
 }
+
+# A failed script's message stays under the executor's cap on the errors a model is
+# shown (2,000 characters), so that cap never cuts off the list of calls it made.
+_FAILURE_MESSAGE_CHARS = 1_900
+# Room for the "[N more characters]" markers that shortened parts carry.
+_SHORTENED_MARKER_CHARS = 64
+# The most a failure's list of calls may take, so the error always keeps room.
+_FAILURE_CALLS_CHARS = 600
 
 CODEMODE_PROMPT = ToolPromptMetadata(
     prompt_snippet="codemode: run a Python script that calls the read-only tools.",
@@ -74,15 +82,29 @@ class _CallLog:
     def total(self) -> int:
         return sum(self.by_tool.values())
 
-    def line(self) -> str:
+    def line(self, max_chars: int | None = None) -> str:
+        """Summarize the calls, naming tools until ``max_chars`` and counting the rest."""
+
         if not self.by_tool:
             return "No tool calls."
-        calls = ", ".join(
-            name if count == 1 else f"{name} ×{count}" for name, count in self.by_tool.items()
-        )
         noun = "call" if self.total == 1 else "calls"
         failed = f" ({self.failed} failed)" if self.failed else ""
-        return f"{self.total} tool {noun}{failed}: {calls}"
+        head = f"{self.total} tool {noun}{failed}: "
+        entries = [
+            name if count == 1 else f"{name} ×{count}" for name, count in self.by_tool.items()
+        ]
+        line = head + ", ".join(entries)
+        if max_chars is None or len(line) <= max_chars:
+            return line
+        # Leave room for the ", and N more tools" that ends a shortened list.
+        budget = max_chars - len(head) - len(f", and {len(entries)} more tools")
+        named: list[str] = []
+        for entry in entries:
+            if len(", ".join([*named, entry])) > budget:
+                break
+            named.append(entry)
+        rest = f"{len(entries) - len(named)} more tools"
+        return head + (f"{', '.join(named)}, and {rest}" if named else rest)
 
 
 class CodemodeTool:
@@ -159,11 +181,7 @@ class CodemodeTool:
         )
         if run.failure is not None:
             # The calls already made stand: every tool a script reaches is read-only.
-            message = [f"Script failed ({run.failure}): {run.error}"]
-            if run.printed:
-                message.append(f"Printed before it failed:\n{run.printed}")
-            message.append(f"Calls made before it failed: {log.line()}")
-            raise ToolError("\n".join(message))
+            raise ToolError(_failure_message(run, log))
         parts = [part for part in (run.printed.rstrip("\n"), run.value) if part]
         parts.append(f"[{log.line()}]")
         bounded = truncate_text(
@@ -191,6 +209,51 @@ class CodemodeTool:
             return result.text
 
         return call_tool
+
+
+def _failure_message(run: ScriptRun, log: _CallLog) -> str:
+    """Describe a failed script: its error, what it printed, and the calls it made.
+
+    The list of calls is kept whole and the rest shares what room is left: the error
+    keeps its start, where the cause is named, and the printout its end, closest to
+    where the script failed. Without a printout the error has all the room, so a type
+    check reporting several mistakes shows more than one.
+    """
+
+    heading = f"Script failed ({run.failure}): "
+    printed_label = "Printed before it failed:\n"
+    calls = f"Calls made before it failed: {log.line(_FAILURE_CALLS_CHARS)}"
+    room = _FAILURE_MESSAGE_CHARS - len(heading) - len(calls) - _SHORTENED_MARKER_CHARS
+    if not run.printed:
+        return "\n".join([heading + _head(run.error or "", room), calls])
+    error_room = room * 2 // 5
+    printed_room = room - error_room - len(printed_label)
+    return "\n".join(
+        [
+            heading + _head(run.error or "", error_room),
+            printed_label + _tail(run.printed, printed_room),
+            calls,
+        ]
+    )
+
+
+def _head(text: str, limit: int) -> str:
+    """The first ``limit`` characters of ``text``, marked when shortened."""
+
+    limit = max(0, limit)
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}… [{len(text) - limit} more characters]"
+
+
+def _tail(text: str, limit: int) -> str:
+    """The last ``limit`` characters of ``text``, marked when shortened."""
+
+    limit = max(0, limit)
+    if len(text) <= limit:
+        return text
+    tail = text[-limit:] if limit else ""
+    return f"[{len(text) - limit} earlier characters] …{tail}"
 
 
 def _signature(tool: ScriptableTool) -> _Signature | None:
@@ -254,9 +317,11 @@ def _description(
         "`import asyncio`.",
         "",
         "The script runs in a sandbox with a subset of Python: no files, network, "
-        "classes with inheritance or third-party packages, and no map() or filter(), so "
-        "use comprehensions; json, re, collections, itertools and math are available. "
-        "It is type-checked against the tools' parameters before it runs.",
+        "classes with inheritance or third-party packages. Some builtins are missing: "
+        "map(), filter(), ascii(), format(), getattr(), hasattr(), setattr(), callable(), "
+        "dir() and vars(); use comprehensions, f-strings and plain attribute access. "
+        "json, re, collections, itertools and math are available. It is type-checked "
+        "against the tools' parameters before it runs.",
         f"Limits: {limits.max_calls} tool calls and {limits.wall_seconds:g} seconds per script.",
         "",
         "Callable tools:",
