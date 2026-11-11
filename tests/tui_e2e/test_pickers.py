@@ -102,10 +102,13 @@ SKILL_EXPANSION_MARKER
                 output.clear()
             elif (
                 phase == "browser ready"
-                and b"Inspect changes carefully" in output
-                and b"Refreshing skills" not in output
+                # Read the replayed screen: a differential repaint can paint the selected
+                # skill's description without repainting its name from an earlier frame.
+                and screen_shows(painted, "Inspect changes carefully")
+                and not screen_shows(painted, "Refreshing skills")
             ):
-                assert b"0-review" in output and b"project:wisp" in output
+                assert screen_shows(painted, "0-review"), bytes(output)
+                assert screen_shows(painted, "project:wisp"), bytes(output)
                 os.write(terminal_fd, b"\r")
                 phase = "inserted"
                 output.clear()
