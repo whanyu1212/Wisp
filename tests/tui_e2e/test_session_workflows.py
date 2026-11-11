@@ -18,6 +18,7 @@ import pytest
 from tests.tui_e2e.support import (
     CONTEXT_STATS_BACKEND,
     reap,
+    screen_shows,
     welcome_ready,
 )
 from wisp import __version__
@@ -329,6 +330,17 @@ for line in sys.stdin:
                 phase = "first tree"
                 phase_started = now
                 phase_output_offset = len(output)
+            elif (
+                phase == "first tree"
+                and not command_types.count("get_session_tree")
+                and now - phase_started > 0.5
+                and screen_shows(output, "metadata refresh to finish")
+            ):
+                # The welcome menu repaints as the draft empties, so its text can
+                # appear before the clone's metadata refresh ends. The refused
+                # command stays in the draft; send it again.
+                os.write(terminal_fd, b"\r")
+                phase_started = now
             elif (
                 phase == "first tree"
                 and command_types.count("get_session_tree") >= 1

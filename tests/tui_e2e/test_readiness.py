@@ -216,8 +216,8 @@ def _has_fragments(output: bytes, offset: int, *fragments: bytes) -> bool:
     return all(fragment in phase_output for fragment in fragments)
 
 
-# Runs of full dots that only the finished Wisp logo shows, at its normal and full sizes.
-_FINISHED_LOGO_ROWS = ("⣿⣿⣿⣿⣿⣿⣿⣿⣁⣠⡿", "⣾⣿⣿⣿⣿⣿⣿⣿⣿⡿⠋")
+# Runs of dots that only the finished Wisp logo shows, at its mini, normal and full sizes.
+_FINISHED_LOGO_ROWS = ("⢀⠤⠶⠶⣿⣿⡄", "⣿⣿⣿⣿⣿⣿⣿⣿⣁⣠⡿", "⣾⣿⣿⣿⣿⣿⣿⣿⣿⡿⠋")
 
 
 @pytest.mark.process
