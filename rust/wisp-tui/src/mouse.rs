@@ -296,6 +296,14 @@ pub(crate) struct FoldRow {
     pub target: crate::transcript_view::BrowseTarget,
 }
 
+/// A painted row of the welcome card's menu, which a click opens.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct WelcomeRow {
+    pub y: u16,
+    /// The row's place in the menu.
+    pub index: usize,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct Conversation {
     pub transcript: Rect,
@@ -308,6 +316,8 @@ pub(crate) struct Conversation {
     pub completion: Rows,
     pub completion_visible: bool,
     pub fold_rows: Vec<FoldRow>,
+    /// The welcome menu's rows while the menu takes keys; empty otherwise.
+    pub welcome_rows: Vec<WelcomeRow>,
     /// Whether the footer notice is too long for its row and scrolls, so the
     /// footer needs repainting while it stays on screen.
     pub notice_scrolls: bool,
@@ -549,6 +559,19 @@ impl LiveUi {
                         .await?;
                     self.reconcile_browse_selection();
                     return Ok(control);
+                }
+                // A press on a welcome menu row opens what it names.
+                if self.welcome_menu_rows() > 0 {
+                    if let Some(row) = frame
+                        .conversation
+                        .welcome_rows
+                        .iter()
+                        .find(|row| row.y == event.row)
+                        .copied()
+                    {
+                        self.welcome_selected = row.index;
+                        return self.activate_welcome_action(row.index, writer, limit).await;
+                    }
                 }
                 // Wheel input was handled above, so this is a press. Over transcript text it
                 // starts a selection, which a drag extends and the release copies.

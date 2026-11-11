@@ -2257,3 +2257,132 @@ async fn copying_a_linked_row_copies_its_text() {
     .unwrap();
     assert_eq!(copied.lock().unwrap().copied, ["see docs here"]);
 }
+
+/// A welcome screen at 100×30 whose card menu takes keys, painted once.
+fn welcome_screen() -> LiveUi {
+    let mut ui = LiveUi {
+        mouse_enabled: true,
+        state: UiState::new("fake".into(), Some("model-x".into()), None),
+        ..LiveUi::default()
+    };
+    draw(&mut ui, 100, 30);
+    assert_eq!(ui.welcome_rows.len(), 3);
+    ui
+}
+
+#[tokio::test]
+async fn welcome_menu_follows_keys() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut ui = welcome_screen();
+    // Up from the first row wraps to the last; Down wraps back.
+    ui.handle_input(key(KeyCode::Up), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.welcome_selected, 2);
+    ui.handle_input(key(KeyCode::Down), &writer, 8192)
+        .await
+        .unwrap();
+    ui.handle_input(key(KeyCode::Down), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.welcome_selected, 1);
+    // Browse commands types `/`, as the key would, which opens command completion.
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.editor.text(), "/");
+    // With a draft, the menu steps back and the arrows go to the composer.
+    draw(&mut ui, 100, 30);
+    assert_eq!(ui.welcome_menu_rows(), 0);
+    ui.handle_input(key(KeyCode::Up), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.welcome_selected, 1);
+}
+
+#[tokio::test]
+async fn welcome_typed_command_runs() {
+    let (writer, mut receiver) = mpsc::channel(16);
+    let mut ui = welcome_screen();
+    ui.state.provider = None;
+    ui.state.command_catalog = Some(commands::tests::catalog().into());
+    ui.state.selected_session = Some(crate::reducer::SessionIdentity {
+        session_id: "demo".into(),
+        session_path: "/sessions/demo.jsonl".into(),
+        session_name: None,
+    });
+    draw(&mut ui, 100, 30);
+    for code in "/tree".chars().map(KeyCode::Char) {
+        ui.handle_input(key(code), &writer, 8192).await.unwrap();
+    }
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    let sent = std::iter::from_fn(|| receiver.try_recv().ok())
+        .filter_map(|message| match message {
+            WriterMessage::Frame { payload, .. } => {
+                Some(String::from_utf8_lossy(&payload).into_owned())
+            }
+            WriterMessage::Close => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        sent.iter()
+            .any(|message| message.contains("get_session_tree")),
+        "editor={:?} notice={:?} sent={sent:?}",
+        ui.editor.text(),
+        ui.notice
+    );
+}
+
+#[test]
+fn welcome_footer_names_menu_keys() {
+    let footer = |buffer: &Buffer| {
+        let y = buffer.area.height - 1;
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect::<String>()
+    };
+    let mut ui = welcome_screen();
+    assert!(footer(&draw(&mut ui, 100, 30)).contains("↑↓ menu"));
+    ui.editor.insert_paste("draft");
+    let drafted = footer(&draw(&mut ui, 100, 30));
+    assert!(!drafted.contains("menu"), "{drafted}");
+}
+
+#[tokio::test]
+async fn welcome_menu_resumes_and_mentions() {
+    let (writer, _receiver) = mpsc::channel(16);
+    // Enter on the first row resumes a session, through the command's own path.
+    let mut ui = welcome_screen();
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(ui.session_picker.is_some());
+    assert_eq!(ui.editor.text(), "");
+    // A click on the last row types `@`, which opens the file picker.
+    let mut ui = welcome_screen();
+    let row = ui.welcome_rows[2];
+    ui.handle_input(click(50, row.y), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.welcome_selected, 2);
+    assert_eq!(ui.editor.text(), "@");
+}
+
+#[tokio::test]
+async fn welcome_menu_waits_for_empty_draft() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut ui = welcome_screen();
+    ui.editor.insert_paste("draft");
+    // The last frame painted the menu, but the draft now has the keys and clicks.
+    let row = ui.welcome_rows[2];
+    ui.handle_input(click(50, row.y), &writer, 8192)
+        .await
+        .unwrap();
+    ui.handle_input(key(KeyCode::Down), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.welcome_selected, 0);
+    assert_eq!(ui.editor.text(), "draft");
+}

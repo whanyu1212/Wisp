@@ -210,7 +210,10 @@ pub fn render(
         0,
         Palette::default(),
         &Bindings::default(),
-        LogoChoice::AdalBraille,
+        Welcome {
+            logo: LogoChoice::AdalBraille,
+            ..Welcome::default()
+        },
         None,
         Motion::default(),
         None,
@@ -234,7 +237,7 @@ pub fn render_interactive(
     activity_frame: u8,
     palette: Palette,
     bindings: &Bindings,
-    startup_logo: LogoChoice,
+    welcome: Welcome,
     decision_choice: Option<usize>,
     motion: Motion<'_>,
     activity_elapsed: Option<std::time::Duration>,
@@ -288,7 +291,7 @@ pub fn render_interactive(
                 Constraint::Length(1),
             ])
             .split(area);
-        let (jump_painted, _) = render_transcript(
+        let (jump_painted, _, _) = render_transcript(
             frame,
             chunks[0],
             state,
@@ -299,7 +302,7 @@ pub fn render_interactive(
             activity_frame,
             palette,
             bindings,
-            startup_logo,
+            welcome,
             motion,
         );
         render_decision_panel(
@@ -320,6 +323,7 @@ pub fn render_interactive(
             palette,
             bindings,
             jump_painted.is_some(),
+            false,
             false,
             column.width,
         );
@@ -352,7 +356,7 @@ pub fn render_interactive(
         ])
         .split(area);
 
-    let (jump_to_latest, fold_rows) = render_transcript(
+    let (jump_to_latest, fold_rows, welcome_rows) = render_transcript(
         frame,
         chunks[0],
         state,
@@ -363,7 +367,7 @@ pub fn render_interactive(
         activity_frame,
         palette,
         bindings,
-        startup_logo,
+        welcome,
         motion,
     );
     let completion_rows = completion
@@ -402,6 +406,7 @@ pub fn render_interactive(
         palette,
         bindings,
         jump_to_latest.is_some(),
+        !welcome_rows.is_empty(),
         composer_framed(state, padded, chunks[3]),
         column.width,
     );
@@ -422,6 +427,7 @@ pub fn render_interactive(
         completion: completion_rows,
         completion_visible: completion_height > 0,
         fold_rows,
+        welcome_rows,
         notice_scrolls,
     }
 }
@@ -750,9 +756,9 @@ fn render_transcript(
     activity_frame: u8,
     palette: Palette,
     bindings: &Bindings,
-    startup_logo: LogoChoice,
+    welcome: Welcome,
     motion: Motion<'_>,
-) -> (Option<Rect>, Vec<mouse::FoldRow>) {
+) -> (Option<Rect>, Vec<mouse::FoldRow>, Vec<mouse::WelcomeRow>) {
     let padding = u16::from(
         !state.transcript.entries().is_empty()
             && area.height >= if decision_pending(state) { 10 } else { 8 },
@@ -892,17 +898,32 @@ fn render_transcript(
             .map(|row| row.anchor)
     });
     let mut fold_rows = Vec::new();
+    let mut welcome_rows = Vec::new();
     if rows.is_empty() && status_lines.is_empty() {
-        let lines = empty_transcript_lines(
+        let panel = welcome_panel(
             state,
             connection,
             palette,
+            bindings,
             visible_lines,
             content_width,
-            startup_logo,
+            welcome,
             motion.logo,
         );
-        frame.render_widget(Paragraph::new(Text::from(lines)), content);
+        // Only rows painted whole, while the menu takes keys, answer a click.
+        welcome_rows = panel
+            .menu
+            .iter()
+            .filter(|_| welcome.selected.is_some())
+            .filter(|(line, _)| *line < usize::from(content.height))
+            .filter_map(|(line, index)| {
+                Some(mouse::WelcomeRow {
+                    y: content.y + u16::try_from(*line).ok()?,
+                    index: *index,
+                })
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(Text::from(panel.lines)), content);
     } else {
         let prompts = TurnBounds {
             first: state
@@ -1000,7 +1021,7 @@ fn render_transcript(
         })
         .flatten();
     row_cache.painted_links = links;
-    (jump_to_latest, fold_rows)
+    (jump_to_latest, fold_rows, welcome_rows)
 }
 
 /// Draw the centered jump-to-latest label in `row`, naming its key when it fits.
@@ -2778,21 +2799,107 @@ fn centered_welcome_line(line: Line<'static>, width: usize) -> Line<'static> {
     Line::from(spans).style(style)
 }
 
-fn welcome_action_line(
-    label: &'static str,
-    shortcut: &str,
-    width: usize,
-    palette: Palette,
-) -> Line<'static> {
-    let block_width = width.min(44);
-    let content_width = label.width().saturating_add(shortcut.width());
-    let gap = block_width.saturating_sub(content_width).max(2);
-    let line = Line::from(vec![
-        Span::styled(label, Style::default().fg(palette.foreground)),
-        Span::raw(" ".repeat(gap)),
-        Span::styled(shortcut.to_owned(), Style::default().fg(palette.muted)),
+/// The welcome card's width, frame included, where the column has room for it.
+const WELCOME_CARD_WIDTH: usize = 54;
+/// The widest the frameless menu's rows grow on a screen too short for the card.
+const WELCOME_MENU_WIDTH: usize = 46;
+
+/// A row of the welcome card's menu: what it opens.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WelcomeAction {
+    ConnectProvider,
+    ResumeSession,
+    BrowseCommands,
+    MentionFile,
+}
+
+impl WelcomeAction {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::ConnectProvider => "Connect a provider",
+            Self::ResumeSession => "Resume a session",
+            Self::BrowseCommands => "Browse commands",
+            Self::MentionFile => "Mention a project file",
+        }
+    }
+
+    /// What the row types: the command it runs, or the prefix that opens a picker.
+    pub(crate) const fn shortcut(self) -> &'static str {
+        match self {
+            Self::ConnectProvider => "/connect",
+            Self::ResumeSession => "/resume",
+            Self::BrowseCommands => "/",
+            Self::MentionFile => "@",
+        }
+    }
+}
+
+/// The welcome menu for `state`: connecting a provider comes first while none is set.
+pub(crate) fn welcome_actions(state: &UiState) -> Vec<WelcomeAction> {
+    let mut actions = Vec::new();
+    if state.provider.is_none() {
+        actions.push(WelcomeAction::ConnectProvider);
+    }
+    actions.extend([
+        WelcomeAction::ResumeSession,
+        WelcomeAction::BrowseCommands,
+        WelcomeAction::MentionFile,
     ]);
-    centered_welcome_line(line, width)
+    actions
+}
+
+/// The tips one launch picks from for the line above the composer. Each names its key by
+/// action, so a rebound key shows its own name and an unbound one leaves its tip out.
+const WELCOME_TIPS: [(Option<KeyAction>, &str); 5] = [
+    (
+        Some(KeyAction::AlternateSubmit),
+        "{key} steers a run that's already going",
+    ),
+    (
+        Some(KeyAction::History),
+        "{key} searches the prompts you sent before",
+    ),
+    (
+        Some(KeyAction::TogglePanel),
+        "{key} shows the session panel",
+    ),
+    (
+        Some(KeyAction::ExternalEditor),
+        "{key} writes the draft in your editor",
+    ),
+    (None, "/model switches the model and its effort"),
+];
+
+/// How many tips there are to pick from.
+pub(crate) const WELCOME_TIP_COUNT: usize = WELCOME_TIPS.len();
+
+/// Tip `index` under `bindings`, or None when the key it names is unbound.
+fn welcome_tip(index: usize, bindings: &Bindings) -> Option<String> {
+    let (action, text) = WELCOME_TIPS[index % WELCOME_TIPS.len()];
+    match action {
+        Some(action) => {
+            let key = primary_label(bindings, action);
+            (key != "Unbound").then(|| text.replace("{key}", &key))
+        }
+        None => Some(text.to_owned()),
+    }
+}
+
+/// What the welcome screen shows besides the session's own state.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Welcome {
+    pub logo: LogoChoice,
+    /// The selected menu row while the menu takes keys; None while it steps back.
+    pub selected: Option<usize>,
+    /// The launch's tip, by its place among the tips.
+    pub tip: Option<usize>,
+}
+
+/// The welcome screen's lines, and which of them are menu rows.
+struct WelcomePanel {
+    lines: Vec<Line<'static>>,
+    /// Each menu row's line, with its place in the menu.
+    menu: Vec<(usize, usize)>,
 }
 
 fn center_welcome_panel(mut panel: Vec<Line<'static>>, height: usize) -> Vec<Line<'static>> {
@@ -2802,15 +2909,212 @@ fn center_welcome_panel(mut panel: Vec<Line<'static>>, height: usize) -> Vec<Lin
     lines
 }
 
-fn empty_transcript_lines(
+/// `line` padded with spaces to `width` columns, centred.
+fn centered_in(line: Line<'static>, width: usize) -> Vec<Span<'static>> {
+    let room = width.saturating_sub(line.width());
+    let mut spans = vec![Span::raw(" ".repeat(room / 2))];
+    spans.extend(line.spans);
+    spans.push(Span::raw(" ".repeat(room - room / 2)));
+    spans
+}
+
+/// A menu row `width` columns wide: its label and, right-aligned, its shortcut. While the
+/// menu takes keys the labels are bold and the selected row carries the selection band
+/// and a `▸`; while it steps back, for a draft, the labels are muted.
+fn welcome_menu_row(
+    action: WelcomeAction,
+    selected: bool,
+    live: bool,
+    width: usize,
+    palette: Palette,
+) -> Vec<Span<'static>> {
+    let label = Style::default().fg(palette.foreground);
+    let label = if live {
+        label.add_modifier(Modifier::BOLD)
+    } else {
+        label.fg(palette.muted)
+    };
+    let marker = if selected { "▸ " } else { "  " };
+    let gap = width
+        .saturating_sub(6 + action.label().width() + action.shortcut().width())
+        .max(1);
+    let spans = [
+        ("  ".to_owned(), Style::default()),
+        (marker.to_owned(), Style::default().fg(palette.accent)),
+        (action.label().to_owned(), label),
+        (" ".repeat(gap), Style::default()),
+        (
+            action.shortcut().to_owned(),
+            Style::default().fg(palette.muted),
+        ),
+        ("  ".to_owned(), Style::default()),
+    ];
+    spans
+        .into_iter()
+        .map(|(text, style)| {
+            let style = if selected {
+                palette.selected_row(style)
+            } else {
+                style
+            };
+            Span::styled(text, style)
+        })
+        .collect()
+}
+
+/// The welcome card, fitted to `height` rows: a faint rounded frame around the logo, the
+/// name and tagline, and the menu, anchored just above the launch's tip. A short screen
+/// gets a smaller logo, then none, then no tip, then no frame; the menu always stays.
+/// None when even the frameless menu does not fit.
+#[allow(clippy::too_many_arguments)]
+fn welcome_card(
+    state: &UiState,
+    palette: Palette,
+    bindings: &Bindings,
+    height: usize,
+    width: usize,
+    welcome: Welcome,
+    entrance: startup_logo::Entrance,
+    name: Line<'static>,
+) -> Option<WelcomePanel> {
+    let actions = welcome_actions(state);
+    let card_width = width.min(WELCOME_CARD_WIDTH);
+    let inner = card_width.saturating_sub(2);
+    let tip = welcome
+        .tip
+        .and_then(|index| welcome_tip(index, bindings))
+        .filter(|tip| tip.width() + 6 <= width);
+    // Rows besides the logo: a padding row, the name, the tagline, a blank, the menu,
+    // and a padding row; then the frame's two rows, and a blank and the tip under it.
+    let body = actions.len() + 5;
+    let tip_rows = if tip.is_some() { 2 } else { 0 };
+    let logo_room = height.saturating_sub(body + 2 + tip_rows + 1);
+    let logo = startup_logo::preview_lines(
+        welcome.logo,
+        u16::try_from(inner).unwrap_or(u16::MAX),
+        u16::try_from(logo_room).unwrap_or(u16::MAX),
+        palette,
+        palette.is_monochrome(),
+        entrance,
+    );
+    let (framed, tip) = if !logo.is_empty() || body + 2 + tip_rows <= height {
+        (true, tip)
+    } else if body + 2 <= height {
+        (true, None)
+    } else if actions.len() + 3 <= height {
+        (false, None)
+    } else {
+        return None;
+    };
+    let live = welcome.selected.is_some();
+    let selected = welcome
+        .selected
+        .map(|index| index.min(actions.len().saturating_sub(1)));
+    let muted = Style::default().fg(palette.muted);
+    let tagline = Line::styled(
+        EMPTY_TRANSCRIPT_TAGLINE,
+        Style::default().fg(palette.foreground),
+    );
+
+    // The card's rows, each `inner` columns wide, and which are menu rows.
+    let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
+    let mut menu = Vec::new();
+    let menu_width = if framed {
+        inner.saturating_sub(2)
+    } else {
+        width.min(WELCOME_MENU_WIDTH)
+    };
+    if framed {
+        rows.push(centered_in(Line::default(), inner));
+        for line in logo {
+            rows.push(centered_in(line, inner).into_iter().skip(1).collect());
+            let last = rows.last_mut().expect("a logo row was pushed");
+            let room = inner.saturating_sub(last.iter().map(Span::width).sum());
+            last.push(Span::raw(" ".repeat(room)));
+        }
+        if rows.len() > 1 {
+            rows.push(centered_in(Line::default(), inner));
+        }
+    }
+    let row_width = if framed { inner } else { width };
+    rows.push(centered_in(name, row_width));
+    rows.push(centered_in(tagline, row_width));
+    rows.push(centered_in(Line::default(), row_width));
+    for (index, action) in actions.iter().enumerate() {
+        let row = welcome_menu_row(*action, selected == Some(index), live, menu_width, palette);
+        menu.push((rows.len(), index));
+        rows.push(centered_in(Line::from(row), row_width));
+    }
+    if framed {
+        rows.push(centered_in(Line::default(), inner));
+    }
+
+    let border = Style::default().fg(palette.card_border());
+    let left = " ".repeat(width.saturating_sub(card_width) / 2);
+    let mut lines = Vec::new();
+    if framed {
+        let edge = "─".repeat(inner);
+        lines.push(Line::from(vec![
+            Span::raw(left.clone()),
+            Span::styled(format!("╭{edge}╮"), border),
+        ]));
+        for row in rows {
+            let mut spans = vec![Span::raw(left.clone()), Span::styled("│", border)];
+            spans.extend(row);
+            spans.push(Span::styled("│", border));
+            lines.push(Line::from(spans));
+        }
+        lines.push(Line::from(vec![
+            Span::raw(left),
+            Span::styled(format!("╰{edge}╯"), border),
+        ]));
+        // The frame's top row comes first, so each menu row sits one line lower.
+        for (line, _) in &mut menu {
+            *line += 1;
+        }
+    } else {
+        lines.extend(rows.into_iter().map(Line::from));
+    }
+    if let Some(tip) = tip {
+        lines.push(Line::default());
+        lines.push(Line::from(vec![
+            Span::styled(
+                " Tip",
+                Style::default()
+                    .fg(palette.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("  {}", sanitize_for_terminal(&tip)), muted),
+        ]));
+    }
+    // Anchored to the bottom, so the card sits just above the tip and the composer.
+    let top = height.saturating_sub(lines.len());
+    let mut padded = vec![Line::default(); top];
+    padded.extend(lines);
+    for (line, _) in &mut menu {
+        *line += top;
+    }
+    Some(WelcomePanel {
+        lines: padded,
+        menu,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn welcome_panel(
     state: &UiState,
     connection: &ConnectionInfo,
     palette: Palette,
+    bindings: &Bindings,
     height: usize,
     width: usize,
-    startup_logo: LogoChoice,
+    welcome: Welcome,
     entrance: startup_logo::Entrance,
-) -> Vec<Line<'static>> {
+) -> WelcomePanel {
+    let plain = |lines| WelcomePanel {
+        lines,
+        menu: Vec::new(),
+    };
     let muted = Style::default().fg(palette.muted);
     if state.context.loading() {
         let mut lines = vec![Line::styled(
@@ -2823,102 +3127,43 @@ fn empty_transcript_lines(
                 lines.push(Line::styled(sanitize_for_terminal(&identity), muted));
             }
         }
-        return lines;
+        return plain(lines);
     }
     if !editable(state) {
-        return Vec::new();
+        return plain(Vec::new());
     }
 
     let version = sanitize_for_terminal(&connection.backend_version);
     // The name takes the logo's tip colour, so it reads as part of the mark above it.
-    let name_color = startup_logo::name_color(startup_logo, palette, palette.is_monochrome());
-    let version_line = || {
-        centered_welcome_line(
-            Line::from(vec![
-                Span::styled(
-                    "Wisp ",
-                    Style::default().fg(name_color).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(version.clone(), muted),
-            ]),
+    let name_color = startup_logo::name_color(welcome.logo, palette, palette.is_monochrome());
+    let name = Line::from(vec![
+        Span::styled(
+            "Wisp ",
+            Style::default().fg(name_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(version, muted),
+    ]);
+    if width >= EMPTY_TRANSCRIPT_PANEL_WIDTH {
+        if let Some(card) = welcome_card(
+            state,
+            palette,
+            bindings,
+            height,
             width,
-        )
-    };
+            welcome,
+            entrance,
+            name.clone(),
+        ) {
+            return card;
+        }
+    }
 
     let hint = if state.provider.is_none() {
         "/connect to add a provider"
     } else {
         EMPTY_TRANSCRIPT_HINT
     };
-    if width >= EMPTY_TRANSCRIPT_PANEL_WIDTH {
-        // The action list names the keys the hint line and the composer's placeholder
-        // already give, so it replaces the hint and leaves out typing a prompt.
-        let mut actions = Vec::new();
-        if state.provider.is_none() {
-            actions.push(("Connect a provider", "/connect"));
-        }
-        actions.extend([
-            ("Resume a session", "/resume"),
-            ("Browse commands", "/"),
-            ("Mention a project file", "@"),
-        ]);
-        let copy_height = 3;
-        let action_height = actions.len() + 1;
-        // The separator after the logo can be omitted at the exact-fit boundary.
-        let action_logo_height = height
-            .saturating_add(1)
-            .saturating_sub(copy_height + action_height);
-        let mut panel = startup_logo::preview_lines(
-            startup_logo,
-            u16::try_from(width).unwrap_or(u16::MAX),
-            u16::try_from(action_logo_height).unwrap_or(u16::MAX),
-            palette,
-            palette.is_monochrome(),
-            entrance,
-        );
-        if panel.is_empty() {
-            panel = startup_logo::preview_lines(
-                startup_logo,
-                u16::try_from(width).unwrap_or(u16::MAX),
-                u16::try_from(height.saturating_sub(copy_height + 1)).unwrap_or(u16::MAX),
-                palette,
-                palette.is_monochrome(),
-                entrance,
-            );
-        }
-        let mark_height = panel.len();
-        panel.push(Line::default());
-        panel.push(version_line());
-        panel.push(centered_welcome_line(
-            Line::styled(
-                EMPTY_TRANSCRIPT_TAGLINE,
-                Style::default().fg(palette.foreground),
-            ),
-            width,
-        ));
-
-        let mut full_height = panel.len().saturating_add(1).saturating_add(actions.len());
-        if height + 1 == full_height {
-            // Give the new composer padding its row without hiding the actions.
-            panel.remove(mark_height);
-            full_height -= 1;
-        }
-        if height >= full_height {
-            panel.push(Line::default());
-            panel.extend(
-                actions
-                    .into_iter()
-                    .map(|(label, shortcut)| welcome_action_line(label, shortcut, width, palette)),
-            );
-            return center_welcome_panel(panel, height);
-        }
-        panel.push(centered_welcome_line(Line::styled(hint, muted), width));
-        if height >= panel.len() {
-            return center_welcome_panel(panel, height);
-        }
-    }
-
-    let mut panel = vec![version_line()];
+    let mut panel = vec![centered_welcome_line(name, width)];
     if height >= 3 && EMPTY_TRANSCRIPT_TAGLINE.width() <= width {
         panel.push(centered_welcome_line(
             Line::styled(
@@ -2937,7 +3182,7 @@ fn empty_transcript_lines(
         };
         panel.push(centered_welcome_line(Line::styled(hint, muted), width));
     }
-    center_welcome_panel(panel, height)
+    plain(center_welcome_panel(panel, height))
 }
 
 /// The browse hint, shown once in the footer instead of under every card. It needs a
@@ -2950,13 +3195,19 @@ fn browse_hint(state: &UiState, bindings: &Bindings) -> String {
     }
 }
 
-fn footer_hints(state: &UiState, bindings: &Bindings, width: usize) -> String {
-    join_hints(footer_hint_parts(state, bindings, Vec::new()), width)
+fn footer_hints(state: &UiState, bindings: &Bindings, menu: bool, width: usize) -> String {
+    join_hints(footer_hint_parts(state, bindings, menu, Vec::new()), width)
 }
 
 /// The footer's key hints in order. Offered `panel` hints go beside the interrupt
-/// key during a run, and last otherwise.
-fn footer_hint_parts(state: &UiState, bindings: &Bindings, mut panel: Vec<String>) -> Vec<String> {
+/// key during a run, and last otherwise. With `menu`, the welcome card's menu takes the
+/// arrow keys, so its hint leads.
+fn footer_hint_parts(
+    state: &UiState,
+    bindings: &Bindings,
+    menu: bool,
+    mut panel: Vec<String>,
+) -> Vec<String> {
     let mut parts: Vec<String> = if matches!(state.view_status, ViewStatus::WaitingForApproval) {
         vec![
             "y once".into(),
@@ -2979,7 +3230,10 @@ fn footer_hint_parts(state: &UiState, bindings: &Bindings, mut panel: Vec<String
         parts
     } else {
         // Help lists the remaining keys, sending included.
-        vec!["Ctrl+G help".into(), browse_hint(state, bindings)]
+        let menu = menu.then(|| "↑↓ menu".to_owned());
+        menu.into_iter()
+            .chain(["Ctrl+G help".into(), browse_hint(state, bindings)])
+            .collect()
     };
     parts.extend(panel);
     parts
@@ -2995,6 +3249,7 @@ fn render_footer(
     palette: Palette,
     bindings: &Bindings,
     jump_painted: bool,
+    menu: bool,
     identity_in_composer: bool,
     column_width: u16,
 ) -> bool {
@@ -3098,6 +3353,7 @@ fn render_footer(
             let hints = footer_hints(
                 state,
                 bindings,
+                menu,
                 hint_cap(width.saturating_sub(status_width).saturating_sub(3)),
             );
             let hints_width = if hints.is_empty() {
@@ -3119,7 +3375,7 @@ fn render_footer(
                 let hint_room = beside_status
                     .saturating_sub(left.width())
                     .saturating_sub(if left.is_empty() { 1 } else { 3 });
-                let hints = footer_hints(state, bindings, hint_cap(hint_room));
+                let hints = footer_hints(state, bindings, menu, hint_cap(hint_room));
                 (left, Style::default().fg(palette.muted), hints)
             }
         }
@@ -3135,7 +3391,7 @@ fn render_footer(
         hints
     } else {
         let room = beside_status.saturating_sub(left_width + usize::from(left_width > 0) * 2);
-        with_panel_hints(state, bindings, panel_docked, hint_cap(room)).unwrap_or(hints)
+        with_panel_hints(state, bindings, menu, panel_docked, hint_cap(room)).unwrap_or(hints)
     };
 
     let mut right = if status_line.is_empty() {
@@ -3178,6 +3434,7 @@ fn render_footer(
 fn with_panel_hints(
     state: &UiState,
     bindings: &Bindings,
+    menu: bool,
     panel_docked: bool,
     room: usize,
 ) -> Option<String> {
@@ -3191,7 +3448,7 @@ fn with_panel_hints(
     }
     while !panel.is_empty() {
         let offer = join_hints(
-            footer_hint_parts(state, bindings, panel.clone()),
+            footer_hint_parts(state, bindings, menu, panel.clone()),
             usize::MAX,
         );
         if offer.width() + 3 <= room {
@@ -4174,7 +4431,10 @@ mod tests {
                     0,
                     Palette::default(),
                     bindings,
-                    LogoChoice::AdalBraille,
+                    Welcome {
+                        logo: LogoChoice::AdalBraille,
+                        ..Welcome::default()
+                    },
                     None,
                     Motion::default(),
                     None,
@@ -4213,7 +4473,10 @@ mod tests {
                     activity_frame,
                     Palette::default(),
                     &Bindings::default(),
-                    LogoChoice::AdalBraille,
+                    Welcome {
+                        logo: LogoChoice::AdalBraille,
+                        ..Welcome::default()
+                    },
                     None,
                     Motion::default(),
                     None,
@@ -4271,6 +4534,33 @@ mod tests {
         assert!(!rendered.contains("backend "));
         assert!(!rendered.contains("PgUp"));
         assert!(!rendered.contains("theme"));
+    }
+
+    /// The welcome screen's lines with `logo`, its menu stepped back and no tip.
+    fn empty_transcript_lines(
+        state: &UiState,
+        connection: &ConnectionInfo,
+        palette: Palette,
+        height: usize,
+        width: usize,
+        logo: LogoChoice,
+        entrance: startup_logo::Entrance,
+    ) -> Vec<Line<'static>> {
+        let welcome = Welcome {
+            logo,
+            ..Welcome::default()
+        };
+        welcome_panel(
+            state,
+            connection,
+            palette,
+            &Bindings::default(),
+            height,
+            width,
+            welcome,
+            entrance,
+        )
+        .lines
     }
 
     #[test]
@@ -4344,6 +4634,85 @@ mod tests {
             .expect("monochrome mark row");
         assert_eq!(mark.style.fg, Some(monochrome.primary));
         assert_eq!(mark.style.bg, None);
+    }
+
+    #[test]
+    fn welcome_card_frames_menu() {
+        let state = UiState::new("fake".into(), Some("model-x".into()), None);
+        let palette = Palette::default();
+        let panel = |height, selected| {
+            let welcome = Welcome {
+                logo: LogoChoice::WispBraille,
+                selected,
+                tip: Some(0),
+            };
+            let panel = welcome_panel(
+                &state,
+                &connection(),
+                palette,
+                &Bindings::default(),
+                height,
+                80,
+                welcome,
+                startup_logo::Entrance::Finished,
+            );
+            let text = panel.lines.iter().map(Line::to_string).collect::<Vec<_>>();
+            (panel, text)
+        };
+        // Tall: the frame, the tip under it, and menu rows that point at their labels.
+        let (tall, text) = panel(30, Some(1));
+        assert_eq!(text.len(), 30);
+        assert!(text.iter().any(|line| line.contains('╭')), "{text:#?}");
+        assert!(
+            text.last()
+                .unwrap()
+                .contains("Tip  Alt+Enter steers a run that's already going"),
+            "{text:#?}"
+        );
+        let labels = [
+            "Resume a session",
+            "Browse commands",
+            "Mention a project file",
+        ];
+        for ((line, index), label) in tall.menu.iter().zip(labels) {
+            assert!(text[*line].contains(label), "{index}: {}", text[*line]);
+        }
+        // The selected row carries the marker and the selection band; the others do not.
+        let selected = &tall.lines[tall.menu[1].0];
+        assert!(selected.to_string().contains("▸ Browse commands"));
+        let label = selected
+            .spans
+            .iter()
+            .find(|span| span.content == "Browse commands")
+            .unwrap();
+        assert_eq!(label.style.bg, Some(palette.selected));
+        assert!(label.style.add_modifier.contains(Modifier::BOLD));
+        assert!(!text[tall.menu[0].0].contains('▸'));
+        // Stepped back for a draft: no marker, and muted labels.
+        let (back, text) = panel(30, None);
+        assert!(text.iter().all(|line| !line.contains('▸')));
+        let label = back.lines[back.menu[0].0]
+            .spans
+            .iter()
+            .find(|span| span.content == "Resume a session")
+            .unwrap();
+        assert_eq!(label.style.fg, Some(palette.muted));
+        // Shorter screens drop the logo, then the tip, then the frame; the menu stays.
+        for (height, framed, tip) in [(12, true, true), (10, true, false), (7, false, false)] {
+            let (short, text) = panel(height, Some(0));
+            assert_eq!(text.len(), height);
+            assert_eq!(
+                text.iter().any(|line| line.contains('╭')),
+                framed,
+                "{height}"
+            );
+            assert_eq!(
+                text.iter().any(|line| line.contains("Tip")),
+                tip,
+                "{height}"
+            );
+            assert_eq!(short.menu.len(), 3, "{height}");
+        }
     }
 
     #[test]
@@ -4517,7 +4886,10 @@ mod tests {
                     0,
                     Palette::default(),
                     &Bindings::default(),
-                    LogoChoice::AdalBraille,
+                    Welcome {
+                        logo: LogoChoice::AdalBraille,
+                        ..Welcome::default()
+                    },
                     None,
                     Motion::default(),
                     None,
@@ -4887,7 +5259,10 @@ mod tests {
                     0,
                     Palette::default(),
                     &Bindings::default(),
-                    LogoChoice::AdalBraille,
+                    Welcome {
+                        logo: LogoChoice::AdalBraille,
+                        ..Welcome::default()
+                    },
                     None,
                     Motion::default(),
                     None,
@@ -5712,7 +6087,10 @@ mod tests {
                     0,
                     Palette::default(),
                     &Bindings::default(),
-                    LogoChoice::AdalBraille,
+                    Welcome {
+                        logo: LogoChoice::AdalBraille,
+                        ..Welcome::default()
+                    },
                     None,
                     Motion::default(),
                     None,
@@ -5959,7 +6337,10 @@ mod tests {
                         0,
                         Palette::default(),
                         &Bindings::default(),
-                        LogoChoice::AdalBraille,
+                        Welcome {
+                            logo: LogoChoice::AdalBraille,
+                            ..Welcome::default()
+                        },
                         None,
                         Motion::default(),
                         None,
@@ -5972,6 +6353,8 @@ mod tests {
         let color = |backend: &TestBackend, text: &str| style_at_text(backend, text).unwrap().0;
         let palette = Palette::default();
         let mut state = UiState::new("fake".into(), Some("model-x".into()), Some("high".into()));
+        // A conversation, so the welcome card's own frame is not on screen.
+        state.transcript.append_prompt("hello".into());
         state.context.budget = Some(ContextBudget {
             estimate: ContextEstimate { total_tokens: 8000 },
             observed_tokens: None,
@@ -6050,7 +6433,10 @@ mod tests {
                     0,
                     Palette::default(),
                     &Bindings::default(),
-                    LogoChoice::AdalBraille,
+                    Welcome {
+                        logo: LogoChoice::AdalBraille,
+                        ..Welcome::default()
+                    },
                     None,
                     Motion::default(),
                     None,
@@ -7314,7 +7700,10 @@ mod tests {
                     0,
                     Palette::default(),
                     &Bindings::default(),
-                    LogoChoice::AdalBraille,
+                    Welcome {
+                        logo: LogoChoice::AdalBraille,
+                        ..Welcome::default()
+                    },
                     None,
                     Motion::default(),
                     None,
@@ -7539,7 +7928,10 @@ mod tests {
                     0,
                     Palette::default(),
                     &Bindings::default(),
-                    LogoChoice::AdalBraille,
+                    Welcome {
+                        logo: LogoChoice::AdalBraille,
+                        ..Welcome::default()
+                    },
                     None,
                     Motion::default(),
                     None,
@@ -7598,7 +7990,10 @@ mod tests {
                     0,
                     Palette::default(),
                     &Bindings::default(),
-                    LogoChoice::AdalBraille,
+                    Welcome {
+                        logo: LogoChoice::AdalBraille,
+                        ..Welcome::default()
+                    },
                     None,
                     Motion::default(),
                     None,
@@ -8297,7 +8692,10 @@ mod tests {
                     0,
                     Palette::default(),
                     &Bindings::default(),
-                    LogoChoice::AdalBraille,
+                    Welcome {
+                        logo: LogoChoice::AdalBraille,
+                        ..Welcome::default()
+                    },
                     None,
                     Motion::default(),
                     None,
@@ -8375,11 +8773,11 @@ mod tests {
     #[test]
     fn footer_offers_browse_only_when_there_is_something_to_browse() {
         let mut state = UiState::unconfigured();
-        assert!(!footer_hints(&state, &Bindings::default(), 120).contains("browse"));
+        assert!(!footer_hints(&state, &Bindings::default(), false, 120).contains("browse"));
         state.transcript.append_prompt("hello".into());
-        assert!(footer_hints(&state, &Bindings::default(), 120).contains("F6 browse"));
+        assert!(footer_hints(&state, &Bindings::default(), false, 120).contains("F6 browse"));
         // It survives the 56-column cap that narrower terminals apply.
-        assert!(footer_hints(&state, &Bindings::default(), 56).contains("F6 browse"));
+        assert!(footer_hints(&state, &Bindings::default(), false, 56).contains("F6 browse"));
 
         // A prompt run with input ready (steering) offers it too, since cards arrive then.
         let mut running = UiState::new("fake".into(), None, None);
@@ -8391,7 +8789,7 @@ mod tests {
         });
         running.transcript.append_prompt("hello".into());
         assert!(running.active_prompt_editable());
-        let hints = footer_hints(&running, &Bindings::default(), 200);
+        let hints = footer_hints(&running, &Bindings::default(), false, 200);
         assert_eq!(hints, "Esc interrupt · F6 browse");
     }
 
@@ -8654,7 +9052,10 @@ mod tests {
                         tick,
                         palette,
                         &Bindings::default(),
-                        LogoChoice::AdalBraille,
+                        Welcome {
+                            logo: LogoChoice::AdalBraille,
+                            ..Welcome::default()
+                        },
                         None,
                         Motion::default(),
                         None,

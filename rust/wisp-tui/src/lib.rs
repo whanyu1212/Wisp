@@ -618,6 +618,12 @@ struct LiveUi {
     finished_cards: Vec<(TranscriptEntryId, u8)>,
     /// The welcome logo's entrance, played once per launch.
     logo_entrance: LogoEntrance,
+    /// The welcome card's selected menu row.
+    welcome_selected: usize,
+    /// The welcome menu's rows the last frame painted while the menu took keys.
+    welcome_rows: Vec<mouse::WelcomeRow>,
+    /// The launch's tip for the line above the composer on the welcome screen.
+    welcome_tip: Option<usize>,
     /// The command whose run the working row times, and when it was first drawn.
     activity_clock: Option<(String, std::time::Instant)>,
     /// The footer notice as first drawn, and when, which paces its ticker.
@@ -691,6 +697,9 @@ impl Default for LiveUi {
             activity_frame: 0,
             finished_cards: Vec::new(),
             logo_entrance: LogoEntrance::Done,
+            welcome_selected: 0,
+            welcome_rows: Vec::new(),
+            welcome_tip: None,
             activity_clock: None,
             notice_clock: None,
             notice_scrolling: false,
@@ -718,6 +727,14 @@ impl Default for LiveUi {
             stream_trace: None,
         }
     }
+}
+
+/// The tip a launch shows on the welcome screen, picked once from the clock.
+fn launch_tip() -> usize {
+    let time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.subsec_nanos() as usize);
+    time % ui::WELCOME_TIP_COUNT
 }
 
 /// Where the welcome logo's once-per-launch entrance is.
@@ -1879,6 +1896,7 @@ impl LiveUi {
             self.logo_entrance = LogoEntrance::Done;
         }
         let logo_entrance = self.logo_entrance();
+        let welcome_live = self.welcome_menu_live();
         self.transcript_row_cache
             .fold_mut()
             .set_click_hints(self.mouse_enabled);
@@ -1919,7 +1937,11 @@ impl LiveUi {
                 self.activity_frame,
                 palette,
                 &self.bindings,
-                self.startup_logo,
+                ui::Welcome {
+                    logo: self.startup_logo,
+                    selected: welcome_live.then_some(self.welcome_selected),
+                    tip: self.welcome_tip,
+                },
                 self.decision_choice,
                 ui::Motion {
                     mode: motion_mode,
@@ -2205,6 +2227,7 @@ impl LiveUi {
             }
         }
         self.notice_scrolling = painted.conversation.notice_scrolls;
+        self.welcome_rows = painted.conversation.welcome_rows.clone();
         self.mouse_frame = self.mouse_enabled.then_some(painted);
         self.completion.invalidate();
         if let Some(name) = rendered_completion {
@@ -2288,6 +2311,67 @@ impl LiveUi {
             }
             _ => {}
         }
+    }
+
+    /// Whether the welcome card's menu takes ↑↓, Enter and clicks: the draft is empty,
+    /// with no image attached, and no popup, picker, completion, browse selection or
+    /// pending decision has the keys. Typing hands them back to the draft.
+    fn welcome_menu_live(&self) -> bool {
+        self.welcome_visible()
+            && self.state.view_status == ViewStatus::Idle
+            && self.editor.text().is_empty()
+            && self.images.is_empty()
+            && self.active_overlay().is_none()
+            && self.browse_selected.is_none()
+            && !self.file_picker.is_open()
+            && self
+                .completion
+                .view(
+                    self.state.command_catalog.as_deref(),
+                    self.state.skills.snapshot.as_deref(),
+                )
+                .is_none()
+    }
+
+    /// The welcome menu row a key or click acts on: only while the menu takes keys and
+    /// the last frame painted it, so nothing acts on rows the user cannot see.
+    fn welcome_menu_rows(&self) -> usize {
+        if self.welcome_menu_live() {
+            self.welcome_rows.len()
+        } else {
+            0
+        }
+    }
+
+    /// Opens what welcome menu row `index` names, as typing its shortcut would: a command
+    /// runs, and a prefix opens its picker in the draft. A command the catalog does not
+    /// know yet is left in the draft to send.
+    async fn activate_welcome_action(
+        &mut self,
+        index: usize,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        let Some(action) = ui::welcome_actions(&self.state).get(index).copied() else {
+            return Ok(LoopControl::Continue);
+        };
+        let typed = action.shortcut();
+        if matches!(
+            action,
+            ui::WelcomeAction::ConnectProvider | ui::WelcomeAction::ResumeSession
+        ) {
+            if let Some(command) = commands::classify(typed, self.state.command_catalog.as_deref())
+            {
+                return self.handle_command(command, writer, limit).await;
+            }
+        }
+        let outcome = self.editor.replace_range(self.editor.insert_range(), typed);
+        self.update_edit_notice(outcome);
+        self.completion
+            .sync(&self.editor, self.state.workspace_cwd.as_deref());
+        self.file_picker.sync_editor(&self.editor);
+        self.render_pending = true;
+        Ok(LoopControl::Continue)
     }
 
     /// Shows the finished logo from now on, for the rest of the launch: any input,
@@ -5365,6 +5449,29 @@ impl LiveUi {
         if self.editor_editable() && self.handle_file_picker_key(key) {
             return Ok(Some(LoopControl::Continue));
         }
+        let rows = self.welcome_menu_rows();
+        if !decision_pending && rows > 0 && key.modifiers == KeyModifiers::NONE {
+            match key.code {
+                KeyCode::Up | KeyCode::Down => {
+                    let current = self.welcome_selected.min(rows - 1);
+                    self.welcome_selected = if key.code == KeyCode::Down {
+                        (current + 1) % rows
+                    } else {
+                        (current + rows - 1) % rows
+                    };
+                    self.render_pending = true;
+                    return Ok(Some(LoopControl::Continue));
+                }
+                KeyCode::Enter => {
+                    let index = self.welcome_selected.min(rows - 1);
+                    return self
+                        .activate_welcome_action(index, writer, limit)
+                        .await
+                        .map(Some);
+                }
+                _ => {}
+            }
+        }
         if !matches!(
             self.state.view_status,
             ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
@@ -6004,6 +6111,7 @@ where
                 } else {
                     LogoEntrance::Done
                 },
+                welcome_tip: Some(launch_tip()),
                 ..LiveUi::default()
             };
             // `WISP_TUI_STREAM_PACING=0` shows each streamed delta as it arrives.

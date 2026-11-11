@@ -1550,7 +1550,10 @@ mod tests {
                     0,
                     Palette::default(),
                     &Bindings::default(),
-                    LogoChoice::AdalBraille,
+                    crate::ui::Welcome {
+                        logo: LogoChoice::AdalBraille,
+                        ..crate::ui::Welcome::default()
+                    },
                     None,
                     ui::Motion::default(),
                     None,

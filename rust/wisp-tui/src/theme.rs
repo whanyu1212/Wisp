@@ -107,6 +107,12 @@ impl Palette {
         self
     }
 
+    /// The welcome card's frame: the muted grey blended about halfway into the
+    /// background, so the card reads as a soft outline under its logo.
+    pub fn card_border(self) -> Color {
+        mix(self.muted, self.background, 0.45)
+    }
+
     /// Whether a gradient can show: not in monochrome, and not at 16 colours, where
     /// its steps would collapse into unrelated named colours.
     pub fn shows_gradients(self) -> bool {

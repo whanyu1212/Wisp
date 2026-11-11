@@ -481,6 +481,8 @@ My pick for the next focused task: **HY-314, coordinated with HY-269’s navigat
             _ => LogoChoice::WispBraille,
         };
         ui.editor = PromptEditor::default();
+        // The welcome screens show the first tip; a launch picks one at random.
+        ui.welcome_tip = Some(0);
         if scenario == "welcome-entrance" {
             // Captured frame by frame, with the activity frame as the entrance's.
             ui.logo_entrance = crate::LogoEntrance::Playing { started: 0 };

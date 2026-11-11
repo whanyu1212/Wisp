@@ -189,6 +189,14 @@ this policy.
   choosing a logo. 256 and 16 colours and `NO_COLOR` gather without the band;
   `WISP_TUI_MOTION=off` or a terminal in the background shows the finished logo. The screen stops
   redrawing once it ends. (HY-479)
+- The welcome screen is a card: a faint rounded frame around the logo, the name and version, the
+  tagline, and a menu with each shortcut right-aligned. While the draft is empty, `↑`/`↓` and
+  `Enter`, or a click, open a row: `Resume a session` and `Connect a provider` run their command,
+  and `Browse commands` and `Mention a project file` type `/` or `@` to open their picker. The
+  selected row carries the selection band and a `▸`, and the footer shows `↑↓ menu`; typing hands
+  the keys back to the draft and the menu steps back. A tip under the card, picked once per launch,
+  names a key or command. Short terminals drop the logo size, then the tip and frame, and keep the
+  menu. (HY-488)
 
 <!-- Keeps links to the pre-release "0.7.0 — Unreleased" heading working. -->
 <a id="070--unreleased"></a>

@@ -64,10 +64,14 @@ label names it in the warning colour after the mode; YOLO that is not saved for 
 border names the keys that follow up or steer. The frame collapses on short terminals to preserve
 editing space, and the footer then names the mode and model. The footer shows the folder and
 branch, then status (`idle`, `working`, `approval`, `trust`) and context, then the keys for the
-current workflow set apart by `│`, as space permits. The backend version stays in `Ctrl+G` help. An empty transcript shows a centered startup
-logo with the installed package version, invites a prompt or `/` commands, and points at `/resume`,
-`/connect`, and `@` when there is room. It collapses to compact artwork and copy on short or narrow
-terminals.
+current workflow set apart by `│`, as space permits. The backend version stays in `Ctrl+G` help. An empty transcript shows a welcome
+card: a faint rounded frame around the startup logo, the installed package version, and a menu of
+`Resume a session`, `Browse commands`, and `Mention a project file`, led by `Connect a provider` when
+none is set. While the draft is empty, `↑`/`↓` move through the menu and `Enter` opens the selected
+row, as does a click: a command runs, and `/` or `@` opens its picker in the draft. Typing hands the
+keys back to the draft and the menu steps back. A one-line tip sits under the card, a different one
+each launch. A short terminal gets a smaller logo, then none, then no tip or frame, keeping the
+menu; a narrow one gets compact copy instead.
 
 Wisp's default instructions favor the answer or outcome first, short paragraphs, and a few useful
 bullets. Progress updates focus on findings, blockers, and next steps; final replies summarize
