@@ -55,6 +55,7 @@ class _Tool:
     description: str = "Query a table."
     input_schema: ToolInputSchema = field(default_factory=lambda: dict(_SCHEMA))
     delay: float = 0.0
+    reply: str | None = None
     confirm_every_call: bool = False
     calls: list[dict[str, object]] = field(default_factory=list)
     running: int = 0
@@ -68,7 +69,7 @@ class _Tool:
             await anyio.sleep(self.delay)
         finally:
             self.running -= 1
-        return ToolResult(text=f"{self.name}:{arguments.get('table')}")
+        return ToolResult(text=self.reply or f"{self.name}:{arguments.get('table')}")
 
 
 @dataclass
@@ -263,6 +264,29 @@ def test_on_demand_command_tool_unreachable(tmp_path: Path) -> None:
     assert tools.drop.calls == []
 
 
+def test_eval_reaches_only_given_tools(tmp_path: Path) -> None:
+    """``eval`` skips the type check, but sees only the tools a script was given."""
+
+    tools = _Tools()
+    code = "await eval(\"mcp__db__drop(table='a')\")"
+
+    events, _ = _run(tmp_path, tools, [_script(code)])
+
+    assert "NameError" in _result(events).output
+    assert tools.drop.calls == []
+
+
+def test_huge_tool_output_bounded(tmp_path: Path) -> None:
+    """A script reads a tool's result as the model would: cut to the output limit."""
+
+    tools = _Tools(lookup=_Tool("lookup", reply="r" * 5_000_000))
+
+    events, _ = _run(tmp_path, tools, [_script("len(await lookup(table='a'))")])
+
+    seen = int(_result(events).output.splitlines()[0])
+    assert 0 < seen <= ToolContext(cwd=tmp_path).max_output_bytes
+
+
 def test_offered_in_plan_mode(tmp_path: Path) -> None:
     _, provider = _run(tmp_path, _Tools(), [], mode="plan")
 
@@ -302,32 +326,180 @@ def test_failed_call_raises_in_script() -> None:
     assert result.data == {"calls": 1, "failed_calls": 1}
 
 
+_GATHER = "import asyncio\nawait asyncio.gather(*[query(table='a') for _ in range({})])"
+
+
 @pytest.mark.parametrize(
-    ("code", "limits", "failure"),
+    ("code", "limits", "message"),
     [
-        ("while True:\n    pass", ScriptLimits(compute_seconds=0.2), "runtime"),
-        ("for i in range(5):\n    await query(table='a')", ScriptLimits(max_calls=3), "runtime"),
-        ("await query(table='a')", ScriptLimits(wall_seconds=0.2), "timeout"),
+        (
+            "while True:\n    pass",
+            ScriptLimits(compute_seconds=0.2),
+            r"\(limit\): The script computed for more than 0.2 seconds",
+        ),
+        (
+            "for i in range(5):\n    await query(table='a')",
+            ScriptLimits(max_calls=3),
+            r"\(limit\): The script made more than 3 tool calls",
+        ),
+        (_GATHER.format(5000), ScriptLimits(max_calls=3), r"\(limit\): .* more than 3 tool calls"),
+        (
+            "x = []\nwhile True:\n    x.append('a' * 100000)",
+            ScriptLimits(memory_bytes=8 * 1024 * 1024),
+            r"\(limit\): The script used more than 8 MiB of memory",
+        ),
+        (
+            "for _ in range(100):\n    print('y' * 100)",
+            ScriptLimits(max_printed_bytes=1000),
+            r"\(limit\): The script printed more than 1000 bytes",
+        ),
+        ("def f(n):\n    return f(n + 1)\nf(0)", None, r"\(runtime\): RecursionError"),
+        ("await query(table='a')", ScriptLimits(wall_seconds=0.2), r"\(timeout\)"),
         # Type-checked first, so a positional call or bad syntax never runs.
-        ("await query('a')", None, "type"),
-        ("x = (", None, "type"),
+        ("await query('a')", None, r"\(type\)"),
+        ("x = (", None, r"\(type\)"),
     ],
-    ids=["compute", "calls", "wall-clock", "positional", "syntax"],
+    ids=[
+        "compute",
+        "calls",
+        "gather",
+        "memory",
+        "printed",
+        "recursion",
+        "wall-clock",
+        "positional",
+        "syntax",
+    ],
 )
-def test_limits_end_script(code: str, limits: ScriptLimits | None, failure: str) -> None:
+def test_limits_end_script(code: str, limits: ScriptLimits | None, message: str) -> None:
     async def slow(name: str, arguments: object) -> NestedCallResult:
         await anyio.sleep(1)
         return NestedCallResult(text="late")
 
-    caller = slow if failure == "timeout" else None
-    with pytest.raises(ToolError, match=rf"Script failed \({failure}\)"):
+    caller = slow if "timeout" in message else None
+    with pytest.raises(ToolError, match=rf"Script failed {message}"):
         _run_tool(_tool(caller, limits=limits), code)
 
 
-def test_no_sandbox_escape() -> None:
-    for code in ("open('/etc/passwd').read()", "import socket", "import os\nos.environ['HOME']"):
-        with pytest.raises(ToolError, match=r"Script failed"):
-            _run_tool(_tool(), code)
+@pytest.mark.parametrize(
+    "code",
+    [
+        "import socket",
+        "import subprocess",
+        "import os\nos.environ['HOME']",
+        "import os\nos.getenv('HOME')",
+        "import os\nos.system('true')",
+        "__import__('os')",
+        "eval(\"__import__('os')\")",
+        "compile('1', 'f', 'eval')",
+        "globals()",
+        "vars()",
+        "__builtins__",
+        "getattr(query, '__globals__')",
+        # eval and exec skip the type check, so the same reach is tried at run time.
+        "eval('globals()')",
+        "exec('vars()')",
+        'eval(\'compile("1", "f", "eval")\')',
+        "eval(\"getattr(query, '__globals__')\")",
+        "eval('type(()).__subclasses__()')",
+        "eval('().__class__.__mro__')",
+        "query.__code__",
+        "type(()).__subclasses__()",
+        "().__class__.__mro__",
+        "import sys\nsys.modules",
+        "import sys\nsys._getframe()",
+    ],
+)
+def test_no_sandbox_escape(code: str) -> None:
+    with pytest.raises(ToolError, match=r"Script failed \((type|runtime)\)"):
+        _run_tool(_tool(), code)
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "open({path!r}).read()",
+        'eval("open({path!r}).read()")',
+        'exec("open({path!r}).read()")',
+        "from pathlib import Path\nPath({path!r}).read_text()",
+        "from pathlib import Path\nPath({path!r}).exists()",
+        "from pathlib import Path\nlist(Path({folder!r}).iterdir())",
+        "import os\nos.listdir({folder!r})",
+    ],
+    ids=["open", "eval", "exec", "read_text", "exists", "iterdir", "listdir"],
+)
+def test_host_files_unreachable(tmp_path: Path, code: str) -> None:
+    secret = tmp_path / "secret.txt"
+    secret.write_text("host secret", encoding="utf-8")
+
+    with pytest.raises(ToolError, match=r"PermissionError") as raised:
+        _run_tool(_tool(), code.format(path=str(secret), folder=str(tmp_path)))
+
+    assert "host secret" not in str(raised.value)
+
+
+def test_failure_keeps_call_list() -> None:
+    """A long error or printout still leaves room for the calls the script made."""
+
+    code = (
+        "await query(table='a')\nprint('START' + 'p' * 50000 + 'END')\n"
+        "raise ValueError('CAUSE' + 'e' * 50000)"
+    )
+
+    with pytest.raises(ToolError) as raised:
+        _run_tool(_tool(), code)
+
+    message = str(raised.value)
+    assert message.endswith("Calls made before it failed: 1 tool call: query")
+    assert "ValueError: CAUSE" in message and "more characters]" in message
+    assert "END" in message and "START" not in message and "earlier characters]" in message
+    assert len(message) < 2_000
+
+
+def test_many_tools_keep_error() -> None:
+    """A script that called many distinct tools still shows why it failed."""
+
+    names = [f"mcp__production_database__query_table_{index}" for index in range(60)]
+    code = "\n".join(f"await {name}(table='a')" for name in names)
+    code += "\nraise ValueError('CAUSE' + 'e' * 5000)"
+
+    with pytest.raises(ToolError) as raised:
+        _run_tool(_tool(tools=[_Tool(name) for name in names]), code)
+
+    message = str(raised.value)
+    assert "ValueError: CAUSE" in message and names[0] in message
+    assert message.endswith("more tools") and "60 tool calls" in message
+    assert len(message) < 2_000
+
+
+def test_type_errors_keep_room() -> None:
+    """Without a printout, the error has all the room: several type errors show."""
+
+    code = "\n".join(f"await query(tabel_{index}='a')" for index in range(6))
+
+    with pytest.raises(ToolError) as raised:
+        _run_tool(_tool(), code)
+
+    message = str(raised.value)
+    assert message.count("error[") >= 3
+    assert message.endswith("Calls made before it failed: No tool calls.")
+    assert len(message) < 2_000
+
+
+def test_host_error_reaches_script_as_text() -> None:
+    """An exception a tool call raises reaches the script as its type name and text."""
+
+    async def broken(name: str, arguments: object) -> NestedCallResult:
+        raise LookupError(object())
+
+    code = (
+        "try:\n    await query(table='a')\nexcept Exception as error:\n"
+        "    caught = [type(error).__name__, [type(arg).__name__ for arg in error.args]]\n"
+        "caught"
+    )
+    result = _run_tool(_tool(broken), code)
+
+    assert result.text.splitlines()[0] == '["LookupError", ["str"]]'
 
 
 # --- Nested calls through the executor --------------------------------------------
@@ -453,8 +625,9 @@ def test_policy_limits_scripts() -> None:
     assert (allowed.is_error, allowed.text) == (False, "lookup:t")
 
 
-def test_script_end_cancels_calls() -> None:
-    """Calls still running when a script times out are cancelled, not left running."""
+@pytest.mark.parametrize("ending", ["timeout", "caller-cancels"])
+def test_script_end_cancels_calls(ending: str) -> None:
+    """Calls still running when a script ends are cancelled, not left running."""
 
     finished: list[str] = []
     cancelled: list[str] = []
@@ -471,9 +644,13 @@ def test_script_end_cancels_calls() -> None:
     code = "import asyncio\nawait asyncio.gather(*[query(table='a') for _ in range(4)])"
 
     async def run() -> None:
-        tool = _tool(slow, limits=ScriptLimits(wall_seconds=0.3))
-        with pytest.raises(ToolError, match=r"Script failed \(timeout\)"):
-            await tool.run({"code": code}, ToolContext(cwd=Path(".")))
+        if ending == "timeout":
+            tool = _tool(slow, limits=ScriptLimits(wall_seconds=0.3))
+            with pytest.raises(ToolError, match=r"Script failed \(timeout\)"):
+                await tool.run({"code": code}, ToolContext(cwd=Path(".")))
+        else:
+            with anyio.move_on_after(0.3):
+                await _tool(slow).run({"code": code}, ToolContext(cwd=Path(".")))
         # Long enough for any call left running to have finished.
         await anyio.sleep(2.5)
 

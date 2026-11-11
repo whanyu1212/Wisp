@@ -463,8 +463,7 @@ also gets a `codemode` tool. It writes a short Python script that calls the run'
 async functions, and only what the script prints and its last expression come back. One script can
 run many calls at once with `asyncio.gather`, chain calls on earlier answers, and filter large results
 before the model reads them. Install the `codemode` extra first (`pip install 'wisp-ai[codemode]'`);
-it adds [monty](https://github.com/pydantic/monty), the sandbox scripts run in. monty needs Python 3.12
-or newer; on 3.11 the extra installs nothing and the model is not offered `codemode`.
+it adds [monty](https://github.com/pydantic/monty), the sandbox scripts run in.
 
 - **Only read-only tools.** A script can call the read-only tools the run already offers: `read`,
   `ls`, `grep`, `find`, and MCP tools whose `tool_safety` you set to `"read"`. Tool selection and
@@ -478,8 +477,10 @@ or newer; on 3.11 the extra installs nothing and the model is not offered `codem
 - **A sandbox, not a shell.** Scripts run in a separate process with no files, network, environment
   or third-party packages, in a subset of Python. They are type-checked against the tools'
   declarations before anything runs.
-- **Limits.** 200 tool calls, 2 minutes, 10 seconds of the script's own computing and 128 MiB per
-  script. A script cannot start another script, and cancelling a run kills it.
+- **Limits.** 200 tool calls, 2 minutes, 10 seconds of the script's own computing, 128 MiB and
+  1 MiB of printed output per script. A script that reaches one fails with the limit named. A
+  script cannot start another script, and cancelling a run kills it along with the calls it has
+  running.
 
 It is off by default while its effect is measured on the tool-use evals (HY-431).
 
