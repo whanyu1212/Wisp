@@ -232,12 +232,12 @@ for line in sys.stdin:
                 in b"".join(re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", output).split())
             ):
                 # Paging before refresh completion can be rejected as stale input.
-                # The queue command adds a row; permissions is now on the next help page.
+                # The queue command adds a row; codemode is now on the next help page.
                 os.write(terminal_fd, b"\x1b[6~")
                 phase = "help scrolled"
             elif (
                 phase == "help scrolled"
-                and b"/permissions" in output
+                and b"/codemode" in output
                 and b"/compact" in output
                 and b"Esc close" in output
             ):

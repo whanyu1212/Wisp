@@ -1,4 +1,4 @@
-//! Skill selection, MCP server management, and the `/permissions` picker.
+//! Skill selection, MCP server management, and the `/permissions` and `/codemode` pickers.
 
 use crate::{
     mcp_manager::McpView,
@@ -18,7 +18,7 @@ use ratatui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
-use wisp_protocol::commands::PermissionMode;
+use wisp_protocol::commands::{CodemodeSetting, PermissionMode};
 use wisp_protocol::events::SkillCatalogSnapshot;
 
 // Returned once per key event and consumed immediately, so its size does not matter;
@@ -35,17 +35,54 @@ pub(crate) enum DiscoveryAction {
 pub(crate) enum DiscoveryView {
     Skills(SkillsView),
     Mcp(Box<McpView>),
-    Permissions(PermissionsView),
+    Permissions(ChoiceView),
+    Codemode(ChoiceView),
 }
 
-/// The `/permissions` picker. Like a pending decision, it has no default choice:
-/// Enter applies only a mode the user highlighted and that has been painted,
-/// because saving a mode also clears temporary grants.
+/// A picker of a few saved choices, such as `/permissions`. Like a pending
+/// decision, it has no default choice: Enter applies only a choice the user
+/// highlighted and that has been painted, because saving a permission mode also
+/// clears temporary grants. A choice's number applies it directly.
 #[derive(Default)]
-pub(crate) struct PermissionsView {
+pub(crate) struct ChoiceView {
     painted: bool,
     selected: Option<usize>,
     rendered: Option<usize>,
+}
+
+impl ChoiceView {
+    /// Move the highlight, or return the index of the choice `code` applies once
+    /// the view is painted and its data is `ready`.
+    fn choose(&mut self, code: KeyCode, count: usize, ready: bool) -> Option<usize> {
+        if matches!(code, KeyCode::Up | KeyCode::Down) {
+            self.selected = Some(match (self.selected, code) {
+                (None, KeyCode::Down) => 0,
+                (None, _) => count - 1,
+                (Some(index), KeyCode::Down) => (index + 1) % count,
+                (Some(index), _) => (index + count - 1) % count,
+            });
+            return None;
+        }
+        if !self.painted || !ready {
+            return None;
+        }
+        let choice = match code {
+            KeyCode::Enter => self.selected.filter(|index| self.rendered == Some(*index)),
+            KeyCode::Char(key) => key
+                .to_digit(10)
+                .and_then(|digit| usize::try_from(digit).ok()?.checked_sub(1))
+                .filter(|index| *index < count),
+            _ => None,
+        }?;
+        self.painted = false;
+        self.rendered = None;
+        Some(choice)
+    }
+
+    fn invalidate(&mut self) {
+        self.painted = false;
+        self.rendered = None;
+    }
 }
 
 const PERMISSION_CHOICES: [(char, &str, PermissionMode); 2] = [
@@ -57,12 +94,27 @@ const PERMISSION_CHOICES: [(char, &str, PermissionMode); 2] = [
     ),
 ];
 
+const CODEMODE_CHOICES: [(char, &str, CodemodeSetting); 3] = [
+    (
+        '1',
+        "Automatic — when MCP tools are found on demand",
+        CodemodeSetting::Automatic,
+    ),
+    (
+        '2',
+        "Always — every run, with its read-only tools",
+        CodemodeSetting::Always,
+    ),
+    ('3', "Never", CodemodeSetting::Never),
+];
+
 impl DiscoveryView {
     // The scheduler preserves this painted choice while draining a finite event prefix.
     pub fn rendered_selection(&self) -> Option<&str> {
         match self {
             Self::Skills(view) => view.rendered.as_deref(),
             Self::Permissions(view) => view.rendered.map(|index| PERMISSION_CHOICES[index].1),
+            Self::Codemode(view) => view.rendered.map(|index| CODEMODE_CHOICES[index].1),
             Self::Mcp(_) => None,
         }
     }
@@ -78,7 +130,11 @@ impl DiscoveryView {
     }
 
     pub fn permissions() -> Self {
-        Self::Permissions(PermissionsView::default())
+        Self::Permissions(ChoiceView::default())
+    }
+
+    pub fn codemode() -> Self {
+        Self::Codemode(ChoiceView::default())
     }
 
     pub fn key_activates(&self, key: KeyEvent) -> bool {
@@ -88,15 +144,15 @@ impl DiscoveryView {
         key.code == KeyCode::Enter
             || (matches!(self, Self::Permissions(_))
                 && matches!(key.code, KeyCode::Char('1' | '2')))
+            || (matches!(self, Self::Codemode(_)) && matches!(key.code, KeyCode::Char('1'..='3')))
     }
 
     pub fn invalidate_selection(&mut self) {
         if let Self::Mcp(view) = self {
             view.invalidate();
         }
-        if let Self::Permissions(view) = self {
-            view.painted = false;
-            view.rendered = None;
+        if let Self::Permissions(view) | Self::Codemode(view) = self {
+            view.invalidate();
         }
         if let Self::Skills(view) = self {
             view.rendered = None;
@@ -177,39 +233,29 @@ impl DiscoveryView {
                 Self::Skills(_) => UiAction::LoadSkills,
                 Self::Mcp(_) => unreachable!("the MCP view handles its own keys"),
                 Self::Permissions(_) => UiAction::Permissions(None),
+                Self::Codemode(_) => UiAction::Codemode(None),
             });
         }
         match self {
             Self::Permissions(view) => {
-                if matches!(key.code, KeyCode::Up | KeyCode::Down) {
-                    let count = PERMISSION_CHOICES.len();
-                    view.selected = Some(match (view.selected, key.code) {
-                        (None, KeyCode::Down) => 0,
-                        (None, _) => count - 1,
-                        (Some(index), KeyCode::Down) => (index + 1) % count,
-                        (Some(index), _) => (index + count - 1) % count,
-                    });
-                    return DiscoveryAction::None;
-                }
-                if !view.painted
-                    || state.permissions.loading()
-                    || state.permissions.snapshot.is_none()
-                {
-                    return DiscoveryAction::None;
-                }
-                let choice = match key.code {
-                    KeyCode::Enter => view.selected.filter(|index| view.rendered == Some(*index)),
-                    KeyCode::Char(key) => PERMISSION_CHOICES
-                        .iter()
-                        .position(|(choice_key, ..)| *choice_key == key),
-                    _ => None,
-                };
-                let Some(choice) = choice else {
-                    return DiscoveryAction::None;
-                };
-                view.painted = false;
-                view.rendered = None;
-                DiscoveryAction::Refresh(UiAction::Permissions(Some(PERMISSION_CHOICES[choice].2)))
+                let ready = !state.permissions.loading() && state.permissions.snapshot.is_some();
+                view.choose(key.code, PERMISSION_CHOICES.len(), ready)
+                    .map_or(DiscoveryAction::None, |choice| {
+                        DiscoveryAction::Refresh(UiAction::Permissions(Some(
+                            PERMISSION_CHOICES[choice].2,
+                        )))
+                    })
+            }
+            Self::Codemode(view) => {
+                let ready = !state.codemode.loading() && state.codemode.snapshot.is_some();
+                view.choose(key.code, CODEMODE_CHOICES.len(), ready).map_or(
+                    DiscoveryAction::None,
+                    |choice| {
+                        DiscoveryAction::Refresh(UiAction::Codemode(Some(
+                            CODEMODE_CHOICES[choice].2,
+                        )))
+                    },
+                )
             }
             Self::Skills(view) => view.handle_key(key.code, state.skills.snapshot.as_deref()),
             Self::Mcp(_) => unreachable!("the MCP view handles its own keys"),
@@ -225,7 +271,8 @@ impl DiscoveryView {
         palette: Palette,
     ) -> Rows {
         match self {
-            Self::Permissions(view) => view.render(frame, area, state, palette),
+            Self::Permissions(view) => render_permissions(view, frame, area, state, palette),
+            Self::Codemode(view) => render_codemode(view, frame, area, state, palette),
             Self::Skills(view) => view.render(frame, area, state, notice, palette),
             Self::Mcp(view) => {
                 view.render(frame, area, state, palette);
@@ -485,100 +532,221 @@ impl ReportView {
     }
 }
 
-impl PermissionsView {
-    fn render(
-        &mut self,
-        frame: &mut Frame<'_>,
-        area: Rect,
-        state: &UiState,
-        palette: Palette,
-    ) -> Rows {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .padding(Padding::horizontal(1))
-            .style(palette.composer())
-            .border_style(palette.border())
-            .title(" Project permissions ")
-            .title_bottom(
-                Line::from(" ↑↓ select · Enter apply · Esc close ")
-                    .style(Style::default().fg(palette.muted))
-                    .right_aligned(),
-            );
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        let width = usize::from(inner.width);
-        let snapshot = state.permissions.snapshot.as_ref();
-        let muted = Style::default().fg(palette.muted);
-        let mut lines: Vec<Line<'static>> = PERMISSION_CHOICES
-            .iter()
-            .enumerate()
-            .map(|(index, (key, label, mode))| {
-                let current = snapshot.is_some_and(|snapshot| snapshot.mode == *mode);
-                let suffix = if current { "  current" } else { "" };
-                let mut line = crate::ui::choice_line(
-                    &key.to_string(),
-                    label,
-                    self.selected == Some(index),
-                    width.saturating_sub(suffix.width()),
-                    palette,
-                );
-                line.spans.push(Span::styled(suffix, muted));
-                line
+fn render_permissions(
+    view: &mut ChoiceView,
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &UiState,
+    palette: Palette,
+) -> Rows {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .padding(Padding::horizontal(1))
+        .style(palette.composer())
+        .border_style(palette.border())
+        .title(" Project permissions ")
+        .title_bottom(
+            Line::from(" ↑↓ select · Enter apply · Esc close ")
+                .style(Style::default().fg(palette.muted))
+                .right_aligned(),
+        );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let width = usize::from(inner.width);
+    let snapshot = state.permissions.snapshot.as_ref();
+    let muted = Style::default().fg(palette.muted);
+    let mut lines = choice_lines(
+        &PERMISSION_CHOICES,
+        view.selected,
+        snapshot.map(|snapshot| snapshot.mode),
+        width,
+        palette,
+    );
+    lines.push(Line::default());
+    let status = if let Some(error) = &state.permissions.error {
+        Some(Line::styled(
+            terminal_row(&format!("Error: {error}"), width),
+            Style::default().fg(palette.warning),
+        ))
+    } else if state.permissions.loading() {
+        Some(Line::styled(
+            terminal_row(
+                if snapshot.is_some() {
+                    "Updating permissions…"
+                } else {
+                    "Loading permissions…"
+                },
+                width,
+            ),
+            muted,
+        ))
+    } else {
+        snapshot
+            .filter(|snapshot| snapshot.saved_mode != Some(snapshot.mode))
+            .map(|snapshot| {
+                let text = if snapshot.session_only_yolo && snapshot.mode == PermissionMode::Yolo {
+                    "YOLO lasts for this session; it is not saved here."
+                } else {
+                    "Current mode is not saved; choose one to save it."
+                };
+                Line::styled(
+                    terminal_row(text, width),
+                    Style::default().fg(palette.warning),
+                )
             })
-            .collect();
-        lines.push(Line::default());
-        let status = if let Some(error) = &state.permissions.error {
-            Some(Line::styled(
-                terminal_row(&format!("Error: {error}"), width),
-                Style::default().fg(palette.warning),
-            ))
-        } else if state.permissions.loading() {
-            Some(Line::styled(
-                terminal_row(
-                    if snapshot.is_some() {
-                        "Updating permissions…"
-                    } else {
-                        "Loading permissions…"
-                    },
-                    width,
+    };
+    lines.extend(status);
+    let scope = if snapshot.is_some_and(|snapshot| snapshot.session_only_yolo) {
+        "YOLO is never saved in this folder. Changing mode clears grants."
+    } else {
+        "Saved for this project. Changing mode clears temporary grants."
+    };
+    lines.push(Line::styled(terminal_row(scope, width), muted));
+    if let Some(project) = snapshot.and_then(|snapshot| snapshot.project_path.as_deref()) {
+        lines.push(Line::styled(
+            crate::ui::tail_row(&format!("Project: {project}"), width),
+            muted,
+        ));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+    view.painted = inner.height >= 3 && inner.width >= 22 && !state.permissions.loading();
+    view.rendered = if view.painted { view.selected } else { None };
+    Rows::default()
+}
+
+/// One row per choice, the highlighted one marked and the one in effect labelled.
+fn choice_lines<T: PartialEq>(
+    choices: &[(char, &str, T)],
+    selected: Option<usize>,
+    current: Option<T>,
+    width: usize,
+    palette: Palette,
+) -> Vec<Line<'static>> {
+    let muted = Style::default().fg(palette.muted);
+    choices
+        .iter()
+        .enumerate()
+        .map(|(index, (key, label, value))| {
+            let suffix = if current.as_ref() == Some(value) {
+                "  current"
+            } else {
+                ""
+            };
+            let mut line = crate::ui::choice_line(
+                &key.to_string(),
+                label,
+                selected == Some(index),
+                width.saturating_sub(suffix.width()),
+                palette,
+            );
+            line.spans.push(Span::styled(suffix, muted));
+            line
+        })
+        .collect()
+}
+
+fn render_codemode(
+    view: &mut ChoiceView,
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &UiState,
+    palette: Palette,
+) -> Rows {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .padding(Padding::horizontal(1))
+        .style(palette.composer())
+        .border_style(palette.border())
+        .title(" Codemode ")
+        .title_bottom(
+            Line::from(" ↑↓ select · Enter apply · Esc close ")
+                .style(Style::default().fg(palette.muted))
+                .right_aligned(),
+        );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let width = usize::from(inner.width);
+    let snapshot = state.codemode.snapshot.as_deref();
+    let muted = Style::default().fg(palette.muted);
+    let warning = Style::default().fg(palette.warning);
+    let mut lines = choice_lines(
+        &CODEMODE_CHOICES,
+        view.selected,
+        snapshot.map(|snapshot| snapshot.setting),
+        width,
+        palette,
+    );
+    lines.push(Line::default());
+    for (text, style) in codemode_notes(state) {
+        lines.push(Line::styled(
+            terminal_row(&text, width),
+            if style { warning } else { muted },
+        ));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+    view.painted = inner.height >= 3 && inner.width >= 22 && !state.codemode.loading();
+    view.rendered = if view.painted { view.selected } else { None };
+    Rows::default()
+}
+
+/// The `/codemode` picker's rows below its choices, each flagged when it warns.
+fn codemode_notes(state: &UiState) -> Vec<(String, bool)> {
+    let mut notes = Vec::new();
+    let snapshot = state.codemode.snapshot.as_deref();
+    if let Some(error) = &state.codemode.error {
+        notes.push((format!("Error: {error}"), true));
+    } else if state.codemode.loading() {
+        let text = if snapshot.is_some() {
+            "Updating codemode…"
+        } else {
+            "Loading codemode…"
+        };
+        notes.push((text.to_owned(), false));
+    }
+    if let Some(snapshot) = snapshot {
+        if !snapshot.available {
+            notes.push((
+                "Needs the codemode extra: pip install 'wisp-ai[codemode]'".to_owned(),
+                true,
+            ));
+        } else if snapshot.offered {
+            notes.push(("On for the next prompt.".to_owned(), false));
+        } else {
+            notes.push(("Off for the next prompt.".to_owned(), false));
+        }
+        if let Some(env) = snapshot.env_setting {
+            notes.push((
+                format!(
+                    "WISP_CODEMODE sets {} when Wisp starts.",
+                    codemode_label(env)
                 ),
-                muted,
-            ))
-        } else {
-            snapshot
-                .filter(|snapshot| snapshot.saved_mode != Some(snapshot.mode))
-                .map(|snapshot| {
-                    let text =
-                        if snapshot.session_only_yolo && snapshot.mode == PermissionMode::Yolo {
-                            "YOLO lasts for this session; it is not saved here."
-                        } else {
-                            "Current mode is not saved; choose one to save it."
-                        };
-                    Line::styled(
-                        terminal_row(text, width),
-                        Style::default().fg(palette.warning),
-                    )
-                })
-        };
-        lines.extend(status);
-        let scope = if snapshot.is_some_and(|snapshot| snapshot.session_only_yolo) {
-            "YOLO is never saved in this folder. Changing mode clears grants."
-        } else {
-            "Saved for this project. Changing mode clears temporary grants."
-        };
-        lines.push(Line::styled(terminal_row(scope, width), muted));
-        if let Some(project) = snapshot.and_then(|snapshot| snapshot.project_path.as_deref()) {
-            lines.push(Line::styled(
-                crate::ui::tail_row(&format!("Project: {project}"), width),
-                muted,
+                true,
             ));
         }
-        frame.render_widget(Paragraph::new(lines), inner);
-        self.painted = inner.height >= 3 && inner.width >= 22 && !state.permissions.loading();
-        self.rendered = if self.painted { self.selected } else { None };
-        Rows::default()
     }
+    notes.push((
+        "Saved for you. Applies from the next prompt.".to_owned(),
+        false,
+    ));
+    notes
+}
+
+/// The setting's name as the side panel and picker notes show it.
+pub(crate) fn codemode_label(setting: CodemodeSetting) -> &'static str {
+    match setting {
+        CodemodeSetting::Automatic => "automatic",
+        CodemodeSetting::Always => "always",
+        CodemodeSetting::Never => "never",
+    }
+}
+
+/// Rows the docked `/codemode` panel needs for `state`, borders included.
+pub(crate) fn codemode_panel_height(state: &UiState) -> u16 {
+    // Borders, three choices and a gap, then the notes.
+    let notes = u16::try_from(codemode_notes(state).len()).unwrap_or(u16::MAX);
+    6_u16.saturating_add(notes)
 }
 
 /// Rows the docked `/permissions` panel needs for `state`, borders included.
@@ -616,6 +784,38 @@ mod tests {
     }
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn codemode_picker_applies_a_number() {
+        let mut state = UiState::unconfigured();
+        let mut view = DiscoveryView::codemode();
+        // Nothing applies before the setting has loaded and been painted.
+        assert!(matches!(
+            view.handle_key(key(KeyCode::Char('2')), &state),
+            DiscoveryAction::None
+        ));
+        state.codemode.snapshot = Some(Arc::new(wisp_protocol::events::CodemodeState {
+            setting: CodemodeSetting::Automatic,
+            available: false,
+            offered: false,
+            env_setting: Some(CodemodeSetting::Never),
+        }));
+        let rendered = draw(&mut view, &state, 72, codemode_panel_height(&state));
+        assert!(rendered.contains("current"));
+        assert!(rendered.contains("pip install 'wisp-ai[codemode]'"));
+        assert!(rendered.contains("WISP_CODEMODE sets never when Wisp starts."));
+        assert!(rendered.contains("Applies from the next prompt."));
+        assert!(matches!(
+            view.handle_key(key(KeyCode::Char('2')), &state),
+            DiscoveryAction::Refresh(UiAction::Codemode(Some(CodemodeSetting::Always)))
+        ));
+        // A number past the choices does nothing.
+        draw(&mut view, &state, 72, codemode_panel_height(&state));
+        assert!(matches!(
+            view.handle_key(key(KeyCode::Char('4')), &state),
+            DiscoveryAction::None
+        ));
     }
 
     #[test]

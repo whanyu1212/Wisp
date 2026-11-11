@@ -392,6 +392,12 @@ class _HarnessLoopState:
             self.tool_presentation_statuses[event.call_id] = "denied"
 
 
+def codemode_available() -> bool:
+    """Report whether the `codemode` extra, which runs the scripts, is installed."""
+
+    return importlib.util.find_spec("pydantic_monty") is not None
+
+
 def _no_executor() -> ConfiguredToolExecutor:
     """Stand in for the executor where a codemode tool is built only to be measured."""
 
@@ -2048,6 +2054,23 @@ class CodingSession:
         )
         return offered_tools, executor
 
+    def codemode_offered(self) -> bool:
+        """Report whether a run started now would offer the codemode tool.
+
+        The tools are worked out as a run would work them out, after mode, policy
+        and MCP exposure, without starting one.
+
+        Returns:
+            bool: Whether the tool would be offered. False when the `codemode` extra
+            is not installed, whatever the setting.
+        """
+
+        if not codemode_available():
+            return False
+        registry = self._operation_tool_registry()
+        tools, catalog = self._apply_mcp_exposure(self._effective_tools(registry), registry)
+        return self._codemode_tool(tools, registry, _no_executor, catalog) is not None
+
     def _codemode_tool(
         self,
         offered: tuple[ToolSpec, ...],
@@ -2086,7 +2109,7 @@ class CodingSession:
             return None
         if self.codemode is False or (automatic and catalog is None):
             return None
-        if importlib.util.find_spec("pydantic_monty") is None:
+        if not codemode_available():
             # Offering a tool that can only fail would cost the model a turn. Only an
             # explicit choice warns; the automatic one quietly does without.
             if not automatic:

@@ -26,6 +26,7 @@ from wisp.rpc.commands import (
     DisconnectProviderCommand,
     FollowUpCommand,
     ForkSessionCommand,
+    GetCodemodeCommand,
     GetCommandsCommand,
     GetConnectionCatalogCommand,
     GetGitDiffCommand,
@@ -52,6 +53,7 @@ from wisp.rpc.commands import (
     ReconnectMcpCommand,
     RemoveMcpServerCommand,
     SelectSessionCommand,
+    SetCodemodeCommand,
     SetMcpServerEnabledCommand,
     SetPermissionsCommand,
     SetQueueModeCommand,
@@ -82,6 +84,7 @@ from .coordinator import (
     _RpcRunningCommand,
     _RpcSessionState,
 )
+from .handlers.codemode import handle_rpc_codemode_command
 from .handlers.configure import handle_rpc_configure_command
 from .handlers.connections import (
     handle_rpc_disconnect_provider_command,
@@ -247,6 +250,8 @@ class RpcCommandExecutor:
             return self._dispatch_state(known, running_command)
         if isinstance(known, (GetPermissionsCommand, SetPermissionsCommand)):
             return self._dispatch_permissions(known, running_command)
+        if isinstance(known, (GetCodemodeCommand, SetCodemodeCommand)):
+            return self._dispatch_codemode(known, running_command)
         if isinstance(known, GetCommandsCommand):
             self.coordinator.running_command = running_command
             return self._dispatch_commands(known, running_command)
@@ -671,6 +676,20 @@ class RpcCommandExecutor:
             )
         )
         lifecycle.finish()
+        return _RpcDispatchResult(running_command=running_command)
+
+    def _dispatch_codemode(
+        self,
+        command: GetCodemodeCommand | SetCodemodeCommand,
+        running_command: _RpcRunningCommand | None,
+    ) -> _RpcDispatchResult:
+        if isinstance(command, SetCodemodeCommand) and running_command is not None:
+            # Inspection answers during a run; a change waits behind it, like configure.
+            RpcCommandLifecycle.for_command(command, write_event=self.write_event).fail(
+                "Change codemode after the current operation finishes"
+            )
+            return _RpcDispatchResult(running_command=running_command)
+        handle_rpc_codemode_command(command, agent=self.agent, write_event=self.write_event)
         return _RpcDispatchResult(running_command=running_command)
 
     def _dispatch_commands(

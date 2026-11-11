@@ -161,7 +161,7 @@ context, discovery, model, and connection views, while session, tree, and detail
 normal run-cancellation or idle-exit behavior.
 
 Approvals and project-trust requests take precedence over popups. A refreshed selection must be
-drawn before it can be activated. Popups are centered and capped at 100×28, except `/permissions`
+drawn before it can be activated. Popups are centered and capped at 100×28, except `/permissions`, `/codemode`
 and the `/mcp` add, enable, and remove panels, which dock above the composer; at the minimum 30×8
 terminal size they can fill the screen. Short decision layouts prioritize readable controls while
 retaining conversation state. Device-login URLs and codes wrap; use arrow/Page keys or Home/End to

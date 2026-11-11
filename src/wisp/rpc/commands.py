@@ -26,6 +26,7 @@ from wisp.events import (
     MAX_RPC_MODEL_ID_CHARS,
     MAX_RPC_PROVIDER_ID_CHARS,
     AgentMode,
+    CodemodeSetting,
     ImagePart,
     PermissionMode,
     QueueKind,
@@ -198,6 +199,19 @@ class SetPermissionsCommand(RpcCommandModel):
 
     type: Literal["set_permissions"] = "set_permissions"
     mode: PermissionMode
+
+
+class GetCodemodeCommand(RpcCommandModel):
+    """Read the codemode setting and whether the next run would offer the tool."""
+
+    type: Literal["get_codemode"] = "get_codemode"
+
+
+class SetCodemodeCommand(RpcCommandModel):
+    """Apply a codemode setting from the next run and save it as the user setting."""
+
+    type: Literal["set_codemode"] = "set_codemode"
+    setting: CodemodeSetting
 
 
 class ChangeDirectoryCommand(RpcCommandModel):
@@ -700,6 +714,8 @@ RpcCommand = TypeAliasType(
         | GetStateCommand
         | GetPermissionsCommand
         | SetPermissionsCommand
+        | GetCodemodeCommand
+        | SetCodemodeCommand
         | GetCommandsCommand
         | GetModelCatalogCommand
         | GetConnectionCatalogCommand

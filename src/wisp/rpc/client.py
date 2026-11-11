@@ -17,6 +17,7 @@ from pydantic import ValidationError
 from wisp import __version__
 from wisp.events import (
     AgentMode,
+    CodemodeSetting,
     ImagePart,
     KnownWispEvent,
     PermissionMode,
@@ -39,6 +40,7 @@ from wisp.rpc.commands import (
     DisconnectProviderCommand,
     FollowUpCommand,
     ForkSessionCommand,
+    GetCodemodeCommand,
     GetCommandsCommand,
     GetConnectionCatalogCommand,
     GetGitDiffCommand,
@@ -65,6 +67,7 @@ from wisp.rpc.commands import (
     RemoveMcpServerCommand,
     RpcCommand,
     SelectSessionCommand,
+    SetCodemodeCommand,
     SetMcpServerEnabledCommand,
     SetPermissionsCommand,
     SetQueueModeCommand,
@@ -201,6 +204,28 @@ class RpcController:
 
         selected_id = command_id or self._command_id_factory("permissions")
         await self._transport.send(SetPermissionsCommand(id=selected_id, mode=mode))
+        return selected_id
+
+    async def get_codemode(self, *, command_id: str | None = None) -> str:
+        """Request the codemode setting and whether the next run would offer the tool."""
+
+        selected_id = command_id or self._command_id_factory("codemode")
+        await self._transport.send(GetCodemodeCommand(id=selected_id))
+        return selected_id
+
+    async def set_codemode(self, setting: CodemodeSetting, *, command_id: str | None = None) -> str:
+        """Apply a codemode setting from the next run and save it as the user setting.
+
+        Args:
+            setting (CodemodeSetting): "automatic", "always" or "never".
+            command_id (str | None): Optional identifier for matching the response.
+
+        Returns:
+            str: The submitted command identifier. The reported event confirms success.
+        """
+
+        selected_id = command_id or self._command_id_factory("codemode")
+        await self._transport.send(SetCodemodeCommand(id=selected_id, setting=setting))
         return selected_id
 
     async def change_directory(self, path: str, *, command_id: str | None = None) -> str:

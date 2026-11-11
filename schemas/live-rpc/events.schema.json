@@ -224,6 +224,50 @@
       "title": "BillableTokenUsage",
       "type": "object"
     },
+    "CodemodeSetting": {
+      "enum": [
+        "automatic",
+        "always",
+        "never"
+      ],
+      "type": "string"
+    },
+    "CodemodeState": {
+      "additionalProperties": false,
+      "description": "The session's codemode setting and whether its next run would offer the tool.",
+      "properties": {
+        "available": {
+          "title": "Available",
+          "type": "boolean"
+        },
+        "env_setting": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodemodeSetting"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "offered": {
+          "title": "Offered",
+          "type": "boolean"
+        },
+        "setting": {
+          "$ref": "#/$defs/CodemodeSetting"
+        }
+      },
+      "required": [
+        "setting",
+        "available",
+        "offered",
+        "env_setting"
+      ],
+      "title": "CodemodeState",
+      "type": "object"
+    },
     "CompactionCompleted": {
       "additionalProperties": false,
       "allOf": [
@@ -2231,6 +2275,38 @@
         "command_id"
       ],
       "title": "QueueUpdated",
+      "type": "object"
+    },
+    "RpcCodemodeReported": {
+      "additionalProperties": false,
+      "description": "Codemode snapshot returned by a codemode inspection or change.",
+      "properties": {
+        "codemode": {
+          "$ref": "#/$defs/CodemodeState"
+        },
+        "command_id": {
+          "title": "Command Id",
+          "type": "string"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "rpc.codemode",
+          "default": "rpc.codemode",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "timestamp",
+        "command_id",
+        "codemode"
+      ],
+      "title": "RpcCodemodeReported",
       "type": "object"
     },
     "RpcCommandArgument": {
@@ -8161,6 +8237,7 @@
       "queue.items.removed": "#/$defs/QueueItemsRemoved",
       "queue.message.injected": "#/$defs/QueueMessageInjected",
       "queue.updated": "#/$defs/QueueUpdated",
+      "rpc.codemode": "#/$defs/RpcCodemodeReported",
       "rpc.command.finished": "#/$defs/RpcCommandFinished",
       "rpc.command.started": "#/$defs/RpcCommandStarted",
       "rpc.commands": "#/$defs/RpcCommandsReported",
@@ -8304,6 +8381,9 @@
     },
     {
       "$ref": "#/$defs/RpcPermissionsReported"
+    },
+    {
+      "$ref": "#/$defs/RpcCodemodeReported"
     },
     {
       "$ref": "#/$defs/RpcCommandsReported"
@@ -8586,6 +8666,17 @@
       "timestamp": "2026-01-02T03:04:05Z",
       "token": null,
       "type": "queue.updated"
+    },
+    "rpc.codemode": {
+      "codemode": {
+        "available": true,
+        "env_setting": null,
+        "offered": false,
+        "setting": "automatic"
+      },
+      "command_id": "command-1",
+      "timestamp": "2026-01-02T03:04:05Z",
+      "type": "rpc.codemode"
     },
     "rpc.command.finished": {
       "command_id": "command-1",

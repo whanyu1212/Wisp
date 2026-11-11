@@ -26,6 +26,7 @@ impl UiState {
             // A read of the mode, which the composer refreshes in the background,
             // leaves the editor usable.
             || self.permissions.changing()
+            || self.codemode.changing()
     }
 
     pub(crate) fn command_catalog_loading(&self) -> bool {

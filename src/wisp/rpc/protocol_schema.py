@@ -247,6 +247,8 @@ _COMMAND_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     "approval": {"call_id": "call-1", "approved": True},
     "get_permissions": {},
     "set_permissions": {"mode": "ask"},
+    "get_codemode": {},
+    "set_codemode": {"setting": "always"},
     "change_directory": {"path": "src"},
     "cancel": {"target_id": "command-1"},
     "clear_queue": {},
@@ -549,6 +551,10 @@ _EVENT_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     "rpc.state": {"command_id": "command-1", "state": _RPC_STATE},
     "rpc.workspace": {"cwd": Path("/workspace"), "git_branch": "main"},
     "rpc.permissions": {"command_id": "command-1", "permissions": {"mode": "ask"}},
+    "rpc.codemode": {
+        "command_id": "command-1",
+        "codemode": {"setting": "automatic", "available": True, "offered": False},
+    },
     "session.directory_changed": {
         "session_id": "session-1",
         "previous_cwd": Path("/project"),

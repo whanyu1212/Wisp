@@ -162,6 +162,8 @@ request. Completion and results arrive through `events()`.
 | `get_session_stats` | `(*, command_id: str \| None = None)` | `SessionStatsReported` |
 | `get_permissions` | `(*, command_id: str \| None = None)` | `RpcPermissionsReported` |
 | `set_permissions` | `(mode: PermissionMode, *, command_id: str \| None = None)` | Saved project default, then `RpcPermissionsReported` |
+| `get_codemode` | `(*, command_id: str \| None = None)` | `RpcCodemodeReported` |
+| `set_codemode` | `(setting: CodemodeSetting, *, command_id: str \| None = None)` | Applied from the next run and saved as the user setting, then `RpcCodemodeReported` |
 | `change_directory` | `(path: str, *, command_id: str \| None = None)` | After running work: `SessionDirectoryChanged` when a move was saved; for another project, `ProjectConfigApplied` when its configuration differs, `SkillCatalogUpdated`, and `RpcPermissionsReported`; then `RpcWorkspaceReported` |
 | `get_state` | `(*, command_id: str \| None = None)` | `RpcStateReported` |
 | `get_commands` | `(*, command_id: str \| None = None)` | `RpcCommandsReported` |
@@ -272,6 +274,12 @@ grants; it fails without changing permissions if an operation is running or savi
 Saved defaults apply to future launches in the same canonical project directory. Match `request_id` from
 `TrustRequested` and `call_id` from `ToolApprovalRequested`. These methods are re-entrant control
 commands and may be submitted while a prompt is paused.
+
+`CodemodeSetting` is `"automatic" | "always" | "never"`. `CodemodeState` reports the `setting`,
+whether the `codemode` extra is `available`, whether a run started now would be `offered` the tool,
+and `env_setting`, the setting `WISP_CODEMODE` gives at startup. `set_codemode` waits for the
+current operation; when saving fails, the setting still applies to the session and an `error`
+event comes first.
 
 #### Persisted sessions
 

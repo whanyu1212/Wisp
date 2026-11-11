@@ -36,6 +36,7 @@ pub(crate) enum Command {
     Skills,
     Mcp,
     Permissions(Option<wisp_protocol::commands::PermissionMode>),
+    Codemode(Option<wisp_protocol::commands::CodemodeSetting>),
     AutoCompaction(bool),
     Search(Option<bool>),
     Compact(Option<String>),
@@ -65,6 +66,7 @@ fn usage(name: &str) -> Option<&'static str> {
         "skills" => "/skills",
         "mcp" => "/mcp",
         "permissions" => "/permissions [ask|yolo]",
+        "codemode" => "/codemode [automatic|always|never]",
         "compact" => "/compact [instructions]",
         "quit" => "/quit",
         "model" => "/model [provider::model] [effort|-]",
@@ -167,6 +169,7 @@ fn parse_command(canonical: &str, tail: &str, syntax: &str) -> Command {
         "skills" => Command::Skills,
         "mcp" => Command::Mcp,
         "permissions" => parse_permissions(tail, syntax),
+        "codemode" => parse_codemode(tail, syntax),
         "plan" => Command::Mode(AgentMode::Plan),
         "build" => Command::Mode(AgentMode::Build),
         "context" => parse_context(tail, syntax),
@@ -229,6 +232,17 @@ fn parse_permissions(tail: &str, syntax: &str) -> Command {
         "yolo" => Command::Permissions(Some(wisp_protocol::commands::PermissionMode::Yolo)),
         _ => Command::Invalid(format!("Usage: {syntax}")),
     }
+}
+
+fn parse_codemode(tail: &str, syntax: &str) -> Command {
+    use wisp_protocol::commands::CodemodeSetting;
+    Command::Codemode(Some(match tail.trim() {
+        "" => return Command::Codemode(None),
+        "automatic" => CodemodeSetting::Automatic,
+        "always" => CodemodeSetting::Always,
+        "never" => CodemodeSetting::Never,
+        _ => return Command::Invalid(format!("Usage: {syntax}")),
+    }))
 }
 
 fn parse_context(tail: &str, syntax: &str) -> Command {
@@ -778,6 +792,27 @@ pub(crate) mod tests {
             classify("/search maybe", None),
             Some(Command::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn codemode_takes_one_setting() {
+        use wisp_protocol::commands::CodemodeSetting;
+        let parsed = |input| match classify(input, None) {
+            Some(Command::Codemode(setting)) => Ok(setting),
+            Some(Command::Invalid(_)) => Err(()),
+            _ => panic!("{input} is not a codemode command"),
+        };
+        assert_eq!(parsed("/codemode"), Ok(None));
+        assert_eq!(
+            parsed("/codemode automatic"),
+            Ok(Some(CodemodeSetting::Automatic))
+        );
+        assert_eq!(
+            parsed("/codemode always"),
+            Ok(Some(CodemodeSetting::Always))
+        );
+        assert_eq!(parsed("/codemode never"), Ok(Some(CodemodeSetting::Never)));
+        assert_eq!(parsed("/codemode sometimes"), Err(()));
     }
 
     #[test]

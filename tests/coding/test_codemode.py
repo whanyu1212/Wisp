@@ -290,6 +290,41 @@ def test_not_offered_without_monty(
     assert ("codemode extra is not installed" in caplog.text) is warns
 
 
+@pytest.mark.parametrize(
+    ("codemode", "exposure", "offered"),
+    [
+        (True, "direct", True),
+        (None, "direct", False),
+        (None, "on_demand", True),
+        (False, "on_demand", False),
+    ],
+)
+def test_offered_matches_the_run(
+    tmp_path: Path, codemode: bool | None, exposure: McpToolExposure, offered: bool
+) -> None:
+    """The session predicts, without a run, whether its next run offers codemode."""
+
+    provider = ScriptedProvider([_done()])
+    session = CodingSession(
+        provider=provider,
+        sessions=JsonlSessionStore(tmp_path / "sessions"),
+        tool_registry=_Tools().registry(),
+        tool_context=ToolContext(cwd=tmp_path),
+        mcp_tool_exposure=exposure,
+        codemode=codemode,
+    )
+
+    predicted = session.codemode_offered()
+
+    async def run() -> None:
+        async for _ in session.run("go"):
+            pass
+
+    anyio.run(run)
+    assert predicted is offered
+    assert (CODEMODE in [tool.name for tool in provider.calls[0].tools]) is offered
+
+
 def test_script_is_safe_to_replay(tmp_path: Path) -> None:
     """A script reaches only read-only tools, so it never blocks overflow recovery."""
 

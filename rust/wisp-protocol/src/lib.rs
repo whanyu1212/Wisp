@@ -519,6 +519,16 @@ pub mod commands {
         Yolo,
     }
 
+    /// When a run offers the codemode tool: with MCP tools found on demand, or
+    /// always, or never.
+    #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, Eq, PartialEq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum CodemodeSetting {
+        Automatic,
+        Always,
+        Never,
+    }
+
     /// Lifetime granted by an approved tool request.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum ApprovalScope {
@@ -629,6 +639,19 @@ pub mod commands {
                     serde_json::json!({"type": "set_permissions", "id": id, "mode": mode})
                 }
                 None => serde_json::json!({"type": "get_permissions", "id": id}),
+            };
+            deserialize(value)
+        }
+        /// Read the codemode setting, or apply and save a new one.
+        pub fn codemode(
+            id: &str,
+            setting: Option<CodemodeSetting>,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            let value = match setting {
+                Some(setting) => {
+                    serde_json::json!({"type": "set_codemode", "id": id, "setting": setting})
+                }
+                None => serde_json::json!({"type": "get_codemode", "id": id}),
             };
             deserialize(value)
         }
@@ -1315,6 +1338,18 @@ pub mod events {
         /// True in the home folder or a folder above it, where YOLO is never saved.
         #[serde(default)]
         pub session_only_yolo: bool,
+    }
+
+    /// The session's codemode setting and whether its next run would offer the tool.
+    #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq)]
+    pub struct CodemodeState {
+        pub setting: crate::commands::CodemodeSetting,
+        /// Whether the backend has the `codemode` extra installed.
+        pub available: bool,
+        /// Whether a run started now would offer the tool.
+        pub offered: bool,
+        /// The setting `WISP_CODEMODE` gives, which outranks the saved one at startup.
+        pub env_setting: Option<crate::commands::CodemodeSetting>,
     }
 
     pub use crate::context::{
