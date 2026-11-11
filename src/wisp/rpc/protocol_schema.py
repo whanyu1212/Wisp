@@ -588,6 +588,22 @@ _EVENT_FIXTURE_VALUES: dict[str, dict[str, object]] = {
         "stderr_bytes": 0,
     },
     "tool.execution.started": {"call_id": "call-1", "name": "read", "arguments": {}},
+    "tool.nested.ended": {
+        "parent_call_id": "call-1",
+        "call": {
+            "call_id": "nested-1",
+            "name": "read",
+            "arguments": {"path": "fixture.txt"},
+            "started_at": _FIXTURE_TIMESTAMP,
+            "duration_ms": 5,
+        },
+    },
+    "tool.nested.started": {
+        "parent_call_id": "call-1",
+        "call_id": "nested-1",
+        "name": "read",
+        "arguments": {"path": "fixture.txt"},
+    },
     "tool.result": {"call_id": "call-1", "name": "read", "output": "", "is_error": False},
     "trust.requested": {"request_id": "trust-1", "project_path": Path("fixture.jsonl")},
     "trust.resolved": {

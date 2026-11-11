@@ -149,10 +149,14 @@ from wisp.events.sessions import (
 from wisp.events.tools import (
     MAX_EDIT_LINE,
     MAX_EDIT_LOCATIONS,
+    MAX_NESTED_CALLS,
     MAX_TOOL_RESULT_IMAGES,
+    NESTED_CALL_ARGUMENTS_MAX_CHARS,
+    NESTED_CALL_TEXT_MAX_CHARS,
     TOOL_PROGRESS_TAIL_MAX_BYTES,
     TOOL_PROGRESS_TAIL_MAX_LINES,
     EditLocation,
+    NestedToolCall,
     ProjectConfigApplied,
     ToolApprovalRequested,
     ToolApprovalResolved,
@@ -160,6 +164,8 @@ from wisp.events.tools import (
     ToolExecutionEnded,
     ToolExecutionProgress,
     ToolExecutionStarted,
+    ToolNestedCallEnded,
+    ToolNestedCallStarted,
     ToolResultReady,
     TrustRequested,
     TrustResolved,
@@ -196,7 +202,11 @@ from wisp.events.usage import (
 __all__ = [
     "MAX_EDIT_LINE",
     "MAX_EDIT_LOCATIONS",
+    "MAX_NESTED_CALLS",
     "MAX_TOOL_RESULT_IMAGES",
+    "NESTED_CALL_ARGUMENTS_MAX_CHARS",
+    "NESTED_CALL_TEXT_MAX_CHARS",
+    "NestedToolCall",
     "TOOL_PROGRESS_TAIL_MAX_BYTES",
     "TOOL_PROGRESS_TAIL_MAX_LINES",
     "DEFAULT_AGENT_MODE",
@@ -337,6 +347,8 @@ __all__ = [
     "ToolCallSnapshot",
     "ToolExecutionEnded",
     "ToolExecutionProgress",
+    "ToolNestedCallEnded",
+    "ToolNestedCallStarted",
     "ToolExecutionStarted",
     "ToolPresentationStatus",
     "ToolResultReady",
@@ -420,7 +432,9 @@ KnownWispEvent = TypeAliasType(
         | QueueMessageInjected
         | SkillInvoked
         | ModelProviderAutoSwitched
-        | ErrorEvent,
+        | ErrorEvent
+        | ToolNestedCallStarted
+        | ToolNestedCallEnded,
         Field(discriminator="type"),
     ],
 )

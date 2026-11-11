@@ -151,6 +151,79 @@ class EditLocation(BaseModel):
     new_line: int = Field(ge=1, le=MAX_EDIT_LINE)
 
 
+# The most calls one codemode script's result records; a script that makes more
+# reports how many it left out. Scripts are limited to 200 calls by default.
+MAX_NESTED_CALLS = 200
+# Bounds on what one recorded call keeps: its arguments as JSON text, and its error
+# or summary.
+NESTED_CALL_ARGUMENTS_MAX_CHARS = 2_000
+NESTED_CALL_TEXT_MAX_CHARS = 500
+
+
+class NestedToolCall(BaseModel):
+    """One tool call a codemode script made, as its script's result records it.
+
+    Every call is recorded, including those refused before running and those the
+    script ended before they finished, so a session shows everything a script
+    tried. Only the script sees the call's output; the model sees what the script
+    prints and returns.
+
+    Attributes:
+        call_id (str): The call's id, unique within its script.
+        name (str): The tool the script called.
+        target (str | None): The MCP tool a proxied `mcp_call` ran.
+        arguments (JsonObject | None): The call's arguments; None when they were
+            too large to keep.
+        is_error (bool): Whether the call failed or was refused.
+        failure_code (ToolFailureCode | None): Why it failed, when classified.
+        error (str | None): The start of its error message.
+        summary (str | None): A one-line summary, for read-type tools.
+        started_at (datetime): When the script made the call.
+        duration_ms (int): How long it took, waiting for other calls included.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    call_id: str
+    name: str
+    target: str | None = None
+    arguments: JsonObject | None = None
+    is_error: bool = False
+    failure_code: ToolFailureCode | None = None
+    error: str | None = Field(default=None, max_length=NESTED_CALL_TEXT_MAX_CHARS)
+    summary: str | None = Field(default=None, max_length=NESTED_CALL_TEXT_MAX_CHARS)
+    started_at: datetime
+    duration_ms: int = Field(ge=0)
+
+
+class ToolNestedCallStarted(WispEvent):
+    """A codemode script made a tool call, which may still wait to run.
+
+    Like `tool.execution.progress`, it is transient: published only between its
+    script's `tool.execution.started` and `tool.execution.ended`, never persisted
+    and never sent to the model. Delivery is best effort. A call can start without
+    ending when its script ends first; the script's `tool.execution.ended` closes
+    it, and its `nested_calls` record every call, unless the run was cancelled
+    while the script ran, which leaves the result no calls to record.
+    """
+
+    type: Literal["tool.nested.started"] = "tool.nested.started"
+    # The codemode call whose script made this one.
+    parent_call_id: str
+    call_id: str
+    name: str
+    target: str | None = None
+    arguments: JsonObject | None = None
+
+
+class ToolNestedCallEnded(WispEvent):
+    """A tool call a codemode script made finished; transient, like its start."""
+
+    type: Literal["tool.nested.ended"] = "tool.nested.ended"
+    parent_call_id: str
+    call: NestedToolCall
+
+
 class _ToolResultEvent(_MessageOriginEvent):
     """Shared bounded result contract for distinct tool lifecycle events."""
 
@@ -211,6 +284,10 @@ class _ToolResultEvent(_MessageOriginEvent):
     # Images the tool returned, such as an image file `read` showed, by reference
     # into the session's image store; they are stored before the result is published.
     images: tuple[ImagePart, ...] = Field(default=(), max_length=MAX_TOOL_RESULT_IMAGES)
+    # The calls a codemode script made, in the order it made them, and how many more
+    # it made than the result records. Empty for every other tool.
+    nested_calls: tuple[NestedToolCall, ...] = Field(default=(), max_length=MAX_NESTED_CALLS)
+    nested_calls_omitted: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def _validate_failure_metadata(self) -> Self:

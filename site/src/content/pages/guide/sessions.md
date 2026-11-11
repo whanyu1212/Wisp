@@ -36,8 +36,9 @@ if a page cursor becomes stale. See [TUI controls](tui.md) and the
 ## What a session file contains
 
 Session files contain provider-facing `message` entries plus selected structured `event` entries
-(tool calls, approvals, tool start/end, [web searches](providers.md#web-search), errors) for audit. They do **not** persist `message.delta`
-or `tool.execution.progress` events. Continuation replays only the selected path's messages and compactions, so audit events never
+(tool calls, approvals, tool start/end, [web searches](providers.md#web-search), errors) for audit. A codemode script's tool end
+lists every call the script made. They do **not** persist `message.delta`, `tool.execution.progress`, or the transient
+`tool.nested.started` and `tool.nested.ended` events. Continuation replays only the selected path's messages and compactions, so audit events never
 become model-visible history.
 
 That split is what makes the transcript useful for both purposes at once: the model sees a clean

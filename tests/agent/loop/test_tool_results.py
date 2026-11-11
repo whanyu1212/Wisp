@@ -148,6 +148,8 @@ def test_projection_keeps_complete_wire_payload() -> None:
         "process_started_at": None,
         "process_ended_at": None,
         "images": (),
+        "nested_calls": (),
+        "nested_calls_omitted": 0,
     }
 
     envelope_fields = {"type", "schema_version", "timestamp"}
