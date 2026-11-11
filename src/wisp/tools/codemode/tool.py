@@ -108,24 +108,32 @@ class CodemodeTool:
         tools: Sequence[ScriptableTool],
         call: NestedToolCaller,
         *,
+        discoverable: Sequence[ScriptableTool] = (),
         limits: ScriptLimits | None = None,
     ) -> None:
         """Offer ``tools`` to scripts, running each call a script makes with ``call``.
 
         Args:
-            tools (Sequence[ScriptableTool]): The tools a script may call. A tool
-                whose name or parameters are not Python identifiers is left out.
+            tools (Sequence[ScriptableTool]): The tools a script may call, named in
+                the description. A tool whose name or parameters are not Python
+                identifiers is left out, here and in ``discoverable``.
             call (NestedToolCaller): Runs one call under the run's tool policy.
+            discoverable (Sequence[ScriptableTool]): Further tools a script may call
+                by name without the description listing them: the MCP tools a run
+                finds on demand, which `mcp_search` describes. Leaving them out
+                keeps the description short and the same from run to run.
             limits (ScriptLimits | None): The bounds scripts run under; None uses
                 the defaults.
         """
 
-        self._signatures = tuple(
-            signature for tool in tools if (signature := _signature(tool)) is not None
+        listed = tuple(signature for tool in tools if (signature := _signature(tool)) is not None)
+        found = tuple(
+            signature for tool in discoverable if (signature := _signature(tool)) is not None
         )
+        self._signatures = (*listed, *found)
         self._call = call
         self._limits = limits or ScriptLimits()
-        self.description = _description(self._signatures, self._limits)
+        self.description = _description(listed, self._limits, discoverable=bool(found))
         self._stubs = "\n".join(signature.declaration for signature in self._signatures) + "\n"
 
     @property
@@ -222,12 +230,15 @@ def _is_identifier(name: str) -> bool:
     return name.isidentifier() and not keyword.iskeyword(name)
 
 
-def _description(signatures: Sequence[_Signature], limits: ScriptLimits) -> str:
+def _description(
+    signatures: Sequence[_Signature], limits: ScriptLimits, *, discoverable: bool = False
+) -> str:
     """Describe the tool, naming the tools a script may call.
 
-    Each callable tool is also offered directly, so the model already has its full
+    Each listed tool is also offered directly, so the model already has its full
     schema; repeating every signature here would resend it on every request. The
     declarations still reach the sandbox, which type-checks scripts against them.
+    With ``discoverable``, MCP tools found on demand are callable too, unlisted.
     """
 
     lines = [
@@ -243,14 +254,23 @@ def _description(signatures: Sequence[_Signature], limits: ScriptLimits) -> str:
         "`import asyncio`.",
         "",
         "The script runs in a sandbox with a subset of Python: no files, network, "
-        "classes with inheritance or third-party packages; json, re, collections, "
-        "itertools and math are available. It is type-checked against the tools' "
-        "parameters before it runs.",
+        "classes with inheritance or third-party packages, and no map() or filter(), so "
+        "use comprehensions; json, re, collections, itertools and math are available. "
+        "It is type-checked against the tools' parameters before it runs.",
         f"Limits: {limits.max_calls} tool calls and {limits.wall_seconds:g} seconds per script.",
         "",
         "Callable tools:",
         *_grouped_names(signature.name for signature in signatures),
     ]
+    if discoverable:
+        lines += [
+            "",
+            "A read-only MCP tool that mcp_search finds is callable too, by its full name "
+            "(such as mcp__server__tool_name), when that name and its parameters are "
+            "Python identifiers; call any other through mcp_call(name=..., "
+            "arguments=...). Calls by name are type-checked: mcp_describe shows a tool's "
+            "parameter types.",
+        ]
     return "\n".join(lines)
 
 
