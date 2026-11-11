@@ -10,7 +10,17 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## Unreleased
+## 0.8.0 — Unreleased
+
+0.8.0 adds an experimental `codemode` tool: from the new `codemode` extra, the model writes a
+Python script that calls the run's read-only tools, offered by default when a run finds its MCP
+tools on demand, and `/codemode` chooses when runs offer it. A session can move its working
+directory, with `change_directory` and the TUI's `/cd`, and a trusted project's file tools reach
+its whole root. Wisp now supports Python 3.11. Anthropic requests that offer `bash` work again.
+The TUI gains a welcome card with a working menu, script cards, verb-first tool lines, and a
+composer border that names the model and mode. Commands and events gain fields, so the backend and
+every frontend must come from the same release. 0.8.0 reads sessions 0.7.x wrote; 0.7.x refuses a
+0.8.0 session that holds a codemode script's result and ignores its directory moves.
 
 ### Packaging
 
@@ -86,15 +96,18 @@ this policy.
   or they ended where they started. A session's starting-folder record is not a move. The TUI draws
   it as the divider. (HY-478)
 - `/cd` is in the `get_commands` catalog, with one required `path` argument.
+- `get_codemode` and `set_codemode {setting}` are new commands, and `RpcController` gains
+  `get_codemode()` and `set_codemode()`. Both reply with `rpc.codemode` (`RpcCodemodeReported`),
+  whose `CodemodeState` has the `setting` (`automatic`, `always`, or `never`), whether the
+  `codemode` extra is `available`, whether a run started now would be `offered` the tool, and
+  `env_setting`, the setting `WISP_CODEMODE` gives at startup. `set_codemode` applies from the next
+  run and saves the user `codemode` setting (`automatic` removes the key); when saving fails, the
+  setting still applies to the session and an `error` event comes first. `/codemode` is in the
+  `get_commands` catalog. The schema bundle and conformance fixture are regenerated; the
+  same-release rule applies. (HY-507)
 
 ### Tools
 
-- Codemode is offered by default whenever a run finds its MCP tools on demand, and the `codemode`
-  extra is installed. `"codemode": true` (or `WISP_CODEMODE=1`) still offers it in every run, and
-  `"codemode": false` (or `WISP_CODEMODE=0`) never does. A confirmation run on the orchestration
-  tasks, with tools found on demand, held the earlier result: luna passed 23 of 25 instead of 17,
-  Sonnet and sol passed every run, and Sonnet cost $0.97 instead of $1.45. The tools guide now
-  recommends on-demand discovery with codemode for a large MCP catalog. (HY-509)
 - An experimental `codemode` tool, offered by default when a run finds its MCP tools on demand
   (see below), or always with `"codemode": true` or `WISP_CODEMODE=1`: the model
   writes a Python script that calls the run's read-only tools, and only what the script prints and
@@ -103,6 +116,12 @@ this policy.
   run. Each call a script makes passes the same checks as a direct call; a call that would need an
   approval fails, so approving the script grants nothing. Limits: 200 calls, 2 minutes, 10 seconds
   of computing and 128 MiB per script. The tool-use evals gain `--codemode python`. (HY-495)
+- Codemode is offered by default whenever a run finds its MCP tools on demand, and the `codemode`
+  extra is installed. `"codemode": true` (or `WISP_CODEMODE=1`) still offers it in every run, and
+  `"codemode": false` (or `WISP_CODEMODE=0`) never does. A confirmation run on the orchestration
+  tasks, with tools found on demand, held the earlier result: luna passed 23 of 25 instead of 17,
+  Sonnet and sol passed every run, and Sonnet cost $0.97 instead of $1.45. The tools guide now
+  recommends on-demand discovery with codemode for a large MCP catalog. (HY-509)
 - With on-demand MCP discovery, a codemode script can call a read-only MCP tool `mcp_search` finds
   by its full name, type-checked against the tool's own schema, instead of through `mcp_call`, when
   that name and its parameters are Python identifiers. The
@@ -220,6 +239,11 @@ this policy.
   the keys back to the draft and the menu steps back. A tip under the card, picked once per launch,
   names a key or command. Short terminals drop the logo size, then the tip and frame, and keep the
   menu. (HY-488)
+- `/codemode` opens a picker docked above the composer, like `/permissions`, to choose when runs
+  offer codemode: automatic, always, or never; `/codemode always` and the others apply one
+  directly. It marks the current setting, says whether the next prompt offers the tool, and notes
+  when `WISP_CODEMODE` is set or the `codemode` extra is missing. The side panel names codemode as
+  on or off for the next prompt, except while the automatic setting leaves it off. (HY-507)
 
 <!-- Keeps links to the pre-release "0.7.0 — Unreleased" heading working. -->
 <a id="070--unreleased"></a>
