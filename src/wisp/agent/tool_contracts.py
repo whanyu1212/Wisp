@@ -6,6 +6,8 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
+from typing_extensions import TypeAliasType
+
 from wisp.events import (
     ToolApprovalRequested,
     ToolApprovalResolved,
@@ -13,7 +15,9 @@ from wisp.events import (
 )
 from wisp.providers.events import ToolCall
 
-type ToolExecutionEvent = ToolApprovalRequested | ToolApprovalResolved | ToolExecutionEnded
+ToolExecutionEvent = TypeAliasType(
+    "ToolExecutionEvent", ToolApprovalRequested | ToolApprovalResolved | ToolExecutionEnded
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,7 +48,9 @@ class PreparedToolExecution:
         return await self.runner()
 
 
-type ToolPreparationEvent = ToolApprovalRequested | ToolApprovalResolved | PreparedToolExecution
+ToolPreparationEvent = TypeAliasType(
+    "ToolPreparationEvent", ToolApprovalRequested | ToolApprovalResolved | PreparedToolExecution
+)
 
 
 class ToolExecutionProtocolError(RuntimeError):

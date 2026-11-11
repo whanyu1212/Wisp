@@ -20,6 +20,7 @@ from pathlib import Path
 
 import anyio
 import pytest
+from typing_extensions import TypeAliasType
 
 from evals.tool_use.runner import mcp_settings
 from evals.tool_use.servers.catalogs import REORDER_POINT, REORDER_SKU
@@ -53,7 +54,7 @@ class _Request:
     last_result: str
 
 
-type _Step = Callable[[_Request], Sequence[ProviderEvent]]
+_Step = TypeAliasType("_Step", Callable[[_Request], Sequence[ProviderEvent]])
 
 
 class _ScriptedModel:

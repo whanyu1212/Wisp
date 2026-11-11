@@ -9,11 +9,14 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 import yaml
+from typing_extensions import TypeAliasType
 from yaml.tokens import AliasToken, AnchorToken, TagToken
 
 from wisp.skills.models import SkillDiagnostic, SkillEntry, SkillSource
 
-type SkillMetadataErrorCode = Literal["invalid-frontmatter", "invalid-metadata", "invalid-yaml"]
+SkillMetadataErrorCode = TypeAliasType(
+    "SkillMetadataErrorCode", Literal["invalid-frontmatter", "invalid-metadata", "invalid-yaml"]
+)
 
 _SKILL_NAME = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _SUPPORTED_FIELDS = frozenset(

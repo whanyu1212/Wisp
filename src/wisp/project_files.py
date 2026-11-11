@@ -16,6 +16,8 @@ from threading import Event
 from time import monotonic
 from typing import TYPE_CHECKING
 
+from typing_extensions import TypeAliasType
+
 if TYPE_CHECKING:
     from wisp.tools.context import ToolContext
 
@@ -84,7 +86,7 @@ class ProjectDirectory:
         return f"{self.path}/"
 
 
-type ProjectEntry = ProjectFile | ProjectDirectory
+ProjectEntry = TypeAliasType("ProjectEntry", ProjectFile | ProjectDirectory)
 
 
 @dataclass(frozen=True)

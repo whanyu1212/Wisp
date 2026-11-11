@@ -25,6 +25,7 @@ from typing import Any
 
 import anyio
 import pytest
+from typing_extensions import TypeAliasType
 
 from tests.support.agent_runtime import (
     assert_message_pairing,
@@ -32,8 +33,8 @@ from tests.support.agent_runtime import (
     assert_turn_invariants,
 )
 
-type RunAgentLoop = Callable[..., AsyncGenerator[Any, None]]
-type ViolationSink = Callable[[str], None]
+RunAgentLoop = TypeAliasType("RunAgentLoop", Callable[..., AsyncGenerator[Any, None]])
+ViolationSink = TypeAliasType("ViolationSink", Callable[[str], None])
 
 # Where the running test's violations go; None while no test, or an exempt test, runs.
 _active_sink: ViolationSink | None = None

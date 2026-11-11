@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass, field
 
+from typing_extensions import TypeAliasType
+
 from wisp.agent.context_budget import estimate_context_budget
 from wisp.agent.turn_lifecycle import TurnLifecycle
 from wisp.events import (
@@ -49,7 +51,8 @@ from .response_projection import project_completed_response
 from .stream_cleanup import closing_stream
 from .tool_execution import CancelledToolBatch, ToolBatch
 
-type AgentLoopEvent = (
+AgentLoopEvent = TypeAliasType(
+    "AgentLoopEvent",
     TurnStarted
     | ContextEstimated
     | ProviderRetrying
@@ -66,7 +69,7 @@ type AgentLoopEvent = (
     | ToolExecutionEnded
     | ToolResultReady
     | TurnCompleted
-    | ErrorEvent
+    | ErrorEvent,
 )
 
 

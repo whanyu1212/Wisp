@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 GROUP_JOBS = {
-    "python": ("quality", "python-tests", "macos-smoke"),
+    "python": ("quality", "python-tests", "python-tests-oldest", "macos-smoke"),
     "rust": ("rust-workspace",),
     "handoff": ("tui-handoff",),
     "package": ("package",),

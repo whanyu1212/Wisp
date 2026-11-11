@@ -8,10 +8,12 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
+from typing import TypeVar
 
 import anyio
 from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectSendStream
+from typing_extensions import TypeAliasType
 
 from wisp.coding.prompt import resolve_project_context_root
 from wisp.coding.session import CodingSession
@@ -52,14 +54,20 @@ from wisp.sessions.replay import resolve_session_tree
 from wisp.tools.context import ToolContext, WriteConstraint
 from wisp.tools.files.operations import CreateOnlyWriteReceipt
 
-type RpcEventRenderer = Callable[[AsyncIterator[WispEvent]], Awaitable[None]]
-type RunningCommandFactory = Callable[..., _RpcRunningCommand]
-type CommandCompletedFactory = Callable[..., _RpcCommandCompleted]
+T = TypeVar("T")
+
+RpcEventRenderer = TypeAliasType(
+    "RpcEventRenderer", Callable[[AsyncIterator[WispEvent]], Awaitable[None]]
+)
+RunningCommandFactory = TypeAliasType("RunningCommandFactory", Callable[..., _RpcRunningCommand])
+CommandCompletedFactory = TypeAliasType(
+    "CommandCompletedFactory", Callable[..., _RpcCommandCompleted]
+)
 
 _PROJECT_INIT_TOOL_NAMES = frozenset({"read", "grep", "find", "ls", "write"})
 
 
-async def _run_abandonable_session_read[T](func: Callable[..., T], *args: object) -> T:
+async def _run_abandonable_session_read(func: Callable[..., T], *args: object) -> T:
     return await anyio.to_thread.run_sync(func, *args, abandon_on_cancel=True)
 
 

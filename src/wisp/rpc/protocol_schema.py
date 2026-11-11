@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from types import UnionType
-from typing import Annotated, cast, get_args, get_origin
+from typing import Annotated, TypeAlias, TypeVar, cast, get_args, get_origin
 
 from pydantic import BaseModel, TypeAdapter
 
@@ -27,6 +27,8 @@ from wisp.rpc.protocol import (
     RpcHandshakeRequest,
     RpcHandshakeResponseAdapter,
 )
+
+T = TypeVar("T")
 
 JSON_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema"
 DEFAULT_SCHEMA_DIRECTORY = Path("schemas/live-rpc")
@@ -41,8 +43,8 @@ _MANIFEST = "manifest.json"
 _DECIMAL_STRING_PATTERN = (
     r"^(?:[+]?(?:\d+(?:\.\d*)?|\.\d+)|-0+(?:\.0*)?)(?:[eE][+-]?\d+)?(?![\s\S])"
 )
-type JsonValue = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
-type JsonObject = dict[str, JsonValue]
+JsonValue: TypeAlias = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
+JsonObject: TypeAlias = dict[str, JsonValue]
 
 
 def generate_protocol_artifacts() -> dict[str, str]:
@@ -604,7 +606,7 @@ _EVENT_FIXTURE_VALUES: dict[str, dict[str, object]] = {
 }
 
 
-def _conformance_fixtures[T](
+def _conformance_fixtures(
     adapter: TypeAdapter[T],
     schema: JsonObject,
     values: Mapping[str, Mapping[str, object]],
@@ -1104,7 +1106,7 @@ def _add_event_semantic_constraints(schema: JsonObject) -> None:
     )
 
 
-def _adapter_models[T](adapter: TypeAdapter[T]) -> dict[str, type[BaseModel]]:
+def _adapter_models(adapter: TypeAdapter[T]) -> dict[str, type[BaseModel]]:
     models: dict[str, type[BaseModel]] = {}
     visited: set[int] = set()
 
@@ -1130,7 +1132,7 @@ def _adapter_models[T](adapter: TypeAdapter[T]) -> dict[str, type[BaseModel]]:
     return models
 
 
-def _schema_for_model[T](adapter: TypeAdapter[T], *, title: str) -> JsonObject:
+def _schema_for_model(adapter: TypeAdapter[T], *, title: str) -> JsonObject:
     schema = cast(JsonObject, deepcopy(adapter.json_schema(mode="validation")))
     schema["$schema"] = JSON_SCHEMA_DIALECT
     schema["title"] = title

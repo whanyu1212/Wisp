@@ -58,7 +58,7 @@ remains the default.
 
 ### Run the available checkpoints
 
-From a source checkout with Python 3.12 or newer:
+From a source checkout with Python 3.11 or newer:
 
 ```bash
 python3 -m examples.crafting_agents.checkpoint_01

@@ -8,10 +8,12 @@ import time
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
+from typing import TypeVar
 
 import anyio
 from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectSendStream
+from typing_extensions import TypeAliasType
 
 from wisp.events import (
     RpcCommandFinished,
@@ -43,11 +45,15 @@ from wisp.sessions.jsonl import (
     SessionTreePage,
 )
 
-type RunningCommandFactory = Callable[..., _RpcRunningCommand]
-type CommandCompletedFactory = Callable[..., _RpcCommandCompleted]
+T = TypeVar("T")
+
+RunningCommandFactory = TypeAliasType("RunningCommandFactory", Callable[..., _RpcRunningCommand])
+CommandCompletedFactory = TypeAliasType(
+    "CommandCompletedFactory", Callable[..., _RpcCommandCompleted]
+)
 
 
-async def _run_abandonable_session_read[T](func: Callable[..., T], *args: object) -> T:
+async def _run_abandonable_session_read(func: Callable[..., T], *args: object) -> T:
     return await anyio.to_thread.run_sync(func, *args, abandon_on_cancel=True)
 
 

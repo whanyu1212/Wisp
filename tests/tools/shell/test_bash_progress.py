@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from pathlib import Path
+from typing import TypeVar
 
 import anyio
 import pytest
@@ -16,6 +17,8 @@ from wisp.tools.progress import OutputProgress
 from wisp.tools.result import ToolError
 from wisp.tools.shell.supervisor import ProcessSupervisor
 from wisp.tools.shell.tool import BashTool
+
+T = TypeVar("T")
 
 pytestmark = pytest.mark.process
 
@@ -36,7 +39,7 @@ class RecordingProgress:
         self.reports.append(progress)
 
 
-def run_bash[T](
+def run_bash(
     tmp_path: Path, scenario: Callable[[BashTool, ToolContext, RecordingProgress], Awaitable[T]]
 ) -> tuple[T, RecordingProgress]:
     progress = RecordingProgress()

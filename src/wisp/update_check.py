@@ -18,6 +18,7 @@ import httpx
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
+from typing_extensions import TypeAliasType
 
 from wisp import __version__
 
@@ -28,9 +29,11 @@ HTTP_TIMEOUT_SECONDS = 2.0
 
 _DISTRIBUTION_NAME = "wisp-ai"
 
-type UpdateCommandRunner = Callable[[tuple[str, ...]], Awaitable[None]]
-type UpdateInstallVerifier = Callable[[], Awaitable[None]]
-type UpdateInstallStartedCallback = Callable[[], None]
+UpdateCommandRunner = TypeAliasType(
+    "UpdateCommandRunner", Callable[[tuple[str, ...]], Awaitable[None]]
+)
+UpdateInstallVerifier = TypeAliasType("UpdateInstallVerifier", Callable[[], Awaitable[None]])
+UpdateInstallStartedCallback = TypeAliasType("UpdateInstallStartedCallback", Callable[[], None])
 
 
 @dataclass(frozen=True, slots=True)

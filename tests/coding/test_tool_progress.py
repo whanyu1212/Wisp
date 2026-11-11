@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Awaitable, Callable
+from typing import TypeVar
 
 import anyio
 import pytest
@@ -11,6 +12,8 @@ from wisp.coding import tool_progress as tool_progress_module
 from wisp.coding.tool_progress import bounded_tail, run_with_progress
 from wisp.events import ToolExecutionProgress, WispEvent
 from wisp.tools.progress import OutputProgress, ToolProgress
+
+T = TypeVar("T")
 
 
 def output(stdout: str) -> OutputProgress:
@@ -47,7 +50,7 @@ class RecordingSink:
         return [event.stdout_tail for event in self.events]
 
 
-def run[T](scenario: Callable[[], Awaitable[T]]) -> T:
+def run(scenario: Callable[[], Awaitable[T]]) -> T:
     return anyio.run(scenario)
 
 

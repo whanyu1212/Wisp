@@ -6,6 +6,8 @@ import time
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
 
+from typing_extensions import TypeAliasType
+
 from wisp.agent.tool_contracts import (
     PreparedToolExecutor,
     ToolExecutionEvent,
@@ -120,7 +122,7 @@ class CancelledToolBatch:
     results: tuple[ToolCallResult, ...]
 
 
-type ToolBatchOutcome = CompletedToolBatch | CancelledToolBatch
+ToolBatchOutcome = TypeAliasType("ToolBatchOutcome", CompletedToolBatch | CancelledToolBatch)
 
 
 @dataclass(slots=True)

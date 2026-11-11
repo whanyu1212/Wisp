@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from typing import cast
+from typing import TypeVar, cast
 
 import anyio
+
+Event = TypeVar("Event")
 
 
 async def _close_stream(stream: object) -> None:
@@ -27,7 +29,7 @@ async def _close_stream(stream: object) -> None:
 
 
 @asynccontextmanager
-async def closing_stream[Event](
+async def closing_stream(
     stream: AsyncIterator[Event],
 ) -> AsyncIterator[AsyncIterator[Event]]:
     """Own an iterator until exhaustion, error, cancellation, or consumer closure.

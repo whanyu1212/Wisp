@@ -10,6 +10,7 @@ from typing import cast
 
 import anyio
 from pydantic import ValidationError
+from typing_extensions import TypeAliasType
 
 from wisp.agent.tool_contracts import (
     PreparedToolExecution,
@@ -45,7 +46,7 @@ from wisp.tools.truncation import truncate_text
 
 _logger = logging.getLogger(__name__)
 
-type ImageStore = Callable[[bytes], Awaitable[ImagePart]]
+ImageStore = TypeAliasType("ImageStore", Callable[[bytes], Awaitable[ImagePart]])
 """Validates an image and makes it durable, returning the reference to record."""
 
 # Tools whose ``ToolResult.data["exit_code"]`` carries genuine process

@@ -10,8 +10,12 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Literal
 
-type Arguments = Mapping[str, object]
-type ParameterKind = Literal["string", "integer", "boolean", "string_list", "object"]
+from typing_extensions import TypeAliasType
+
+Arguments = TypeAliasType("Arguments", Mapping[str, object])
+ParameterKind = TypeAliasType(
+    "ParameterKind", Literal["string", "integer", "boolean", "string_list", "object"]
+)
 
 
 @dataclass(frozen=True, slots=True)

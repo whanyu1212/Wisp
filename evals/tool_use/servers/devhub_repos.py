@@ -16,8 +16,11 @@ import hashlib
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import TypeVar
 
 from evals.tool_use.servers.model import Arguments
+
+T = TypeVar("T")
 
 API_OWNER = "acme"
 API_REPO = "api"
@@ -27,7 +30,7 @@ def _digest(*parts: object) -> bytes:
     return hashlib.sha256("/".join(str(part) for part in parts).encode()).digest()
 
 
-def _pick[T](options: Sequence[T], *parts: object) -> T:
+def _pick(options: Sequence[T], *parts: object) -> T:
     return options[_digest(*parts)[0] % len(options)]
 
 
@@ -47,7 +50,7 @@ def _int(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
-def _page[T](items: Sequence[T], arguments: Arguments) -> Sequence[T]:
+def _page(items: Sequence[T], arguments: Arguments) -> Sequence[T]:
     """The page of ``items`` that `page` and `per_page` select, as devhub pages."""
 
     per_page = max(min(_int(arguments.get("per_page")) or 30, 100), 1)

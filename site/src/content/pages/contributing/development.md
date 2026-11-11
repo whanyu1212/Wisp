@@ -11,7 +11,7 @@ searchable: true
 
 # Development setup
 
-Wisp targets Python 3.12 or newer and uses `uv` for its locked development environment. Clone the
+Wisp targets Python 3.11 or newer and uses `uv` for its locked development environment. Clone the
 repository, then install the package and development dependencies:
 
 ```bash

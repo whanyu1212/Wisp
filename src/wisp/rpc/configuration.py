@@ -8,6 +8,7 @@ from functools import partial
 from pathlib import Path
 
 import anyio
+from typing_extensions import TypeAliasType
 
 from wisp.coding import (
     CodingSession,
@@ -21,7 +22,7 @@ from wisp.runtime.registry import ProviderRegistry
 from wisp.skills.lifecycle import discover_skill_catalog
 from wisp.tools.context import ToolContext
 
-type RuntimeBuilder = Callable[[WispConfig], Awaitable[WispRuntime]]
+RuntimeBuilder = TypeAliasType("RuntimeBuilder", Callable[[WispConfig], Awaitable[WispRuntime]])
 
 
 @dataclass(frozen=True)

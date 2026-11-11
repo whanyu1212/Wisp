@@ -27,7 +27,7 @@ def _wheel(
     tmp_path: Path,
     *,
     executable: bool = True,
-    tag: str = "cp312-abi3-test_platform",
+    tag: str = "cp311-abi3-test_platform",
     native: bool = True,
     package_init: bytes | None = None,
     include_extension: bool | None = None,
@@ -88,17 +88,17 @@ def test_repository_versions_are_lockstep() -> None:
 def test_candidate_wheel_contract(tmp_path: Path) -> None:
     root = REPO_ROOT
     wheel = _wheel(tmp_path)
-    verify_wheel(wheel, expected_tag="cp312-abi3-test_platform", root=root)
+    verify_wheel(wheel, expected_tag="cp311-abi3-test_platform", root=root)
 
     nonexecutable = _wheel(tmp_path / "nonexec", executable=False)
     with pytest.raises(ValueError, match="not executable"):
-        verify_wheel(nonexecutable, expected_tag="cp312-abi3-test_platform", root=root)
+        verify_wheel(nonexecutable, expected_tag="cp311-abi3-test_platform", root=root)
 
     missing_extension = _wheel(tmp_path / "missing-extension", include_extension=False)
     with pytest.raises(ValueError, match="must contain exactly one wisp/_native.abi3.so"):
         verify_wheel(
             missing_extension,
-            expected_tag="cp312-abi3-test_platform",
+            expected_tag="cp311-abi3-test_platform",
             root=root,
         )
 
@@ -113,7 +113,7 @@ def test_candidate_matches_reference_python_package(tmp_path: Path) -> None:
     )
     verify_wheel(
         candidate,
-        expected_tag="cp312-abi3-test_platform",
+        expected_tag="cp311-abi3-test_platform",
         root=root,
         reference_wheel=reference,
     )
@@ -123,7 +123,7 @@ def test_candidate_matches_reference_python_package(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="differs from reference"):
         verify_wheel(
             candidate,
-            expected_tag="cp312-abi3-test_platform",
+            expected_tag="cp311-abi3-test_platform",
             root=root,
             reference_wheel=reference,
         )
@@ -137,7 +137,7 @@ def test_candidate_matches_reference_python_package(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="content differs from reference"):
         verify_wheel(
             candidate,
-            expected_tag="cp312-abi3-test_platform",
+            expected_tag="cp311-abi3-test_platform",
             root=root,
             reference_wheel=changed_reference,
         )
@@ -146,7 +146,7 @@ def test_candidate_matches_reference_python_package(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="differs from reference"):
         verify_wheel(
             extra_candidate,
-            expected_tag="cp312-abi3-test_platform",
+            expected_tag="cp311-abi3-test_platform",
             root=root,
             reference_wheel=_wheel(
                 tmp_path / "clean-reference",
@@ -169,7 +169,7 @@ def test_record_covers_candidate_files(tmp_path: Path) -> None:
                 content = "\n".join(",".join(row) for row in rows[:-2]).encode()
             target.writestr(info, content)
     with pytest.raises(ValueError, match="missing from RECORD"):
-        verify_wheel(rewritten, expected_tag="cp312-abi3-test_platform", root=root)
+        verify_wheel(rewritten, expected_tag="cp311-abi3-test_platform", root=root)
 
 
 def test_release_set_requires_exact_supported_matrix(tmp_path: Path) -> None:
@@ -181,8 +181,8 @@ def test_release_set_requires_exact_supported_matrix(tmp_path: Path) -> None:
     pure = _wheel(distributions, tag="py3-none-any", native=False)
     cargo = cargo_version(_ROOT)
     targets = {
-        "manylinux-x86-64": "cp312-abi3-manylinux_2_28_x86_64",
-        "macos-arm64": "cp312-abi3-macosx_11_0_arm64",
+        "manylinux-x86-64": "cp311-abi3-manylinux_2_28_x86_64",
+        "macos-arm64": "cp311-abi3-macosx_11_0_arm64",
     }
     for target, tag in targets.items():
         wheel = _wheel(distributions, tag=tag)
@@ -218,7 +218,7 @@ def test_release_set_requires_exact_supported_matrix(tmp_path: Path) -> None:
 
     verify_release_set(distributions, assets, root=_ROOT)
 
-    extra = distributions / f"wisp_ai-{_VERSION}-cp312-abi3-macosx_11_0_x86_64.whl"
+    extra = distributions / f"wisp_ai-{_VERSION}-cp311-abi3-macosx_11_0_x86_64.whl"
     extra.write_bytes(pure.read_bytes())
     with pytest.raises(ValueError, match="differs from supported matrix"):
         verify_release_set(distributions, assets, root=_ROOT)
@@ -232,8 +232,8 @@ def test_release_set_rejects_bad_checksum_and_sbom(tmp_path: Path) -> None:
     (distributions / f"wisp_ai-{_VERSION}.tar.gz").write_bytes(b"sdist")
     _wheel(distributions, tag="py3-none-any", native=False)
     targets = {
-        "manylinux-x86-64": "cp312-abi3-manylinux_2_28_x86_64",
-        "macos-arm64": "cp312-abi3-macosx_11_0_arm64",
+        "manylinux-x86-64": "cp311-abi3-manylinux_2_28_x86_64",
+        "macos-arm64": "cp311-abi3-macosx_11_0_arm64",
     }
     for target, tag in targets.items():
         wheel = _wheel(distributions, tag=tag)

@@ -160,7 +160,7 @@ and **task-specific retrieval** without choosing a ranking or indexing system ye
 
 ## 4. Inspect the first request and the growing evidence
 
-From the checkout root, using Python 3.12+:
+From the checkout root, using Python 3.11+:
 
 ```bash
 python3 -m examples.crafting_agents.checkpoint_03

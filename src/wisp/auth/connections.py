@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, Protocol
 
+from typing_extensions import TypeAliasType
+
 from wisp.auth.storage import (
     ApiKeyCredential,
     AuthCredential,
@@ -15,8 +17,8 @@ from wisp.auth.storage import (
 )
 from wisp.openai_compatible import openai_compatible_api_key_environment
 
-type ConnectionKind = Literal["device_code", "api_key"]
-type ConnectionSource = Literal["environment", "stored", "missing"]
+ConnectionKind = TypeAliasType("ConnectionKind", Literal["device_code", "api_key"])
+ConnectionSource = TypeAliasType("ConnectionSource", Literal["environment", "stored", "missing"])
 
 API_KEY_ENVIRONMENT_VARIABLES = {
     "openai": ("OPENAI_API_KEY",),

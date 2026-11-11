@@ -7,9 +7,11 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol, cast
 
+from typing_extensions import TypeAliasType
+
 from examples.crafting_agents.core import Message, ToolCall, ToolSpec
 
-type Payload = dict[str, object]
+Payload = TypeAliasType("Payload", dict[str, object])
 
 
 class ResponseFailure(Exception):

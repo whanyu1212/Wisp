@@ -9,6 +9,7 @@ from typing import Literal
 
 import anyio
 import pytest
+from typing_extensions import TypeAliasType
 
 from tests.support.agent_runtime import (
     assert_cancellation_settled,
@@ -52,7 +53,9 @@ from wisp.providers.events import (
 )
 from wisp.providers.fake import ScriptedProvider
 
-type Scenario = Literal["stream", "sequential", "parallel", "queues", "replacement", "rebase"]
+Scenario = TypeAliasType(
+    "Scenario", Literal["stream", "sequential", "parallel", "queues", "replacement", "rebase"]
+)
 _SCENARIOS: tuple[Scenario, ...] = (
     "stream",
     "sequential",

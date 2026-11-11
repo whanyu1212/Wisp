@@ -8,6 +8,7 @@ import threading
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import TypeVar
 
 import anyio
 import pytest
@@ -25,13 +26,15 @@ from wisp.tools.output_store import (
 from wisp.tools.read_output import ReadOutputTool
 from wisp.tools.result import ToolError
 
+T = TypeVar("T")
+
 
 @pytest.fixture
 def root(tmp_path: Path) -> Path:
     return tmp_path / "tool-output"
 
 
-def run[T](scenario: Callable[[], Awaitable[T]]) -> T:
+def run(scenario: Callable[[], Awaitable[T]]) -> T:
     return anyio.run(scenario)
 
 

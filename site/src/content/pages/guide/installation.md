@@ -13,7 +13,7 @@ navGroup: Getting started
 # Installation
 
 Wisp is published on PyPI as [`wisp-ai`](https://pypi.org/project/wisp-ai/), installs a `wisp`
-command, and requires Python 3.12 or newer. Wisp supports Linux and macOS; Windows remains
+command, and requires Python 3.11 or newer. Wisp supports Linux and macOS; Windows remains
 best-effort until it has dedicated CI coverage.
 
 Install the latest release:
@@ -44,7 +44,7 @@ matching Rust binary. Source checkouts build the binary separately; see
 ## The TUI does not start after installing
 
 Wisp publishes native wheels (with the Rust TUI) for macOS arm64 and Linux glibc 2.28+ x86_64, plus
-a pure wheel without it. When uv's default Python is older than 3.12, `uv tool install` and `uvx`
+a pure wheel without it. When uv's default Python is older than 3.11, `uv tool install` and `uvx`
 can select the pure wheel even on a supported platform: uv resolves for its default interpreter
 first, where the native wheels don't apply, and keeps that choice after switching to a Python that
 meets Wisp's minimum. `wisp --version` and print, JSON, RPC, and SDK use still work, but `wisp-tui`

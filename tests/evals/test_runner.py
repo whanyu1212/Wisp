@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import importlib.util
 from decimal import Decimal
 from pathlib import Path
 
@@ -333,7 +334,19 @@ def test_on_demand_run_offered_discovery(tmp_path: Path) -> None:
 
 
 @pytest.mark.process
-@pytest.mark.parametrize("codemode", ["off", "python"])
+@pytest.mark.parametrize(
+    "codemode",
+    [
+        "off",
+        pytest.param(
+            "python",
+            marks=pytest.mark.skipif(
+                importlib.util.find_spec("pydantic_monty") is None,
+                reason="codemode needs pydantic-monty, which has no Python 3.11 wheels",
+            ),
+        ),
+    ],
+)
 def test_codemode_run_offers_tool(tmp_path: Path, codemode: str) -> None:
     """The setting reaches Wisp even for a task without MCP servers."""
 

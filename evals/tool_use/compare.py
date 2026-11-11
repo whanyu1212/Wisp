@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from statistics import fmean, median, variance
 
+from typing_extensions import TypeAliasType
+
 from evals.tool_use.report import count_sum
 
 # The fields a baseline keeps from each run, and from the suite's settings.
@@ -73,7 +75,7 @@ _T_95 = (
 )  # fmt: skip
 _CHANCE = 0.05
 
-type Row = Mapping[str, object]
+Row = TypeAliasType("Row", Mapping[str, object])
 
 
 def _calls(row: Row) -> float:

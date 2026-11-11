@@ -37,7 +37,7 @@ wisp-tui --version   # wisp-tui 0.2.4, on platforms with a native wheel
 ```
 
 Keep `--python 3.12` (or any newer Python). Without it, uv resolves for its default interpreter
-first; if that is older than 3.12, uv selects the pure wheel and the install has no Rust TUI. Use
+first; if that is older than Wisp's minimum, uv selects the pure wheel and the install has no Rust TUI. Use
 this command rather than `wisp update` from 0.1.0, which predates the native wheels. See
 [Installation](installation.md#the-tui-does-not-start-after-installing) if the TUI still doesn't
 start.

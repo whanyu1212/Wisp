@@ -11,14 +11,18 @@ from email.utils import parsedate_to_datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from typing_extensions import TypeAliasType
 
-type RetryReason = Literal[
-    "network",
-    "timeout",
-    "rate_limit",
-    "server_error",
-    "transient_http",
-]
+RetryReason = TypeAliasType(
+    "RetryReason",
+    Literal[
+        "network",
+        "timeout",
+        "rate_limit",
+        "server_error",
+        "transient_http",
+    ],
+)
 
 _JITTER_RATIO = 0.1
 _TERMINAL_QUOTA_CODES = frozenset(
