@@ -342,7 +342,7 @@ def test_on_demand_run_offered_discovery(tmp_path: Path) -> None:
             "python",
             marks=pytest.mark.skipif(
                 importlib.util.find_spec("pydantic_monty") is None,
-                reason="codemode needs pydantic-monty, which has no Python 3.11 wheels",
+                reason="codemode needs the `codemode` extra (pydantic-monty)",
             ),
         ),
     ],
