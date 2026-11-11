@@ -725,6 +725,28 @@ impl ToolCardSnapshot {
         }
     }
 
+    /// The verb that opens the card's action line, in the form its status calls for: in
+    /// flight (`Running`), finished (`Ran`), or never run (`Run`, as in
+    /// `Run cargo test · denied`). Another tool is named by its own name.
+    pub fn action_verb(&self) -> String {
+        let (in_flight, finished, never_ran) = match self.name.as_str() {
+            "bash" => ("Running", "Ran", "Run"),
+            "read" => ("Reading", "Read", "Read"),
+            "grep" | "find" => ("Searching", "Searched", "Search"),
+            "ls" => ("Listing", "Listed", "List"),
+            "edit" => ("Editing", "Edited", "Edit"),
+            "write" => ("Writing", "Wrote", "Write"),
+            _ if self.mcp_target().is_some() => ("Calling", "Called", "Call"),
+            name => return clip_chars(&one_line(name), TOOL_LABEL_MAX_CHARS),
+        };
+        match self.status {
+            ToolStatus::Requested | ToolStatus::Running => in_flight,
+            ToolStatus::Done | ToolStatus::Error => finished,
+            ToolStatus::AwaitingApproval | ToolStatus::Denied | ToolStatus::Cancelled => never_ran,
+        }
+        .to_owned()
+    }
+
     /// The server and remote tool an MCP card calls, such as
     /// `github/create_pull_request`. Wisp names MCP tools `mcp__{server}__{tool}`, and
     /// server names hold no `_`, so the first `__` after the prefix ends the server.
@@ -782,10 +804,20 @@ impl ToolCardSnapshot {
     }
 
     /// A concise display summary; the original arguments remain in retained detail.
-    /// The arguments as the action line shows them, relative to the folder the call's
-    /// run used. Before the backend has reported one, the TUI's own working directory
-    /// stands in: the launcher starts the TUI and its backend in the same folder.
+    /// A recognised shell command reads as what it does, such as `Rust tests`. The
+    /// arguments are relative to the folder the call's run used. Before the backend has
+    /// reported one, the TUI's own working directory stands in: the launcher starts the
+    /// TUI and its backend in the same folder.
     pub fn display_arguments(&self) -> String {
+        match self.command_summary.filter(|_| self.name == "bash") {
+            Some(summary) => summary.label(),
+            None => self.action_line_arguments(),
+        }
+    }
+
+    /// The arguments as the action line shows them: like [`Self::display_arguments`], but
+    /// a shell command is always shown as typed, so the line reads `Ran cargo test`.
+    pub fn action_line_arguments(&self) -> String {
         if let Some(subject) = &self.mcp_subject {
             return subject.clone();
         }
@@ -795,16 +827,10 @@ impl ToolCardSnapshot {
                 .map(|root| root.display().to_string())
         });
         let Some(cwd) = cwd.as_deref().filter(|cwd| cwd.len() > 1) else {
-            return self
-                .command_summary
-                .filter(|_| self.name == "bash")
-                .map_or_else(|| self.action_arguments.clone(), CommandSummary::label);
+            return self.action_arguments.clone();
         };
         match self.name.as_str() {
-            "bash" => self.command_summary.map_or_else(
-                || workspace_relative_command(&self.action_arguments, cwd),
-                CommandSummary::label,
-            ),
+            "bash" => workspace_relative_command(&self.action_arguments, cwd),
             "read" | "edit" | "write" | "ls" => match self
                 .action_arguments
                 .strip_prefix(cwd)

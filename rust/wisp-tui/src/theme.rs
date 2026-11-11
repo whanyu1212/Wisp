@@ -177,6 +177,13 @@ impl Palette {
         Style::default().fg(color).add_modifier(Modifier::BOLD)
     }
 
+    /// The verb that opens a tool call's line: bold body text, or the error colour when
+    /// the call failed. Colour stays free to mean an outcome.
+    pub fn action_verb(self, failed: bool) -> Style {
+        let color = if failed { self.error } else { self.foreground };
+        Style::default().fg(color).add_modifier(Modifier::BOLD)
+    }
+
     pub fn tool_argument(self) -> Style {
         Style::default().fg(self.secondary)
     }

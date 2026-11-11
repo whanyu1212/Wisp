@@ -1884,8 +1884,8 @@ async fn click_toggles_a_card() {
     );
     let card = ui.state.transcript.entries().last().unwrap().id;
     let buffer = draw(&mut ui, 80, 24);
-    assert!(!row_text(&buffer, cell_of(&buffer, "Bash").1).contains("expand"));
-    let (x, y) = cell_of(&buffer, "Rust build");
+    assert!(!row_text(&buffer, cell_of(&buffer, "Ran").1).contains("expand"));
+    let (x, y) = cell_of(&buffer, "Ran cargo build");
 
     // A click folds the card without starting browse, so typing still reaches the prompt.
     plain_click(&mut ui, &writer, x, y).await;
@@ -1944,16 +1944,16 @@ async fn click_toggles_explored_group() {
         );
     }
     let buffer = draw(&mut ui, 80, 24);
-    let (x, y) = cell_of(&buffer, "Explore ▸ 2 actions");
+    let (x, y) = cell_of(&buffer, "Explored 2 actions");
     plain_click(&mut ui, &writer, x, y).await;
     let start = ui.state.transcript.entries()[1].id;
     assert!(ui.transcript_row_cache.fold().is_group_expanded(start));
     let opened = draw(&mut ui, 80, 24);
     assert!(row_text(&opened, cell_of(&opened, "a.rs").1).contains("Read"));
-    let (x, y) = cell_of(&opened, "Explore ▾ 2 actions");
+    let (x, y) = cell_of(&opened, "Explored 2 actions");
     plain_click(&mut ui, &writer, x, y).await;
     assert!(!ui.transcript_row_cache.fold().is_group_expanded(start));
-    cell_of(&draw(&mut ui, 80, 24), "Explore ▸ 2 actions");
+    cell_of(&draw(&mut ui, 80, 24), "Explored 2 actions");
 }
 
 #[tokio::test]
@@ -1976,7 +1976,7 @@ async fn click_toggles_consecutive_bash_group_and_member_details() {
         "clean",
     );
     let buffer = draw(&mut ui, 80, 24);
-    let (x, y) = cell_of(&buffer, "Bash    ▸ 2 commands");
+    let (x, y) = cell_of(&buffer, "Ran 2 commands");
     plain_click(&mut ui, &writer, x, y).await;
     let start = ui.state.transcript.entries()[1].id;
     assert!(ui.transcript_row_cache.fold().is_group_expanded(start));
@@ -1988,17 +1988,17 @@ async fn click_toggles_consecutive_bash_group_and_member_details() {
     assert!(ui.transcript_row_cache.fold().is_expanded(start));
     assert!(ui.transcript_row_cache.fold().is_group_expanded(start));
     let detailed = draw(&mut ui, 80, 24);
-    let (x, y) = cell_of(&detailed, "Bash    ▾ 2 commands");
+    let (x, y) = cell_of(&detailed, "Ran 2 commands");
     plain_click(&mut ui, &writer, x, y).await;
     assert!(!ui.transcript_row_cache.fold().is_group_expanded(start));
     let collapsed = draw(&mut ui, 80, 24);
-    let (x, y) = cell_of(&collapsed, "Bash    ▸ 2 commands");
+    let (x, y) = cell_of(&collapsed, "Ran 2 commands");
     // Only the closed header's preview names the commands; their rows are folded away.
     assert!(
         (0..collapsed.area.height)
             .map(|y| row_text(&collapsed, y))
             .filter(|row| row.contains("git status"))
-            .all(|row| row.contains("▸ 2 commands"))
+            .all(|row| row.contains("Ran 2 commands"))
     );
     plain_click(&mut ui, &writer, x, y).await;
     let reopened = draw(&mut ui, 80, 24);
@@ -2054,11 +2054,9 @@ async fn keyboard_browse_distinguishes_group_header_from_first_member() {
         );
         let text = match selected {
             BrowseTarget::Group(_) => {
-                if group_open {
-                    "▾ 2 commands"
-                } else {
-                    "▸ 2 commands"
-                }
+                // The header reads the same open or closed; the fold state is checked
+                // above and the hint names it.
+                "Ran 2 commands"
             }
             BrowseTarget::Entry(_) => "echo one",
             BrowseTarget::Output(_) => unreachable!("this fixture has no folded output"),
@@ -2106,7 +2104,7 @@ async fn group_selection_follows_new_start() {
     draw(&mut ui, 80, 24);
     assert_eq!(ui.browse_selected, Some(BrowseTarget::Group(late)));
     let buffer = draw(&mut ui, 80, 24);
-    let header = row_text(&buffer, cell_of(&buffer, "▾ 3 commands").1);
+    let header = row_text(&buffer, cell_of(&buffer, "Ran 3 commands").1);
     assert!(header.contains("(click to"), "{header}");
 
     ui.handle_input(
@@ -2191,7 +2189,7 @@ async fn scrolled_group_header_stays_on_top() {
     assert_eq!(ui.browse_selected, Some(BrowseTarget::Group(late)));
     assert_eq!(ui.transcript_viewport.scrolled_top(), Some(header(late)));
     let buffer = draw(&mut ui, 80, 12);
-    let selected = row_text(&buffer, cell_of(&buffer, "▾ 3 commands").1);
+    let selected = row_text(&buffer, cell_of(&buffer, "Ran 3 commands").1);
     assert!(selected.contains("(click to"), "{selected}");
 }
 
@@ -2209,7 +2207,7 @@ async fn click_keeps_its_pressed_card() {
     );
     let card = ui.state.transcript.entries().last().unwrap().id;
     let buffer = draw(&mut ui, 80, 12);
-    let (x, y) = cell_of(&buffer, "Rust build");
+    let (x, y) = cell_of(&buffer, "Ran cargo build");
 
     ui.handle_input(click(x, y), &writer, 8192).await.unwrap();
     // Output arriving before the release scrolls the card away from the pressed row.
@@ -2217,7 +2215,7 @@ async fn click_keeps_its_pressed_card() {
         .transcript
         .complete_message(1, "one\ntwo\nthree\nfour\nfive".into());
     let shifted = draw(&mut ui, 80, 12);
-    assert!(!row_text(&shifted, y).contains("Rust build"));
+    assert!(!row_text(&shifted, y).contains("Ran cargo build"));
     ui.handle_input(
         drag(MouseEventKind::Up(MouseButton::Left), x, y),
         &writer,

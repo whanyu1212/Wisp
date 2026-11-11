@@ -734,7 +734,7 @@ fn tool_activity_matches_the_mockup_across_themes_and_resize() {
                 if width >= 80 {
                     row_containing(&buffer, "linear/list_issues · astro");
                     row_containing(&buffer, "linear/get_issue · 5 calls");
-                    row_containing(&buffer, "npm test · npm run check");
+                    row_containing(&buffer, "npm test && npm run check");
                     row_containing(&buffer, "Browser tests · passed");
                 }
             }
@@ -1086,7 +1086,7 @@ fn thought_label_is_quiet_bold() {
         ui.color_depth = depth;
         let muted = depth.downconvert(ui.palette().muted);
         let buffer = draw(&mut ui, 80, 30);
-        let y = row_containing(&buffer, "◆  Thought for ");
+        let y = row_containing(&buffer, "◆ Thought for ");
         let label = column_of(&buffer, y, "Thought");
         assert_eq!(buffer[(label, y)].fg, muted, "{depth:?}");
         assert!(buffer[(label, y)].modifier.contains(Modifier::BOLD));
@@ -1193,7 +1193,7 @@ fn browse_selection_draws_band() {
         let palette = ui.palette();
         let band = depth.downconvert(palette.selected);
         let buffer = draw(&mut ui, 100, 40);
-        let y = row_containing(&buffer, "Rust tests");
+        let y = row_containing(&buffer, "Ran cargo test");
         // The band runs the transcript's width, rail and gutter included.
         assert_eq!(buffer[(2, y)].bg, band, "{depth:?}");
         let banded = (0..buffer.area.height)
@@ -1222,7 +1222,7 @@ fn reversed_selection_without_bands() {
         ui.no_color = no_color;
         ui.color_depth = depth;
         let buffer = draw(&mut ui, 100, 40);
-        let y = row_containing(&buffer, "Rust tests");
+        let y = row_containing(&buffer, "Ran cargo test");
         let reversed = (0..buffer.area.height)
             .filter(|&row| buffer[(10, row)].modifier.contains(Modifier::REVERSED))
             .collect::<Vec<_>>();

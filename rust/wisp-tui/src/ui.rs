@@ -861,11 +861,6 @@ fn render_transcript(
                 rows.drain(..rows.len() - tail_budget);
             }
         }
-        // A rule only separates two cards; with the card above it cut off, it would hang
-        // under the pinned prompt's gap.
-        if rows.len() > 1 && rows[0].kind == TranscriptRowKind::Rule {
-            rows.remove(0);
-        }
         let assistant_header = (tail_budget >= 2)
             .then(|| {
                 clipped_tail_assistant_header(state, &rows, row_cache, content_width, active_reply)
@@ -1459,15 +1454,13 @@ fn turn_rail(
     }
     // The gap that ends a turn, after its summary or a move, or before the next prompt,
     // is bare.
-    if matches!(
-        row.kind,
-        TranscriptRowKind::Spacer | TranscriptRowKind::Rule
-    ) && (entry.run_summary().is_some()
-        || entry.moved_to().is_some()
-        || state
-            .transcript
-            .entry_after(entry.id)
-            .is_some_and(|next| next.role == TranscriptRole::User))
+    if row.kind == TranscriptRowKind::Spacer
+        && (entry.run_summary().is_some()
+            || entry.moved_to().is_some()
+            || state
+                .transcript
+                .entry_after(entry.id)
+                .is_some_and(|next| next.role == TranscriptRole::User))
     {
         return None;
     }
@@ -1535,13 +1528,14 @@ fn render_transcript_row(
             Rect::new(area.x, area.y, 1, 1),
         );
     }
-    let gutter = match row.gutter {
-        RowGutter::None => None,
-        RowGutter::Connector => Some(RESULT_CONNECTOR),
-        RowGutter::Indent => Some(RESULT_INDENT),
-    };
-    // The gutter sits beside a code or diff row's fill rather than inside it.
-    if let Some(gutter) = gutter {
+    // A group member hangs under its group's line, then its own rows' gutter follows.
+    // Both sit beside a code or diff row's fill rather than inside it.
+    for gutter in [row.group_gutter, row.gutter] {
+        let gutter = match gutter {
+            RowGutter::None => continue,
+            RowGutter::Connector => RESULT_CONNECTOR,
+            RowGutter::Indent => RESULT_INDENT,
+        };
         let columns = u16::try_from(gutter.width())
             .unwrap_or(u16::MAX)
             .min(content.width);
@@ -1551,10 +1545,6 @@ fn render_transcript_row(
         );
         content.x += columns;
         content.width -= columns;
-    }
-    if row.kind == TranscriptRowKind::Rule {
-        // Preserve the existing viewport anchors, but separate routine tools with air.
-        return;
     }
     let diff = matches!(
         row.tone,
@@ -1595,7 +1585,7 @@ fn render_transcript_row(
     };
     // While the run is active, an in-progress marker animates as a spinner. The
     // shape changes rather than the brightness, so it reads the same in monochrome.
-    let spinner = pulse.map(|frame| format!("{}  ", spinner_frame(frame)));
+    let spinner = pulse.map(|frame| format!("{} ", spinner_frame(frame)));
     let label = matches!(
         row.kind,
         TranscriptRowKind::CardAction | TranscriptRowKind::CardGroup | TranscriptRowKind::Evidence
@@ -1643,13 +1633,27 @@ fn render_transcript_row(
         })
         .collect::<Vec<_>>();
     if let Some(label) = label {
-        // The chip has no fill, so the label's alignment padding can share its style.
-        let chip = palette.chip(spans[label].content.trim());
-        spans[label].style = on_row(spans[label].style.patch(chip));
+        let verb = palette.action_verb(row.tone == TranscriptRowTone::Error);
+        spans[label].style = on_row(spans[label].style.patch(verb));
     }
     if let Some(mode) = mode {
         let style = palette.run_mode(spans[mode].content.trim());
         spans[mode].style = on_row(spans[mode].style.patch(style));
+    }
+    // The time follows the row's text after one space, and a selected row's hint comes
+    // after it, so selecting a row never moves its time. The row reserved both.
+    // A finished call's time is muted; a running call's ticks in the running colour.
+    let live = live_elapsed.map(|elapsed| {
+        crate::tool_cards::format_duration(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+    });
+    let trailing = match (row.trailing.as_deref(), live.as_deref()) {
+        (Some(trailing), _) => Some((trailing, palette.muted)),
+        (None, Some(live)) => Some((live, palette.secondary)),
+        (None, None) => None,
+    };
+    if let Some((text, color)) = trailing {
+        spans.push(Span::styled(" ", on_row(base)));
+        spans.push(Span::styled(text.to_owned(), on_row(base.fg(color))));
     }
     if let Some(hint) = row.fold_hint.text().filter(|_| selected) {
         spans.push(Span::styled(hint, on_row(base.fg(palette.muted))));
@@ -1671,24 +1675,6 @@ fn render_transcript_row(
                 .set_symbol(arrow.symbol())
                 .set_style(on_row(Style::default().fg(palette.muted)));
         }
-    }
-    // A finished call's time is muted; a running call's ticks in the running colour.
-    let live = live_elapsed.map(|elapsed| {
-        crate::tool_cards::format_duration(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
-    });
-    let trailing = match (row.trailing.as_deref(), live.as_deref()) {
-        (Some(trailing), _) => Some((trailing, palette.muted)),
-        (None, Some(live)) => Some((live, palette.secondary)),
-        (None, None) => None,
-    };
-    if let Some((text, color)) = trailing {
-        let columns = u16::try_from(text.width())
-            .unwrap_or(u16::MAX)
-            .min(content.width);
-        frame.render_widget(
-            Paragraph::new(Span::styled(text.to_owned(), on_row(base.fg(color)))),
-            Rect::new(content.right() - columns, content.y, columns, 1),
-        );
     }
 }
 
@@ -4898,15 +4884,20 @@ mod tests {
         let text = (0..buffer.area.width)
             .map(|x| buffer[(x, row)].symbol())
             .collect::<String>();
-        // The card's own clock ticks at the right edge in the running colour.
+        // The card's own clock ticks right after its command, in the running colour.
         let end = (0..buffer.area.width)
             .rev()
             .find(|&x| buffer[(x, row)].symbol() == "s")
             .expect("timer");
+        // The timer starts one column after the command.
+        let start = text.find("sleep 5").unwrap() + "sleep 5 ".len();
+        assert!(text.contains("Running sleep 5 "), "{text}");
         assert!(
-            usize::from(end) > text.find("sleep 5").unwrap() + 10,
+            text[start..].starts_with(|c: char| c.is_ascii_digit() || c == '<'),
             "{text}"
         );
+        // `end` is a column; the rail and spinner are multi-byte, so count characters.
+        assert!(usize::from(end) > text[..start].chars().count(), "{text}");
         assert_eq!(
             buffer[(end, row)].fg,
             Palette::default().secondary,
@@ -6330,34 +6321,34 @@ mod tests {
         let mut cache = TranscriptRowCache::default();
         let screen = draw_cards(&state, &mut cache);
         assert!(
-            // The preview uses each command's own row text, which names `cargo test`.
-            screen.contains("Bash    ▸ 2 commands · cargo fmt, Rust tests"),
+            // The preview uses each command's own row text.
+            screen.contains("Ran 2 commands · cargo fmt, cargo test"),
             "{screen}"
         );
         assert_eq!(screen.matches("cargo fmt").count(), 1, "{screen}");
         cache.fold_mut().expand_group(first);
         let screen = draw_cards(&state, &mut cache);
         assert!(
-            screen.contains("✓  MCP     ▸ linear/list_issues · HY-0"),
+            screen.contains("• Called linear/list_issues · HY-0"),
             "{screen}"
         );
         assert!(
-            screen.contains("✓  MCP     ▸ linear/get_issue · 3 calls"),
+            screen.contains("• Called linear/get_issue · 3 calls"),
             "{screen}"
         );
         assert!(
-            screen.contains("✓  MCP     ▸ linear/save_issue · 2 calls"),
+            screen.contains("• Called linear/save_issue · 2 calls"),
             "{screen}"
         );
         // Expanding the group reveals every command's individual row.
         assert!(
-            screen.contains("cargo fmt") && screen.contains("Rust tests"),
+            screen.contains("cargo fmt") && screen.contains("cargo test"),
             "{screen}"
         );
     }
 
     #[test]
-    fn mcp_group_draws_chip() {
+    fn mcp_group_draws_verb() {
         let mut state = UiState::unconfigured();
         state.transcript.append_prompt("plan".into());
         for (call_id, id) in [("g1", "HY-1"), ("g2", "HY-2")] {
@@ -6379,9 +6370,10 @@ mod tests {
             })
             .unwrap();
         let palette = Palette::default();
-        let (chip_fg, _, _) = style_at_text(terminal.backend(), "MCP ").unwrap();
-        assert_eq!(Some(chip_fg), palette.chip("MCP").fg);
-        let (marker_fg, _, _) = style_at_text(terminal.backend(), "✓").unwrap();
+        let (verb_fg, _, verb) = style_at_text(terminal.backend(), "Called ").unwrap();
+        assert_eq!(Some(verb_fg), palette.action_verb(false).fg);
+        assert!(verb.contains(Modifier::BOLD));
+        let (marker_fg, _, _) = style_at_text(terminal.backend(), "•").unwrap();
         assert_eq!(marker_fg, palette.success);
     }
 
@@ -6395,14 +6387,14 @@ mod tests {
         let mut cache = TranscriptRowCache::default();
         let screen = draw_cards(&state, &mut cache);
         assert!(
-            screen.contains("MCP     ▸ linear/get_issue · HY-2 · 1 of 2 done"),
+            screen.contains("Calling linear/get_issue · HY-2 · 1 of 2 done"),
             "{screen}"
         );
         // The cached header follows a later member's result.
         finish_call(&mut state, "g2", "mcp__linear__get_issue");
         let screen = draw_cards(&state, &mut cache);
         assert!(
-            screen.contains("✓  MCP     ▸ linear/get_issue · 2 calls"),
+            screen.contains("• Called linear/get_issue · 2 calls"),
             "{screen}"
         );
         assert!(!screen.contains("of 2 done"), "{screen}");
@@ -6424,9 +6416,7 @@ mod tests {
             });
         let screen = draw_cards(&state, &mut TranscriptRowCache::default());
         assert!(
-            screen.contains(
-                "?  MCP     ▸ linear/save_issue · HY-2 · 1 of 2 done · awaiting approval"
-            ),
+            screen.contains("? Call linear/save_issue · HY-2 · 1 of 2 done · awaiting approval"),
             "{screen}"
         );
     }
@@ -6458,10 +6448,7 @@ mod tests {
             })
             .unwrap();
         let screen = terminal.backend().to_string();
-        assert!(
-            screen.contains("✓  MCP     ▸ linear/… · 3 calls"),
-            "{screen}"
-        );
+        assert!(screen.contains("• Called linear/… · 3 calls"), "{screen}");
     }
 
     #[test]
@@ -6504,11 +6491,11 @@ mod tests {
         };
         let wide = screen(80);
         assert!(
-            wide.contains("▸ 5 commands · git status, git diff --stat +3"),
+            wide.contains("Ran 5 commands · git status, git diff --stat +3"),
             "{wide}"
         );
-        let narrow = screen(36);
-        assert!(narrow.contains("▸ 5 commands"), "{narrow}");
+        let narrow = screen(31);
+        assert!(narrow.contains("Ran 5 commands"), "{narrow}");
         assert!(!narrow.contains("git status"), "{narrow}");
     }
 
@@ -6530,7 +6517,7 @@ mod tests {
         }
         let screen = draw_cards(&state, &mut TranscriptRowCache::default());
         assert!(
-            screen.contains("▸ 2 actions · read src/a.rs, read src/b.rs"),
+            screen.contains("Explored 2 actions · read src/a.rs, read src/b.rs"),
             "{screen}"
         );
     }
@@ -6553,7 +6540,7 @@ mod tests {
         let mut cache = TranscriptRowCache::default();
         let screen = draw_cards(&state, &mut cache);
         assert!(
-            screen.contains("▸ 2 actions · read src/a.rs +1"),
+            screen.contains("Explored 2 actions · read src/a.rs +1"),
             "{screen}"
         );
     }
@@ -6701,7 +6688,8 @@ mod tests {
         let short = draw(3);
         let text = short.to_string();
         assert!(!text.contains("Command exited"), "{text}");
-        assert!(text.contains("│  line 0"), "{text}");
+        // The action line already names the command, so the output opens the details.
+        assert!(text.contains("│└ line 0"), "{text}");
         assert_eq!(style_at_text(&short, "line 0").unwrap().1, palette.surface);
         assert_eq!(style_at_text(&short, "exit 3").unwrap().1, palette.surface);
 
@@ -6730,7 +6718,7 @@ mod tests {
     }
 
     #[test]
-    fn fold_arrows_share_a_column() {
+    fn verbs_share_a_column() {
         let mut state = UiState::unconfigured();
         state.transcript.append_prompt("run".into());
         for (call_id, command) in [("b1", "cargo fmt"), ("b2", "cargo check")] {
@@ -6761,9 +6749,12 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing {needle:?}: {screen}"));
             line[..line.find(needle).unwrap()].chars().count()
         };
-        // A group and a single foldable card put the arrow, then their text, in the
-        // same columns.
-        assert_eq!(column("▸ 2 commands"), column("▸ README.md"), "{screen}");
+        // A group and a single card start their verbs in the same column.
+        assert_eq!(
+            column("Ran 2 commands"),
+            column("Read README.md"),
+            "{screen}"
+        );
     }
 
     #[test]
@@ -6783,16 +6774,13 @@ mod tests {
         result.duration_ms = Some(252_000);
         state.transcript.observe_tool_result(result);
         let screen = draw_cards(&state, &mut TranscriptRowCache::default());
-        // The duration sits in a right-aligned column, off the action text.
+        // The duration follows the action text, set apart by a space.
         let row = screen
             .lines()
-            .find(|line| line.contains("Rust tests"))
+            .find(|line| line.contains("cargo test"))
             .expect("action row");
         assert!(!row.contains("· 4m 12s"), "{screen}");
-        assert!(
-            row.trim_end_matches(['"', ' ']).ends_with("4m 12s"),
-            "{screen}"
-        );
+        assert!(row.contains("Ran cargo test 4m 12s"), "{screen}");
     }
 
     #[test]
@@ -6888,6 +6876,7 @@ mod tests {
             tone: TranscriptRowTone::Default,
             spans: Vec::new(),
             gutter: RowGutter::None,
+            group_gutter: RowGutter::None,
             fold_hint: crate::transcript_view::FoldHint::None,
             fold_arrow: None,
             trailing: None,
@@ -6940,8 +6929,8 @@ mod tests {
         let lines = screen.lines().collect::<Vec<_>>();
         let card = lines
             .iter()
-            .position(|line| line.contains("Bash"))
-            .expect("card row");
+            .position(|line| line.contains("Running cargo test"))
+            .unwrap_or_else(|| panic!("{screen}"));
         let summary = lines
             .iter()
             .position(|line| line.contains("╰4.0s · 1 tool · cancelled"))
@@ -6968,7 +6957,7 @@ mod tests {
             .observe_approval_resolved("s2", false, None);
         let screen = draw_cards(&state, &mut TranscriptRowCache::default());
         assert!(
-            screen.contains("⊘  MCP     ▸ linear/save_issue · 2 calls · denied"),
+            screen.contains("⊘ Called linear/save_issue · 2 calls · denied"),
             "{screen}"
         );
     }
@@ -6990,7 +6979,7 @@ mod tests {
         assert!(screen.contains("3 calls"), "{screen}");
         for id in ["HY-1", "HY-2", "HY-3"] {
             assert!(
-                screen.contains(&format!("✓  MCP     ▸ linear/get_issue · {id}")),
+                screen.contains(&format!("• Called linear/get_issue · {id}")),
                 "{screen}"
             );
         }
@@ -7013,7 +7002,7 @@ mod tests {
             result.name = "bash".into();
             state.transcript.observe_tool_result(result);
         }
-        // `Process` fills the label width, so its chip borrows the gap's first space instead.
+        // A background poll follows the group.
         state
             .transcript
             .observe_tool_call(crate::tool_cards::ToolCallInput {
@@ -7051,44 +7040,36 @@ mod tests {
             .iter()
             .position(|line| line.contains("cargo fmt"))
             .unwrap();
-        // A plain row separates the prompt from the persistent group header, and a rule
-        // separates the header from its first member as it does the later members.
-        assert!(lines[first - 2].contains("▾ 2 commands"), "{screen}");
+        // A plain row separates the prompt from the persistent group header, and the
+        // first member hangs directly under the header.
+        assert!(lines[first - 1].contains("Ran 2 commands"), "{screen}");
+        assert!(lines[first].contains("└ • Ran cargo fmt"), "{screen}");
         assert!(
-            lines[first - 1].trim_matches(['"', ' ', '│']).is_empty(),
+            lines[first - 2].trim_matches(['"', ' ']).is_empty(),
             "{screen}"
         );
-        assert!(lines[first - 1].contains('│'), "{screen}");
-        assert!(
-            lines[first - 3].trim_matches(['"', ' ']).is_empty(),
-            "{screen}"
-        );
-        assert!(
-            lines[first + 1].trim_matches(['"', ' ', '│']).is_empty(),
-            "{screen}"
-        );
-        assert!(lines[first + 1].contains('│'), "{screen}");
-        assert!(lines[first + 2].contains("Rust tests"), "{screen}");
+        // Collapsed members stack with no row between them.
+        assert!(lines[first + 1].contains("  • Ran cargo test"), "{screen}");
         let palette = Palette::default();
         let user_bg = palette.user_text().bg;
-        let gap_row = u16::try_from(first - 3).unwrap();
+        let gap_row = u16::try_from(first - 2).unwrap();
         assert_ne!(
             Some(terminal.backend().buffer()[(5, gap_row)].bg),
             user_bg,
             "{screen}"
         );
-        let chip = palette.chip("Process");
+        let chip = palette.action_verb(false);
         let buffer = terminal.backend().buffer();
         let (x, y) = (0..buffer.area.height)
             .find_map(|y| {
                 let row = (0..buffer.area.width)
                     .map(|x| buffer[(x, y)].symbol())
                     .collect::<String>();
-                row.find("Process")
+                row.find("Background")
                     .map(|byte| (u16::try_from(row[..byte].chars().count()).unwrap(), y))
             })
             .expect("process card");
-        // The chip colours the name alone: no fill, so its cells match the row around it.
+        // The label is styled alone: no fill, so its cells match the row around it.
         assert_eq!(Some(buffer[(x, y)].fg), chip.fg, "{screen}");
         assert!(buffer[(x, y)].modifier.contains(Modifier::BOLD), "{screen}");
         assert_eq!(buffer[(x, y)].bg, buffer[(x - 2, y)].bg, "{screen}");
@@ -7132,20 +7113,20 @@ mod tests {
             pending
                 .backend()
                 .to_string()
-                .contains("Read      README.md · awaiting approval")
+                .contains("Read README.md · awaiting approval")
         );
         let palette = Palette::default();
         let (pending_fg, _, pending_modifiers) =
-            style_at_text(pending.backend(), "Read      README.md").unwrap();
-        let chip = palette.chip("Read");
-        assert_eq!(Some(pending_fg), chip.fg);
+            style_at_text(pending.backend(), "Read README.md").unwrap();
+        let verb = palette.action_verb(false);
+        assert_eq!(Some(pending_fg), verb.fg);
         // Awaiting approval is marked by shape as well as colour.
         assert_eq!(
-            style_at_text(pending.backend(), "?  Read").unwrap().0,
+            style_at_text(pending.backend(), "? Read").unwrap().0,
             Palette::default().primary
         );
         assert!(pending_modifiers.contains(Modifier::BOLD));
-        // The note names the state outside the chip, in the row's muted text.
+        // The note names the state after the verb, in the row's muted text.
         assert_eq!(
             style_at_text(pending.backend(), "awaiting approval")
                 .unwrap()
@@ -7160,30 +7141,22 @@ mod tests {
             .transcript
             .observe_tool_result(tool_result("call-1", "contents"));
         let complete = draw(&state);
-        assert!(
-            complete
-                .backend()
-                .to_string()
-                .contains("Read    ▸ README.md")
-        );
+        assert!(complete.backend().to_string().contains("Read README.md"));
         assert!(!complete.backend().to_string().contains("contents"));
         let (success_fg, success_bg, success_modifiers) =
-            style_at_text(complete.backend(), "Read    ▸ README.md").unwrap();
-        assert_eq!(Some(success_fg), chip.fg);
-        // The chip has no fill, so the label sits on the row's own background.
+            style_at_text(complete.backend(), "Read README.md").unwrap();
+        assert_eq!(Some(success_fg), verb.fg);
+        // The verb has no fill, so it sits on the row's own background.
         assert_eq!(
             success_bg,
             style_at_text(complete.backend(), "README.md").unwrap().1
         );
-        // Only the card selected in browse shows how to expand it; every foldable
-        // card shows its muted arrow.
+        // Only the card selected in browse shows how to expand it, and the verb gap
+        // draws no arrow.
         assert!(!complete.backend().to_string().contains("to expand"));
+        assert!(!complete.backend().to_string().contains('▸'));
         assert_eq!(
-            style_at_text(complete.backend(), "▸ README.md").unwrap().0,
-            palette.muted
-        );
-        assert_eq!(
-            style_at_text(complete.backend(), "✓  Read").unwrap().0,
+            style_at_text(complete.backend(), "• Read").unwrap().0,
             Palette::default().success
         );
         assert_eq!(
@@ -7212,9 +7185,28 @@ mod tests {
         shell_result.name = "bash".into();
         shell.transcript.observe_tool_result(shell_result);
         let shell = draw(&shell);
-        let command = style_at_text(shell.backend(), "Rust tests").unwrap();
-        assert_eq!(command.0, Palette::default().secondary);
-        assert!(!command.2.contains(Modifier::BOLD));
+        // The command is syntax-highlighted in place, without weight.
+        let buffer = shell.backend().buffer();
+        let (x, y) = (0..buffer.area.height)
+            .find_map(|y| {
+                let row = (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>();
+                row.find("cargo test --workspace")
+                    .map(|byte| (u16::try_from(row[..byte].chars().count()).unwrap(), y))
+            })
+            .expect("shell action row");
+        let cells = (x..x + 22).map(|x| &buffer[(x, y)]).collect::<Vec<_>>();
+        let colours = cells
+            .iter()
+            .map(|cell| cell.fg)
+            .collect::<std::collections::HashSet<_>>();
+        assert!(colours.len() >= 2, "{colours:?}");
+        assert!(
+            cells
+                .iter()
+                .all(|cell| !cell.modifier.contains(Modifier::BOLD))
+        );
     }
 
     fn render_edit_card(arguments: serde_json::Value, width: u16) -> (String, TestBackend) {
@@ -7327,7 +7319,7 @@ mod tests {
             110,
         );
         assert!(
-            rendered.contains("Edit      src/wisp/providers/google.py  +3 -3"),
+            rendered.contains("Edited src/wisp/providers/google.py  +3 -3"),
             "{rendered}"
         );
         assert!(rendered.contains("− retain portable"), "{rendered}");
@@ -7455,10 +7447,7 @@ mod tests {
 
         let collapsed = render_to_string(80, 20, &state, &PromptEditor::default());
         // Counts sit on the action line; the card has no `M path` heading or `@@` rows.
-        assert!(
-            collapsed.contains("Edit      file.txt  +1 -1"),
-            "{collapsed}"
-        );
+        assert!(collapsed.contains("Edited file.txt  +1 -1"), "{collapsed}");
         assert!(!collapsed.contains("M file.txt"));
         assert!(!collapsed.contains("@@"));
         assert!(!collapsed.contains("No newline"));
@@ -7593,6 +7582,7 @@ mod tests {
             tone: TranscriptRowTone::Success,
             spans,
             gutter,
+            group_gutter: RowGutter::None,
             fold_hint,
             fold_arrow: None,
             trailing: None,
@@ -7659,7 +7649,7 @@ mod tests {
             assert!(screen.contains("└ out"), "{screen}");
 
             let (fg, bg, modifiers) = style_at_text(terminal.backend(), "Read ").unwrap();
-            let chip = palette.chip("Read");
+            let chip = palette.action_verb(false);
             assert!(modifiers.contains(Modifier::BOLD));
             assert!(!modifiers.contains(Modifier::REVERSED));
             if !no_color {
@@ -7673,6 +7663,90 @@ mod tests {
                 palette.muted
             );
         }
+    }
+
+    #[test]
+    fn failed_command_draws_peek() {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_prompt("lint".into());
+        state
+            .transcript
+            .observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: "b1".into(),
+                name: "bash".into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+                arguments: json!({"command": "cargo clippy"}),
+            });
+        let mut result = tool_result("b1", "Command exited with code 1: checking\nerror: foo");
+        result.name = "bash".into();
+        result.is_error = true;
+        result.exit_code = Some(1);
+        result.output_has_exit_status = true;
+        state.transcript.observe_tool_result(result);
+        let screen = draw_cards(&state, &mut TranscriptRowCache::default());
+        let lines = screen.lines().collect::<Vec<_>>();
+        let action = lines
+            .iter()
+            .position(|line| line.contains("✗ Ran cargo clippy"))
+            .unwrap_or_else(|| panic!("{screen}"));
+        assert!(lines[action + 1].contains("│└ error: foo"), "{screen}");
+        assert!(lines[action + 2].contains("│  + 1 more line"), "{screen}");
+    }
+
+    #[test]
+    fn selection_keeps_time_in_place() {
+        let palette = Palette::default();
+        let anchor = RowAnchor {
+            entry_id: TranscriptEntryId::from_raw(1),
+            position: crate::transcript_view::RowPosition::Header,
+        };
+        let row = TranscriptRow {
+            anchor,
+            role: TranscriptRole::Tool,
+            kind: TranscriptRowKind::CardAction,
+            tone: TranscriptRowTone::Success,
+            spans: vec![crate::markdown::TranscriptSpan {
+                link: None,
+                text: "• Ran cargo test".into(),
+                affinity: crate::markdown::SourceAffinity::default(),
+                style: TranscriptSpanStyle::default(),
+            }],
+            gutter: RowGutter::None,
+            group_gutter: RowGutter::None,
+            fold_hint: crate::transcript_view::FoldHint::Expand,
+            fold_arrow: None,
+            trailing: Some("4m 12s".into()),
+            live_timer: false,
+        };
+        let mut terminal = Terminal::new(TestBackend::new(60, 2)).unwrap();
+        terminal
+            .draw(|frame| {
+                for (y, selected) in [None, Some(anchor)].into_iter().enumerate() {
+                    render_transcript_row(
+                        frame,
+                        Rect::new(0, y as u16, 60, 1),
+                        row.clone(),
+                        selected,
+                        false,
+                        palette,
+                        None,
+                        None,
+                        None,
+                        None,
+                        &mut Vec::new(),
+                    );
+                }
+            })
+            .unwrap();
+        let line = |y: u16| {
+            (0..60)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        };
+        let (plain, selected) = (line(0), line(1));
+        // Selecting the row adds its hint after the time, not before it.
+        assert_eq!(plain.find("4m 12s"), selected.find("4m 12s"), "{selected}");
+        assert!(selected.contains("4m 12s (→ to expand)"), "{selected}");
     }
 
     #[test]
@@ -7702,6 +7776,7 @@ mod tests {
                     },
                 }],
                 gutter: RowGutter::None,
+                group_gutter: RowGutter::None,
                 fold_hint: crate::transcript_view::FoldHint::None,
                 fold_arrow: None,
                 trailing: None,
@@ -8182,17 +8257,21 @@ mod tests {
         let collapsed = render_bash_card(command, Some((false, None)), 40, false);
         let action = collapsed
             .lines()
-            .find(|line| line.contains("✓  Bash"))
+            .find(|line| line.contains("• Ran"))
             .expect("action row");
-        assert!(action.contains("Rust tests"), "{collapsed}");
+        assert!(action.contains("Ran cargo test"), "{collapsed}");
+        assert!(action.contains('…'), "{collapsed}");
         assert!(!collapsed.contains("a_very_long_test_name"), "{collapsed}");
 
+        // Expanded, the command wraps whole instead.
         let expanded = render_bash_card(command, Some((false, None)), 40, true);
-        let action = expanded
-            .lines()
-            .find(|line| line.contains("✓  Bash"))
-            .expect("action row");
-        assert!(!action.contains('…'), "{expanded}");
+        assert!(
+            expanded
+                .lines()
+                .filter(|line| line.contains("nocapture"))
+                .all(|line| !line.contains('…')),
+            "{expanded}"
+        );
         assert!(expanded.contains("ong_test_name"), "{expanded}");
 
         // A diff's change counts stay visible when its path is cut.
@@ -8208,7 +8287,7 @@ mod tests {
         );
         let diff_action = diff
             .lines()
-            .find(|line| line.contains("Edit  "))
+            .find(|line| line.contains("• Edited"))
             .expect("diff action row");
         assert!(diff_action.contains('…'), "{diff}");
         assert!(diff_action.contains("+1 -1"), "{diff}");
@@ -8218,7 +8297,7 @@ mod tests {
     fn each_tool_state_renders_its_marker_at_thirty_columns() {
         for (result, marker) in [
             (None, "●"),
-            (Some((false, None)), "✓"),
+            (Some((false, None)), "•"),
             (Some((true, None)), "✗"),
             (Some((false, Some("cancelled"))), "⊘"),
         ] {
@@ -8604,7 +8683,7 @@ mod tests {
                         "{outcome}"
                     );
                     let marker = match outcome {
-                        "success" => "✓",
+                        "success" => "•",
                         "error" => "✗",
                         _ => "⊘",
                     };

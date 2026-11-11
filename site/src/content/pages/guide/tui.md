@@ -89,6 +89,15 @@ Replies that omit a table header are also supported: a paragraph beginning with 
 complete, pipe-enclosed rows with the same number of columns renders as a table without a header.
 Single rows, mismatched columns, and pipe syntax inside code remain literal.
 
+Tool calls read as a list of actions. Each is one line: a status mark (`•` done, `✗` failed, `⊘`
+denied or cancelled, `?` awaiting approval, a spinner while it runs), a verb and what it acted on,
+such as `• Ran cargo test 3.2s` or `• Read src/retry.rs`, then how long it took. Shell commands
+are shown as typed, with syntax highlighting. Consecutive reads, searches and listings fold into
+one `Explored` line, repeated commands into `Ran N commands`, and repeated MCP calls into one line
+with a count; opening a group hangs its calls under it on `└` rows. Collapsed calls stack with no
+blank row between them. A failed command also shows the last line it printed and how many more
+there are. Select a line with `F6` and press `→`, or click it, to show its details.
+
 Images are named rather than drawn. An image pasted or dragged into the composer shows as a chip
 such as `Image 1 · 640×480`, and the sent prompt shows a `[image 640×480 png]` line for it. A tool
 card whose result returned images, such as a `read` of a PNG, ends its action row with the same
@@ -270,7 +279,7 @@ and new content side by side.
 Rust supports `/theme` and `/theme <name>` with curated Vapor, Glass, Orchid, Ember, Storm,
 Grove, Wave, Paper, and Dawn palettes. Paper is the main light theme (`wisp-light` internally), with
 Dawn as a warmer light alternative. Each palette uses coordinated diff backgrounds and word
-highlights; user panels and tool chips stay subdued. Glass leaves the main canvas on the terminal's
+highlights; user panels and tool lines stay subdued. Glass leaves the main canvas on the terminal's
 default background, with smoky graphite surfaces and luminous ice, lilac, and mint accents. Configure
 opacity, wallpaper, and blur in the terminal emulator; Wisp does not simulate those effects.
 

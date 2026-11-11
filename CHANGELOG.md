@@ -129,6 +129,21 @@ this policy.
   instead of in the right-hand column, then its first line as before.
 - A turn's summary row opens with its mode in a colour of its own: the warning colour for Plan and
   the accent for other modes. (HY-484)
+- Tool calls are verb-first lines: a status bullet (`•` replaces `✓` for a finished call), a bold
+  verb in the form the call's state calls for (`Running`, `Ran`, or `Run … · denied`), what it
+  acted on, then its duration, which moves next to the text from the far-right column. The per-tool
+  label colours go; a failed call's verb is red. Shell commands show as typed and syntax
+  highlighted rather than as a summary such as `Rust tests`, and background processes read
+  `Background <task>`.
+- Groups keep their kinds and read `Explored N actions` (`Exploring` while a call runs),
+  `Ran N commands`, or `Called <tool> · N calls`. An open group's calls hang under it on `└` rows, with no blank row after the header.
+- Consecutive collapsed calls stack with no blank row between them; a call showing rows below it
+  still keeps one, and so does a card that closes a turn. A collapsed failed command shows its
+  last output line, without the backend's exit-status prefix, and `+ N more lines`; the rows stay
+  selectable text, and the action line still folds the card. An expanded shell card no longer
+  repeats its command on a row of its own.
+- Tool and group lines no longer draw a `▸`/`▾` fold arrow; clicking a line, `→`/`←` in browse,
+  and the selected line's hint still fold it. (HY-489)
 
 <!-- Keeps links to the pre-release "0.7.0 — Unreleased" heading working. -->
 <a id="070--unreleased"></a>
