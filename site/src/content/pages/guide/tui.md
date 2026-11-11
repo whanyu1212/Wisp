@@ -112,6 +112,9 @@ line that names what it does and counts the calls it makes as they finish, such 
 the script's first lines, numbered, then one `└` row per call (repeated calls to one tool share a
 row, and a failed one says why), then what the script returned. A failed script shows what
 stopped it under its line, like a failed command. Scripts are never folded into other groups.
+Select a script with `F6` and press `Enter` for its full details: the whole script, numbered and
+highlighted, every call it made with its arguments, outcome, and duration, and its complete
+output. The view keeps up while the script runs, and `Esc` closes it.
 
 Images are named rather than drawn. An image pasted or dragged into the composer shows as a chip
 such as `Image 1 · 640×480`, and the sent prompt shows a `[image 640×480 png]` line for it. A tool

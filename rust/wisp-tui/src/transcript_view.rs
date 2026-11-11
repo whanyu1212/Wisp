@@ -3731,7 +3731,7 @@ fn push_script_calls(
 
 /// A call's row as a direct call of the same tool would read: its mark, verb and
 /// what it acted on, relative to the script's own folder.
-fn script_call_action(
+pub(crate) fn script_call_action(
     card: &crate::tool_cards::ToolCardSnapshot,
     call: &crate::script_card::ScriptCall,
 ) -> String {

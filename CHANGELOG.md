@@ -145,6 +145,11 @@ this policy.
   row, a failed call with why), then what it returned. A failed script shows what stopped it.
   Scripts never join `Explored` or `Ran N` groups, and a reopened session draws the same card.
   The model can give each script a `title`, which only the card shows. (HY-499)
+- A script card has a full-screen details view: select it with `F6` and press `Enter`. It shows
+  the whole script as the card keeps it (up to 16 KiB), numbered and highlighted as Python; every
+  recorded call, numbered, with its arguments, outcome, error, and duration, and how many calls the
+  record leaves out; and the script's complete retained output. It follows a running script as
+  calls arrive and works the same in a reopened session. (HY-508)
 - A selected row is drawn as a full-width band in a new `selected` theme tier, one step past the
   prompt's band, with bold text in pickers and lists. It replaces the primary-colour fill, and the
   row picked in browse mode now shows the band too. Text on the band keeps its colour where it

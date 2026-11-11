@@ -56,6 +56,7 @@ mod runtime;
 #[cfg(test)]
 mod runtime_tests;
 mod script_card;
+mod script_detail;
 #[cfg(test)]
 mod session_catalog_tests;
 mod session_picker;
@@ -1570,7 +1571,7 @@ impl LiveUi {
             if self
                 .detail_view
                 .selected_entry()
-                .is_some_and(|entry_id| retained_detail(&self.state, entry_id).is_none())
+                .is_some_and(|entry_id| !has_details(&self.state, entry_id))
             {
                 self.detail_view.close();
                 self.state.history.active_exact_detail = None;
@@ -3310,6 +3311,12 @@ impl LiveUi {
         let Some(BrowseTarget::Entry(entry_id)) = self.browse_selected else {
             return;
         };
+        if script_detail::script_card(&self.state, entry_id).is_some() {
+            self.detail_view.open_script(entry_id);
+            self.notice = None;
+            self.render_pending = true;
+            return;
+        }
         let Some(presentation) = retained_detail(&self.state, entry_id) else {
             self.reconcile_browse_selection();
             return;
@@ -4186,6 +4193,20 @@ impl LiveUi {
             self.open_card_file(entry_id);
             return LoopControl::Continue;
         }
+        if script_detail::script_card(&self.state, entry_id).is_some() {
+            let script = &mut self.detail_view.script;
+            match key.code {
+                KeyCode::Up => script.scroll_lines(-1),
+                KeyCode::Down => script.scroll_lines(1),
+                KeyCode::PageUp => script.page_up(),
+                KeyCode::PageDown => script.page_down(),
+                KeyCode::Home => script.home(),
+                KeyCode::End => script.end(),
+                _ => return LoopControl::Continue,
+            }
+            self.render_pending = true;
+            return LoopControl::Continue;
+        }
         let Some(presentation) = retained_detail(&self.state, entry_id) else {
             self.detail_view.close();
             self.browse_selected = None;
@@ -4282,7 +4303,7 @@ impl LiveUi {
                 }
                 let selected = self.browse_selected.map(BrowseTarget::entry_id);
                 let has_detail = selected.is_some_and(|entry_id| {
-                    retained_detail(&self.state, entry_id).is_some()
+                    has_details(&self.state, entry_id)
                         || self
                             .state
                             .transcript
@@ -5777,6 +5798,13 @@ fn retained_detail(
         return None;
     };
     Some(presentation)
+}
+
+/// Whether `entry_id` has details to show now: a retained presentation, or a
+/// script card's, which is built from the card itself.
+fn has_details(state: &UiState, entry_id: TranscriptEntryId) -> bool {
+    script_detail::script_card(state, entry_id).is_some()
+        || retained_detail(state, entry_id).is_some()
 }
 
 /// The queue kind, text and images of a steering or follow-up submission.

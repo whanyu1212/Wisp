@@ -1803,6 +1803,13 @@ pub fn render_detail_overlay(
     view: &mut DetailView,
     palette: Palette,
 ) {
+    if let Some(card) = view
+        .selected_entry()
+        .and_then(|entry_id| crate::script_detail::script_card(state, entry_id))
+    {
+        crate::script_detail::render(frame, area, &mut view.script, card, palette);
+        return;
+    }
     if let Some(presentation) = selected_detail(state, view) {
         render_detail(frame, area, view, presentation, palette);
     }
