@@ -220,7 +220,8 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
 
 ## Implementation conventions
 
-- Target Python 3.12+ and preserve strict typing.
+- Target Python 3.11+ and preserve strict typing. Without the `type` statement, name aliases with
+  `typing_extensions.TypeAliasType` (as `type` did) and declare `TypeVar`s for generics.
 - Prefer small typed data structures and explicit lifecycle transitions over untyped dictionaries
   outside provider protocol boundaries.
 - Preserve runtime compatibility for optional provider capabilities. Do not assume every third-party

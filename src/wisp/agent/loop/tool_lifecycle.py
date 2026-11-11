@@ -11,6 +11,7 @@ from datetime import timedelta
 from types import TracebackType
 
 import anyio
+from typing_extensions import TypeAliasType
 
 from wisp.agent.tool_contracts import (
     PreparedToolExecution,
@@ -29,14 +30,15 @@ from wisp.events import (
 )
 from wisp.providers.events import ToolCall
 
-type CancellationCheck = Callable[[], bool]
-type ToolBatchEvent = (
+CancellationCheck = TypeAliasType("CancellationCheck", Callable[[], bool])
+ToolBatchEvent = TypeAliasType(
+    "ToolBatchEvent",
     ToolCallRequested
     | ToolExecutionStarted
     | ToolApprovalRequested
     | ToolApprovalResolved
     | ToolExecutionEnded
-    | ToolResultReady
+    | ToolResultReady,
 )
 
 

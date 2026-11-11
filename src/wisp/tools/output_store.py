@@ -33,11 +33,13 @@ from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Final, TypeVar
 
 import anyio
 
 from wisp.tools.result import ToolError
+
+T = TypeVar("T")
 
 _logger = logging.getLogger(__name__)
 
@@ -820,7 +822,7 @@ def _os_error_reason(exc: OSError) -> str:
     return exc.strerror or type(exc).__name__
 
 
-async def _run_in_thread[T](function: Callable[[], T]) -> T:
+async def _run_in_thread(function: Callable[[], T]) -> T:
     """Run file work in a worker thread and wait for it even if the caller is cancelled.
 
     The work changes a stream's file state. Returning before it finished would let a

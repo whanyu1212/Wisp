@@ -7,32 +7,39 @@ from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+from typing_extensions import TypeAliasType
 
-type SkillSource = Literal[
-    "project:wisp",
-    "project:agents",
-    "user:wisp",
-    "user:agents",
-    "package:wisp",
-]
-type SkillDiagnosticSeverity = Literal["warning", "error"]
-type SkillDiagnosticCode = Literal[
-    "catalog-limit",
-    "entry-symlink",
-    "file-unreadable",
-    "invalid-frontmatter",
-    "invalid-metadata",
-    "invalid-yaml",
-    "path-escape",
-    "protected-path",
-    "root-entry-limit",
-    "root-metadata-limit",
-    "root-not-directory",
-    "root-symlink",
-    "root-unreadable",
-    "shadowed",
-    "unsupported-field",
-]
+SkillSource = TypeAliasType(
+    "SkillSource",
+    Literal[
+        "project:wisp",
+        "project:agents",
+        "user:wisp",
+        "user:agents",
+        "package:wisp",
+    ],
+)
+SkillDiagnosticSeverity = TypeAliasType("SkillDiagnosticSeverity", Literal["warning", "error"])
+SkillDiagnosticCode = TypeAliasType(
+    "SkillDiagnosticCode",
+    Literal[
+        "catalog-limit",
+        "entry-symlink",
+        "file-unreadable",
+        "invalid-frontmatter",
+        "invalid-metadata",
+        "invalid-yaml",
+        "path-escape",
+        "protected-path",
+        "root-entry-limit",
+        "root-metadata-limit",
+        "root-not-directory",
+        "root-symlink",
+        "root-unreadable",
+        "shadowed",
+        "unsupported-field",
+    ],
+)
 
 
 class SkillInvocationEvidence(BaseModel):

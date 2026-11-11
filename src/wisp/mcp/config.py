@@ -20,6 +20,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from typing_extensions import TypeAliasType
 
 from wisp.tool_types import ToolSafety
 from wisp.validation import redact_validation_error_inputs
@@ -29,7 +30,7 @@ MAX_MCP_SERVERS = 16
 # How MCP tools reach the model: each tool's schema on every request ("direct"),
 # found and called through mcp_search, mcp_describe and mcp_call ("on_demand"), or
 # on demand only when a run's MCP schemas reach AUTO_ON_DEMAND_SCHEMA_TOKENS ("auto").
-type McpToolExposure = Literal["auto", "direct", "on_demand"]
+McpToolExposure = TypeAliasType("McpToolExposure", Literal["auto", "direct", "on_demand"])
 MCP_TOOL_EXPOSURES: tuple[McpToolExposure, ...] = ("auto", "direct", "on_demand")
 DEFAULT_MCP_TOOL_EXPOSURE: McpToolExposure = "auto"
 # Estimated tokens of a run's MCP tool schemas (Wisp's bytes/4 estimate, as /stats

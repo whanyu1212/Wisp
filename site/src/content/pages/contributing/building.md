@@ -23,8 +23,8 @@ contains, and which workflow builds it.
 | -- | -- | -- |
 | `wisp_ai-<version>.tar.gz` | `uv build --no-sources` (`uv_build`) | Python source, `pyproject.toml`, README and LICENSE; no Rust |
 | `…-py3-none-any.whl` | `uv build --no-sources` (`uv_build`) | The `wisp` package only |
-| `…-cp312-abi3-manylinux_2_28_x86_64.whl` | Hatchling + `packaging/hatch_build.py` | The same Python files, plus the `wisp-tui` executable and `wisp/_native.abi3.so` |
-| `…-cp312-abi3-macosx_11_0_arm64.whl` | Hatchling + `packaging/hatch_build.py` | The same, for macOS 11+ on Apple silicon |
+| `…-cp311-abi3-manylinux_2_28_x86_64.whl` | Hatchling + `packaging/hatch_build.py` | The same Python files, plus the `wisp-tui` executable and `wisp/_native.abi3.so` |
+| `…-cp311-abi3-macosx_11_0_arm64.whl` | Hatchling + `packaging/hatch_build.py` | The same, for macOS 11+ on Apple silicon |
 
 The native pieces come from two crates in `rust/`:
 
@@ -32,7 +32,7 @@ The native pieces come from two crates in `rust/`:
   and the launcher finds it through the distribution's own file list, never by searching `PATH`.
 - **`wisp-python`** builds `wisp._native`, which provides the native literal grep and the
   pending-text buffer for managed process output. It uses the stable ABI (`abi3`), so one wheel
-  per platform covers Python 3.12 and later.
+  per platform covers Python 3.11 and later.
 
 Installers choose a native wheel on a matching platform and the pure wheel everywhere else. A pure
 install keeps print, JSON, RPC and SDK use. Interactive `wisp` stops with a message naming the
@@ -74,7 +74,7 @@ To reproduce a candidate wheel locally, use the exact tag for your platform from
 `rust-tui-wheels.yml`:
 
 ```bash
-WISP_RUST_TUI_WHEEL_TAG=cp312-abi3-macosx_11_0_arm64 \
+WISP_RUST_TUI_WHEEL_TAG=cp311-abi3-macosx_11_0_arm64 \
   uvx --from hatchling==1.27.0 hatchling build -t wheel -d candidate-dist
 ```
 

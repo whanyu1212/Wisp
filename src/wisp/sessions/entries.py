@@ -17,6 +17,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from typing_extensions import TypeAliasType
 
 from wisp.events import (
     MAX_EDIT_LOCATIONS,
@@ -195,17 +196,22 @@ class SessionInfoSessionEntry(SessionEntryBase):
         return normalized
 
 
-type SessionTreeEntry = MessageSessionEntry | EventSessionEntry | CompactionSessionEntry
+SessionTreeEntry = TypeAliasType(
+    "SessionTreeEntry", MessageSessionEntry | EventSessionEntry | CompactionSessionEntry
+)
 
 
-type SessionEntry = Annotated[
-    MessageSessionEntry
-    | EventSessionEntry
-    | CompactionSessionEntry
-    | ActiveLeafSessionEntry
-    | SessionInfoSessionEntry,
-    Field(discriminator="kind"),
-]
+SessionEntry = TypeAliasType(
+    "SessionEntry",
+    Annotated[
+        MessageSessionEntry
+        | EventSessionEntry
+        | CompactionSessionEntry
+        | ActiveLeafSessionEntry
+        | SessionInfoSessionEntry,
+        Field(discriminator="kind"),
+    ],
+)
 
 SessionEntryAdapter: TypeAdapter[SessionEntry] = TypeAdapter(SessionEntry)
 

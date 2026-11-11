@@ -20,6 +20,7 @@ from openai import (
     OpenAIError,
 )
 from openai.types.chat import ChatCompletionChunk
+from typing_extensions import TypeAliasType
 
 from wisp.messages import Message
 from wisp.openai_compatible import (
@@ -64,7 +65,7 @@ OPENAI_COMPATIBLE_API_KEY_ENV = "OPENAI_COMPATIBLE_API_KEY"
 # Chat Completions message/tool dictionaries are kept provider-local. The OpenAI SDK's
 # generated TypedDict union changes frequently, while compatible servers intentionally
 # implement a smaller, structurally equivalent wire contract.
-type ChatPayload = dict[str, object]
+ChatPayload = TypeAliasType("ChatPayload", dict[str, object])
 
 
 @runtime_checkable

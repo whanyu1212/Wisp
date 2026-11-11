@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from typing import Generic, TypeVar
 
 from wisp.messages import Message, NativeOutput
 
+T = TypeVar("T")
 
-class ContinuationStore[T]:
+
+class ContinuationStore(Generic[T]):
     """Store provider-native continuation payloads by response ID.
 
     Operations are synchronous and contain no suspension points. The store is

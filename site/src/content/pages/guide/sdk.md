@@ -32,7 +32,7 @@ start with [Interfaces](interfaces.md).
 
 ## Install
 
-Wisp requires Python 3.12 or newer. Add it to an application environment rather than installing it
+Wisp requires Python 3.11 or newer. Add it to an application environment rather than installing it
 only as a command-line tool. While Wisp is below 1.0, a minor release may make announced breaking
 changes, so pin the minor line:
 

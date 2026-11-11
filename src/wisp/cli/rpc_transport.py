@@ -9,11 +9,12 @@ from collections.abc import Awaitable, Callable
 from functools import partial
 from queue import Empty, Queue
 from threading import Thread
-from typing import Protocol, TextIO, cast
+from typing import Generic, Protocol, TextIO, TypeVar, cast
 
 import anyio
 from anyio.streams.memory import MemoryObjectSendStream
 from pydantic import ValidationError
+from typing_extensions import TypeAliasType
 
 from wisp.events import ErrorEvent, WispEvent
 from wisp.rpc.commands import ParsedRpcCommand, RpcCommandAdapter
@@ -29,6 +30,8 @@ from wisp.rpc.protocol import (
     negotiate_rpc_handshake,
 )
 
+TControlEvent = TypeVar("TControlEvent")
+
 _STDIN_READ_CHUNK_SIZE = 64 * 1024
 _STDIN_THREAD_POLL_INTERVAL = 0.01
 # Let the reader thread run at most 1 MiB of raw chunks ahead of async parsing:
@@ -38,11 +41,11 @@ _STDIN_THREAD_QUEUE_SIZE = 16
 _MAX_RPC_TRANSPORT_ERROR_CHARS = 1_000
 
 
-type RpcEventWriter = Callable[[WispEvent], None]
-type QueueFactory = Callable[[int], Queue[bytes | Exception]]
-type ThreadFactory = Callable[..., Thread]
-type WaitReadable = Callable[[int], Awaitable[None]]
-type ReadFd = Callable[[int, int], bytes]
+RpcEventWriter = TypeAliasType("RpcEventWriter", Callable[[WispEvent], None])
+QueueFactory = TypeAliasType("QueueFactory", Callable[[int], Queue[bytes | Exception]])
+ThreadFactory = TypeAliasType("ThreadFactory", Callable[..., Thread])
+WaitReadable = TypeAliasType("WaitReadable", Callable[[int], Awaitable[None]])
+ReadFd = TypeAliasType("ReadFd", Callable[[int, int], bytes])
 
 
 class RpcTextInput(Protocol):
@@ -136,7 +139,7 @@ def _read_handshake_line(stdin: RpcTextInput, read_fd: ReadFd) -> str | bytes:
     return bytes(line)
 
 
-class RpcStdinTransport[TControlEvent]:
+class RpcStdinTransport(Generic[TControlEvent]):
     """Read JSONL commands without owning coordinator or agent behavior."""
 
     def __init__(

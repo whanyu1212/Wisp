@@ -19,6 +19,7 @@ from pydantic import (
     ValidationError,
     model_validator,
 )
+from typing_extensions import TypeAliasType
 
 from wisp.events import (
     MAX_RPC_MODEL_EFFORT_CHARS,
@@ -34,7 +35,9 @@ from wisp.events import (
 from wisp.images import MAX_IMAGE_BYTES
 from wisp.validation import redact_validation_error_inputs
 
-type ApprovalScope = Literal["once", "tool_session", "all_session", "all_project"]
+ApprovalScope = TypeAliasType(
+    "ApprovalScope", Literal["once", "tool_session", "all_session", "all_project"]
+)
 
 MAX_RPC_COMMAND_ID_CHARS = 256
 MAX_RPC_MCP_SERVER_NAME_CHARS = 64
@@ -47,9 +50,10 @@ MAX_RPC_IMAGE_BASE64_CHARS = -(-MAX_IMAGE_BYTES // 3) * 4
 # message is rejected as a command rather than dropping the connection.
 MAX_RPC_MESSAGE_IMAGES = 6
 # One image file, base64-encoded; its format is identified from the decoded bytes.
-type RpcImageData = Annotated[
-    str, StringConstraints(min_length=1, max_length=MAX_RPC_IMAGE_BASE64_CHARS)
-]
+RpcImageData = TypeAliasType(
+    "RpcImageData",
+    Annotated[str, StringConstraints(min_length=1, max_length=MAX_RPC_IMAGE_BASE64_CHARS)],
+)
 STORE_API_KEY_SECRET_FIELD = "_api_key"
 # Secret-bearing fields by command type. Before a command is queued, each one is
 # moved under its underscore-prefixed name and wrapped so the retained payload
@@ -686,55 +690,58 @@ class ConfigureCommand(RpcCommandModel):
         return self
 
 
-type RpcCommand = Annotated[
-    PromptCommand
-    | InitCommand
-    | CompactCommand
-    | GetSessionStatsCommand
-    | GetStateCommand
-    | GetPermissionsCommand
-    | SetPermissionsCommand
-    | GetCommandsCommand
-    | GetModelCatalogCommand
-    | GetConnectionCatalogCommand
-    | StoreApiKeyCommand
-    | DisconnectProviderCommand
-    | BeginDeviceCodeCommand
-    | GetSkillsCommand
-    | GetGitDiffCommand
-    | GetProjectFilesCommand
-    | GetMcpStatusCommand
-    | AddMcpServerCommand
-    | RemoveMcpServerCommand
-    | SetMcpServerEnabledCommand
-    | ReconnectMcpCommand
-    | LoginMcpServerCommand
-    | LogoutMcpServerCommand
-    | PreviewMcpSnippetCommand
-    | GetMessagesCommand
-    | GetSessionsCommand
-    | NewSessionCommand
-    | SelectSessionCommand
-    | CloneSessionCommand
-    | ForkSessionCommand
-    | GetSessionTreeCommand
-    | NavigateSessionTreeCommand
-    | UnrevertSessionTreeCommand
-    | SetSessionNameCommand
-    | SteerCommand
-    | FollowUpCommand
-    | GetQueueStateCommand
-    | SetQueueModeCommand
-    | PopQueueCommand
-    | ClearQueueCommand
-    | CancelCommand
-    | ApprovalCommand
-    | TrustCommand
-    | ShutdownCommand
-    | ConfigureCommand
-    | ChangeDirectoryCommand,
-    Field(discriminator="type"),
-]
+RpcCommand = TypeAliasType(
+    "RpcCommand",
+    Annotated[
+        PromptCommand
+        | InitCommand
+        | CompactCommand
+        | GetSessionStatsCommand
+        | GetStateCommand
+        | GetPermissionsCommand
+        | SetPermissionsCommand
+        | GetCommandsCommand
+        | GetModelCatalogCommand
+        | GetConnectionCatalogCommand
+        | StoreApiKeyCommand
+        | DisconnectProviderCommand
+        | BeginDeviceCodeCommand
+        | GetSkillsCommand
+        | GetGitDiffCommand
+        | GetProjectFilesCommand
+        | GetMcpStatusCommand
+        | AddMcpServerCommand
+        | RemoveMcpServerCommand
+        | SetMcpServerEnabledCommand
+        | ReconnectMcpCommand
+        | LoginMcpServerCommand
+        | LogoutMcpServerCommand
+        | PreviewMcpSnippetCommand
+        | GetMessagesCommand
+        | GetSessionsCommand
+        | NewSessionCommand
+        | SelectSessionCommand
+        | CloneSessionCommand
+        | ForkSessionCommand
+        | GetSessionTreeCommand
+        | NavigateSessionTreeCommand
+        | UnrevertSessionTreeCommand
+        | SetSessionNameCommand
+        | SteerCommand
+        | FollowUpCommand
+        | GetQueueStateCommand
+        | SetQueueModeCommand
+        | PopQueueCommand
+        | ClearQueueCommand
+        | CancelCommand
+        | ApprovalCommand
+        | TrustCommand
+        | ShutdownCommand
+        | ConfigureCommand
+        | ChangeDirectoryCommand,
+        Field(discriminator="type"),
+    ],
+)
 RpcCommandAdapter: TypeAdapter[RpcCommand] = TypeAdapter(RpcCommand)
 
 

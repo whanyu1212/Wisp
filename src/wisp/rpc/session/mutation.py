@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from typing import TypeVar
 
 import anyio
 from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectSendStream
+from typing_extensions import TypeAliasType
 
 from wisp.events import (
     RpcCommandFinished,
@@ -39,11 +41,15 @@ from wisp.rpc.session.state import rpc_derived_session_state, rpc_selected_sessi
 from wisp.sessions.errors import SessionNavigationCancelledError
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore, SessionError
 
-type RunningCommandFactory = Callable[..., _RpcRunningCommand]
-type CommandCompletedFactory = Callable[..., _RpcCommandCompleted]
+T = TypeVar("T")
+
+RunningCommandFactory = TypeAliasType("RunningCommandFactory", Callable[..., _RpcRunningCommand])
+CommandCompletedFactory = TypeAliasType(
+    "CommandCompletedFactory", Callable[..., _RpcCommandCompleted]
+)
 
 
-async def _run_abandonable_session_read[T](func: Callable[..., T], *args: object) -> T:
+async def _run_abandonable_session_read(func: Callable[..., T], *args: object) -> T:
     return await anyio.to_thread.run_sync(func, *args, abandon_on_cancel=True)
 
 

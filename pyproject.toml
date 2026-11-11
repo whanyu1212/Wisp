@@ -8,7 +8,7 @@ license-files = ["LICENSE"]
 authors = [
     { name = "whanyu1212", email = "whanyu1212@hotmail.com" }
 ]
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 keywords = [
     "agent",
     "ai",
@@ -23,6 +23,7 @@ classifiers = [
     "Intended Audience :: Developers",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Code Generators",
@@ -46,11 +47,14 @@ dependencies = [
     "regex>=2026.7.19",
     "rich>=15.0.0",
     "typer>=0.26.8",
+    # TypeAliasType for named type aliases, which Python 3.11 has no `type` statement for.
+    "typing-extensions>=4.12",
 ]
 
 [project.optional-dependencies]
-# The experimental `codemode` tool runs model-written scripts in monty's sandbox.
-codemode = ["pydantic-monty>=1.5,<2"]
+# The experimental `codemode` tool runs model-written scripts in monty's sandbox. monty ships
+# wheels for Python 3.12+ only, so on 3.11 the extra installs nothing and codemode is not offered.
+codemode = ["pydantic-monty>=1.5,<2; python_version >= '3.12'"]
 
 [project.urls]
 Homepage = "https://github.com/whanyu1212/Wisp"
@@ -90,7 +94,7 @@ dev = [
     "psutil>=7.2.2",
     "pytest-timeout>=2.4",
     "pytest-xdist>=3.8",
-    "pydantic-monty>=1.5,<2",
+    "pydantic-monty>=1.5,<2; python_version >= '3.12'",
 ]
 
 [tool.pytest.ini_options]
@@ -113,7 +117,7 @@ extend-exclude = ["evals/tool_use/tasks"]
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.11"
 strict = true
 # Eval task fixtures and solutions are test data, not part of the package.
 exclude = ["^evals/tool_use/tasks/"]

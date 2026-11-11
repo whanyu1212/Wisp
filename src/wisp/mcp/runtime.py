@@ -7,12 +7,13 @@ import os
 from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal, TypeVar, cast
 
 import anyio
 from mcp.client import Client
 from mcp.client.stdio import StdioServerParameters
 from mcp.types import Tool as McpToolDefinition
+from typing_extensions import TypeAliasType
 
 from wisp.mcp.config import HeaderUnavailable, McpServerConfig, resolve_headers
 from wisp.mcp.credentials import McpTokenStore, uses_header_authorization
@@ -23,23 +24,28 @@ from wisp.mcp.transport import bounded_stdio_client
 from wisp.runtime.api import ExtensionAPI
 from wisp.tools.base import Tool
 
+E = TypeVar("E", bound=BaseException)
+
 MCP_STARTUP_TIMEOUT_SECONDS = 10.0
 MAX_MCP_DISCOVERY_PAGES = 64
 MAX_MCP_TOOL_DEFINITION_BYTES_PER_SERVER = 1_048_576
 MAX_MCP_TOOLS = 256
 MAX_MCP_TOOL_DEFINITION_BYTES = 4_194_304
 
-type McpDiagnosticCode = Literal[
-    "missing-environment",
-    "invalid-header",
-    "login-required",
-    "unavailable",
-    "timeout",
-    "invalid-discovery",
-    "invalid-tool",
-    "resource-limit",
-    "name-collision",
-]
+McpDiagnosticCode = TypeAliasType(
+    "McpDiagnosticCode",
+    Literal[
+        "missing-environment",
+        "invalid-header",
+        "login-required",
+        "unavailable",
+        "timeout",
+        "invalid-discovery",
+        "invalid-tool",
+        "resource-limit",
+        "name-collision",
+    ],
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,7 +85,7 @@ class _FailedServer:
     diagnostic: McpStartupDiagnostic
 
 
-type _ServerResult = _ConnectedServer | _FailedServer
+_ServerResult = TypeAliasType("_ServerResult", _ConnectedServer | _FailedServer)
 
 
 class _DiscoveryRejected(Exception):
@@ -436,7 +442,7 @@ def _server_headers(server: McpServerConfig) -> dict[str, str]:
         raise _DiscoveryRejected(exc.code) from None
 
 
-def _found[E: BaseException](exc: BaseException, kind: type[E], depth: int = 0) -> E | None:
+def _found(exc: BaseException, kind: type[E], depth: int = 0) -> E | None:
     """Return the first ``kind`` raised anywhere in ``exc``, including task groups."""
 
     if depth > 16:

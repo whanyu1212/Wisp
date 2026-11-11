@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Literal
 import anyio
 from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectSendStream
+from typing_extensions import TypeAliasType
 
 from wisp.coding.session import CodingSession
 from wisp.config.mcp_servers import (
@@ -79,16 +80,19 @@ from wisp.tools.selection import select_tools
 if TYPE_CHECKING:
     from wisp.mcp.runtime import McpRuntime, McpStartupDiagnostic
 
-type McpServerCommand = (
+McpServerCommand = TypeAliasType(
+    "McpServerCommand",
     AddMcpServerCommand
     | RemoveMcpServerCommand
     | SetMcpServerEnabledCommand
     | ReconnectMcpCommand
     | LoginMcpServerCommand
-    | LogoutMcpServerCommand
+    | LogoutMcpServerCommand,
 )
-type RunningCommandFactory = Callable[..., _RpcRunningCommand]
-type CommandCompletedFactory = Callable[..., _RpcCommandCompleted]
+RunningCommandFactory = TypeAliasType("RunningCommandFactory", Callable[..., _RpcRunningCommand])
+CommandCompletedFactory = TypeAliasType(
+    "CommandCompletedFactory", Callable[..., _RpcCommandCompleted]
+)
 
 # MCP tool names all start with this; see `wisp.mcp.tool`.
 _MCP_TOOL_PREFIX = "mcp__"

@@ -15,6 +15,8 @@ from pathlib import Path
 from threading import Event, Thread
 from typing import Literal
 
+from typing_extensions import TypeAliasType
+
 from wisp.events import RpcGitDiffEdit, RpcGitDiffFile, RpcGitDiffReported
 from wisp.events.rpc import MAX_GIT_DIFF_FILE_EDITS
 from wisp.project_files import ProjectScanCancelled, ProjectScanTimedOut, is_display_safe_path
@@ -168,9 +170,9 @@ _CONTENT_UNAVAILABLE_NOTICE = (
     "Content unavailable: binary, oversized, symbolic link, submodule, or unreadable file"
 )
 
-type _FileStatus = Literal["untracked", "modified", "added", "deleted"]
+_FileStatus = TypeAliasType("_FileStatus", Literal["untracked", "modified", "added", "deleted"])
 # "unchanged" files leave the report silently; "withheld" ones mark it truncated.
-type _Omission = Literal["unchanged", "withheld"]
+_Omission = TypeAliasType("_Omission", Literal["unchanged", "withheld"])
 
 
 @dataclass(frozen=True, slots=True)

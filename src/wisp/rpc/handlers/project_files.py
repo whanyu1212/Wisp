@@ -10,6 +10,7 @@ from threading import Event, Lock
 import anyio
 from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectSendStream
+from typing_extensions import TypeAliasType
 
 from wisp.events import (
     ProjectFilesInvalidated,
@@ -34,9 +35,10 @@ from wisp.rpc.lifecycle import RpcCommandLifecycle, RpcEventWriter
 from wisp.sessions import JsonlSession
 from wisp.tools.context import ToolContext
 
-type ProjectFilesPublisher = Callable[
-    [RpcProjectFilesReported | RpcGitDiffReported, anyio.CancelScope], Awaitable[bool]
-]
+ProjectFilesPublisher = TypeAliasType(
+    "ProjectFilesPublisher",
+    Callable[[RpcProjectFilesReported | RpcGitDiffReported, anyio.CancelScope], Awaitable[bool]],
+)
 
 
 def project_files_report(

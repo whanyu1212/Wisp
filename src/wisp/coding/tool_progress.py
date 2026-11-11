@@ -16,9 +16,10 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from typing import Final
+from typing import Final, TypeVar
 
 import anyio
+from typing_extensions import TypeAliasType
 
 from wisp.events import (
     TOOL_PROGRESS_TAIL_MAX_BYTES,
@@ -28,9 +29,11 @@ from wisp.events import (
 )
 from wisp.tools.progress import OutputProgress, ToolProgress
 
+T = TypeVar("T")
+
 _logger = logging.getLogger(__name__)
 
-type LiveEventSink = Callable[[WispEvent], Awaitable[None]]
+LiveEventSink = TypeAliasType("LiveEventSink", Callable[[WispEvent], Awaitable[None]])
 """Delivers a transient event to frontends; it may wait while they catch up."""
 
 # Quick calls finish before the first update, so they publish no progress at all.
@@ -64,7 +67,7 @@ class _LatestProgress:
         self.closed_event.set()
 
 
-async def run_with_progress[T](
+async def run_with_progress(
     sink: LiveEventSink,
     *,
     call_id: str,

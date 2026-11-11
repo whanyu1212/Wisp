@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://pypi.org/project/wisp-ai/"><img src="https://img.shields.io/pypi/v/wisp-ai?label=PyPI" alt="PyPI version"></a>
-  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.12%2B-blue" alt="Python 3.12+"></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.11%2B-blue" alt="Python 3.11+"></a>
   <a href="https://github.com/whanyu1212/Wisp/actions/workflows/ci.yml"><img src="https://github.com/whanyu1212/Wisp/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="MIT License"></a>
 </p>
@@ -34,7 +34,7 @@ Wisp works with OpenAI (including a ChatGPT subscription), Anthropic, Google, xA
 
 ## Install
 
-Wisp needs Python 3.12 or newer and runs on macOS and Linux. Windows is best-effort until it has
+Wisp needs Python 3.11 or newer and runs on macOS and Linux. Windows is best-effort until it has
 dedicated CI coverage.
 
 ```bash
@@ -43,8 +43,8 @@ uv tool install --python 3.12 wisp-ai
 
 On macOS arm64 and Linux x86_64 (glibc 2.28+), the native wheel includes the Rust terminal UI. Other
 platforms get a pure wheel, which keeps print, JSON, RPC and SDK use but has no terminal UI. Keep
-`--python 3.12` (or newer): without it, uv may resolve for an older default Python and pick the pure
-wheel. Run `uv tool update-shell` once if `wisp` is not on your `PATH`.
+`--python 3.12` (or at least 3.11): without it, uv may resolve for an older default Python and pick the
+pure wheel. Run `uv tool update-shell` once if `wisp` is not on your `PATH`.
 
 The [installation guide](https://whanyu1212.github.io/Wisp/guide/installation.html) covers updates
 and troubleshooting. Coming from 0.1? Read the

@@ -6,6 +6,7 @@ from functools import partial
 from typing import assert_never
 
 import anyio
+from typing_extensions import TypeAliasType
 
 from wisp.coding import CodingSession
 from wisp.events import QueueItemsRemoved, QueueUpdated, RpcCommandFinished, WispEvent
@@ -23,13 +24,14 @@ from wisp.rpc.lifecycle import RpcCommandLifecycle, RpcEventWriter
 from wisp.rpc.session.images import decode_rpc_images
 from wisp.sessions.jsonl import JsonlSession
 
-type _RpcQueueCommand = (
+_RpcQueueCommand = TypeAliasType(
+    "_RpcQueueCommand",
     SteerCommand
     | FollowUpCommand
     | GetQueueStateCommand
     | SetQueueModeCommand
     | PopQueueCommand
-    | ClearQueueCommand
+    | ClearQueueCommand,
 )
 
 

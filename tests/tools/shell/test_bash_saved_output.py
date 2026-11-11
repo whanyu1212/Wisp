@@ -6,6 +6,7 @@ import asyncio
 import re
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import TypeVar
 
 import anyio
 import pytest
@@ -17,6 +18,8 @@ from wisp.tools.read_output import ReadOutputTool
 from wisp.tools.result import ToolError, ToolResult
 from wisp.tools.shell.supervisor import ProcessSupervisor
 from wisp.tools.shell.tool import BashTool
+
+T = TypeVar("T")
 
 pytestmark = pytest.mark.process
 
@@ -55,7 +58,7 @@ def output_ids(text: str) -> dict[str, str]:
     return dict(_OUTPUT_ID.findall(text))
 
 
-def with_shell[T](tmp_path: Path, scenario: Callable[[Shell], Awaitable[T]]) -> T:
+def with_shell(tmp_path: Path, scenario: Callable[[Shell], Awaitable[T]]) -> T:
     async def run() -> T:
         shell = Shell(tmp_path)
         try:

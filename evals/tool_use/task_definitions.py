@@ -9,15 +9,21 @@ from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from typing_extensions import TypeAliasType
 
 from evals.tool_use.servers.catalogs import CATALOGS
 
 TASKS_DIR = Path(__file__).parent / "tasks"
 
-type Tag = Literal[
-    "general", "long-output", "edit", "mcp", "mcp-sweep", "multi-read", "orchestration", "scale"
-]
-type ToolName = Literal["read", "write", "edit", "bash", "grep", "find", "ls", "read_output"]
+Tag = TypeAliasType(
+    "Tag",
+    Literal[
+        "general", "long-output", "edit", "mcp", "mcp-sweep", "multi-read", "orchestration", "scale"
+    ],
+)
+ToolName = TypeAliasType(
+    "ToolName", Literal["read", "write", "edit", "bash", "grep", "find", "ls", "read_output"]
+)
 
 
 class TaskChecks(BaseModel):

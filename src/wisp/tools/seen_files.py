@@ -6,10 +6,12 @@ import os
 import threading
 from pathlib import Path
 
+from typing_extensions import TypeAliasType
+
 from wisp.tools.result import ToolError
 
 # Device, inode, size, modification and change times, as ``secure_fs.file_version``.
-type FileVersion = tuple[int, int, int, int, int]
+FileVersion = TypeAliasType("FileVersion", tuple[int, int, int, int, int])
 
 
 class SeenFiles:

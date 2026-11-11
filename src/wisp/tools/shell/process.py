@@ -1968,9 +1968,8 @@ def _format_process_output_preview(
         tail_lines=min(PREVIEW_TAIL_LINES, body_lines - head_lines - 1),
     )
     notice_line = f"\n{notice}" if notice else ""
-    return TruncatedText(
-        text=f"{status}: {body.text.rstrip('\n')}{notice_line}", truncated=body.truncated
-    )
+    body_text = body.text.rstrip("\n")
+    return TruncatedText(text=f"{status}: {body_text}{notice_line}", truncated=body.truncated)
 
 
 def _output_start(result: ProcessResult) -> tuple[str, str]:

@@ -328,6 +328,57 @@ jobs:
           path: test-results/${{ matrix.suite }}/
           if-no-files-found: error
 
+  # The development Python is pinned in .python-version; this job runs both suites on the
+  # oldest supported Python (requires-python in pyproject.toml), on Linux.
+  python-tests-oldest:
+    needs: changes
+    if: needs.changes.outputs.python == 'true'
+    name: Python tests on 3.11 (${{ matrix.suite }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: parallel
+            args: -m 'not (slow or process or benchmark)' -n auto
+          - suite: serial
+            args: -m 'slow or process or benchmark'
+    env:
+      UV_PYTHON: "3.11"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Test
+        run: >-
+          uv run pytest tests ${{ matrix.args }}
+          --durations=20
+          --junitxml=test-results/oldest-${{ matrix.suite }}/junit.xml
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-oldest-${{ matrix.suite }}
+          overwrite: true
+          path: test-results/oldest-${{ matrix.suite }}/
+          if-no-files-found: error
+
   macos-smoke:
     needs: changes
     if: needs.changes.outputs.python == 'true'
@@ -400,7 +451,7 @@ jobs:
   ci-passed:
     name: CI passed
     if: ${{ always() }}
-    needs: [changes, quality, rust-workspace, tui-handoff, package, python-tests, macos-smoke, contracts]
+    needs: [changes, quality, rust-workspace, tui-handoff, package, python-tests, python-tests-oldest, macos-smoke, contracts]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

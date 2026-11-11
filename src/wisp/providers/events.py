@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from json import JSONDecodeError, loads
 from typing import Literal, cast
 
+from typing_extensions import TypeAliasType
+
 JsonObject = Mapping[str, object]
 ProviderFinishReason = Literal["stop", "tool_calls", "length"]
 ProviderFailureKind = Literal["error", "context_overflow", "aborted"]
@@ -187,7 +189,8 @@ class ProviderResponseFailed:
     failure_kind: ProviderFailureKind = "error"
 
 
-type ProviderEvent = (
+ProviderEvent = TypeAliasType(
+    "ProviderEvent",
     ProviderResponseStarted
     | ProviderRetrying
     | ProviderTextDelta
@@ -195,7 +198,7 @@ type ProviderEvent = (
     | ProviderToolCallCompleted
     | ProviderWebSearch
     | ProviderResponseCompleted
-    | ProviderResponseFailed
+    | ProviderResponseFailed,
 )
 
 

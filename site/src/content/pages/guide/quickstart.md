@@ -12,7 +12,7 @@ capture: approval
 
 # Quickstart
 
-Wisp runs from the project you want it to understand. It requires Python 3.12 or newer; the
+Wisp runs from the project you want it to understand. It requires Python 3.11 or newer; the
 recommended persistent installation is:
 
 ```bash

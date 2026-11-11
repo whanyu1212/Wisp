@@ -3,9 +3,12 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeVar
 
 from examples.crafting_agents.checkpoint_02 import TOOLS, FixtureTools, bound_output
 from examples.crafting_agents.core import ToolCall, ToolFailure
+
+T = TypeVar("T")
 
 
 # ANCHOR: request
@@ -29,7 +32,7 @@ class ExecutionPolicy:
 # ANCHOR_END: request
 
 
-def _host_callback[T](callback: Callable[[], T]) -> T:
+def _host_callback(callback: Callable[[], T]) -> T:
     """Keep host failures distinct from the loop's recoverable tool-error channel.
 
     Args:

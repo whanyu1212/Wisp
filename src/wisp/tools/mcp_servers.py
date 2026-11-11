@@ -22,6 +22,7 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 import anyio
+from typing_extensions import TypeAliasType
 
 from wisp.config.mcp_servers import (
     McpSettingsError,
@@ -38,7 +39,7 @@ PROPOSE_MCP_SERVER = "propose_mcp_server"
 PROPOSE_MCP_SERVER_CHANGE = "propose_mcp_server_change"
 LIST_MCP_SERVERS = "list_mcp_servers"
 
-type McpServerChange = Literal["remove", "disable"]
+McpServerChange = TypeAliasType("McpServerChange", Literal["remove", "disable"])
 
 _KNOWN_SECRET_PREFIX = re.compile(
     r"(ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|glpat-|xox[abprs]-|sk-[A-Za-z0-9]|sk_live_|"

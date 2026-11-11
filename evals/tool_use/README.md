@@ -152,6 +152,7 @@ the commit the change starts from, with the models the change will be measured o
 | `2026-11-10-codemode-off.json`, `2026-11-10-codemode-python.json` | The `orchestration` tasks and `mcp-triage`, 5 runs each on gpt-6.1-sol, gpt-5.6-luna and claude-sonnet-5-5, without and with the Python codemode tool (HY-495). Sonnet's `mcp-flaky-comments` runs errored on a `bash` schema Anthropic rejected (fixed in #957) |
 | `2026-11-10-flaky-sonnet-codemode-off.json`, `2026-11-10-flaky-sonnet-codemode-python.json` | Sonnet's `mcp-flaky-comments` runs after that fix, 5 each, without and with codemode |
 | `2026-11-10-on-demand-codemode-off.json`, `2026-11-10-on-demand-codemode-python.json` | The same 5 tasks and 3 models with MCP tools found on demand, without and with codemode, whose scripts call catalog tools by name (HY-498) |
+| `2026-11-11-core-codemode-off.json`, `2026-11-11-core-codemode-python.json` | The 10 tasks without MCP tools, 5 runs each on the same 3 models, without and with codemode: whether offering it hurts ordinary coding work (HY-431) |
 
 On-demand discovery cut tokens per run by 76–77% on `mcp-triage` (102 tools) and 28–46% on
 `mcp-pick-tool` (50 tools), and cost 20–34% more on `mcp-similar-servers` (6 tools), with every run
