@@ -1230,11 +1230,14 @@ class CodingSession:
                 Awaited once the run accepts queued messages, before prompt
                 construction. Defaults to None.
             live_event_sink (LiveEventSink | None, optional): Receives transient
-                `ToolExecutionProgress` events while tools run. They are not
-                yielded, persisted, or sent to the model, and each arrives between
-                its call's `ToolExecutionStarted` and `ToolExecutionEnded`. The
-                sink may wait while its frontend catches up; the tool keeps running
-                and newer progress replaces what was not delivered. Defaults to None.
+                `ToolExecutionProgress` events while tools run, and the
+                `ToolNestedCallStarted` and `ToolNestedCallEnded` of each call a
+                codemode script makes. They are not yielded, persisted, or sent to
+                the model, and each arrives between its call's
+                `ToolExecutionStarted` and `ToolExecutionEnded`. The sink may wait
+                while its frontend catches up: a tool keeps running and newer
+                progress replaces what was not delivered, but a script's next
+                call waits for its nested-call events. Defaults to None.
 
         Yields:
             WispEvent: The run's events in publication order. A `QueueUpdated`
@@ -3055,6 +3058,8 @@ class CodingSession:
                 ),
                 target=event.target,
                 edit_locations=event.edit_locations or None,
+                nested_calls=event.nested_calls or None,
+                nested_calls_omitted=event.nested_calls_omitted or None,
             )
             if isinstance(event, ToolExecutionEnded)
             else None
