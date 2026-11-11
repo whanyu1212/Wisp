@@ -331,6 +331,21 @@ def test_config_resolves_web_search_off_by_default_then_settings_env_and_overrid
     assert WispConfig.from_env(session_dir=tmp_path, web_search=True).web_search is True
 
 
+def test_config_leaves_codemode_automatic_unless_set(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    home = Path.home()
+    (home / ".wisp").mkdir(parents=True)
+    assert WispConfig.from_env(session_dir=tmp_path).codemode is None
+
+    (home / ".wisp" / "settings.json").write_text('{"codemode": true}', encoding="utf-8")
+    assert WispConfig.from_env(session_dir=tmp_path).codemode is True
+
+    monkeypatch.setenv("WISP_CODEMODE", "0")
+    assert WispConfig.from_env(session_dir=tmp_path).codemode is False
+    assert WispConfig.from_env(session_dir=tmp_path, codemode=True).codemode is True
+
+
 def test_config_rejects_invalid_auto_compaction_env(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:

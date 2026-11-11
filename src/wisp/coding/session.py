@@ -427,13 +427,14 @@ class CodingSession:
         mode: AgentMode = DEFAULT_AGENT_MODE,
         mcp_tool_exposure: McpToolExposure = DEFAULT_MCP_TOOL_EXPOSURE,
         mcp_server_connected: Callable[[str], bool] | None = None,
-        codemode: bool = False,
+        codemode: bool | None = None,
     ) -> None:
         self.sessions = sessions
         self.events = events
         self.tool_registry = tool_registry
         self.mcp_tool_exposure: McpToolExposure = mcp_tool_exposure
-        # Offer the experimental codemode tool, which scripts the run's read-only tools.
+        # Offer the experimental codemode tool, which scripts the run's read-only
+        # tools: always, never, or (None) whenever the run finds MCP tools on demand.
         self.codemode = codemode
         self._mcp_server_connected = mcp_server_connected
         self.tool_policy = tool_policy or ToolPolicy.allow_all_tools()
@@ -514,7 +515,7 @@ class CodingSession:
         max_tool_iterations: int | None = None,
         mcp_tool_exposure: McpToolExposure = DEFAULT_MCP_TOOL_EXPOSURE,
         mcp_server_connected: Callable[[str], bool] | None = None,
-        codemode: bool = False,
+        codemode: bool | None = None,
     ) -> CodingSession:
         """Create a session from one resolved dynamic configuration snapshot."""
 
@@ -2070,16 +2071,26 @@ class CodingSession:
             catalog (McpCatalog | None): The MCP tools found on demand this run, or
                 None when exposure is direct.
 
+        Unset (``self.codemode`` None), codemode is offered only when the run found
+        its MCP tools on demand: scripts save the most there, by calling catalog
+        tools without a turn each to look them up.
+
         Returns:
             CodemodeTool | None: The registered tool, or None when codemode is off,
-            the run has no registry, or no read-only tool is offered.
+            or automatic and the run found no MCP tools on demand, when the run has
+            no registry, or when no read-only tool is offered.
         """
 
-        if not self.codemode or registry is None or CODEMODE in registry.names():
+        automatic = self.codemode is None
+        if registry is None or CODEMODE in registry.names():
+            return None
+        if self.codemode is False or (automatic and catalog is None):
             return None
         if importlib.util.find_spec("pydantic_monty") is None:
-            # Offering a tool that can only fail would cost the model a turn.
-            _logger.warning("codemode is on, but the codemode extra is not installed")
+            # Offering a tool that can only fail would cost the model a turn. Only an
+            # explicit choice warns; the automatic one quietly does without.
+            if not automatic:
+                _logger.warning("codemode is on, but the codemode extra is not installed")
             return None
         registered = set(registry.names())
         scriptable = [

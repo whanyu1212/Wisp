@@ -269,7 +269,12 @@ def _signature(tool: ScriptableTool) -> _Signature | None:
     properties = tool.input_schema.get("properties")
     required = tool.input_schema.get("required")
     properties = properties if isinstance(properties, Mapping) else {}
-    required_names = set(required) if isinstance(required, list) else set()
+    # MCP servers send schemas of any draft; older ones nest lists in `required`.
+    required_names = (
+        {name for name in required if isinstance(name, str)}
+        if isinstance(required, list)
+        else set()
+    )
     parameters: list[str] = []
     # Required parameters first, so the declaration is valid Python.
     for name in sorted(properties, key=lambda name: name not in required_names):

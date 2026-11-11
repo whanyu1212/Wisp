@@ -153,6 +153,7 @@ the commit the change starts from, with the models the change will be measured o
 | `2026-11-10-flaky-sonnet-codemode-off.json`, `2026-11-10-flaky-sonnet-codemode-python.json` | Sonnet's `mcp-flaky-comments` runs after that fix, 5 each, without and with codemode |
 | `2026-11-10-on-demand-codemode-off.json`, `2026-11-10-on-demand-codemode-python.json` | The same 5 tasks and 3 models with MCP tools found on demand, without and with codemode, whose scripts call catalog tools by name (HY-498) |
 | `2026-11-11-core-codemode-off.json`, `2026-11-11-core-codemode-python.json` | The 10 tasks without MCP tools, 5 runs each on the same 3 models, without and with codemode: whether offering it hurts ordinary coding work (HY-431) |
+| `2026-11-11-stage2-on-demand-codemode-{off,python}.json` | The orchestration tasks and `mcp-triage` with MCP tools found on demand, without and with codemode, on the code that made codemode the default there (HY-509) |
 
 On-demand discovery cut tokens per run by 76–77% on `mcp-triage` (102 tools) and 28–46% on
 `mcp-pick-tool` (50 tools), and cost 20–34% more on `mcp-similar-servers` (6 tools), with every run
