@@ -10,7 +10,10 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.8.0 — Unreleased
+<!-- Keeps links to the pre-release "0.8.0 — Unreleased" heading working. -->
+<a id="080--unreleased"></a>
+
+## 0.8.0 — 2026-11-11
 
 0.8.0 adds an experimental `codemode` tool: from the new `codemode` extra, the model writes a
 Python script that calls the run's read-only tools, offered by default when a run finds its MCP
