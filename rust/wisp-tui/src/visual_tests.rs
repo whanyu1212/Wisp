@@ -197,6 +197,30 @@ fn fixture(scenario: &str) -> LiveUi {
         }));
         ui.discovery_view = Some(DiscoveryView::permissions());
     }
+    if matches!(scenario, "composer-plan" | "composer-yolo") {
+        // The composer's border names a chosen model, effort, and mode.
+        ui.editor = Default::default();
+        ui.state.model = Some("claude-opus-5-5".into());
+        ui.state.effort = Some("high".into());
+        ui.state.mode_confirmed = true;
+        if scenario == "composer-plan" {
+            ui.state.mode = crate::reducer::AgentMode::Plan;
+            ui.editor
+                .insert_paste("Sketch the migration before touching code.");
+        } else {
+            ui.state.permissions.snapshot =
+                Some(Arc::new(wisp_protocol::events::PermissionState {
+                    mode: wisp_protocol::commands::PermissionMode::Yolo,
+                    saved_mode: Some(wisp_protocol::commands::PermissionMode::Yolo),
+                    project_path: Some("/projects/wisp".into()),
+                    session_only_yolo: false,
+                }));
+            ui.editor.insert_paste(
+                "Refactor the retry helper so that:\n- backoff is capped at 30s\n\
+                 - jitter comes from an injected clock",
+            );
+        }
+    }
     if matches!(scenario, "activity-rail" | "activity-rail-expanded") {
         ui.state.transcript = Default::default();
         ui.state
@@ -1334,13 +1358,8 @@ fn composer_geometry_tracks_padding_and_keeps_the_cursor_in_the_editor() {
         );
         assert_eq!(buffer[(margin + 1, editor.area.y)].symbol(), "›");
         assert_eq!(buffer[(editor.area.x, editor.area.y)].symbol(), "a");
-        // A framed composer ends with its identity row and bottom border, and from
-        // 24 rows a blank row between the draft and the identity.
-        let bottom_padding = match height {
-            24.. => 3,
-            16.. => 2,
-            _ => 0,
-        };
+        // A framed composer ends with its bottom border, which carries the identity.
+        let bottom_padding = if height >= 16 { 1 } else { 0 };
         assert_eq!(editor.area.bottom(), height - 1 - bottom_padding);
         if bottom_padding > 0 {
             assert_eq!(buffer[(margin, editor.area.y - 1)].symbol(), "╭");
@@ -1671,6 +1690,8 @@ fn capture_conversation_screens() {
                 "showcase",
                 "welcome",
                 "typography",
+                "composer-plan",
+                "composer-yolo",
             ] {
                 let mut ui = fixture(scenario);
                 ui.theme.active = selected;

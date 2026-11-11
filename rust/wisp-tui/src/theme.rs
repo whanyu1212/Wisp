@@ -407,6 +407,19 @@ impl Palette {
         Style::default().fg(self.foreground).bg(self.panel)
     }
 
+    /// The composer's border in plan mode: the warning colour blended 70% into the
+    /// background, so the mode reads from the frame while the word `plan` keeps the
+    /// full colour. A lighter blend would sit darker than the normal muted border and
+    /// read as dimmed rather than amber. At 16 colours a blend shows as the same grey as
+    /// the normal border, so the border is the warning colour itself. Like every token
+    /// it stays RGB, and grey in monochrome, until `color_depth.rs` converts the frame.
+    pub fn plan_border(self) -> Color {
+        if self.depth == ColorDepth::Ansi16 {
+            return self.warning;
+        }
+        mix(self.warning, self.background, 0.7)
+    }
+
     pub fn border(self) -> Style {
         Style::default().fg(self.muted)
     }

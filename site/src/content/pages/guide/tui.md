@@ -54,13 +54,17 @@ the composer, collapsing on short terminals.
 
 The composer shares the transcript background, with a thin rounded frame, a `›` prompt, and a hint
 when empty. Long logical lines soft-wrap at word boundaries, falling back to safe hard wrapping for
-long tokens, without adding newlines to the submitted prompt. The composer grows to its bounded
-height, then keeps the cursor's wrapped row visible. The frame collapses on short terminals to
-preserve editing space. The footer separates the keys for the current workflow on the left from
-status (`idle`, `working`, `approval`, `trust`), mode, model, and context on the right, as space
-permits. When YOLO is on, the mode line names it in the warning colour, after the agent mode and
-ahead of the model; YOLO that is not saved for the project reads `YOLO (session)`. Ask, the safe
-default, is not shown. The backend version stays in `Ctrl+G` help. An empty transcript shows a centered startup
+long tokens, without adding newlines to the submitted prompt. A one-line draft takes three rows,
+and the composer grows with the draft to half the conversation's height, then keeps the cursor's
+wrapped row visible. Its bottom border names the model, the effort, and the agent mode
+(`claude-opus-5-5 (high) · build`); a narrow composer keeps the mode and drops the model. In plan
+mode the whole border turns amber, and `plan` keeps the full warning colour. When YOLO is on, the
+label names it in the warning colour after the mode; YOLO that is not saved for the project reads
+`YOLO (session)`. Ask, the safe default, is not shown. During a run that takes input, the top
+border names the keys that follow up or steer. The frame collapses on short terminals to preserve
+editing space, and the footer then names the mode and model. The footer shows the folder and
+branch, then status (`idle`, `working`, `approval`, `trust`) and context, then the keys for the
+current workflow set apart by `│`, as space permits. The backend version stays in `Ctrl+G` help. An empty transcript shows a centered startup
 logo with the installed package version, invites a prompt or `/` commands, and points at `/resume`,
 `/connect`, and `@` when there is room. It collapses to compact artwork and copy on short or narrow
 terminals.

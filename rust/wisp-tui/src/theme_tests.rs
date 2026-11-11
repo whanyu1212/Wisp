@@ -294,6 +294,43 @@ fn monochrome_diff_bands_show() {
 }
 
 #[test]
+fn plan_border_stays_apart() {
+    use crate::color_depth::ColorDepth;
+    // Plan mode reads from the composer's border alone, so its tint shows apart from the
+    // normal border wherever the theme's warning colour does.
+    for theme in theme::themes() {
+        for depth in [
+            ColorDepth::TrueColor,
+            ColorDepth::Ansi256,
+            ColorDepth::Ansi16,
+        ] {
+            let palette = theme.palette(false).for_depth(depth);
+            let shown = |color| depth.downconvert(color);
+            if shown(palette.warning) == shown(palette.muted) {
+                continue;
+            }
+            assert_ne!(
+                shown(palette.plan_border()),
+                shown(palette.muted),
+                "{} at {depth:?}",
+                theme.slug
+            );
+        }
+    }
+    // Without colour the border stays a grey at every depth, so NO_COLOR keeps no hue.
+    for depth in [ColorDepth::TrueColor, ColorDepth::Ansi16] {
+        let border = theme::default_theme()
+            .palette(true)
+            .for_depth(depth)
+            .plan_border();
+        assert!(
+            matches!(border, Color::Rgb(r, g, b) if r == g && g == b),
+            "{border:?} at {depth:?}"
+        );
+    }
+}
+
+#[test]
 fn heading_levels_stay_apart() {
     use crate::color_depth::ColorDepth;
     for theme in theme::themes() {
