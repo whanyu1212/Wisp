@@ -138,6 +138,9 @@ def _run(
         tool_approval_policy=approval or ToolApprovalPolicy.require_approval(),
         mcp_tool_exposure=exposure,  # type: ignore[arg-type]
         mode=mode,
+        # These tests pin the discovery tools; codemode, offered with them by
+        # default, has its own tests.
+        codemode=False,
     )
 
     async def collect() -> list[WispEvent]:

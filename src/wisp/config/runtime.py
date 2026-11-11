@@ -61,8 +61,9 @@ class WispConfig(BaseModel):
     context_reserve_tokens: int = Field(default=DEFAULT_CONTEXT_RESERVE_TOKENS, ge=0)
     auto_compaction_enabled: bool = DEFAULT_AUTO_COMPACTION_ENABLED
     web_search: bool = DEFAULT_WEB_SEARCH_ENABLED
-    # The experimental codemode tool, which needs the `codemode` extra.
-    codemode: bool = False
+    # The experimental codemode tool, which needs the `codemode` extra: True or False
+    # when set, None to offer it whenever the run finds its MCP tools on demand.
+    codemode: bool | None = None
     mcp_servers: tuple[McpServerConfig, ...] = Field(
         default=(), max_length=MAX_MCP_SERVERS, repr=False
     )
@@ -176,9 +177,11 @@ class WispConfig(BaseModel):
         ``web_search`` is user-only too, because each search is billed to the user's
         provider account. It is off unless enabled.
 
-        ``codemode`` (``WISP_CODEMODE``) is user-only and off unless enabled: it
-        offers the experimental codemode tool, which runs model-written scripts that
-        call the run's read-only tools.
+        ``codemode`` (``WISP_CODEMODE``) is user-only. It offers the experimental
+        codemode tool, which runs model-written scripts that call the run's read-only
+        tools. Unset, it resolves to None: the tool is offered whenever a run finds
+        its MCP tools on demand, where scripts help most; true or false always or
+        never offers it.
 
         ``mcp_servers`` is likewise user-only because it defines commands that Wisp
         may later execute. There is deliberately no environment-variable layer for
@@ -281,10 +284,9 @@ class WispConfig(BaseModel):
             codemode=(
                 codemode
                 if codemode is not None
-                else _resolve_bool(
+                else _resolve_optional_bool(
                     os.environ.get("WISP_CODEMODE"),
                     settings.codemode,
-                    default=False,
                     name="WISP_CODEMODE",
                 )
             ),
@@ -388,8 +390,20 @@ def _resolve_bool(
     default: bool,
     name: str,
 ) -> bool:
+    resolved = _resolve_optional_bool(env_value, saved_value, name=name)
+    return default if resolved is None else resolved
+
+
+def _resolve_optional_bool(
+    env_value: str | None,
+    saved_value: bool | None,
+    *,
+    name: str,
+) -> bool | None:
+    """The environment's value, else the saved one; None when neither sets it."""
+
     if env_value is None:
-        return saved_value if saved_value is not None else default
+        return saved_value
     normalized = env_value.strip().casefold()
     if normalized in {"1", "true", "yes", "on"}:
         return True

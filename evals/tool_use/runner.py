@@ -579,14 +579,13 @@ def _run_wisp(
         if definition.mcp_servers
         else {}
     )
-    if context.codemode != "off":
-        # A user-only setting, like the MCP servers. Scripts may call the task's
-        # read-only tools, which include every MCP tool, all marked read-only above.
-        settings["codemode"] = True
-    if settings:
-        settings_path = home / ".wisp" / "settings.json"
-        settings_path.parent.mkdir(parents=True, exist_ok=True)
-        settings_path.write_text(json.dumps(settings), encoding="utf-8")
+    # A user-only setting, like the MCP servers, and always written: unset, Wisp offers
+    # codemode whenever it finds MCP tools on demand. Scripts may call the task's
+    # read-only tools, which include every MCP tool, all marked read-only above.
+    settings["codemode"] = context.codemode != "off"
+    settings_path = home / ".wisp" / "settings.json"
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(json.dumps(settings), encoding="utf-8")
     environment = run_environment(home, context.credentials, os.environ)
     with (
         (run_dir / "events.jsonl").open("w", encoding="utf-8") as events,

@@ -123,7 +123,7 @@ def _run(
     tools: _Tools,
     streams: Sequence[list[ProviderEvent]],
     *,
-    codemode: bool = True,
+    codemode: bool | None = True,
     mode: AgentMode = "build",
     exposure: McpToolExposure = "direct",
     timeline: list[WispEvent] | None = None,
@@ -173,6 +173,44 @@ def test_offered_only_when_on(tmp_path: Path, enabled: bool) -> None:
         # already has each one's schema as a direct tool.
         assert description.endswith("Callable tools:\n- mcp__db__{query}\n- lookup")
         assert "async def" not in description
+
+
+@pytest.mark.parametrize(
+    ("codemode", "exposure", "offered"),
+    [
+        (None, "on_demand", True),
+        (None, "direct", False),
+        # The default exposure keeps a small catalog direct, so no codemode either.
+        (None, "auto", False),
+        (False, "on_demand", False),
+        (True, "direct", True),
+    ],
+    ids=["auto-on-demand", "auto-direct", "auto-small-catalog", "off-on-demand", "on-direct"],
+)
+def test_automatic_with_on_demand(
+    tmp_path: Path, codemode: bool | None, exposure: McpToolExposure, offered: bool
+) -> None:
+    """Unset, codemode is offered exactly when the run finds its MCP tools on demand."""
+
+    _, provider = _run(tmp_path, _Tools(), [], codemode=codemode, exposure=exposure)
+
+    assert (CODEMODE in {tool.name for tool in provider.calls[0].tools}) is offered
+
+
+def test_older_schema_drafts_scriptable(tmp_path: Path) -> None:
+    """A draft-03 schema, with lists in `required`, neither crashes nor blocks codemode."""
+
+    tools = _Tools()
+    tools.query.input_schema = {
+        "$schema": "http://json-schema.org/draft-03/schema#",
+        "properties": {"table": {"type": [{"type": "string"}, "string"]}},
+        "required": [["table"], "table"],
+    }
+
+    events, provider = _run(tmp_path, tools, [_script("await mcp__db__query(table='a')")])
+
+    assert CODEMODE in {tool.name for tool in provider.calls[0].tools}
+    assert not _result(events).is_error
 
 
 def test_script_fans_out(tmp_path: Path) -> None:
@@ -229,7 +267,16 @@ def test_failure_reports_calls(tmp_path: Path) -> None:
     assert "half way" in output and "1 tool call: mcp__db__query" in output
 
 
-def test_not_offered_without_monty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(("codemode", "warns"), [(True, True), (None, False)], ids=["on", "auto"])
+def test_not_offered_without_monty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    codemode: bool | None,
+    warns: bool,
+) -> None:
+    """Without the extra, codemode is left out; only an explicit choice warns."""
+
     real_find_spec = importlib.util.find_spec
 
     def find_spec(name: str, *args: object) -> object:
@@ -237,9 +284,10 @@ def test_not_offered_without_monty(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr(importlib.util, "find_spec", find_spec)
 
-    _, provider = _run(tmp_path, _Tools(), [])
+    _, provider = _run(tmp_path, _Tools(), [], codemode=codemode, exposure="on_demand")
 
     assert CODEMODE not in [tool.name for tool in provider.calls[0].tools]
+    assert ("codemode extra is not installed" in caplog.text) is warns
 
 
 def test_script_is_safe_to_replay(tmp_path: Path) -> None:

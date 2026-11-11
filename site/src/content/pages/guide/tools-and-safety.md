@@ -458,12 +458,13 @@ This is a heuristic, so read every proposal before confirming. To store a value 
 
 ## Scripting tool calls with codemode (experimental)
 
-With `"codemode": true` in `~/.wisp/settings.json`, or `WISP_CODEMODE=1` for one process, the model
-also gets a `codemode` tool. It writes a short Python script that calls the run's read-only tools as
-async functions, and only what the script prints and its last expression come back. One script can
-run many calls at once with `asyncio.gather`, chain calls on earlier answers, and filter large results
-before the model reads them. Install the `codemode` extra first (`pip install 'wisp-ai[codemode]'`);
-it adds [monty](https://github.com/pydantic/monty), the sandbox scripts run in.
+When a run finds its [MCP tools on demand](#finding-mcp-tools-on-demand), the model also gets a
+`codemode` tool, provided the `codemode` extra is installed. It writes a short Python script that
+calls the run's read-only tools as async functions, and only what the script prints and its last
+expression come back. One script can run many calls at once with `asyncio.gather`, chain calls on
+earlier answers, and filter large results before the model reads them. Install the `codemode`
+extra first (`pip install 'wisp-ai[codemode]'`); it adds [monty](https://github.com/pydantic/monty),
+the sandbox scripts run in.
 
 - **Only read-only tools.** A script can call the read-only tools the run already offers: `read`,
   `ls`, `grep`, `find`, and MCP tools whose `tool_safety` you set to `"read"`. Tool selection and
@@ -491,7 +492,14 @@ it adds [monty](https://github.com/pydantic/monty), the sandbox scripts run in.
   script cannot start another script, and cancelling a run kills it along with the calls it has
   running.
 
-It is off by default while its effect is measured on the tool-use evals (HY-431).
+**When it is offered.** By default, codemode is offered when a run finds its MCP tools on demand,
+which `"mcp_tool_exposure": "auto"` does for a large catalog, and the run has a read-only tool for
+scripts to call. That is where scripts help
+most, so on-demand discovery with codemode is the recommended setup for a large MCP catalog. On the
+tool-use evals' orchestration tasks it was the cheapest setup measured, and its accuracy matched or
+beat every other setup on every model. `"codemode": true` in `~/.wisp/settings.json`, or
+`WISP_CODEMODE=1`, offers it in every run; `"codemode": false`, or `WISP_CODEMODE=0`, never does.
+Without the extra installed, codemode is simply not offered.
 
 ## Saved project permissions
 

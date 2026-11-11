@@ -89,7 +89,14 @@ this policy.
 
 ### Tools
 
-- An experimental `codemode` tool, off unless `"codemode": true` or `WISP_CODEMODE=1`: the model
+- Codemode is offered by default whenever a run finds its MCP tools on demand, and the `codemode`
+  extra is installed. `"codemode": true` (or `WISP_CODEMODE=1`) still offers it in every run, and
+  `"codemode": false` (or `WISP_CODEMODE=0`) never does. A confirmation run on the orchestration
+  tasks, with tools found on demand, held the earlier result: luna passed 23 of 25 instead of 17,
+  Sonnet and sol passed every run, and Sonnet cost $0.97 instead of $1.45. The tools guide now
+  recommends on-demand discovery with codemode for a large MCP catalog. (HY-509)
+- An experimental `codemode` tool, offered by default when a run finds its MCP tools on demand
+  (see below), or always with `"codemode": true` or `WISP_CODEMODE=1`: the model
   writes a Python script that calls the run's read-only tools, and only what the script prints and
   returns comes back. Scripts run in [monty](https://github.com/pydantic/monty)'s sandbox, from the
   new `codemode` extra, with no files, network or environment, and are type-checked before they
