@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.tui_e2e.support import welcome_ready
+from tests.tui_e2e.support import screen_shows, welcome_ready
 
 
 @pytest.mark.process
@@ -89,7 +89,9 @@ def test_native_mouse_moves_the_composer_cursor_when_capture_is_enabled(
                 os.write(terminal_fd, b"mouse draft")
                 phase = "draft"
                 output.clear()
-            elif phase == "draft" and b"draft" in output:
+            # Read the draft from the replayed screen: a welcome tip can also paint
+            # "draft", and typed keys may paint across several frames.
+            elif phase == "draft" and screen_shows(all_output, "mouse draft"):
                 # SGR is one-based. The padded composer has its editor at
                 # column 6, row 22, after the outer margin, rail, and `> `; the
                 # bottom border, which names the model and mode, sits below it.
