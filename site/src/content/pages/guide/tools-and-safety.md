@@ -474,6 +474,14 @@ it adds [monty](https://github.com/pydantic/monty), the sandbox scripts run in.
 - **Each call is checked on its own.** Every call a script makes passes the same checks as a direct
   call. A script cannot ask for an approval, so a call that would need one fails, and the script can
   catch the error. Approving or allowing the script grants nothing to the calls it makes.
+- **Each call is recorded.** The script's `tool.execution.ended` and `tool.result` events list every
+  call it made in `nested_calls`, with each call's arguments, outcome and timing. Refused calls
+  are listed too, and so are calls the script ended before they finished. The session saves that
+  list. While the script runs, RPC and SDK clients and `--mode json` also receive transient
+  `tool.nested.started` and `tool.nested.ended` events, on a best-effort basis. The model still
+  reads only what the script prints and returns. A run cancelled while a script is running
+  records that script as interrupted, with no calls listed; its live events are then the only
+  trace. The terminal UI does not show these calls yet.
 - **A sandbox, not a shell.** Scripts run in a separate process with no files, network, environment
   or third-party packages, in a subset of Python. They are type-checked against the tools'
   declarations before anything runs.

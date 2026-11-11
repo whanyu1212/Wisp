@@ -4621,6 +4621,22 @@
    "event": "tool.execution.ended",
    "operation": "remove",
    "path": [
+    "nested_calls"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.execution.ended",
+   "operation": "remove",
+   "path": [
+    "nested_calls_omitted"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.execution.ended",
+   "operation": "remove",
+   "path": [
     "output"
    ],
    "accepted": false
@@ -4916,6 +4932,224 @@
    "accepted": true
   },
   {
+   "event": "tool.nested.ended",
+   "operation": "remove",
+   "path": [
+    "call"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.nested.ended",
+   "operation": "remove",
+   "path": [
+    "parent_call_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.nested.ended",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.nested.ended",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "tool.nested.ended",
+   "operation": "remove",
+   "path": [
+    "call",
+    "arguments"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.nested.ended",
+   "operation": "remove",
+   "path": [
+    "call",
+    "call_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.nested.ended",
+   "operation": "remove",
+   "path": [
+    "call",
+    "duration_ms"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.nested.ended",
+   "operation": "remove",
+   "path": [
+    "call",
+    "error"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.nested.ended",
+   "operation": "remove",
+   "path": [
+    "call",
+    "failure_code"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.nested.ended",
+   "operation": "remove",
+   "path": [
+    "call",
+    "is_error"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.nested.ended",
+   "operation": "remove",
+   "path": [
+    "call",
+    "name"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.nested.ended",
+   "operation": "remove",
+   "path": [
+    "call",
+    "started_at"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.nested.ended",
+   "operation": "remove",
+   "path": [
+    "call",
+    "summary"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.nested.ended",
+   "operation": "remove",
+   "path": [
+    "call",
+    "target"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.nested.ended",
+   "operation": "add_unknown",
+   "path": [
+    "call"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.nested.ended",
+   "operation": "remove",
+   "path": [
+    "call",
+    "arguments",
+    "path"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.nested.ended",
+   "operation": "add_unknown",
+   "path": [
+    "call",
+    "arguments"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.nested.started",
+   "operation": "remove",
+   "path": [
+    "arguments"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.nested.started",
+   "operation": "remove",
+   "path": [
+    "call_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.nested.started",
+   "operation": "remove",
+   "path": [
+    "name"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.nested.started",
+   "operation": "remove",
+   "path": [
+    "parent_call_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.nested.started",
+   "operation": "remove",
+   "path": [
+    "target"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.nested.started",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.nested.started",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "tool.nested.started",
+   "operation": "remove",
+   "path": [
+    "arguments",
+    "path"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.nested.started",
+   "operation": "add_unknown",
+   "path": [
+    "arguments"
+   ],
+   "accepted": true
+  },
+  {
    "event": "tool.result",
    "operation": "remove",
    "path": [
@@ -5002,6 +5236,22 @@
     "name"
    ],
    "accepted": false
+  },
+  {
+   "event": "tool.result",
+   "operation": "remove",
+   "path": [
+    "nested_calls"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.result",
+   "operation": "remove",
+   "path": [
+    "nested_calls_omitted"
+   ],
+   "accepted": true
   },
   {
    "event": "tool.result",

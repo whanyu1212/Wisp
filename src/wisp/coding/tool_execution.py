@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from dataclasses import dataclass, replace
+from contextvars import ContextVar
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import cast
 
@@ -20,13 +23,22 @@ from wisp.agent.tool_contracts import (
 from wisp.coding.tool_progress import LiveEventSink, run_with_progress
 from wisp.events import (
     MAX_EDIT_LOCATIONS,
+    MAX_NESTED_CALLS,
     MAX_TOOL_RESULT_IMAGES,
+    NESTED_CALL_ARGUMENTS_MAX_CHARS,
+    NESTED_CALL_TEXT_MAX_CHARS,
     EditLocation,
     ImagePart,
+    JsonObject,
     ManagedProcessState,
+    NestedToolCall,
     ToolApprovalRequested,
     ToolApprovalResolved,
     ToolExecutionEnded,
+    ToolNestedCallEnded,
+    ToolNestedCallStarted,
+    WispEvent,
+    utc_now,
 )
 from wisp.images import ImageRejectedError
 from wisp.mcp.discovery import MCP_CALL, McpCatalog, check_proxied_arguments, resolve_target
@@ -64,6 +76,8 @@ _BEFORE_TEXT_TOOLS = frozenset({"write"})
 _MODEL_VISIBLE_TOOL_ERROR_MAX_CHARS = 2_000
 # The batch limit, `_MAX_PARALLEL_TOOL_EXECUTIONS` in the loop, for a script's calls.
 _MAX_PARALLEL_NESTED_CALLS = 8
+# How a nested call is recorded when its script ended before the call finished.
+_SCRIPT_ENDED_FIRST = "The script ended before this call finished"
 _MAX_RESULT_COUNT = (1 << 63) - 1
 _MIN_EXIT_CODE = -(1 << 31)
 _MAX_EXIT_CODE = (1 << 31) - 1
@@ -159,6 +173,75 @@ class _ToolRunOutcome:
     process_started_at: datetime | None = None
     process_ended_at: datetime | None = None
     images: tuple[ImagePart, ...] = ()
+    nested_calls: tuple[NestedToolCall, ...] = ()
+    nested_calls_omitted: int = 0
+
+
+@dataclass(slots=True)
+class _ScriptCallLog:
+    """The calls one codemode script makes, kept in the order it made them.
+
+    The first `MAX_NESTED_CALLS` calls are recorded and later ones only counted, so
+    a script's result stays bounded however many calls its limits allow. When the
+    script ends the log closes: a call still unfinished is recorded then, as one
+    the script ended before it finished, and nothing a call does later is recorded
+    or published. Closing waits for nothing, so the result never depends on how
+    fast a cancelled tool stops.
+    """
+
+    parent_call_id: str
+    omitted: int = 0
+    closed: bool = False
+    _count: int = 0
+    _recorded: dict[int, NestedToolCall] = field(default_factory=dict)
+    _unfinished: dict[int, tuple[NestedToolCall, float]] = field(default_factory=dict)
+
+    def start(self, unfinished: NestedToolCall) -> int | None:
+        """Number the next call, given its record should the script end first.
+
+        Returns:
+            int | None: The call's place in the log, or None when it is past the
+            cap and only counted.
+        """
+
+        index = self._count
+        self._count += 1
+        if index >= MAX_NESTED_CALLS:
+            self.omitted += 1
+            return None
+        self._unfinished[index] = (unfinished, time.monotonic())
+        return index
+
+    def record(self, index: int | None, call: NestedToolCall) -> bool:
+        """Record a call's outcome, unless the script has ended.
+
+        Returns:
+            bool: Whether the script is still running, so the call may be published.
+        """
+
+        if self.closed:
+            return False
+        if index is not None:
+            self._unfinished.pop(index, None)
+            self._recorded[index] = call
+        return True
+
+    def close(self) -> None:
+        """End the script: record its unfinished calls and ignore anything later."""
+
+        self.closed = True
+        for index, (call, started) in self._unfinished.items():
+            duration_ms = round((time.monotonic() - started) * 1000)
+            self._recorded[index] = call.model_copy(update={"duration_ms": duration_ms})
+        self._unfinished.clear()
+
+    def calls(self) -> tuple[NestedToolCall, ...]:
+        return tuple(self._recorded[index] for index in sorted(self._recorded))
+
+
+# The script a codemode call is running. The call sets it around the script, and the
+# script's host calls, which run in tasks started inside it, read it from there.
+_SCRIPT_CALLS: ContextVar[_ScriptCallLog | None] = ContextVar("wisp_script_calls", default=None)
 
 
 @dataclass(frozen=True)
@@ -336,36 +419,99 @@ class ConfiguredToolExecutor:
         unless the approval policy already grants it, so approving the script grants
         nothing it calls. A tool that is
         not parallel-safe waits for the other such nested calls, as it would in a
-        batch. Nested calls report no progress or events of their own; the script's
-        result describes them.
+        batch. Nested calls report no progress of their own.
+
+        Every call is recorded in its script's result, refused ones included, and
+        published live as `tool.nested.started` and `tool.nested.ended`, outside
+        the waits above. Publishing waits for the frontend, so a slow one slows the
+        script; one that fails is logged and the call goes on. A call the script
+        ended before it finished is recorded as such and publishes no end.
 
         Args:
             tool_call (ToolCall): The call, with an id unique within the script.
 
         Returns:
             NestedCallResult: The tool's text, and whether it failed.
+
+        Raises:
+            anyio.get_cancelled_exc_class(): When the script ends before the call
+                finishes.
         """
 
+        log = _SCRIPT_CALLS.get()
+        if log is None:
+            outcome = await self._nested_outcome(tool_call)
+            return NestedCallResult(text=outcome.output, is_error=outcome.is_error)
+        target = self.resolve_target(tool_call)
+        arguments = _recorded_arguments(tool_call.arguments)
+        started_at = utc_now()
+        started = time.monotonic()
+
+        def recorded(outcome: _ToolRunOutcome) -> NestedToolCall:
+            summary = None if outcome.is_error else outcome.summary
+            return NestedToolCall(
+                call_id=tool_call.call_id,
+                name=tool_call.name,
+                target=target,
+                arguments=arguments,
+                is_error=outcome.is_error,
+                failure_code=outcome.failure_code,
+                error=outcome.output[:NESTED_CALL_TEXT_MAX_CHARS] if outcome.is_error else None,
+                summary=summary[:NESTED_CALL_TEXT_MAX_CHARS] if summary is not None else None,
+                started_at=started_at,
+                duration_ms=round((time.monotonic() - started) * 1000),
+            )
+
+        ended_first = _ToolRunOutcome(output=_SCRIPT_ENDED_FIRST, is_error=True)
+        index = log.start(recorded(ended_first))
+        try:
+            await self._publish_nested(
+                log,
+                ToolNestedCallStarted(
+                    parent_call_id=log.parent_call_id,
+                    call_id=tool_call.call_id,
+                    name=tool_call.name,
+                    target=target,
+                    arguments=arguments,
+                ),
+            )
+            outcome = await self._nested_outcome(tool_call)
+        except anyio.get_cancelled_exc_class():
+            # Recorded without waiting: nothing may be published once the script ended.
+            log.record(index, recorded(ended_first))
+            raise
+        call = recorded(outcome)
+        if log.record(index, call):
+            await self._publish_nested(
+                log, ToolNestedCallEnded(parent_call_id=log.parent_call_id, call=call)
+            )
+        return NestedCallResult(text=outcome.output, is_error=outcome.is_error)
+
+    async def _nested_outcome(self, tool_call: ToolCall) -> _ToolRunOutcome:
+        """Check and run one nested call, or explain why it may not run."""
+
         if tool_call.name == CODEMODE:
-            return NestedCallResult(text="A script cannot run another script.", is_error=True)
+            return _failure_outcome(
+                "A script cannot run another script.", failure_code="policy_denied"
+            )
         checked = self._check_call(tool_call)
         if isinstance(checked, _ToolRunOutcome):
-            return NestedCallResult(text=checked.output, is_error=True)
+            return replace(checked, is_error=True)
         tool, arguments, target = checked.tool, checked.arguments, checked.target
         if tool.safety != "read":
             # Checked on the tool that runs, so no route, such as `mcp_call` naming a
             # command tool, reaches more than a read-only tool even under `--yes`.
-            return NestedCallResult(
-                text=f"{tool.name} is not read-only; a script can call only read-only tools.",
-                is_error=True,
+            return _failure_outcome(
+                f"{tool.name} is not read-only; a script can call only read-only tools.",
+                failure_code="policy_denied",
             )
         if self._approval_policy.requires_approval(tool) and not self._approval_policy.approves(
             tool
         ):
-            return NestedCallResult(
-                text=f"{tool.name} needs approval, which a script cannot ask for. "
+            return _failure_outcome(
+                f"{tool.name} needs approval, which a script cannot ask for. "
                 "Call it directly instead.",
-                is_error=True,
+                failure_code="approval_denied",
             )
         name = target or tool_call.name
         parallel_safe = (
@@ -374,10 +520,19 @@ class ConfiguredToolExecutor:
             else False
         )
         async with self._nested_parallel_limit if parallel_safe else self._nested_serial_lock:
-            outcome = await self._run_tool(
+            return await self._run_tool(
                 tool, arguments, call_id=tool_call.call_id, tool_name=name, nested=True
             )
-        return NestedCallResult(text=outcome.output, is_error=outcome.is_error)
+
+    async def _publish_nested(self, log: _ScriptCallLog, event: WispEvent) -> None:
+        """Publish a nested call's event live; best effort, never once its script ended."""
+
+        if self._progress_sink is None or log.closed:
+            return
+        try:
+            await self._progress_sink(event)
+        except Exception:  # noqa: BLE001 - the script's calls must not depend on a frontend
+            _logger.exception("Could not publish a nested call's %s event", event.type)
 
     def _resolve_call(self, tool_call: ToolCall) -> _ResolvedCall | _ToolRunOutcome:
         """Find what a call will run, or the failure decided before any check.
@@ -437,12 +592,27 @@ class ConfiguredToolExecutor:
         target: str | None = None,
     ) -> PreparedToolExecution:
         async def run() -> ToolExecutionEnded:
-            outcome = await self._run_tool(
-                tool,
-                arguments,
-                call_id=tool_call.call_id,
-                tool_name=target or tool_call.name,
-            )
+            if tool_call.name != CODEMODE:
+                outcome = await self._run_tool(
+                    tool,
+                    arguments,
+                    call_id=tool_call.call_id,
+                    tool_name=target or tool_call.name,
+                )
+                return _execution_ended(tool_call, outcome, target=target)
+            log = _ScriptCallLog(tool_call.call_id)
+            token = _SCRIPT_CALLS.set(log)
+            try:
+                outcome = await self._run_tool(
+                    tool, arguments, call_id=tool_call.call_id, tool_name=tool_call.name
+                )
+            finally:
+                # Closed before anything reads it, on every path: a cancelled call
+                # that stops only later can neither change the result nor publish
+                # after it.
+                log.close()
+                _SCRIPT_CALLS.reset(token)
+            outcome = replace(outcome, nested_calls=log.calls(), nested_calls_omitted=log.omitted)
             return _execution_ended(tool_call, outcome, target=target)
 
         # Scheduling follows the tool that runs: a proxied call is as parallel-safe
@@ -684,7 +854,22 @@ def _execution_ended(
         process_started_at=outcome.process_started_at,
         process_ended_at=outcome.process_ended_at,
         images=outcome.images,
+        nested_calls=outcome.nested_calls,
+        nested_calls_omitted=outcome.nested_calls_omitted,
     )
+
+
+def _recorded_arguments(arguments: Mapping[str, object]) -> JsonObject | None:
+    """A nested call's arguments as its record keeps them, or None when too large."""
+
+    try:
+        text = json.dumps(arguments, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        return None
+    if len(text) > NESTED_CALL_ARGUMENTS_MAX_CHARS:
+        return None
+    decoded = json.loads(text)
+    return cast(JsonObject, decoded) if isinstance(decoded, dict) else None
 
 
 def _read_tool_result(result: ToolResult, *, tool_name: str) -> _RawToolResultSnapshot:

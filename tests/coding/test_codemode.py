@@ -7,7 +7,8 @@ executor's nested calls directly, with scripts running in monty.
 from __future__ import annotations
 
 import importlib.util
-from collections.abc import Sequence
+import itertools
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -17,7 +18,15 @@ import pytest
 from tests.agent.loop.support import tool_call_stream
 from wisp.coding.session import CodingSession
 from wisp.coding.tool_execution import ConfiguredToolExecutor
-from wisp.events import AgentMode, ToolExecutionEnded, ToolResultReady, WispEvent
+from wisp.events import (
+    AgentMode,
+    ToolExecutionEnded,
+    ToolExecutionStarted,
+    ToolNestedCallEnded,
+    ToolNestedCallStarted,
+    ToolResultReady,
+    WispEvent,
+)
 from wisp.mcp.config import McpToolExposure
 from wisp.mcp.discovery import MCP_CALL, McpCatalog, discovery_tools
 from wisp.providers.events import (
@@ -28,6 +37,8 @@ from wisp.providers.events import (
 )
 from wisp.providers.fake import ScriptedProvider
 from wisp.runtime.registry import ToolRegistry
+from wisp.sessions import MessageSessionEntry
+from wisp.sessions.entries import session_entry_from_json
 from wisp.sessions.jsonl import JsonlSessionStore
 from wisp.tool_types import ToolSafety
 from wisp.tools.approval import ToolApprovalPolicy
@@ -115,6 +126,7 @@ def _run(
     codemode: bool = True,
     mode: AgentMode = "build",
     exposure: McpToolExposure = "direct",
+    timeline: list[WispEvent] | None = None,
 ) -> tuple[list[WispEvent], ScriptedProvider]:
     provider = ScriptedProvider([*streams, _done()])
     session = CodingSession(
@@ -129,8 +141,17 @@ def _run(
         mode=mode,
     )
 
+    async def live(event: WispEvent) -> None:
+        if timeline is not None:
+            timeline.append(event)
+
     async def collect() -> list[WispEvent]:
-        return [event async for event in session.run("go")]
+        events = []
+        async for event in session.run("go", live_event_sink=live):
+            events.append(event)
+            if timeline is not None:
+                timeline.append(event)
+        return events
 
     return anyio.run(collect), provider
 
@@ -674,3 +695,236 @@ def test_unscriptable_names_left_out() -> None:
 
 async def _echo(name: str, arguments: object) -> NestedCallResult:
     return NestedCallResult(text=f"{name}:{arguments}")
+
+
+# --- What a script's calls record ---------------------------------------------------
+
+
+def _ended(events: Sequence[WispEvent]) -> ToolExecutionEnded:
+    (ended,) = [
+        event
+        for event in events
+        if isinstance(event, ToolExecutionEnded) and event.name == CODEMODE
+    ]
+    return ended
+
+
+_AUDITED = (
+    "import asyncio\n"
+    "await asyncio.gather(mcp__db__query(table='a'), mcp__db__query(table='b'))\n"
+    "try:\n    await mcp_call(name='mcp__db__drop', arguments={'table': 'c'})\n"
+    "except RuntimeError:\n    pass"
+)
+
+
+def test_script_calls_recorded(tmp_path: Path) -> None:
+    """Every call a script made is on its result and in the session, refusals too."""
+
+    tools = _Tools()
+
+    events, provider = _run(tmp_path, tools, [_script(_AUDITED)], exposure="on_demand")
+
+    calls = _ended(events).nested_calls
+    assert [(c.name, c.target, c.arguments, c.is_error, c.failure_code) for c in calls] == [
+        ("mcp__db__query", None, {"table": "a"}, False, None),
+        ("mcp__db__query", None, {"table": "b"}, False, None),
+        (
+            "mcp_call",
+            "mcp__db__drop",
+            {"name": "mcp__db__drop", "arguments": {"table": "c"}},
+            True,
+            "policy_denied",
+        ),
+    ]
+    assert calls[2].error is not None and "not read-only" in calls[2].error
+    assert _result(events).nested_calls == calls
+    saved = [
+        entry.tool_result.nested_calls
+        for path in (tmp_path / "sessions").rglob("*.jsonl")
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if isinstance(entry := session_entry_from_json(line), MessageSessionEntry)
+        and entry.tool_result is not None
+        and entry.tool_result.nested_calls
+    ]
+    assert saved == [calls]
+    # The model reads only what the script returned, never the records.
+    assert "policy_denied" not in repr(provider.calls[-1])
+
+
+def test_live_events_bracket_calls(tmp_path: Path) -> None:
+    """Each call starts and ends live, inside its script's own start and end."""
+
+    timeline: list[WispEvent] = []
+
+    events, _ = _run(
+        tmp_path, _Tools(), [_script(_AUDITED)], exposure="on_demand", timeline=timeline
+    )
+
+    position = {id(event): index for index, event in enumerate(timeline)}
+    (script_start,) = [
+        position[id(e)]
+        for e in timeline
+        if isinstance(e, ToolExecutionStarted) and e.name == CODEMODE
+    ]
+    script_end = position[id(_ended(events))]
+    started = [e for e in timeline if isinstance(e, ToolNestedCallStarted)]
+    ended = [e for e in timeline if isinstance(e, ToolNestedCallEnded)]
+    assert (len(started), len(ended)) == (3, 3)
+    assert {e.parent_call_id for e in [*started, *ended]} == {"call-script"}
+    by_id = {e.call.call_id: e.call for e in ended}
+    assert [by_id[call.call_id] for call in _ended(events).nested_calls] == list(
+        _ended(events).nested_calls
+    )
+    for start in started:
+        (end,) = [e for e in ended if e.call.call_id == start.call_id]
+        assert script_start < position[id(start)] < position[id(end)] < script_end
+
+
+def _script_executor(
+    tools: _Tools,
+    *,
+    limits: ScriptLimits | None = None,
+    live: list[WispEvent] | None = None,
+    sink: bool = True,
+    failing_sink: bool = False,
+) -> ConfiguredToolExecutor:
+    """An executor offering codemode whose scripts call back into it, as a session's do."""
+
+    registry = tools.registry()
+    executors: list[ConfiguredToolExecutor] = []
+    ids = itertools.count(1)
+
+    async def call(name: str, arguments: Mapping[str, object]) -> NestedCallResult:
+        nested = ToolCall(call_id=f"nested-{next(ids)}", name=name, arguments=dict(arguments))
+        return await executors[0].run_nested(nested)
+
+    async def publish(event: WispEvent) -> None:
+        if failing_sink:
+            raise RuntimeError("frontend went away")
+        if live is not None:
+            live.append(event)
+
+    codemode = CodemodeTool([tools.query, tools.lookup], call, limits=limits)
+    registry.register(codemode, execution=ToolExecutionMetadata(parallel_safe=False))
+    executors.append(
+        ConfiguredToolExecutor(
+            registry=registry,
+            context=ToolContext(cwd=Path(".")),
+            policy=ToolPolicy.allow_all_tools(),
+            approval_policy=ToolApprovalPolicy.require_approval(),
+            progress_sink=publish if sink else None,
+        )
+    )
+    return executors[0]
+
+
+async def _execute(executor: ConfiguredToolExecutor, call_id: str, code: str) -> ToolExecutionEnded:
+    call = ToolCall(call_id=call_id, name=CODEMODE, arguments={"code": code})
+    (ended,) = [e async for e in executor.execute(call) if isinstance(e, ToolExecutionEnded)]
+    return ended
+
+
+def test_concurrent_scripts_attributed() -> None:
+    """Two scripts running at once each record only their own calls."""
+
+    tools = _Tools(lookup=_Tool("lookup", delay=0.05))
+    live: list[WispEvent] = []
+    executor = _script_executor(tools, live=live)
+    gather = "import asyncio\nawait asyncio.gather(*[lookup(table=t) for t in {}])"
+    ended: dict[str, ToolExecutionEnded] = {}
+
+    async def run() -> None:
+        async def one(call_id: str, tables: list[str]) -> None:
+            ended[call_id] = await _execute(executor, call_id, gather.format(tables))
+
+        async with anyio.create_task_group() as group:
+            group.start_soon(one, "left", ["a", "b", "c"])
+            group.start_soon(one, "right", ["x", "y"])
+
+    anyio.run(run)
+
+    tables = {
+        call_id: [call.arguments["table"] for call in event.nested_calls if call.arguments]
+        for call_id, event in ended.items()
+    }
+    assert tables == {"left": ["a", "b", "c"], "right": ["x", "y"]}
+    for event in live:
+        assert isinstance(event, ToolNestedCallStarted | ToolNestedCallEnded)
+        mine = {c.call_id for c in ended[event.parent_call_id].nested_calls}
+        assert (
+            event.call_id if isinstance(event, ToolNestedCallStarted) else event.call.call_id
+        ) in mine
+
+
+@pytest.mark.parametrize("sink", [True, False], ids=["live", "no-sink"])
+def test_cancelled_calls_recorded(sink: bool) -> None:
+    """Calls cut off by a script's limit are recorded as unfinished and never end live."""
+
+    tools = _Tools(lookup=_Tool("lookup", delay=5))
+    live: list[WispEvent] = []
+    executor = _script_executor(tools, limits=ScriptLimits(wall_seconds=1), live=live, sink=sink)
+    code = "import asyncio\nawait asyncio.gather(lookup(table='a'), lookup(table='b'))"
+
+    async def run() -> ToolExecutionEnded:
+        ended = await _execute(executor, "slow", code)
+        await anyio.sleep(0.2)  # Lets the cancelled calls run their handlers.
+        return ended
+
+    ended = anyio.run(run)
+
+    assert ended.is_error and "Script failed (timeout)" in ended.output
+    assert [(c.is_error, c.error) for c in ended.nested_calls] == [
+        (True, "The script ended before this call finished")
+    ] * 2
+    assert [type(e) for e in live] == ([ToolNestedCallStarted] * 2 if sink else [])
+
+
+def test_slow_cancel_publishes_nothing_late() -> None:
+    """A tool that finishes after its script ended neither changes the record nor publishes."""
+
+    @dataclass
+    class _Stubborn(_Tool):
+        async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
+            with anyio.CancelScope(shield=True):
+                await anyio.sleep(0.6)
+            return ToolResult(text="late")
+
+    live: list[WispEvent] = []
+    executor = _script_executor(
+        _Tools(lookup=_Stubborn("lookup")), limits=ScriptLimits(wall_seconds=0.3), live=live
+    )
+
+    async def run() -> ToolExecutionEnded:
+        ended = await _execute(executor, "stubborn", "await lookup(table='a')")
+        await anyio.sleep(1)  # Past the tool's own end.
+        return ended
+
+    ended = anyio.run(run)
+
+    (call,) = ended.nested_calls
+    assert call.error == "The script ended before this call finished"
+    assert [type(e) for e in live] == [ToolNestedCallStarted]
+
+
+def test_failing_sink_ignored() -> None:
+    """A frontend that fails to take an event changes nothing the script sees."""
+
+    executor = _script_executor(_Tools(), failing_sink=True)
+
+    ended = anyio.run(_execute, executor, "plain", "await lookup(table='a')")
+
+    assert not ended.is_error and ended.output.startswith("lookup:a")
+    assert [(c.name, c.is_error) for c in ended.nested_calls] == [("lookup", False)]
+
+
+def test_records_stay_bounded() -> None:
+    """Huge arguments are dropped from a record, and calls past the cap only counted."""
+
+    executor = _script_executor(_Tools(), limits=ScriptLimits(max_calls=300))
+    code = "await lookup(table='x' * 5000)\nfor i in range(209):\n    await lookup(table='a')"
+
+    ended = anyio.run(_execute, executor, "many", code)
+
+    assert len(ended.nested_calls) == 200 and ended.nested_calls_omitted == 10
+    assert ended.nested_calls[0].arguments is None
+    assert ended.nested_calls[1].arguments == {"table": "a"}

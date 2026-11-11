@@ -63,6 +63,16 @@ this policy.
 
 ### Events
 
+- A codemode script's `tool.execution.ended` and `tool.result` carry `nested_calls`: every call the
+  script made, including refused ones and those it ended before they finished. Each record has
+  the call's arguments (left out when longer than 2,000 characters), outcome, failure code, the
+  start of its error, summary and timing. Up to 200 are recorded, and `nested_calls_omitted`
+  counts the rest. Sessions save the list with the tool result. A run cancelled while a script is
+  running records no calls for that script. While a script runs, two new transient events, `tool.nested.started`
+  (`ToolNestedCallStarted`) and `tool.nested.ended` (`ToolNestedCallEnded`), reach RPC clients, the
+  SDK's live sink and `--mode json`; like tool progress they are never saved or sent to the model.
+  The schema bundle and conformance fixture are regenerated; the same-release rule applies. The
+  terminal UI does not show nested calls yet. (HY-505)
 - `session.directory_changed` (`SessionDirectoryChanged`) is new: `session_id`, `previous_cwd`
   (`null` for the folder a new session started in), and `cwd`. `change_directory` is a new
   command. `rpc.workspace` is now also sent after a move and after a session becomes active. The

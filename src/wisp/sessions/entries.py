@@ -21,10 +21,12 @@ from typing_extensions import TypeAliasType
 
 from wisp.events import (
     MAX_EDIT_LOCATIONS,
+    MAX_NESTED_CALLS,
     EditLocation,
     JsonObject,
     JsonObjectAdapter,
     KnownWispEvent,
+    NestedToolCall,
     ToolPresentationStatus,
     utc_now,
     wisp_event_from_dict,
@@ -91,6 +93,13 @@ class ToolResultPresentationSnapshot(BaseModel):
     edit_locations: tuple[EditLocation, ...] | None = Field(
         default=None, min_length=1, max_length=MAX_EDIT_LOCATIONS
     )
+    # The calls a codemode script made, so a session records what each script read
+    # and called; absent for other tools and for results recorded before they were kept.
+    nested_calls: tuple[NestedToolCall, ...] | None = Field(
+        default=None, min_length=1, max_length=MAX_NESTED_CALLS
+    )
+    # How many more calls the script made than `nested_calls` records.
+    nested_calls_omitted: int | None = Field(default=None, ge=1)
 
 
 class RepositoryStatusSnapshot(BaseModel):

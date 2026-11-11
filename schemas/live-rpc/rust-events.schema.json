@@ -1433,6 +1433,125 @@
       "title": "ModelProviderAutoSwitched",
       "type": "object"
     },
+    "NestedToolCall": {
+      "additionalProperties": false,
+      "description": "One tool call a codemode script made, as its script's result records it.\n\nEvery call is recorded, including those refused before running and those the\nscript ended before they finished, so a session shows everything a script\ntried. Only the script sees the call's output; the model sees what the script\nprints and returns.\n\nAttributes:\n    call_id (str): The call's id, unique within its script.\n    name (str): The tool the script called.\n    target (str | None): The MCP tool a proxied `mcp_call` ran.\n    arguments (JsonObject | None): The call's arguments; None when they were\n        too large to keep.\n    is_error (bool): Whether the call failed or was refused.\n    failure_code (ToolFailureCode | None): Why it failed, when classified.\n    error (str | None): The start of its error message.\n    summary (str | None): A one-line summary, for read-type tools.\n    started_at (datetime): When the script made the call.\n    duration_ms (int): How long it took, waiting for other calls included.",
+      "properties": {
+        "arguments": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "NestedToolCallArguments"
+        },
+        "call_id": {
+          "title": "NestedToolCallCallId",
+          "type": "string"
+        },
+        "duration_ms": {
+          "minimum": 0,
+          "title": "NestedToolCallDurationMs",
+          "type": "integer"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "NestedToolCallError"
+        },
+        "failure_code": {
+          "anyOf": [
+            {
+              "enum": [
+                "approval_denied",
+                "internal_error",
+                "invalid_arguments",
+                "invalid_pattern",
+                "invalid_result",
+                "not_found",
+                "path_outside_workspace",
+                "policy_denied",
+                "stale_input",
+                "timeout",
+                "unknown_tool"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "NestedToolCallFailureCode"
+        },
+        "is_error": {
+          "default": false,
+          "title": "NestedToolCallIsError",
+          "type": "boolean"
+        },
+        "name": {
+          "title": "NestedToolCallName",
+          "type": "string"
+        },
+        "started_at": {
+          "format": "date-time",
+          "title": "NestedToolCallStartedAt",
+          "type": "string"
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "NestedToolCallSummary"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "NestedToolCallTarget"
+        }
+      },
+      "required": [
+        "call_id",
+        "name",
+        "target",
+        "arguments",
+        "is_error",
+        "failure_code",
+        "error",
+        "summary",
+        "started_at",
+        "duration_ms"
+      ],
+      "title": "NestedToolCall",
+      "type": "object"
+    },
     "PermissionMode": {
       "enum": [
         "ask",
@@ -6170,6 +6289,21 @@
           "title": "ToolExecutionEndedName",
           "type": "string"
         },
+        "nested_calls": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NestedToolCall"
+          },
+          "maxItems": 200,
+          "title": "ToolExecutionEndedNestedCalls",
+          "type": "array"
+        },
+        "nested_calls_omitted": {
+          "default": 0,
+          "minimum": 0,
+          "title": "ToolExecutionEndedNestedCallsOmitted",
+          "type": "integer"
+        },
         "output": {
           "title": "ToolExecutionEndedOutput",
           "type": "string"
@@ -6398,7 +6532,9 @@
         "stderr_dropped_bytes",
         "process_started_at",
         "process_ended_at",
-        "images"
+        "images",
+        "nested_calls",
+        "nested_calls_omitted"
       ],
       "title": "ToolExecutionEnded",
       "type": "object"
@@ -6523,6 +6659,104 @@
       "title": "ToolExecutionStarted",
       "type": "object"
     },
+    "ToolNestedCallEnded": {
+      "additionalProperties": false,
+      "description": "A tool call a codemode script made finished; transient, like its start.",
+      "properties": {
+        "call": {
+          "$ref": "#/$defs/NestedToolCall",
+          "title": "ToolNestedCallEndedCall"
+        },
+        "parent_call_id": {
+          "title": "ToolNestedCallEndedParentCallId",
+          "type": "string"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "ToolNestedCallEndedTimestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "tool.nested.ended",
+          "default": "tool.nested.ended",
+          "title": "ToolNestedCallEndedType",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "timestamp",
+        "parent_call_id",
+        "call"
+      ],
+      "title": "ToolNestedCallEnded",
+      "type": "object"
+    },
+    "ToolNestedCallStarted": {
+      "additionalProperties": false,
+      "description": "A codemode script made a tool call, which may still wait to run.\n\nLike `tool.execution.progress`, it is transient: published only between its\nscript's `tool.execution.started` and `tool.execution.ended`, never persisted\nand never sent to the model. Delivery is best effort. A call can start without\nending when its script ends first; the script's `tool.execution.ended` closes\nit, and its `nested_calls` record every call, unless the run was cancelled\nwhile the script ran, which leaves the result no calls to record.",
+      "properties": {
+        "arguments": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "ToolNestedCallStartedArguments"
+        },
+        "call_id": {
+          "title": "ToolNestedCallStartedCallId",
+          "type": "string"
+        },
+        "name": {
+          "title": "ToolNestedCallStartedName",
+          "type": "string"
+        },
+        "parent_call_id": {
+          "title": "ToolNestedCallStartedParentCallId",
+          "type": "string"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "ToolNestedCallStartedTarget"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "ToolNestedCallStartedTimestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "tool.nested.started",
+          "default": "tool.nested.started",
+          "title": "ToolNestedCallStartedType",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "timestamp",
+        "parent_call_id",
+        "call_id",
+        "name",
+        "target",
+        "arguments"
+      ],
+      "title": "ToolNestedCallStarted",
+      "type": "object"
+    },
     "ToolResultReady": {
       "additionalProperties": false,
       "description": "Presentation/provider projection of a completed tool execution.",
@@ -6637,6 +6871,21 @@
         "name": {
           "title": "ToolResultReadyName",
           "type": "string"
+        },
+        "nested_calls": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/NestedToolCall"
+          },
+          "maxItems": 200,
+          "title": "ToolResultReadyNestedCalls",
+          "type": "array"
+        },
+        "nested_calls_omitted": {
+          "default": 0,
+          "minimum": 0,
+          "title": "ToolResultReadyNestedCallsOmitted",
+          "type": "integer"
         },
         "output": {
           "title": "ToolResultReadyOutput",
@@ -6866,7 +7115,9 @@
         "stderr_dropped_bytes",
         "process_started_at",
         "process_ended_at",
-        "images"
+        "images",
+        "nested_calls",
+        "nested_calls_omitted"
       ],
       "title": "ToolResultReady",
       "type": "object"
@@ -7381,6 +7632,8 @@
       "tool.execution.ended": "#/$defs/ToolExecutionEnded",
       "tool.execution.progress": "#/$defs/ToolExecutionProgress",
       "tool.execution.started": "#/$defs/ToolExecutionStarted",
+      "tool.nested.ended": "#/$defs/ToolNestedCallEnded",
+      "tool.nested.started": "#/$defs/ToolNestedCallStarted",
       "tool.result": "#/$defs/ToolResultReady",
       "trust.requested": "#/$defs/TrustRequested",
       "trust.resolved": "#/$defs/TrustResolved",
@@ -7570,6 +7823,12 @@
     },
     {
       "$ref": "#/$defs/ErrorEvent"
+    },
+    {
+      "$ref": "#/$defs/ToolNestedCallStarted"
+    },
+    {
+      "$ref": "#/$defs/ToolNestedCallEnded"
     }
   ],
   "title": "Wisp current live event output"
