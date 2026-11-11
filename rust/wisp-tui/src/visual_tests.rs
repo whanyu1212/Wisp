@@ -469,9 +469,17 @@ My pick for the next focused task: **HY-314, coordinated with HY-269’s navigat
         );
         ui.editor = PromptEditor::default();
     }
-    if matches!(scenario, "showcase" | "welcome") {
+    if matches!(
+        scenario,
+        "showcase" | "welcome" | "welcome-adal" | "welcome-classic"
+    ) {
         ui.state = showcase_state(scenario == "showcase");
-        ui.startup_logo = LogoChoice::WispBraille;
+        // Each logo family takes its own gradient: theme headings, or the Adal pink.
+        ui.startup_logo = match scenario {
+            "welcome-adal" => LogoChoice::AdalBraille,
+            "welcome-classic" => LogoChoice::Classic,
+            _ => LogoChoice::WispBraille,
+        };
         ui.editor = PromptEditor::default();
     }
     ui
@@ -1689,6 +1697,8 @@ fn capture_conversation_screens() {
                 "activity-rail-expanded",
                 "showcase",
                 "welcome",
+                "welcome-adal",
+                "welcome-classic",
                 "typography",
                 "composer-plan",
                 "composer-yolo",
