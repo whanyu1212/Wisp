@@ -107,6 +107,12 @@ impl Palette {
         self
     }
 
+    /// Whether a gradient can show: not in monochrome, and not at 16 colours, where
+    /// its steps would collapse into unrelated named colours.
+    pub fn shows_gradients(self) -> bool {
+        !(self.monochrome || self.depth == ColorDepth::Ansi16)
+    }
+
     /// Whether a row band can show: not in monochrome, on the terminal's own
     /// background, or at 16 colours.
     pub fn shows_bands(self) -> bool {
@@ -586,7 +592,7 @@ fn breath_level(frame: u8) -> f64 {
 }
 
 /// Blend `share` of `color` into `base`. Colours other than RGB come back unchanged.
-fn mix(color: Color, base: Color, share: f64) -> Color {
+pub(crate) fn mix(color: Color, base: Color, share: f64) -> Color {
     let (Color::Rgb(r, g, b), Color::Rgb(base_r, base_g, base_b)) = (color, base) else {
         return color;
     };
@@ -594,6 +600,15 @@ fn mix(color: Color, base: Color, share: f64) -> Color {
         (f64::from(base) + (f64::from(value) - f64::from(base)) * share).round() as u8
     };
     Color::Rgb(channel(r, base_r), channel(g, base_g), channel(b, base_b))
+}
+
+/// The colour `t` (0 to 1) of the way along evenly spaced `stops`. Takes at least two
+/// stops; where either neighbouring stop is not RGB, the later one comes back unchanged.
+pub(crate) fn ramp(stops: &[Color], t: f64) -> Color {
+    let last = stops.len() - 1;
+    let position = t.clamp(0.0, 1.0) * last as f64;
+    let index = (position.floor() as usize).min(last - 1);
+    mix(stops[index + 1], stops[index], position - index as f64)
 }
 
 /// Find the nearest readable gray rather than encoding a palette-specific fix.

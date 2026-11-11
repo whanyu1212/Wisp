@@ -2826,14 +2826,14 @@ fn empty_transcript_lines(
     }
 
     let version = sanitize_for_terminal(&connection.backend_version);
+    // The name takes the logo's tip colour, so it reads as part of the mark above it.
+    let name_color = startup_logo::name_color(startup_logo, palette, palette.is_monochrome());
     let version_line = || {
         centered_welcome_line(
             Line::from(vec![
                 Span::styled(
                     "Wisp ",
-                    Style::default()
-                        .fg(palette.primary)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(name_color).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(version.clone(), muted),
             ]),

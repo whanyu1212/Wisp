@@ -299,8 +299,10 @@ Braille. You can also select one directly, such as `/logo wisp-braille` or
 `/logo adal-mark-braille`. Arrow, Page, Home, and End keys move through the picker; `Enter` applies
 the displayed logo, and `Escape` or `Ctrl+C` closes it. The choice updates an empty welcome screen
 immediately and applies to later new-session welcome screens. Random chooses one named logo once per
-process, so terminal redraws and resizes do not change it. The Adal variants render as pink artwork
-over the terminal background.
+process, so terminal redraws and resizes do not change it. Each logo is shaded from its top-right
+tip, the Wisp flame, toward its far end: the theme's heading colours run from teal through blue to
+purple, and the Adal variants from light to deep pink over the terminal background. The `Wisp` name
+under the logo takes the tip's colour. At 16 colours and without colour the logo keeps one colour.
 
 Rust stores theme preferences in `~/.wisp/tui.json` (`theme`, `last_dark_theme`, and
 `startup_logo`). It preserves unrelated keys and writes atomically. Missing, unknown, or unusable
