@@ -142,6 +142,10 @@ The supported Python API only gains methods and fields: `CodingSession.change_di
 `RpcController.change_directory()`, `get_codemode()`, and `set_codemode()`, and `ToolContext`'s
 `workspace_root` and `boundary()`. Python 3.11 is now supported.
 
+0.8.1 changes no command, event, handshake, session, settings, credential, or trust format, so
+0.8.0 and 0.8.1 read each other's sessions, and the schema bundle is unchanged. The backend and every
+frontend must still be the same release. The supported Python API is unchanged.
+
 ## Wisp 0.7 compatibility
 
 0.7.0 reads every session 0.6.x wrote. The session `schema_version` stays 6, because each new field
