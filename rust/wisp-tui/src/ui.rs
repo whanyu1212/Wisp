@@ -1606,6 +1606,13 @@ fn render_transcript_row(
             .position(|span| span.style.inline == InlineStyle::ToolName)
     })
     .flatten();
+    let mode = (row.kind == TranscriptRowKind::RunSummary)
+        .then(|| {
+            row.spans
+                .iter()
+                .position(|span| span.style.inline == InlineStyle::RunMode)
+        })
+        .flatten();
     // Where each linked span lands: its first column and width in the row.
     let mut linked = Vec::new();
     let mut column = 0_u16;
@@ -1639,6 +1646,10 @@ fn render_transcript_row(
         // The chip has no fill, so the label's alignment padding can share its style.
         let chip = palette.chip(spans[label].content.trim());
         spans[label].style = on_row(spans[label].style.patch(chip));
+    }
+    if let Some(mode) = mode {
+        let style = palette.run_mode(spans[mode].content.trim());
+        spans[mode].style = on_row(spans[mode].style.patch(style));
     }
     if let Some(hint) = row.fold_hint.text().filter(|_| selected) {
         spans.push(Span::styled(hint, on_row(base.fg(palette.muted))));
@@ -1926,6 +1937,8 @@ fn markdown_span_style(base: Style, semantic: TranscriptSpanStyle, palette: Pale
         // Modifiers, not colour, so the changed words stay visible in monochrome.
         InlineStyle::DiffChange => palette.diff_change(style),
         InlineStyle::DiffGutter => style.fg(palette.muted),
+        // Coloured by its name where the row is drawn.
+        InlineStyle::RunMode => style,
         InlineStyle::DiffSign => style.fg(if style.bg == Some(palette.deletion_background) {
             palette.error
         } else if style.bg == Some(palette.addition_background) {
@@ -6004,12 +6017,12 @@ mod tests {
         let info = style_at_text(terminal.backend(), "rust").unwrap();
         let body = style_at_text(terminal.backend(), "fn main() {}").unwrap();
         let palette = Palette::default();
-        assert_eq!(heading.0, palette.primary);
+        assert_eq!(heading.0, palette.heading_1);
         assert!(heading.2.contains(Modifier::BOLD));
         assert_eq!(marker.0, palette.muted);
         assert!(!marker.2.contains(Modifier::BOLD));
-        assert_eq!(inline.0, palette.foreground);
-        assert_eq!(inline.1, palette.panel);
+        assert_eq!(inline.0, palette.code);
+        assert!(inline.2.contains(Modifier::BOLD));
         assert_eq!(fence.0, palette.secondary);
         assert!(fence.2.contains(Modifier::BOLD));
         assert_eq!(info.0, palette.accent);
@@ -6852,8 +6865,14 @@ mod tests {
             rail_at(&finished, "Build · gpt_x · 4m 12s · 31 tok/s"),
             ("╰".to_owned(), palette.rail())
         );
+        // The mode opens the row in its own colour; the rest stays muted.
         assert_eq!(
-            style_at_text(&finished, "Build · gpt_x").map(|style| style.0),
+            style_at_text(&finished, "Build").map(|style| style.0),
+            Some(palette.accent),
+            "{screen}"
+        );
+        assert_eq!(
+            style_at_text(&finished, " · gpt_x").map(|style| style.0),
             Some(palette.muted),
             "{screen}"
         );
@@ -7974,7 +7993,7 @@ mod tests {
             },
             palette,
         );
-        assert_eq!(heading.fg, Some(palette.primary));
+        assert_eq!(heading.fg, Some(palette.heading_1));
         assert!(heading.add_modifier.contains(Modifier::BOLD));
 
         let code = markdown_span_style(
@@ -7985,8 +8004,9 @@ mod tests {
             },
             palette,
         );
-        assert_eq!(code.fg, Some(palette.foreground));
-        assert_eq!(code.bg, Some(palette.panel));
+        assert_eq!(code.fg, Some(palette.code));
+        assert_eq!(code.bg, None);
+        assert!(code.add_modifier.contains(Modifier::BOLD));
 
         let link = markdown_span_style(
             Style::default(),

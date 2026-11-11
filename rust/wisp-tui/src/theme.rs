@@ -43,6 +43,17 @@ pub(crate) struct Palette {
     /// The band under a selected row, one tier past `panel`.
     #[serde(deserialize_with = "color")]
     pub selected: Color,
+    /// Reply headings, by level: each its own hue so levels read apart from each other
+    /// and from the speaker label.
+    #[serde(deserialize_with = "color")]
+    pub heading_1: Color,
+    #[serde(deserialize_with = "color")]
+    pub heading_2: Color,
+    #[serde(deserialize_with = "color")]
+    pub heading_3: Color,
+    /// Inline code in replies and the composer.
+    #[serde(deserialize_with = "color")]
+    pub code: Color,
     #[serde(deserialize_with = "color")]
     pub muted: Color,
     #[serde(deserialize_with = "color")]
@@ -155,6 +166,17 @@ impl Palette {
         Style::default().fg(text).add_modifier(Modifier::BOLD)
     }
 
+    /// The mode opening a turn's summary row, bold in a colour of its own: the warning
+    /// hue for `Plan` and the accent for any other mode.
+    pub fn run_mode(self, label: &str) -> Style {
+        let color = if label == "Plan" {
+            self.warning
+        } else {
+            self.accent
+        };
+        Style::default().fg(color).add_modifier(Modifier::BOLD)
+    }
+
     pub fn tool_argument(self) -> Style {
         Style::default().fg(self.secondary)
     }
@@ -229,14 +251,17 @@ impl Palette {
         }
     }
 
+    /// A heading at `level`, bold: the theme's three heading hues for the first three
+    /// levels, then greys that step down toward muted text.
     pub fn semantic_heading(self, level: u8) -> Style {
-        Style::default()
-            .fg(if level <= 2 {
-                self.primary
-            } else {
-                self.secondary
-            })
-            .add_modifier(Modifier::BOLD)
+        let color = match level {
+            1 => self.heading_1,
+            2 => self.heading_2,
+            3 => self.heading_3,
+            4 => mix(self.muted, self.foreground, 0.5),
+            _ => self.muted,
+        };
+        Style::default().fg(color).add_modifier(Modifier::BOLD)
     }
 
     pub fn semantic_list_marker(self) -> Style {
@@ -244,9 +269,13 @@ impl Palette {
         Style::default().fg(self.muted)
     }
 
+    /// Inline code: bold in the code colour. Monochrome keeps the raised surface, since
+    /// its grays alone would not set code apart from bold text.
     pub fn semantic_inline_code(self) -> Style {
-        // A neutral surface keeps the accent colours for labels and status.
-        Style::default().fg(self.foreground).bg(self.panel)
+        if self.monochrome {
+            return Style::default().fg(self.foreground).bg(self.panel);
+        }
+        Style::default().fg(self.code).add_modifier(Modifier::BOLD)
     }
 
     pub fn semantic_code_delimiter(self) -> Style {
@@ -458,6 +487,10 @@ impl Palette {
             surface: gray(self.surface),
             panel: gray(self.panel),
             selected: gray(self.selected),
+            heading_1: gray(self.heading_1),
+            heading_2: gray(self.heading_2),
+            heading_3: gray(self.heading_3),
+            code: gray(self.code),
             muted: gray(self.muted),
             addition: gray(self.addition),
             addition_background: gray(self.addition_background),
@@ -476,6 +509,9 @@ impl Palette {
             &mut palette.success,
             &mut palette.error,
             &mut palette.muted,
+            &mut palette.heading_1,
+            &mut palette.heading_2,
+            &mut palette.heading_3,
         ] {
             *foreground = readable_gray(*foreground, &backgrounds);
         }

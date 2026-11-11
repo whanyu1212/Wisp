@@ -55,6 +55,8 @@ pub enum InlineStyle {
     DiffChange,
     DiffGutter,
     DiffSign,
+    /// The mode a turn's summary row opens with, such as `Plan`.
+    RunMode,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]

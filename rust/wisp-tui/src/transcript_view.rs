@@ -291,6 +291,25 @@ impl TranscriptRow {
             .saturating_add(self.trailing.as_ref().map_or(0, String::len))
     }
 
+    /// Splits `lead` off the start of a single-span row into a span of its own, which it
+    /// returns so the caller can style it apart from the rest. Returns `None`, leaving the
+    /// row alone, when the row does not start with `lead`.
+    fn split_lead(&mut self, lead: &str) -> Option<&mut TranscriptSpan> {
+        let first = self
+            .spans
+            .first_mut()
+            .filter(|first| first.text.starts_with(lead))?;
+        let rest = first.text.split_off(lead.len());
+        if !rest.is_empty() {
+            let mut tail = first.clone();
+            tail.text = rest;
+            tail.affinity.source_offset = first.affinity.source_offset + lead.len();
+            first.affinity.source_end = tail.affinity.source_offset;
+            self.spans.insert(1, tail);
+        }
+        self.spans.first_mut()
+    }
+
     fn plain(
         anchor: RowAnchor,
         role: TranscriptRole,
@@ -1123,14 +1142,21 @@ impl TranscriptRowCache {
                     .map(|grapheme| sanitize_grapheme(grapheme, 0))
                     .collect::<String>();
                 let summary = self.clip_to_columns(&summary, width);
+                let mut row = TranscriptRow::plain(
+                    anchor,
+                    entry.role,
+                    TranscriptRowKind::RunSummary,
+                    summary,
+                    entry.display_content().len(),
+                );
+                // The mode opening the row gets its own colour.
+                if let Some(mode) = entry.run_summary_mode()
+                    && let Some(lead) = row.split_lead(mode)
+                {
+                    lead.style.inline = crate::markdown::InlineStyle::RunMode;
+                }
                 ProjectedRow {
-                    row: TranscriptRow::plain(
-                        anchor,
-                        entry.role,
-                        TranscriptRowKind::RunSummary,
-                        summary,
-                        entry.display_content().len(),
-                    ),
+                    row,
                     next: after_run_summary(transcript, entry),
                 }
             }
@@ -1297,26 +1323,22 @@ impl TranscriptRowCache {
         } else {
             FoldHint::None
         };
-        let trailing = entry
-            .thinking_ms()
-            .map(|milliseconds| crate::tool_cards::format_duration(u64::from(milliseconds)))
-            .filter(|duration| {
-                row_width >= ACTION_COLUMNS_BESIDE_HINT + duration.width() + TRAILING_GAP
-            });
-        if let Some(duration) = &trailing {
-            row_width -= duration.width() + TRAILING_GAP;
-        }
-        // `◇` and `Thought` fill the status marker and chip columns of the tool rows
-        // around it, and its first line summarizes it.
-        let label = "◇  Thought";
+        // `◆` and `Thought` fill the status marker and chip columns of the tool rows
+        // around it. How long it took follows inline, and its first line summarizes it.
+        let label = "◆  Thought";
         let mut text = label.to_owned();
+        if let Some(milliseconds) = entry.thinking_ms() {
+            text.push_str(" for ");
+            text.push_str(&crate::tool_cards::format_duration(u64::from(milliseconds)));
+        }
+        let heading = text.clone();
         if let Some(summary) = entry
             .thinking()
             .lines()
             .map(str::trim)
             .find(|line| !line.is_empty())
         {
-            let room = row_width.saturating_sub(label.width() + LABEL_GAP.len());
+            let room = row_width.saturating_sub(heading.width() + LABEL_GAP.len());
             let summary = summary
                 .graphemes(true)
                 .map(|grapheme| sanitize_grapheme(grapheme, 0))
@@ -1356,9 +1378,12 @@ impl TranscriptRowCache {
             }
         });
         let mut row = TranscriptRow::plain(anchor, entry.role, TranscriptRowKind::Thought, text, 0);
+        // The label is bold, apart from its time and summary.
+        if let Some(lead) = row.split_lead(label) {
+            lead.style.strong = true;
+        }
         row.fold_hint = fold_hint;
-        row.fold_arrow = foldable.then(|| self.fold_arrow_after(label, expanded));
-        row.trailing = trailing;
+        row.fold_arrow = foldable.then(|| self.fold_arrow_after(&heading, expanded));
         ProjectedRow { row, next }
     }
 
@@ -5932,21 +5957,20 @@ mod tests {
             .find(|row| row.anchor.entry_id == answer && row.kind == TranscriptRowKind::Thought)
             .unwrap();
 
-        // The first line summarizes the thought; the time sits in the right column.
-        assert_eq!(thought.plain_text(), "◇  Thought   first");
+        // How long it took follows the label, then the first line summarizes it.
+        let text = thought.plain_text();
+        let (heading, summary) = text.split_once("   ").unwrap();
+        assert!(heading.starts_with("◆  Thought for "), "{text}");
+        assert!(heading.ends_with('s'), "{text}");
+        assert_eq!(summary, "first");
         assert_eq!(
             thought.fold_arrow,
             Some(FoldArrow {
-                column: 11,
+                column: u16::try_from(heading.width() + 1).unwrap(),
                 expanded: false
             })
         );
-        assert!(
-            thought
-                .trailing
-                .as_deref()
-                .is_some_and(|time| time.ends_with('s'))
-        );
+        assert_eq!(thought.trailing, None);
     }
 
     #[test]
@@ -6641,7 +6665,9 @@ mod tests {
         let collapsed = viewport.visible_rows(&transcript, &mut cache);
         // Collapsed, the thought shows only its first line as a summary.
         assert!(collapsed.iter().any(|row| {
-            row.kind == TranscriptRowKind::Thought && row.plain_text() == "◇  Thought   secret plan"
+            row.kind == TranscriptRowKind::Thought
+                && row.plain_text().starts_with("◆  Thought for ")
+                && row.plain_text().ends_with("   secret plan")
         }));
         assert!(
             !collapsed
