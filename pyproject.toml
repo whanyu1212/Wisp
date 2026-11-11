@@ -52,9 +52,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# The experimental `codemode` tool runs model-written scripts in monty's sandbox. monty ships
-# wheels for Python 3.12+ only, so on 3.11 the extra installs nothing and codemode is not offered.
-codemode = ["pydantic-monty>=1.5,<2; python_version >= '3.12'"]
+# The experimental `codemode` tool runs model-written scripts in monty's sandbox.
+codemode = ["pydantic-monty>=1.5,<2"]
 
 [project.urls]
 Homepage = "https://github.com/whanyu1212/Wisp"
@@ -94,7 +93,7 @@ dev = [
     "psutil>=7.2.2",
     "pytest-timeout>=2.4",
     "pytest-xdist>=3.8",
-    "pydantic-monty>=1.5,<2; python_version >= '3.12'",
+    "pydantic-monty>=1.5,<2",
 ]
 
 [tool.pytest.ini_options]

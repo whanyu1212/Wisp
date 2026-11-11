@@ -1068,8 +1068,8 @@ name = "pydantic-monty"
 version = "1.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pydantic-monty-client", marker = "python_full_version >= '3.12'" },
-    { name = "pydantic-monty-runtime", marker = "python_full_version >= '3.12'" },
+    { name = "pydantic-monty-client" },
+    { name = "pydantic-monty-runtime" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/75/4f/0d959f4afdbfad03f26503244009d6e5d7aef964d02fcaeeb4db7c0ec8be/pydantic_monty-1.5.0.tar.gz", hash = "sha256:e3855316d029bd20eea0d183654edc92c367e195f156e66766b21c509bbc9ad1", size = 8020, upload-time = "2026-11-06T00:45:20.354Z" }
 wheels = [
@@ -1081,7 +1081,7 @@ name = "pydantic-monty-client"
 version = "1.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions", marker = "python_full_version >= '3.12'" },
+    { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/ba/97/b0bacba4db0e751828cac75e5feed8b15ba1ce86a4fc1e9d8e10b8d03630/pydantic_monty_client-1.5.0.tar.gz", hash = "sha256:b588f3d2c5bbc3c810d4a1a117834e3d2cd6419c1d86a99f0ac70363026a2665", size = 3183628, upload-time = "2026-11-06T00:45:21.751Z" }
 wheels = [
@@ -1944,14 +1944,14 @@ dependencies = [
 
 [package.optional-dependencies]
 codemode = [
-    { name = "pydantic-monty", marker = "python_full_version >= '3.12'" },
+    { name = "pydantic-monty" },
 ]
 
 [package.dev-dependencies]
 dev = [
     { name = "mypy" },
     { name = "psutil" },
-    { name = "pydantic-monty", marker = "python_full_version >= '3.12'" },
+    { name = "pydantic-monty" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-timeout" },
@@ -1976,7 +1976,7 @@ requires-dist = [
     { name = "packaging", specifier = ">=26.0" },
     { name = "pathspec", specifier = ">=1.1.1" },
     { name = "pydantic", specifier = ">=2.13.4" },
-    { name = "pydantic-monty", marker = "python_full_version >= '3.12' and extra == 'codemode'", specifier = ">=1.5,<2" },
+    { name = "pydantic-monty", marker = "extra == 'codemode'", specifier = ">=1.5,<2" },
     { name = "pygments", specifier = ">=2.20.0" },
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "regex", specifier = ">=2026.7.19" },
@@ -1990,7 +1990,7 @@ provides-extras = ["codemode"]
 dev = [
     { name = "mypy", specifier = ">=2.1.0" },
     { name = "psutil", specifier = ">=7.2.2" },
-    { name = "pydantic-monty", marker = "python_full_version >= '3.12'", specifier = ">=1.5,<2" },
+    { name = "pydantic-monty", specifier = ">=1.5,<2" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "pytest-asyncio", specifier = ">=1.4.0" },
     { name = "pytest-timeout", specifier = ">=2.4" },

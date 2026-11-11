@@ -16,8 +16,9 @@ this policy.
 
 - Wisp now supports Python 3.11 as well as 3.12 and newer. The native wheels, which carry the
   Rust terminal UI, are tagged `cp311-abi3`, so a 3.11 install gets the terminal UI too.
-  The `codemode` extra still needs Python 3.12: on 3.11 it installs nothing, and the model is not
-  offered `codemode`. Wisp now depends on `typing-extensions` directly. (HY-500)
+  Wisp now depends on `typing-extensions` directly. (HY-500)
+- The `codemode` extra installs on Python 3.11 too, so codemode is offered there. The 3.11
+  support above had limited it to 3.12 by mistake: monty supports Python 3.10 and newer. (HY-504)
 
 ### Sessions
 
