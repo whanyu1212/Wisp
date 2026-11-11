@@ -467,7 +467,10 @@ it adds [monty](https://github.com/pydantic/monty), the sandbox scripts run in.
 
 - **Only read-only tools.** A script can call the read-only tools the run already offers: `read`,
   `ls`, `grep`, `find`, and MCP tools whose `tool_safety` you set to `"read"`. Tool selection and
-  plan mode apply as for direct calls.
+  plan mode apply as for direct calls. When [MCP tools are found on demand](#finding-mcp-tools-on-demand),
+  a script can also call a read-only tool `mcp_search` finds by its full name, when that name and
+  its parameters are Python identifiers, without the codemode description listing them. Other
+  tools stay reachable through `mcp_call`.
 - **Each call is checked on its own.** Every call a script makes passes the same checks as a direct
   call. A script cannot ask for an approval, so a call that would need one fails, and the script can
   catch the error. Approving or allowing the script grants nothing to the calls it makes.

@@ -2027,7 +2027,7 @@ class CodingSession:
             policy = replace(
                 policy, allowed_tools=policy.allowed_tools | frozenset(DISCOVERY_TOOL_NAMES)
             )
-        codemode = self._codemode_tool(offered_tools, registry, lambda: executor)
+        codemode = self._codemode_tool(offered_tools, registry, lambda: executor, catalog)
         if codemode is not None:
             # Like the discovery tools, the script tool joins without widening what
             # anything else may do: each call a script makes is checked as itself.
@@ -2049,19 +2049,23 @@ class CodingSession:
         offered: tuple[ToolSpec, ...],
         registry: ToolRegistry | None,
         executor: Callable[[], ConfiguredToolExecutor],
+        catalog: McpCatalog | None = None,
     ) -> CodemodeTool | None:
         """Register the codemode tool for one run, when the session offers it.
 
         A script may call the read-only tools among ``offered``: what this run
-        already allows after selection, policy, plan mode and MCP exposure. Their
-        calls run through ``executor``, built after this tool and so looked up when a
-        script calls.
+        already allows after selection, policy, plan mode and MCP exposure. With
+        on-demand exposure it may also call the read-only tools in ``catalog`` by
+        name, the same tools `mcp_call` reaches. Their calls run through
+        ``executor``, built after this tool and so looked up when a script calls.
 
         Args:
             offered (tuple[ToolSpec, ...]): The tools the run offers the model.
             registry (ToolRegistry | None): The operation's registry copy, which the
                 tool is registered in.
             executor (Callable[[], ConfiguredToolExecutor]): The run's executor.
+            catalog (McpCatalog | None): The MCP tools found on demand this run, or
+                None when exposure is direct.
 
         Returns:
             CodemodeTool | None: The registered tool, or None when codemode is off,
@@ -2080,7 +2084,12 @@ class CodingSession:
             for spec in offered
             if spec.name in registered and (tool := registry.get(spec.name)).safety == "read"
         ]
-        if not scriptable:
+        discoverable = [
+            entry.tool
+            for entry in (catalog.entries if catalog is not None else ())
+            if entry.tool.safety == "read"
+        ]
+        if not scriptable and not discoverable:
             return None
         call_ids = itertools.count(1)
 
@@ -2090,7 +2099,7 @@ class CodingSession:
             )
             return await executor().run_nested(tool_call)
 
-        tool = CodemodeTool(scriptable, call)
+        tool = CodemodeTool(scriptable, call, discoverable=discoverable)
         registry.register(
             tool,
             replace=False,
@@ -2705,7 +2714,9 @@ class CodingSession:
             stats_tools, stats_catalog = self._apply_mcp_exposure(
                 self._effective_tools(stats_registry), stats_registry
             )
-            stats_codemode = self._codemode_tool(stats_tools, stats_registry, _no_executor)
+            stats_codemode = self._codemode_tool(
+                stats_tools, stats_registry, _no_executor, stats_catalog
+            )
             if stats_codemode is not None:
                 stats_tools = (*stats_tools, ToolSpec.from_tool(stats_codemode))
             prompt = await self._prompt_messages_async(

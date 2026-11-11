@@ -18,6 +18,7 @@ from tests.agent.loop.support import tool_call_stream
 from wisp.coding.session import CodingSession
 from wisp.coding.tool_execution import ConfiguredToolExecutor
 from wisp.events import AgentMode, ToolExecutionEnded, ToolResultReady, WispEvent
+from wisp.mcp.config import McpToolExposure
 from wisp.mcp.discovery import MCP_CALL, McpCatalog, discovery_tools
 from wisp.providers.events import (
     ProviderEvent,
@@ -58,11 +59,6 @@ class _Tool:
     calls: list[dict[str, object]] = field(default_factory=list)
     running: int = 0
     most_running: int = 0
-    server_name: str = "db"
-
-    @property
-    def remote_name(self) -> str:
-        return self.name.rsplit("__", 1)[-1]
 
     async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
         self.calls.append(dict(arguments))
@@ -76,9 +72,20 @@ class _Tool:
 
 
 @dataclass
+class _McpTool(_Tool):
+    """A tool from MCP server `db`, which on-demand exposure finds in the catalog."""
+
+    server_name: str = "db"
+
+    @property
+    def remote_name(self) -> str:
+        return self.name.rsplit("__", 1)[-1]
+
+
+@dataclass
 class _Tools:
-    query: _Tool = field(default_factory=lambda: _Tool("mcp__db__query"))
-    drop: _Tool = field(default_factory=lambda: _Tool("mcp__db__drop", safety="command"))
+    query: _Tool = field(default_factory=lambda: _McpTool("mcp__db__query"))
+    drop: _Tool = field(default_factory=lambda: _McpTool("mcp__db__drop", safety="command"))
     lookup: _Tool = field(default_factory=lambda: _Tool("lookup"))
 
     def registry(self) -> ToolRegistry:
@@ -106,6 +113,7 @@ def _run(
     *,
     codemode: bool = True,
     mode: AgentMode = "build",
+    exposure: McpToolExposure = "direct",
 ) -> tuple[list[WispEvent], ScriptedProvider]:
     provider = ScriptedProvider([*streams, _done()])
     session = CodingSession(
@@ -115,7 +123,7 @@ def _run(
         tool_context=ToolContext(cwd=tmp_path),
         tool_policy=ToolPolicy.allow_all_tools(),
         tool_approval_policy=ToolApprovalPolicy.require_approval(),
-        mcp_tool_exposure="direct",
+        mcp_tool_exposure=exposure,
         codemode=codemode,
         mode=mode,
     )
@@ -225,6 +233,34 @@ def test_script_is_safe_to_replay(tmp_path: Path) -> None:
 
     assert not session._tool_is_unsafe(CODEMODE)
     assert session._tool_is_unsafe("mcp__db__drop")
+
+
+def test_on_demand_scripts_call_catalog(tmp_path: Path) -> None:
+    """On demand, a script calls a read-only catalog tool by name, unlisted."""
+
+    tools = _Tools()
+    code = "await mcp__db__query(table='a')"
+
+    events, provider = _run(tmp_path, tools, [_script(code)], exposure="on_demand")
+
+    offered = {tool.name: tool for tool in provider.calls[0].tools}
+    assert "mcp__db__query" not in offered
+    description = offered[CODEMODE].description
+    assert "mcp__db__query" not in description and "mcp_search finds" in description
+    result = _result(events)
+    assert (result.is_error, result.output.splitlines()[0]) == (False, "mcp__db__query:a")
+    assert tools.query.calls == [{"table": "a"}]
+
+
+def test_on_demand_command_tool_unreachable(tmp_path: Path) -> None:
+    tools = _Tools()
+
+    events, _ = _run(
+        tmp_path, tools, [_script("await mcp__db__drop(table='users')")], exposure="on_demand"
+    )
+
+    assert "Script failed (type)" in _result(events).output
+    assert tools.drop.calls == []
 
 
 def test_offered_in_plan_mode(tmp_path: Path) -> None:
@@ -444,3 +480,20 @@ def test_script_end_cancels_calls() -> None:
     anyio.run(run)
 
     assert (finished, len(cancelled)) == ([], 4)
+
+
+def test_unscriptable_names_left_out() -> None:
+    """A tool whose name is not a Python identifier stays reachable only through mcp_call."""
+
+    tool = CodemodeTool(
+        [_Tool("lookup")],
+        _echo,
+        discoverable=[_McpTool("mcp__docs-site__search"), _McpTool("mcp__db__query")],
+    )
+
+    assert tool.tool_names == ("lookup", "mcp__db__query")
+    assert "mcp_call(name=..., arguments=...)" in tool.description
+
+
+async def _echo(name: str, arguments: object) -> NestedCallResult:
+    return NestedCallResult(text=f"{name}:{arguments}")

@@ -74,6 +74,11 @@ this policy.
   run. Each call a script makes passes the same checks as a direct call; a call that would need an
   approval fails, so approving the script grants nothing. Limits: 200 calls, 2 minutes, 10 seconds
   of computing and 128 MiB per script. The tool-use evals gain `--codemode python`. (HY-495)
+- With on-demand MCP discovery, a codemode script can call a read-only MCP tool `mcp_search` finds
+  by its full name, type-checked against the tool's own schema, instead of through `mcp_call`, when
+  that name and its parameters are Python identifiers. The
+  codemode description says so without listing the tools, so it stays short. Its guidance also
+  notes that scripts have no `map()` or `filter()`. (HY-498)
 - The file and search tools' boundary is the project root in a trusted project, instead of the
   working directory, so a session started in a subfolder can read, edit and search the rest of its
   project. Relative paths are still taken from the working directory, protected paths stay
