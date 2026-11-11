@@ -86,6 +86,12 @@ this policy.
   that name and its parameters are Python identifiers. The
   codemode description says so without listing the tools, so it stays short. Its guidance also
   notes that scripts have no `map()` or `filter()`. (HY-498)
+- A codemode script that reaches a limit fails as `limit`, with the limit named in the tool's own
+  terms, instead of monty's `MemoryError` for the print cap or "suspension limit" for the call cap.
+  A failed script's message fits under the cap on errors a model is shown, keeping the list of
+  calls it made whole, the start of its error and the end of what it printed. The codemode description names the builtins scripts lack, such
+  as `ascii()`, `getattr()` and `format()`. Adversarial tests cover sandbox escapes, every limit, a
+  tool's huge result, and cancellation in the middle of `asyncio.gather`. (HY-502)
 - The file and search tools' boundary is the project root in a trusted project, instead of the
   working directory, so a session started in a subfolder can read, edit and search the rest of its
   project. Relative paths are still taken from the working directory, protected paths stay

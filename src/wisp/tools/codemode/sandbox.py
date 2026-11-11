@@ -21,7 +21,7 @@ from typing_extensions import TypeAliasType
 
 ScriptFunction = TypeAliasType("ScriptFunction", Callable[..., Awaitable[str]])
 ScriptFailure = TypeAliasType(
-    "ScriptFailure", Literal["unavailable", "syntax", "type", "runtime", "timeout"]
+    "ScriptFailure", Literal["unavailable", "syntax", "type", "runtime", "limit", "timeout"]
 )
 
 
@@ -136,6 +136,9 @@ async def run_script(
     except MontyTypingError as exc:
         return ScriptRun(printed="", failure="type", error=exc.display())
     except MontyError as exc:
+        reached = _reached_limit(str(exc), limits)
+        if reached is not None:
+            return ScriptRun(printed=printed.output, failure="limit", error=reached)
         return ScriptRun(printed=printed.output, failure="runtime", error=str(exc))
     finally:
         calls.end()
@@ -171,6 +174,33 @@ class _ScriptCalls:
         self._ended = True
         for scope in tuple(self._running):
             scope.cancel()
+
+
+def _reached_limit(error: str, limits: ScriptLimits) -> str | None:
+    """Describe the limit that ended a script, or None when the error is the script's own.
+
+    monty reports its limits as Python exceptions in the script, worded in its own
+    terms: the print cap is a MemoryError and the call cap a "suspension limit". The
+    model reads the limit in the tool's terms instead. A script could raise one of
+    these messages itself; it then reads as a limit, which is harmless.
+    """
+
+    # Both caps are reported as "memory limit exceeded: N bytes > CAP bytes".
+    if error.startswith("MemoryError") and error.endswith(f"> {limits.max_printed_bytes} bytes"):
+        return (
+            f"The script printed more than {limits.max_printed_bytes} bytes. "
+            "Print less: filter large results in the script."
+        )
+    if error.startswith("RuntimeError: suspension limit"):
+        return f"The script made more than {limits.max_calls} tool calls."
+    if error.startswith("TimeoutError: feed time limit"):
+        return (
+            f"The script computed for more than {limits.compute_seconds:g} seconds, "
+            "not counting tool calls."
+        )
+    if error.startswith("MemoryError: memory limit"):
+        return f"The script used more than {limits.memory_bytes // (1024 * 1024)} MiB of memory."
+    return None
 
 
 def _as_text(value: object) -> str | None:
