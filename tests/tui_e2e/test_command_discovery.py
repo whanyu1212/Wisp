@@ -20,6 +20,7 @@ from tests.tui_e2e.support import (
     frame_cursor,
     reap,
     rendered_without_spacing,
+    screen_shows,
     welcome_ready,
 )
 from wisp import __version__
@@ -205,20 +206,20 @@ for line in sys.stdin:
                     if exc.errno != errno.EIO:
                         raise
             commands = complete_logged_commands(command_log)
-            if phase == "startup" and welcome_ready(output) and b"Plan" in output:
+            if phase == "startup" and welcome_ready(output) and screen_shows(output, "plan ─╯"):
                 os.write(terminal_fd, b"/he")
                 phase = "prefix"
                 output.clear()
             # Enter only accepts a completion the user saw, so wait for the frame that
             # placed the cursor after "/he" and painted its menu. Menu text painted for
             # "/" or "/h" can arrive first while the TUI still has keys to process.
-            elif phase == "prefix" and b"/help" in output and frame_cursor(output) == (20, 9):
+            elif phase == "prefix" and b"/help" in output and frame_cursor(output) == (22, 9):
                 os.write(terminal_fd, b"\r")
                 phase = "completed"
                 output.clear()
             # A second Enter before the filled "/help" is painted can reach a menu the
             # user never saw; the cursor after the fill proves it was painted.
-            elif phase == "completed" and frame_cursor(output) == (20, 11):
+            elif phase == "completed" and frame_cursor(output) == (22, 11):
                 assert not any(command["type"] == "prompt" for command in commands)
                 os.write(terminal_fd, b"\r")
                 phase = "help"
@@ -250,7 +251,7 @@ for line in sys.stdin:
                 os.write(terminal_fd, b"\x1b")
                 phase = "closing help"
                 output.clear()
-            elif phase == "closing help" and frame_cursor(output) == (20, 6):
+            elif phase == "closing help" and frame_cursor(output) == (22, 6):
                 # Closing a popup leaves the background's unchanged cells out of
                 # differential writes. Resize to inspect the full restored frame.
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 102, 0, 0))

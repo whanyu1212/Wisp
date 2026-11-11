@@ -257,7 +257,8 @@ def screen_shows(output: bytes | bytearray, text: str) -> bool:
     return any(text in row for row in screen_rows(complete_frames(output)))
 
 
-_STATUS_LABEL = re.compile(r"(?:^|\s)(idle|working)(?=\s·|\s*$)")
+# The status word is followed by more status (` · `), the key hints (` │ `), or nothing.
+_STATUS_LABEL = re.compile(r"(?:^|\s)(idle|working)(?=\s[·│]|\s*$)")
 
 
 def run_settled(output: bytes | bytearray, offset: int = 0, *fragments: bytes) -> bool:

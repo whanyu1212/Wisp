@@ -94,13 +94,13 @@ def test_rust_model_selection_survives_restart(tmp_path: Path) -> None:
                 if phase == "startup" and ready:
                     if restart:
                         phase = "restored"
-                    elif shows("fake fake"):
+                    elif shows("─ fake "):
                         command = (
                             b"/model\r" if picker_only else b"/model fake::custom-model effort\r"
                         )
                         send(command, retry_after=1)
                         phase = "picker" if picker_only else "applying"
-                elif phase == "restored" and shows("custom-model fake · effort"):
+                elif phase == "restored" and shows("custom-model (effort)"):
                     phase = "quitting"
                 elif phase == "picker":
                     if shows("Effort: Default  ←/→ change"):
@@ -119,7 +119,7 @@ def test_rust_model_selection_survives_restart(tmp_path: Path) -> None:
                         assert saved["provider"] != "fake" and saved["model"]
                         assert saved["effort"]
                         phase = "quitting"
-                    elif not picker_only and shows("custom-model fake · effort"):
+                    elif not picker_only and shows("custom-model (effort)"):
                         phase = "quitting"
                     elif now >= resend_at and (
                         (picker_only and shows("←/→ change") and shows("Enter apply"))

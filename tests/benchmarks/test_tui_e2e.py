@@ -151,11 +151,18 @@ def test_reply_start_counts_before_a_later_frame_scrolls_it() -> None:
 def test_ready_ignores_cursor_gaps() -> None:
     # The status line as Linux CI painted it: cursor moves, no spaces.
     status = "\x1b[24;40Hidle\x1b[24;45H·ctx\x1b[24;50H▰▰▰▱▱▱▱▱▱▱~35%".encode()
-    composer = b"\x1b[20;5HAsk Wisp anything\x1b[22;5HBuild \xc2\xb7 fake\x1b[22;18Hfake"
+    # The composer's bottom border names the model and mode, painted in pieces.
+    composer = "\x1b[20;5HAsk Wisp anything\x1b[21;80Hfake\x1b[21;85H·\x1b[21;87Hbuild ─╯".encode()
     plain = rust_tui_e2e._plain_text(composer + status)
 
     assert rust_tui_e2e._ready(plain, "rust")
     assert not rust_tui_e2e._ready(plain.replace("▰▰▰▱▱▱▱▱▱▱~35%", "~?"), "rust")
+    # Before the mode is confirmed the label is the model alone.
+    alone = "\x1b[20;5HAsk Wisp anything\x1b[21;90Hfake ─╯".encode()
+    assert rust_tui_e2e._ready(rust_tui_e2e._plain_text(alone + status), "rust")
+    # The model's name painted twice in a row is not the label.
+    repainted = b"\x1b[20;5HAsk Wisp anything\x1b[21;90Hfake\x1b[21;90Hfake"
+    assert not rust_tui_e2e._ready(rust_tui_e2e._plain_text(repainted + status), "rust")
     # A short terminal keeps the identity and a token count in the footer.
     short = rust_tui_e2e._plain_text(
         b"Ask Wisp anything idle \xc2\xb7 ctx ~3.5k \xc2\xb7 fake/fake"
