@@ -731,24 +731,30 @@ impl ErrorPeek {
     }
 }
 
-/// What a finished script returned, as the model read it: the line just before
-/// the `[N tool calls: …]` line that ends its output. That is its last expression,
-/// or the last thing it printed when it had none.
-fn script_returned(output: &str) -> Option<&str> {
-    let mut lines = output
-        .lines()
-        .rev()
-        .map(str::trim)
-        .filter(|line| !line.is_empty());
-    let last = lines.next()?;
-    let is_call_count = last.starts_with('[')
-        && last.ends_with(']')
-        && (last.contains(" tool call") || last == "[No tool calls.]");
-    if is_call_count {
-        lines.next()
-    } else {
-        Some(last)
+/// What a finished script gave back, as the model read it: everything it printed,
+/// then its last expression, without the `[N tool calls: …]` line that ends its
+/// output and the blank lines around it.
+fn script_returned(output: &str) -> Vec<&str> {
+    let mut lines: Vec<&str> = output.lines().collect();
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
     }
+    if lines.last().is_some_and(|line| {
+        let line = line.trim();
+        line.starts_with('[')
+            && line.ends_with(']')
+            && (line.contains(" tool call") || line == "[No tool calls.]")
+    }) {
+        lines.pop();
+    }
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+    let first = lines
+        .iter()
+        .position(|line| !line.trim().is_empty())
+        .unwrap_or(lines.len());
+    lines.split_off(first)
 }
 
 /// A failed script's message without its list of calls, which the card shows as rows.
@@ -3512,6 +3518,8 @@ fn tool_action_projection(
 const SCRIPT_PREVIEW_LINES: usize = 4;
 /// Call rows an opened script card shows before `… N more calls`.
 const SCRIPT_CALL_ROWS: usize = 12;
+/// Lines of what a script returned an opened card shows before `+ N more lines`.
+const SCRIPT_RETURN_LINES: usize = 8;
 
 /// A codemode script's card: `Scripted <title> · 9 calls · read ×7, grep ×2` on its
 /// action line, and when opened, the start of the script, one row per call it made
@@ -3539,8 +3547,17 @@ fn script_projection(card: &crate::tool_cards::ToolCardSnapshot) -> CardProjecti
     push_script_calls(&mut detail, &mut detail_tones, card, script);
     match card.status {
         ToolStatus::Done => {
-            if let Some(returned) = script_returned(&card.retained_output.text) {
-                push_detail_row(&mut detail, &format!("Returned {returned}"));
+            // Its first lines under `Returned`, aligned after the label; the rest
+            // counted, since the card keeps only the start of a long result.
+            let returned = script_returned(&card.retained_output.text);
+            for (index, line) in returned.iter().take(SCRIPT_RETURN_LINES).enumerate() {
+                let label = if index == 0 { "Returned " } else { "         " };
+                push_detail_row(&mut detail, &format!("{label}{}", line.trim_end()));
+            }
+            let more = returned.len().saturating_sub(SCRIPT_RETURN_LINES);
+            if more > 0 {
+                let noun = if more == 1 { "line" } else { "lines" };
+                push_detail_row(&mut detail, &format!("         + {more} more {noun}"));
             }
         }
         ToolStatus::Error => {

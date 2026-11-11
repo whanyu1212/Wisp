@@ -2164,8 +2164,31 @@ fn returned_row_shows_the_value() {
     );
 
     let text = screen_text(&buffer);
-    assert!(text.contains(r#"Returned ["a.rs", "b.rs"]"#), "{text}");
-    assert!(!text.contains("Returned scanning"), "{text}");
+    assert!(text.contains("Returned scanning"), "{text}");
+    assert!(text.contains(r#"         ["a.rs", "b.rs"]"#), "{text}");
+    assert!(!text.contains("[2 tool calls"), "{text}");
+}
+
+#[test]
+fn returned_row_keeps_every_line() {
+    // A multi-line value shows whole up to the cap, then counts the rest.
+    let value: Vec<String> = (1..=10).map(|n| format!("line {n}")).collect();
+    let output = format!("{}\n[1 tool call: read]", value.join("\n"));
+    let buffer = script_card(
+        &[script_call(Some("lines")), finished_script(&output, false)],
+        true,
+        100,
+    );
+
+    let text = screen_text(&buffer);
+    assert!(
+        text.contains("Returned line 1") && text.contains("line 8"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("line 9") && text.contains("+ 2 more lines"),
+        "{text}"
+    );
 }
 
 #[test]
