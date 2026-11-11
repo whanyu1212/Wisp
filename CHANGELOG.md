@@ -10,6 +10,19 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
+## Unreleased
+
+### TUI
+
+- Footer key hints draw each key in bold body text instead of on a raised surface. The footer
+  sits on the terminal's last row, and terminals that extend edge cells into their window padding
+  stretched each key's background into a block running to the window's bottom edge. The other
+  key hints, in the side panel and diff views, match.
+- The welcome card and its tip are centred in the conversation column instead of pinned above the
+  composer, and the tip is centred under the card. The menu's rows, and so the selection band, are
+  38 columns wide under the centred name rather than spanning the frame, and the frame is drawn a
+  step stronger so it holds the band.
+
 ## 0.8.0 — Unreleased
 
 0.8.0 adds an experimental `codemode` tool: from the new `codemode` extra, the model writes a

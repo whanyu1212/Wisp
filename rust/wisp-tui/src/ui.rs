@@ -2810,6 +2810,10 @@ fn centered_welcome_line(line: Line<'static>, width: usize) -> Line<'static> {
 const WELCOME_CARD_WIDTH: usize = 54;
 /// The widest the frameless menu's rows grow on a screen too short for the card.
 const WELCOME_MENU_WIDTH: usize = 46;
+/// The width of the card's menu rows, and so of the selection band: the longest label and
+/// shortcut with their padding, so the band sits under the centred name rather than
+/// spanning the frame.
+const WELCOME_CARD_MENU_WIDTH: usize = 38;
 
 /// A row of the welcome card's menu: what it opens.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2855,7 +2859,7 @@ pub(crate) fn welcome_actions(state: &UiState) -> Vec<WelcomeAction> {
     actions
 }
 
-/// The tips one launch picks from for the line above the composer. Each names its key by
+/// The tips one launch picks from for the line under the welcome card. Each names its key by
 /// action, so a rebound key shows its own name and an unbound one leaves its tip out.
 const WELCOME_TIPS: [(Option<KeyAction>, &str); 5] = [
     (
@@ -2969,9 +2973,10 @@ fn welcome_menu_row(
         .collect()
 }
 
-/// The welcome card, fitted to `height` rows: a faint rounded frame around the logo, the
-/// name and tagline, and the menu, anchored just above the launch's tip. A short screen
-/// gets a smaller logo, then none, then no tip, then no frame; the menu always stays.
+/// The welcome card, fitted to `height` rows: a rounded frame around the logo, the name
+/// and tagline, and the menu, with the launch's tip centred under it and the whole group
+/// centred in the column. A short screen gets a smaller logo, then none, then no tip,
+/// then no frame; the menu always stays.
 /// None when even the frameless menu does not fit.
 #[allow(clippy::too_many_arguments)]
 fn welcome_card(
@@ -3027,7 +3032,7 @@ fn welcome_card(
     let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
     let mut menu = Vec::new();
     let menu_width = if framed {
-        inner.saturating_sub(2)
+        inner.saturating_sub(2).min(WELCOME_CARD_MENU_WIDTH)
     } else {
         width.min(WELCOME_MENU_WIDTH)
     };
@@ -3084,18 +3089,18 @@ fn welcome_card(
     }
     if let Some(tip) = tip {
         lines.push(Line::default());
-        lines.push(Line::from(vec![
+        let tip = Line::from(vec![
             Span::styled(
-                " Tip",
+                "Tip",
                 Style::default()
                     .fg(palette.accent)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(format!("  {}", sanitize_for_terminal(&tip)), muted),
-        ]));
+        ]);
+        lines.push(centered_welcome_line(tip, width));
     }
-    // Anchored to the bottom, so the card sits just above the tip and the composer.
-    let top = height.saturating_sub(lines.len());
+    let top = height.saturating_sub(lines.len()) / 2;
     let mut padded = vec![Line::default(); top];
     padded.extend(lines);
     for (line, _) in &mut menu {
@@ -4667,9 +4672,14 @@ mod tests {
             let text = panel.lines.iter().map(Line::to_string).collect::<Vec<_>>();
             (panel, text)
         };
-        // Tall: the frame, the tip under it, and menu rows that point at their labels.
+        // Tall: the frame, the tip under it, and menu rows that point at their labels, the
+        // group centred in the column rather than pinned above the composer.
         let (tall, text) = panel(30, Some(1));
-        assert_eq!(text.len(), 30);
+        let above = text
+            .iter()
+            .take_while(|line| line.trim().is_empty())
+            .count();
+        assert!(above.abs_diff(30 - text.len()) <= 1, "{text:#?}");
         assert!(text.iter().any(|line| line.contains('╭')), "{text:#?}");
         assert!(
             text.last()
@@ -4708,7 +4718,7 @@ mod tests {
         // Shorter screens drop the logo, then the tip, then the frame; the menu stays.
         for (height, framed, tip) in [(12, true, true), (10, true, false), (7, false, false)] {
             let (short, text) = panel(height, Some(0));
-            assert_eq!(text.len(), height);
+            assert!(text.len() <= height, "{height}");
             assert_eq!(
                 text.iter().any(|line| line.contains('╭')),
                 framed,
@@ -6297,7 +6307,7 @@ mod tests {
     }
 
     #[test]
-    fn footer_keys_render_as_keycaps() {
+    fn footer_keys_have_no_background() {
         let state = UiState::new("fake".into(), None, None);
         let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
         terminal
@@ -6315,10 +6325,14 @@ mod tests {
             .unwrap();
         let palette = Palette::default();
         let key = style_at_text(terminal.backend(), "Ctrl+G").unwrap();
-        assert_eq!((key.0, key.1), (palette.foreground, palette.panel));
         let action = style_at_text(terminal.backend(), " help").unwrap();
+        // The key stands out by weight and colour; its background is the footer's own,
+        // which a terminal can extend into its padding without drawing a block.
+        assert_eq!(key.0, palette.foreground);
+        assert!(key.2.contains(Modifier::BOLD));
+        assert_eq!(key.1, action.1);
+        assert_ne!(key.1, palette.panel);
         assert_eq!(action.0, palette.muted);
-        assert_ne!(action.1, palette.panel);
     }
 
     #[test]
