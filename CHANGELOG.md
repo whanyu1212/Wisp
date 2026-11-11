@@ -155,8 +155,8 @@ this policy.
   build`), replacing the identity row inside it, so a one-line draft takes three rows instead of
   five. A narrow composer keeps the mode and drops the model, and the provider is no longer shown
   there. A draft now grows to half the conversation's height instead of ten rows.
-- Plan mode turns the composer's whole border amber (the terminal's yellow at 16 colours), with
-  `plan` in the full warning colour. YOLO
+- Plan mode turns the composer's whole border amber (the warning colour itself at 16 colours),
+  with `plan` in the full warning colour. YOLO
   follows the mode in the label. A chosen effort is bold body text rather than amber, which is left
   to plan mode and YOLO.
 - During a run that takes input, the keys that follow up or steer sit in the composer's top border.
