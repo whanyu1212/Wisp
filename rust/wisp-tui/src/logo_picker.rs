@@ -174,6 +174,7 @@ impl LogoPicker {
                     preview_area.height,
                     palette,
                     no_color,
+                    startup_logo::Entrance::Finished,
                 )),
                 preview_area,
             );

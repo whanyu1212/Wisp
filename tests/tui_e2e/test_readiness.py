@@ -216,6 +216,39 @@ def _has_fragments(output: bytes, offset: int, *fragments: bytes) -> bool:
     return all(fragment in phase_output for fragment in fragments)
 
 
+# Runs of full dots that only the finished Wisp logo shows, at its normal and full sizes.
+_FINISHED_LOGO_ROWS = ("⣿⣿⣿⣿⣿⣿⣿⣿⣁⣠⡿", "⣾⣿⣿⣿⣿⣿⣿⣿⣿⡿⠋")
+
+
+@pytest.mark.process
+def test_logo_entrance_settles_without_input(tmp_path: Path) -> None:
+    """The welcome logo's entrance finishes on its own, then the screen stops redrawing."""
+    home = tmp_path / "home"
+    _write_user_settings(home, provider="fake")
+    (home / ".wisp" / "tui.json").write_text(
+        json.dumps({"startup_logo": "wisp-braille"}), encoding="utf-8"
+    )
+    tui, _ = _launch(tmp_path, home=home, env={"COLORTERM": "truecolor"})
+    try:
+        tui.wait_until(
+            lambda output: (
+                welcome_ready(output)
+                and any(screen_shows(output, row) for row in _FINISHED_LOGO_ROWS)
+            ),
+            failure="the welcome logo did not finish without input",
+        )
+        # Past the entrance's 1.25 s, an idle welcome screen writes nothing more.
+        settle_until = time.monotonic() + 1.5
+        tui.wait_until(lambda _output: time.monotonic() >= settle_until, failure="settling")
+        quiet_from = len(tui.output)
+        quiet_until = time.monotonic() + 1.5
+        tui.wait_until(lambda _output: time.monotonic() >= quiet_until, failure="quiet")
+        assert len(tui.output) == quiet_from, bytes(tui.output[quiet_from:])
+        tui.quit()
+    finally:
+        tui.close()
+
+
 @pytest.mark.process
 def test_init_command_is_discovered_and_runs_through_the_backend_lifecycle(tmp_path: Path) -> None:
     home = tmp_path / "home"

@@ -471,7 +471,7 @@ My pick for the next focused task: **HY-314, coordinated with HY-269’s navigat
     }
     if matches!(
         scenario,
-        "showcase" | "welcome" | "welcome-adal" | "welcome-classic"
+        "showcase" | "welcome" | "welcome-adal" | "welcome-classic" | "welcome-entrance"
     ) {
         ui.state = showcase_state(scenario == "showcase");
         // Each logo family takes its own gradient: theme headings, or the Adal pink.
@@ -481,6 +481,10 @@ My pick for the next focused task: **HY-314, coordinated with HY-269’s navigat
             _ => LogoChoice::WispBraille,
         };
         ui.editor = PromptEditor::default();
+        if scenario == "welcome-entrance" {
+            // Captured frame by frame, with the activity frame as the entrance's.
+            ui.logo_entrance = crate::LogoEntrance::Playing { started: 0 };
+        }
     }
     ui
 }
@@ -1702,18 +1706,18 @@ fn capture_conversation_screens() {
                 "typography",
                 "composer-plan",
                 "composer-yolo",
+                "welcome-entrance",
             ] {
                 let mut ui = fixture(scenario);
                 ui.theme.active = selected;
                 ui.no_color = no_color;
-                let frames = if scenario == "tool-running"
-                    && variant == "dark"
-                    && width == 100
-                    && height == 30
-                {
-                    8
-                } else {
-                    1
+                let frames = match scenario {
+                    "tool-running" if variant == "dark" && width == 100 && height == 30 => 8,
+                    "welcome-entrance" if width == 100 && height == 30 => {
+                        crate::startup_logo::Entrance::length(true) + 1
+                    }
+                    "welcome-entrance" => 0,
+                    _ => 1,
                 };
                 for tick in 0..frames {
                     if frames > 1 {

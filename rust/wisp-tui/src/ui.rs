@@ -900,6 +900,7 @@ fn render_transcript(
             visible_lines,
             content_width,
             startup_logo,
+            motion.logo,
         );
         frame.render_widget(Paragraph::new(Text::from(lines)), content);
     } else {
@@ -1704,6 +1705,8 @@ pub struct Motion<'a> {
     pub mode: MotionMode,
     /// Cards whose call finished lately, each with the activity frame it finished on.
     pub finished: &'a [(TranscriptEntryId, u8)],
+    /// How far the welcome logo's entrance has got.
+    pub logo: startup_logo::Entrance,
 }
 
 impl Motion<'_> {
@@ -2806,6 +2809,7 @@ fn empty_transcript_lines(
     height: usize,
     width: usize,
     startup_logo: LogoChoice,
+    entrance: startup_logo::Entrance,
 ) -> Vec<Line<'static>> {
     let muted = Style::default().fg(palette.muted);
     if state.context.loading() {
@@ -2870,6 +2874,7 @@ fn empty_transcript_lines(
             u16::try_from(action_logo_height).unwrap_or(u16::MAX),
             palette,
             palette.is_monochrome(),
+            entrance,
         );
         if panel.is_empty() {
             panel = startup_logo::preview_lines(
@@ -2878,6 +2883,7 @@ fn empty_transcript_lines(
                 u16::try_from(height.saturating_sub(copy_height + 1)).unwrap_or(u16::MAX),
                 palette,
                 palette.is_monochrome(),
+                entrance,
             );
         }
         let mark_height = panel.len();
@@ -4306,8 +4312,15 @@ mod tests {
     fn empty_welcome_renders_selected_logo_with_its_color_treatment() {
         let state = UiState::new("fake".into(), Some("model-x".into()), None);
         for logo in LogoChoice::ALL {
-            let lines =
-                empty_transcript_lines(&state, &connection(), Palette::default(), 35, 80, logo);
+            let lines = empty_transcript_lines(
+                &state,
+                &connection(),
+                Palette::default(),
+                35,
+                80,
+                logo,
+                startup_logo::Entrance::Finished,
+            );
             assert!(lines.len() <= 35, "{}", logo.name());
             assert!(lines.iter().all(|line| line.width() <= 80));
         }
@@ -4320,6 +4333,7 @@ mod tests {
             14,
             80,
             LogoChoice::AdalBraille,
+            startup_logo::Entrance::Finished,
         );
         let mark = lines
             .iter()
@@ -4348,6 +4362,7 @@ mod tests {
                         height,
                         width,
                         LogoChoice::AdalBraille,
+                        startup_logo::Entrance::Finished,
                     );
                     assert!(lines.len() <= height);
                     assert!(lines.iter().all(|line| line.width() <= width));
@@ -4368,6 +4383,7 @@ mod tests {
                     height,
                     80,
                     logo,
+                    startup_logo::Entrance::Finished,
                 )
                 .into_iter()
                 .map(|line| line.to_string())
@@ -4394,6 +4410,7 @@ mod tests {
                     height,
                     80,
                     logo,
+                    startup_logo::Entrance::Finished,
                 )
                 .into_iter()
                 .map(|line| line.to_string())
