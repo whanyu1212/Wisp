@@ -116,6 +116,32 @@ with `write_constraint`, under the exception below. Tool behavior changes are li
 `bash` runs commands in bash rather than `/bin/sh`, and that the read-only file tools follow
 symbolic links whose targets stay inside the workspace.
 
+## Wisp 0.8 compatibility
+
+0.8.0 reads every session 0.7.x wrote. The session `schema_version` stays 6, because each new
+record is optional and is written only when it has a value. A 0.7.x reader still treats some of
+them differently:
+
+- A session holding a codemode script's result (its result records `nested_calls`) fails to open
+  in 0.7.x.
+- A session whose working directory moved opens in 0.7.x, which ignores the
+  `session.directory_changed` entries and works from the folder it was launched in.
+
+Settings, credential, and trust formats are unchanged. `codemode` is a user setting that
+`/codemode` and `set_codemode` now save; 0.7.x ignores it.
+
+Commands and events gain fields: the `change_directory`, `get_codemode`, and `set_codemode`
+commands; the `session.directory_changed`, `rpc.codemode`, `tool.nested.started`, and
+`tool.nested.ended` events; and `nested_calls`, `nested_calls_omitted`, and `moved_to` on tool
+results and message snapshots, all listed in the
+[changelog](https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md). A 0.7 reader rejects them,
+so the backend and every frontend must be the same release, and external RPC clients should use the
+0.8.0 schema bundle.
+
+The supported Python API only gains methods and fields: `CodingSession.change_directory()`,
+`RpcController.change_directory()`, `get_codemode()`, and `set_codemode()`, and `ToolContext`'s
+`workspace_root` and `boundary()`. Python 3.11 is now supported.
+
 ## Wisp 0.7 compatibility
 
 0.7.0 reads every session 0.6.x wrote. The session `schema_version` stays 6, because each new field
