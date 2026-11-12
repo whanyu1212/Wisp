@@ -66,7 +66,7 @@ SUBAGENT_INSTRUCTIONS = (
 
 # A forked subagent keeps the conversation's own prompt, so its instructions arrive
 # with its task, as the user message that follows the copied conversation.
-_FORK_INSTRUCTIONS = (
+FORK_INSTRUCTIONS = (
     "You are now a subagent forked from the conversation above. The agent in that "
     "conversation continues separately and will read only your final message. Do "
     "not continue its work: do only the task below, then stop. You can only read "
@@ -212,7 +212,7 @@ def fork_transcript(messages: Sequence[Message], *, started_by: str | None) -> t
 def fork_prompt(task: str) -> str:
     """Return the user message that gives a forked subagent its role and its task."""
 
-    return f"{_FORK_INSTRUCTIONS}\n\nTask:\n{task}"
+    return f"{FORK_INSTRUCTIONS}\n\nTask:\n{task}"
 
 
 async def run_subagent(
@@ -284,6 +284,7 @@ async def run_subagent(
 
 
 __all__ = [
+    "FORK_INSTRUCTIONS",
     "FORK_OVERFLOW_ADVICE",
     "FRESH_OVERFLOW_ADVICE",
     "SUBAGENT_INSTRUCTIONS",

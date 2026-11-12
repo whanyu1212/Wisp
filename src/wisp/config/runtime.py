@@ -450,6 +450,15 @@ def subagents_from_env() -> bool | None:
     return _resolve_optional_bool(os.environ.get(_SUBAGENTS_ENV), None, name=_SUBAGENTS_ENV)
 
 
+def subagent_model_from_env() -> str | None:
+    """Return the model ``WISP_SUBAGENT_MODEL`` names, which outranks the saved setting.
+
+    Returns:
+        str | None: The model, or None when the variable is unset or blank.
+    """
+    return _first_non_empty(None, os.environ.get(_SUBAGENT_MODEL_ENV))
+
+
 def _resolve_optional_bool(
     env_value: str | None,
     saved_value: bool | None,

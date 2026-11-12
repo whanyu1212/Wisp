@@ -64,6 +64,7 @@ mod session_tree_picker;
 mod side_panel;
 mod startup_logo;
 mod stream_reveal;
+mod subagents_view;
 mod syntax;
 mod terminal;
 mod theme;
@@ -2055,10 +2056,10 @@ impl LiveUi {
                 && matches!(self.discovery_view, Some(DiscoveryView::Codemode(_)))
             {
                 Some(discovery_view::codemode_panel_height(&self.state))
-            } else if overlay == Some(OverlayKind::Discovery)
-                && matches!(self.discovery_view, Some(DiscoveryView::Subagents(_)))
+            } else if let (Some(OverlayKind::Discovery), Some(DiscoveryView::Subagents(view))) =
+                (overlay, &self.discovery_view)
             {
-                Some(discovery_view::subagents_panel_height(&self.state))
+                Some(view.panel_height(&self.state))
             } else if let Some(height) =
                 docked_mcp_height.filter(|_| overlay == Some(OverlayKind::Discovery))
             {
@@ -3481,6 +3482,14 @@ impl LiveUi {
                 self.notice = None;
                 self.render_pending = true;
                 self.dispatch(UiAction::Subagents(enabled), writer, limit)
+                    .await
+            }
+            Command::SubagentModel(model) => {
+                self.discovery_view = Some(DiscoveryView::subagents());
+                self.editor.clear();
+                self.notice = None;
+                self.render_pending = true;
+                self.dispatch(UiAction::SubagentModel(model), writer, limit)
                     .await
             }
             Command::Skills | Command::Mcp => {

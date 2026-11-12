@@ -3513,6 +3513,51 @@
    "operation": "remove",
    "path": [
     "subagents",
+    "env_model"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.subagents",
+   "operation": "remove",
+   "path": [
+    "subagents",
+    "kinds"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.subagents",
+   "operation": "remove",
+   "path": [
+    "subagents",
+    "max_parallel"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.subagents",
+   "operation": "remove",
+   "path": [
+    "subagents",
+    "max_tasks"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.subagents",
+   "operation": "remove",
+   "path": [
+    "subagents",
+    "max_tool_rounds"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.subagents",
+   "operation": "remove",
+   "path": [
+    "subagents",
     "model"
    ],
    "accepted": true
@@ -3537,9 +3582,90 @@
   },
   {
    "event": "rpc.subagents",
+   "operation": "remove",
+   "path": [
+    "subagents",
+    "refused_tools"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.subagents",
+   "operation": "remove",
+   "path": [
+    "subagents",
+    "report_max_bytes"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.subagents",
+   "operation": "remove",
+   "path": [
+    "subagents",
+    "tools"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.subagents",
    "operation": "add_unknown",
    "path": [
     "subagents"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.subagents",
+   "operation": "remove",
+   "path": [
+    "subagents",
+    "kinds",
+    0,
+    "effort"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.subagents",
+   "operation": "remove",
+   "path": [
+    "subagents",
+    "kinds",
+    0,
+    "instructions"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.subagents",
+   "operation": "remove",
+   "path": [
+    "subagents",
+    "kinds",
+    0,
+    "model"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.subagents",
+   "operation": "remove",
+   "path": [
+    "subagents",
+    "kinds",
+    0,
+    "name"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.subagents",
+   "operation": "add_unknown",
+   "path": [
+    "subagents",
+    "kinds",
+    0
    ],
    "accepted": false
   },

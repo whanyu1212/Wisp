@@ -129,7 +129,9 @@ def builtin_command_descriptors() -> tuple[CommandDescriptor, ...]:
             title="Subagents",
             description="View or save whether runs may hand tasks to subagents",
             category=CommandCategory.configuration,
-            arguments=(CommandArgument("setting", "Optional 'on' or 'off'"),),
+            arguments=(
+                CommandArgument("setting", "Optional 'on', 'off', or 'model <name>' ('-' clears)"),
+            ),
             accepts_arguments=True,
             order=28,
         ),

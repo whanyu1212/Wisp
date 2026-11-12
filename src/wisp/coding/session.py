@@ -83,6 +83,7 @@ from wisp.coding.prompt import (
 )
 from wisp.coding.stats import RunStats, build_session_stats
 from wisp.coding.subagent import (
+    FORK_INSTRUCTIONS,
     FORK_OVERFLOW_ADVICE,
     SUBAGENT_INSTRUCTIONS,
     SUBAGENT_MAX_PARALLEL,
@@ -119,6 +120,7 @@ from wisp.events import (
     SessionSaved,
     SessionStats,
     SkillInvoked,
+    SubagentKind,
     ToolApprovalResolved,
     ToolExecutionEnded,
     ToolExecutionStarted,
@@ -453,6 +455,30 @@ class _ForkPoint:
 
     config: AgentHarnessConfig
     messages: tuple[Message, ...]
+
+
+def _subagent_tool_specs(
+    offered: Sequence[ToolSpec], registry: ToolRegistry
+) -> tuple[ToolSpec, ...]:
+    """Pick the tools a subagent may use from those a run offers.
+
+    Args:
+        offered (Sequence[ToolSpec]): The tools the run offers the model.
+        registry (ToolRegistry): The run's registry, which describes them.
+
+    Returns:
+        tuple[ToolSpec, ...]: The registered read-only tools, in offered order, except
+        any that confirm every call, since a subagent cannot ask.
+    """
+
+    registered = set(registry.names())
+    return tuple(
+        spec
+        for spec in offered
+        if spec.name in registered
+        and (tool := registry.get(spec.name)).safety == "read"
+        and not confirms_every_call(tool)
+    )
 
 
 def _no_executor() -> ConfiguredToolExecutor:
@@ -2279,15 +2305,88 @@ class CodingSession:
             return self.model
         return self.subagent_model
 
+    def provider_lacks_model(self, model: str) -> bool:
+        """Report whether the model catalog lists the provider without ``model`` on it.
+
+        Args:
+            model (str): A model id.
+
+        Returns:
+            bool: True only when the catalog can tell. With no catalog, or a provider
+            it does not list, the name cannot be checked and this is False.
+        """
+
+        if self.models is None:
+            return False
+        provider_listed = any(entry.name == self.provider.name for entry in self.models.providers())
+        return provider_listed and not self.models.knows_model(self.provider.name, model)
+
     def _subagent_model_unavailable(self) -> bool:
         """Report whether the catalog lists the provider but not `subagent_model` on it."""
 
-        if self.subagent_model is None or self.models is None:
-            return False
-        provider_listed = any(entry.name == self.provider.name for entry in self.models.providers())
-        return provider_listed and not self.models.knows_model(
-            self.provider.name, self.subagent_model
+        return self.subagent_model is not None and self.provider_lacks_model(self.subagent_model)
+
+    def subagent_kinds(self) -> tuple[SubagentKind, ...]:
+        """Describe each way a subagent can start, as one started now would be set up.
+
+        Returns:
+            tuple[SubagentKind, ...]: Fresh, then fork, each with the model and effort
+            its harness would be given and the instructions it would read.
+        """
+
+        fresh_model = self.subagent_model_in_use()
+        return (
+            SubagentKind(
+                name="fresh",
+                model=fresh_model or self.provider.default_model,
+                effort=self._effort_for(fresh_model),
+                instructions=SUBAGENT_INSTRUCTIONS,
+            ),
+            # A fork keeps the run's own request settings; see `_forked_subagent_harness`.
+            SubagentKind(
+                name="fork",
+                model=self.model or self.provider.default_model,
+                effort=self.effort,
+                instructions=FORK_INSTRUCTIONS,
+            ),
         )
+
+    def subagent_tool_access(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """Return the tools a subagent of a run started now could and could not use.
+
+        The tools are worked out as a run would work them out, whether or not
+        subagents are on, without starting one.
+
+        Returns:
+            tuple[tuple[str, ...], tuple[str, ...]]: The names a subagent may call,
+            then the names the run offers that a subagent is refused: every tool
+            that is not read-only or confirms each call, codemode when the run would
+            offer it, and `spawn_agent` itself.
+        """
+
+        registry = self._operation_tool_registry()
+        if registry is None:
+            return (), ()
+        offered, _ = self._apply_mcp_exposure(self._effective_tools(registry), registry)
+        # A nested call under either name is refused whatever tool holds it.
+        never = (CODEMODE, SPAWN_AGENT)
+        allowed = tuple(
+            spec.name for spec in _subagent_tool_specs(offered, registry) if spec.name not in never
+        )
+        refused = [
+            spec.name for spec in offered if spec.name not in allowed and spec.name not in never
+        ]
+        if self.codemode_offered() or any(spec.name == CODEMODE for spec in offered):
+            refused.append(CODEMODE)
+        refused.append(SPAWN_AGENT)
+        return allowed, tuple(refused)
+
+    def subagent_tool_rounds(self) -> int:
+        """Return a subagent's tool-round limit: the run's own, up to the subagent cap."""
+
+        if self.max_tool_iterations is None:
+            return SUBAGENT_MAX_TOOL_ITERATIONS
+        return min(self.max_tool_iterations, SUBAGENT_MAX_TOOL_ITERATIONS)
 
     def _subagent_fallback_warning(self, session_id: str) -> WarningEvent | None:
         """Return the warning for a run whose subagents will not use `subagent_model`.
@@ -2357,14 +2456,7 @@ class CodingSession:
 
         if not self.subagents or registry is None or SPAWN_AGENT in registry.names():
             return None
-        registered = set(registry.names())
-        subagent_tools = tuple(
-            spec
-            for spec in offered
-            if spec.name in registered
-            and (tool := registry.get(spec.name)).safety == "read"
-            and not confirms_every_call(tool)
-        )
+        subagent_tools = _subagent_tool_specs(offered, registry)
         if not subagent_tools:
             return None
 
@@ -2469,13 +2561,6 @@ class CodingSession:
         )
         return await run_subagent(harness, task, record_usage=subagent_executor.record_model_usage)
 
-    def _subagent_tool_iterations(self) -> int:
-        """Return a subagent's tool-round limit: the run's own, up to the subagent cap."""
-
-        if self.max_tool_iterations is None:
-            return SUBAGENT_MAX_TOOL_ITERATIONS
-        return min(self.max_tool_iterations, SUBAGENT_MAX_TOOL_ITERATIONS)
-
     async def _fresh_subagent_harness(
         self,
         tool_executor: NestedCallToolExecutor,
@@ -2521,7 +2606,7 @@ class CodingSession:
                 tool_executor=tool_executor,
                 model=model,
                 tools=tools,
-                max_tool_iterations=self._subagent_tool_iterations(),
+                max_tool_iterations=self.subagent_tool_rounds(),
                 effort=self._effort_for(model),
                 # Fresh subagents share a prefix with each other, not with the
                 # conversation.
@@ -2586,7 +2671,7 @@ class CodingSession:
             replace(
                 fork.config,
                 tool_executor=tool_executor,
-                max_tool_iterations=self._subagent_tool_iterations(),
+                max_tool_iterations=self.subagent_tool_rounds(),
                 # A subagent's tool results carry no images.
                 tool_result_image_loader=None,
             ),

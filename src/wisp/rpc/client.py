@@ -73,6 +73,7 @@ from wisp.rpc.commands import (
     SetPermissionsCommand,
     SetQueueModeCommand,
     SetSessionNameCommand,
+    SetSubagentModelCommand,
     SetSubagentsCommand,
     ShutdownCommand,
     SteerCommand,
@@ -250,6 +251,23 @@ class RpcController:
 
         selected_id = command_id or self._command_id_factory("subagents")
         await self._transport.send(SetSubagentsCommand(id=selected_id, enabled=enabled))
+        return selected_id
+
+    async def set_subagent_model(self, model: str | None, *, command_id: str | None = None) -> str:
+        """Choose the model fresh subagents use from the next run and save it.
+
+        Args:
+            model (str | None): A model on the session's provider, or None so that
+                subagents use the session's model.
+            command_id (str | None): Optional identifier for matching the response.
+
+        Returns:
+            str: The submitted command identifier. The reported event confirms
+            success; a model the provider is known not to have fails the command.
+        """
+
+        selected_id = command_id or self._command_id_factory("subagents")
+        await self._transport.send(SetSubagentModelCommand(id=selected_id, model=model))
         return selected_id
 
     async def change_directory(self, path: str, *, command_id: str | None = None) -> str:

@@ -432,6 +432,41 @@ pub(super) fn subagents(
     ])
 }
 
+/// Choose the model fresh subagents use and save it; `None` clears the choice.
+/// Like turning subagents on or off, it waits for the current operation.
+pub(super) fn subagent_model(
+    state: &mut UiState,
+    model: Option<&str>,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    if state.exit_requested {
+        return Ok(Vec::new());
+    }
+    if state.subagents.loading() {
+        return Ok(vec![UiEffect::Notice(
+            "Subagents are still loading; try again.".into(),
+        )]);
+    }
+    if !state.can_select_model() || super::session_sync_pending(state) {
+        return Ok(vec![UiEffect::Notice(
+            "Finish the current operation before changing subagents.".into(),
+        )]);
+    }
+    let id = ids.next_id(CommandKind::Subagents);
+    // The name is typed by the user: one the command cannot carry, such as an
+    // over-long one, is declined here rather than failing the frontend.
+    let Ok(command) = WispTypedClientRpcCommands::subagent_model(&id, model) else {
+        return Ok(vec![UiEffect::Notice(
+            "That is not a valid model name.".into(),
+        )]);
+    };
+    state.subagents.start_change(id);
+    Ok(vec![
+        UiEffect::SendCommand(command),
+        UiEffect::RequestRender,
+    ])
+}
+
 /// Send the codemode read that was asked for while another request was in flight,
 /// once that request has finished.
 pub(super) fn read_codemode_again(
@@ -504,8 +539,10 @@ pub(super) fn observe(state: &mut UiState, event: &BackendEvent) -> Option<Vec<U
             command_type,
             ok,
             error,
-        } if matches!(command_type.as_str(), "get_subagents" | "set_subagents")
-            && state.subagents.finish(command_id, *ok, error.as_deref()) =>
+        } if matches!(
+            command_type.as_str(),
+            "get_subagents" | "set_subagents" | "set_subagent_model"
+        ) && state.subagents.finish(command_id, *ok, error.as_deref()) =>
         {
             Some(vec![UiEffect::RequestRender])
         }

@@ -6495,6 +6495,58 @@
       ],
       "type": "string"
     },
+    "SubagentKind": {
+      "additionalProperties": false,
+      "description": "One way a subagent starts, and what a subagent started that way would get now.",
+      "properties": {
+        "effort": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Effort"
+        },
+        "instructions": {
+          "title": "Instructions",
+          "type": "string"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "name": {
+          "$ref": "#/$defs/SubagentKindName"
+        }
+      },
+      "required": [
+        "name",
+        "model",
+        "effort",
+        "instructions"
+      ],
+      "title": "SubagentKind",
+      "type": "object"
+    },
+    "SubagentKindName": {
+      "enum": [
+        "fresh",
+        "fork"
+      ],
+      "type": "string"
+    },
     "SubagentsState": {
       "additionalProperties": false,
       "description": "The session's subagents setting and what its next run's subagents would use.",
@@ -6514,6 +6566,44 @@
           ],
           "default": null,
           "title": "Env Enabled"
+        },
+        "env_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Env Model"
+        },
+        "kinds": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SubagentKind"
+          },
+          "title": "Kinds",
+          "type": "array"
+        },
+        "max_parallel": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Max Parallel",
+          "type": "integer"
+        },
+        "max_tasks": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Max Tasks",
+          "type": "integer"
+        },
+        "max_tool_rounds": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Max Tool Rounds",
+          "type": "integer"
         },
         "model": {
           "anyOf": [
@@ -6542,6 +6632,28 @@
         "offered": {
           "title": "Offered",
           "type": "boolean"
+        },
+        "refused_tools": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Refused Tools",
+          "type": "array"
+        },
+        "report_max_bytes": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Report Max Bytes",
+          "type": "integer"
+        },
+        "tools": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Tools",
+          "type": "array"
         }
       },
       "required": [
@@ -6549,7 +6661,15 @@
         "offered",
         "env_enabled",
         "model",
-        "model_in_use"
+        "model_in_use",
+        "env_model",
+        "tools",
+        "refused_tools",
+        "kinds",
+        "max_tool_rounds",
+        "max_tasks",
+        "max_parallel",
+        "report_max_bytes"
       ],
       "title": "SubagentsState",
       "type": "object"
@@ -9213,9 +9333,24 @@
       "subagents": {
         "enabled": true,
         "env_enabled": null,
+        "env_model": null,
+        "kinds": [
+          {
+            "effort": null,
+            "instructions": "fixture",
+            "model": null,
+            "name": "fresh"
+          }
+        ],
+        "max_parallel": 0,
+        "max_tasks": 0,
+        "max_tool_rounds": 0,
         "model": null,
         "model_in_use": null,
-        "offered": true
+        "offered": true,
+        "refused_tools": [],
+        "report_max_bytes": 0,
+        "tools": []
       },
       "timestamp": "2026-01-02T03:04:05Z",
       "type": "rpc.subagents"

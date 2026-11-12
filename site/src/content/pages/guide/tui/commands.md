@@ -81,14 +81,24 @@ still decides the setting when Wisp starts, and the panel says so when it is set
 side panel names codemode as on or off for the next prompt, except while the automatic setting
 leaves it off.
 
-Use `/subagents` to turn [subagents](.././tools-and-safety#delegating-to-a-subagent-experimental)
-on or off; `/subagents on` and `/subagents off` apply one directly. The panel docks above the
-composer like `/codemode`, marks the current setting, and says whether the next prompt offers the
-`spawn_agent` tool. Choose with `1` or `2`, or highlight with `↑`/`↓` and press `Enter`. The choice
-applies from the next prompt and is saved as the user `subagents` setting, so it survives
-restarts; wait for the current operation to finish before changing it. `WISP_SUBAGENTS` still
-decides the setting when Wisp starts, and the panel says so when it is set. The panel also names
-the model subagents use. It shows the `subagent_model` setting and does not change it.
+Use `/subagents` to set up [subagents](.././tools-and-safety#delegating-to-a-subagent-experimental)
+and see what they get. The panel docks above the composer like `/codemode`. Highlight a row with
+`↑`/`↓` and press `Enter`:
+
+- **Subagents** turns them on or off. `/subagents on` and `/subagents off` do the same directly.
+- **Model** opens the models of the session's provider. The one you choose is used by subagents
+  that start fresh; "Same as the session" clears the choice. `/subagents model <name>` and
+  `/subagents model -` do the same directly. A model the provider does not have is refused.
+- **Fresh** and **Fork** are the two ways a subagent starts. Below the rows, the panel describes
+  the highlighted one as the next prompt would set it up: its model and effort, the tools it can
+  use and the ones it is refused, its limits, and the start of its instructions. `Enter` or `p`
+  opens the full instructions; `Esc` returns.
+
+Both settings apply from the next prompt and are saved as the user `subagents` and
+`subagent_model` settings, so they survive restarts; wait for the current operation to finish
+before changing them. `WISP_SUBAGENTS` and `WISP_SUBAGENT_MODEL` still decide the settings when
+Wisp starts, and the panel says so when one is set. The panel also says whether the next prompt
+offers the `spawn_agent` tool, and flags a saved model the current provider does not have.
 
 ## Managing MCP servers
 
@@ -154,7 +164,7 @@ reconnect.
 /build                                    switch to normal build mode
 /permissions [ask|yolo]                   inspect or change the project permission default
 /codemode [automatic|always|never]        inspect or save when runs offer the codemode tool
-/subagents [on|off]                       inspect or save whether runs may use subagents
+/subagents [on|off|model <name>|model -]  inspect or save the subagents settings
 /history                                  search prompts submitted in this TUI run
 /theme [name]                             preview or select a curated color theme
 /logo [name]                              preview or select a startup logo

@@ -555,11 +555,12 @@ broad search or investigation whose raw output would crowd its context.
 
 The setting is user-only, because a subagent spends on your provider account. A run that an
 operation limits to named tools, such as `/init`, is not offered the tool. In the terminal UI,
-`/subagents` shows and saves the setting; RPC and SDK clients use `get_subagents` and
-`set_subagents`.
+`/subagents` shows and saves the setting, chooses the subagent model, and describes what each
+kind of subagent gets; RPC and SDK clients use `get_subagents`, `set_subagents` and
+`set_subagent_model`.
 
-**A cheaper model for subagents.** `"subagent_model"` in `~/.wisp/settings.json`, or
-`WISP_SUBAGENT_MODEL`, names the model a subagent that starts fresh uses, on the same provider
+**A cheaper model for subagents.** The Model row of `/subagents`, `"subagent_model"` in
+`~/.wisp/settings.json`, or `WISP_SUBAGENT_MODEL` names the model a subagent that starts fresh uses, on the same provider
 as the session. Subagents mostly read and search, so a smaller model often does. The session's
 reasoning effort carries over when that model supports it, and otherwise the model's default
 applies. If the model catalog lists the current provider without that model, as after switching

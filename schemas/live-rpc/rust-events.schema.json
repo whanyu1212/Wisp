@@ -6091,6 +6091,59 @@
       ],
       "type": "string"
     },
+    "SubagentKind": {
+      "additionalProperties": false,
+      "description": "One way a subagent starts, and what a subagent started that way would get now.",
+      "properties": {
+        "effort": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "SubagentKindEffort"
+        },
+        "instructions": {
+          "title": "SubagentKindInstructions",
+          "type": "string"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "SubagentKindModel"
+        },
+        "name": {
+          "$ref": "#/$defs/SubagentKindName",
+          "title": "SubagentKindName"
+        }
+      },
+      "required": [
+        "name",
+        "model",
+        "effort",
+        "instructions"
+      ],
+      "title": "SubagentKind",
+      "type": "object"
+    },
+    "SubagentKindName": {
+      "enum": [
+        "fresh",
+        "fork"
+      ],
+      "type": "string"
+    },
     "SubagentsState": {
       "additionalProperties": false,
       "description": "The session's subagents setting and what its next run's subagents would use.",
@@ -6110,6 +6163,44 @@
           ],
           "default": null,
           "title": "SubagentsStateEnvEnabled"
+        },
+        "env_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "SubagentsStateEnvModel"
+        },
+        "kinds": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SubagentKind"
+          },
+          "title": "SubagentsStateKinds",
+          "type": "array"
+        },
+        "max_parallel": {
+          "default": 0,
+          "minimum": 0,
+          "title": "SubagentsStateMaxParallel",
+          "type": "integer"
+        },
+        "max_tasks": {
+          "default": 0,
+          "minimum": 0,
+          "title": "SubagentsStateMaxTasks",
+          "type": "integer"
+        },
+        "max_tool_rounds": {
+          "default": 0,
+          "minimum": 0,
+          "title": "SubagentsStateMaxToolRounds",
+          "type": "integer"
         },
         "model": {
           "anyOf": [
@@ -6138,6 +6229,28 @@
         "offered": {
           "title": "SubagentsStateOffered",
           "type": "boolean"
+        },
+        "refused_tools": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "SubagentsStateRefusedTools",
+          "type": "array"
+        },
+        "report_max_bytes": {
+          "default": 0,
+          "minimum": 0,
+          "title": "SubagentsStateReportMaxBytes",
+          "type": "integer"
+        },
+        "tools": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "SubagentsStateTools",
+          "type": "array"
         }
       },
       "required": [
@@ -6145,7 +6258,15 @@
         "offered",
         "env_enabled",
         "model",
-        "model_in_use"
+        "model_in_use",
+        "env_model",
+        "tools",
+        "refused_tools",
+        "kinds",
+        "max_tool_rounds",
+        "max_tasks",
+        "max_parallel",
+        "report_max_bytes"
       ],
       "title": "SubagentsState",
       "type": "object"

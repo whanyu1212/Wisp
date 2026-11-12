@@ -27,6 +27,11 @@ this policy.
   session's usage and cost totals.
 - `/subagents` in the terminal UI shows and saves whether runs may use subagents. RPC and SDK
   clients use `get_subagents` and `set_subagents`.
+- The `/subagents` panel also chooses the subagent model from the session provider's models, and
+  describes the two kinds of subagent, fresh and fork: the model, effort, tools, limits and
+  instructions each would get in the next prompt. `/subagents model <name>` sets the model and
+  `/subagents model -` clears it. The panel's `1` and `2` shortcuts are gone; highlight a row and
+  press Enter.
 - `"subagent_model"` (or `WISP_SUBAGENT_MODEL`) names a model on the session's provider for
   subagents that start fresh. A forked subagent keeps the session's model.
 - A run warns when its subagents will not use the configured `subagent_model` because the
@@ -56,6 +61,11 @@ this policy.
   tool. Session usage and cost totals count these responses.
 - New commands `get_subagents` and `set_subagents`, answered by a new `rpc.subagents` event that
   carries the setting, whether the next run would offer the tool, and the subagent model in use.
+- New command `set_subagent_model` chooses or clears the model fresh subagents use. It fails,
+  changing nothing, when the model catalog lists the provider without that model.
+- `rpc.subagents` gains `env_model`, `tools`, `refused_tools`, `kinds` (each with `name`, `model`,
+  `effort` and `instructions`), `max_tool_rounds`, `max_tasks`, `max_parallel` and
+  `report_max_bytes`.
 - `tool.nested.started`, `tool.nested.ended` and a result's `nested_calls` now also describe the
   tool calls a `spawn_agent` call's subagents make, with that call as `parent_call_id`. Their
   `call_id`s are numbered by Wisp, as `subagent-N-M`, and do not repeat within the call.

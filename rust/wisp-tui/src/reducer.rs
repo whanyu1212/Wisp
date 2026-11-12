@@ -1445,6 +1445,8 @@ pub enum UiAction {
     Codemode(Option<wisp_protocol::commands::CodemodeSetting>),
     /// Read the subagents setting, or turn subagents on or off and save that.
     Subagents(Option<bool>),
+    /// Choose the model fresh subagents use; `None` clears the choice.
+    SubagentModel(Option<String>),
     SetProjectFilesOpen(bool),
     LoadContext,
     SetGitDiffOpen(bool),
@@ -1658,6 +1660,9 @@ pub fn reduce(
         UiAction::Permissions(mode) => Ok(discovery::permissions(state, mode, ids)?),
         UiAction::Codemode(setting) => Ok(discovery::codemode(state, setting, ids)?),
         UiAction::Subagents(enabled) => Ok(discovery::subagents(state, enabled, ids)?),
+        UiAction::SubagentModel(model) => {
+            Ok(discovery::subagent_model(state, model.as_deref(), ids)?)
+        }
         UiAction::SetProjectFilesOpen(open) => {
             state.project_files.set_open(open);
             Ok(vec![UiEffect::ProjectFilesChanged, UiEffect::RequestRender])
@@ -6645,6 +6650,7 @@ mod tests {
             env_enabled: None,
             model: None,
             model_in_use: Some("fake".into()),
+            ..Default::default()
         };
         reduce(
             &mut state,
@@ -6681,6 +6687,49 @@ mod tests {
         // Reading the setting is still allowed while a run is active.
         let read = reduce(&mut state, UiAction::Subagents(None), &mut ids).unwrap();
         assert_eq!(sent(&read), ["get_subagents"]);
+    }
+
+    #[test]
+    fn subagent_model_change() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.input_ready = true;
+        let mut ids = DeterministicIds::default();
+        let change = reduce(
+            &mut state,
+            UiAction::SubagentModel(Some("small".into())),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(sent(&change), ["set_subagent_model"]);
+        assert!(state.subagents.loading());
+        // A refused model ends the change and leaves its reason to show.
+        let id = sent_id(&change, "set_subagent_model");
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished(&id, "set_subagent_model", false)),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(!state.subagents.loading());
+        assert!(state.subagents.error.is_some());
+
+        // A name the command cannot carry is declined, not an error that ends the UI.
+        let long = reduce(
+            &mut state,
+            UiAction::SubagentModel(Some("m".repeat(300))),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(sent(&long).is_empty());
+        assert!(long.iter().any(
+            |effect| matches!(effect, UiEffect::Notice(text) if text.contains("not a valid model"))
+        ));
+
+        // Like turning subagents on or off, the model waits for a run to finish.
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = InteractionStatus::Running;
+        let held = reduce(&mut state, UiAction::SubagentModel(None), &mut ids).unwrap();
+        assert!(sent(&held).is_empty());
     }
 
     #[test]
