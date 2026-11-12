@@ -15,6 +15,7 @@ from wisp.events._base import (
     WispEvent,
     _MessageOriginEvent,
 )
+from wisp.events.usage import TokenUsage, UsageCost
 from wisp.tool_types import ToolFailureCode
 
 
@@ -160,17 +161,22 @@ NESTED_CALL_ARGUMENTS_MAX_CHARS = 2_000
 NESTED_CALL_TEXT_MAX_CHARS = 500
 
 
+# The most model responses one tool result accounts for. A subagent is limited to
+# one fewer tool rounds, so every response it completes fits.
+MAX_TOOL_MODEL_RESPONSES = 64
+
+
 class NestedToolCall(BaseModel):
-    """One tool call a codemode script made, as its script's result records it.
+    """One tool call a codemode script or a subagent made, as its result records it.
 
     Every call is recorded, including those refused before running and those the
-    script ended before they finished, so a session shows everything a script
-    tried. Only the script sees the call's output; the model sees what the script
-    prints and returns.
+    script or subagent ended before they finished, so a session shows everything
+    it tried. Only the script or subagent sees the call's output; the model sees
+    what the script prints and returns, or the subagent's final message.
 
     Attributes:
-        call_id (str): The call's id, unique within its script.
-        name (str): The tool the script called.
+        call_id (str): The call's id, unique within its script or subagent.
+        name (str): The tool that was called.
         target (str | None): The MCP tool a proxied `mcp_call` ran.
         arguments (JsonObject | None): The call's arguments; None when they were
             too large to keep.
@@ -178,7 +184,7 @@ class NestedToolCall(BaseModel):
         failure_code (ToolFailureCode | None): Why it failed, when classified.
         error (str | None): The start of its error message.
         summary (str | None): A one-line summary, for read-type tools.
-        started_at (datetime): When the script made the call.
+        started_at (datetime): When the call was made.
         duration_ms (int): How long it took, waiting for other calls included.
     """
 
@@ -196,19 +202,34 @@ class NestedToolCall(BaseModel):
     duration_ms: int = Field(ge=0)
 
 
+class ModelResponseUsage(BaseModel):
+    """What one model response a tool requested itself used, such as a subagent's.
+
+    Attributes:
+        usage (TokenUsage): The tokens the response reported.
+        cost (UsageCost | None): Its list-price estimate; None when the run had no
+            cost estimator.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    usage: TokenUsage
+    cost: UsageCost | None = None
+
+
 class ToolNestedCallStarted(WispEvent):
-    """A codemode script made a tool call, which may still wait to run.
+    """A codemode script or a subagent made a tool call, which may still wait to run.
 
     Like `tool.execution.progress`, it is transient: published only between its
-    script's `tool.execution.started` and `tool.execution.ended`, never persisted
+    parent's `tool.execution.started` and `tool.execution.ended`, never persisted
     and never sent to the model. Delivery is best effort. A call can start without
-    ending when its script ends first; the script's `tool.execution.ended` closes
+    ending when its parent ends first; the parent's `tool.execution.ended` closes
     it, and its `nested_calls` record every call, unless the run was cancelled
-    while the script ran, which leaves the result no calls to record.
+    while the parent ran, which leaves the result no calls to record.
     """
 
     type: Literal["tool.nested.started"] = "tool.nested.started"
-    # The codemode call whose script made this one.
+    # The codemode or spawn_agent call that made this one.
     parent_call_id: str
     call_id: str
     name: str
@@ -217,7 +238,7 @@ class ToolNestedCallStarted(WispEvent):
 
 
 class ToolNestedCallEnded(WispEvent):
-    """A tool call a codemode script made finished; transient, like its start."""
+    """A tool call a codemode script or a subagent made finished; transient, like its start."""
 
     type: Literal["tool.nested.ended"] = "tool.nested.ended"
     parent_call_id: str
@@ -284,10 +305,15 @@ class _ToolResultEvent(_MessageOriginEvent):
     # Images the tool returned, such as an image file `read` showed, by reference
     # into the session's image store; they are stored before the result is published.
     images: tuple[ImagePart, ...] = Field(default=(), max_length=MAX_TOOL_RESULT_IMAGES)
-    # The calls a codemode script made, in the order it made them, and how many more
-    # it made than the result records. Empty for every other tool.
+    # The calls a codemode script or a subagent made, in the order it made them, and
+    # how many more it made than the result records. Empty for every other tool.
     nested_calls: tuple[NestedToolCall, ...] = Field(default=(), max_length=MAX_NESTED_CALLS)
     nested_calls_omitted: int = Field(default=0, ge=0)
+    # The model responses a subagent completed, so its spend counts toward the
+    # session's. Empty for every other tool.
+    model_usage: tuple[ModelResponseUsage, ...] = Field(
+        default=(), max_length=MAX_TOOL_MODEL_RESPONSES
+    )
 
     @model_validator(mode="after")
     def _validate_failure_metadata(self) -> Self:

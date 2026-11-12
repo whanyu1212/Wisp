@@ -31,12 +31,15 @@ from wisp.events import (
     ImagePart,
     JsonObject,
     ManagedProcessState,
+    ModelResponseUsage,
     NestedToolCall,
+    TokenUsage,
     ToolApprovalRequested,
     ToolApprovalResolved,
     ToolExecutionEnded,
     ToolNestedCallEnded,
     ToolNestedCallStarted,
+    UsageCost,
     WispEvent,
     utc_now,
 )
@@ -53,6 +56,7 @@ from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
 from wisp.tools.progress import ToolProgress
 from wisp.tools.result import ToolError, ToolResult
+from wisp.tools.subagent import SPAWN_AGENT
 from wisp.tools.summary import summarize_tool_result
 from wisp.tools.truncation import truncate_text
 
@@ -78,6 +82,10 @@ _MODEL_VISIBLE_TOOL_ERROR_MAX_CHARS = 2_000
 _MAX_PARALLEL_NESTED_CALLS = 8
 # How a nested call is recorded when its script ended before the call finished.
 _SCRIPT_ENDED_FIRST = "The script ended before this call finished"
+_SUBAGENT_ENDED_FIRST = "The subagent ended before this call finished"
+# Appended to a result whose image the reader does not get, so it is never taken for
+# one that was seen.
+_IMAGE_NOT_ATTACHED = "[The image could not be attached to this result.]"
 _MAX_RESULT_COUNT = (1 << 63) - 1
 _MIN_EXIT_CODE = -(1 << 31)
 _MAX_EXIT_CODE = (1 << 31) - 1
@@ -175,23 +183,35 @@ class _ToolRunOutcome:
     images: tuple[ImagePart, ...] = ()
     nested_calls: tuple[NestedToolCall, ...] = ()
     nested_calls_omitted: int = 0
+    model_usage: tuple[ModelResponseUsage, ...] = ()
+
+
+# The tools whose calls make calls of their own: a codemode script and a subagent.
+# Each records them in its result, and neither may be called from inside the other.
+_NESTED_CALL_HOSTS = frozenset({CODEMODE, SPAWN_AGENT})
 
 
 @dataclass(slots=True)
 class _ScriptCallLog:
-    """The calls one codemode script makes, kept in the order it made them.
+    """The calls one codemode script or subagent makes, in the order it made them.
 
     The first `MAX_NESTED_CALLS` calls are recorded and later ones only counted, so
-    a script's result stays bounded however many calls its limits allow. When the
-    script ends the log closes: a call still unfinished is recorded then, as one
-    the script ended before it finished, and nothing a call does later is recorded
+    a result stays bounded however many calls its limits allow. When the script or
+    subagent ends the log closes: a call still unfinished is recorded then, as one
+    that was ended before it finished, and nothing a call does later is recorded
     or published. Closing waits for nothing, so the result never depends on how
     fast a cancelled tool stops.
+
+    A subagent's model responses are recorded here too, so its result accounts for
+    them however the subagent ended.
     """
 
     parent_call_id: str
+    # What an unfinished call's record says when its script or subagent ends first.
+    ended_first: str = _SCRIPT_ENDED_FIRST
     omitted: int = 0
     closed: bool = False
+    model_usage: list[ModelResponseUsage] = field(default_factory=list)
     _count: int = 0
     _recorded: dict[int, NestedToolCall] = field(default_factory=dict)
     _unfinished: dict[int, tuple[NestedToolCall, float]] = field(default_factory=dict)
@@ -301,6 +321,46 @@ class ConfiguredToolExecutor:
         """The MCP tools `mcp_call` may name this run, or None when exposure is direct."""
 
         return self._mcp_catalog
+
+    def with_context(self, context: ToolContext) -> ConfiguredToolExecutor:
+        """Return an executor for a subagent's calls, which run in ``context``.
+
+        It shares this executor's registry, policy, approval policy, progress sink
+        and MCP catalog, so a subagent's call passes exactly the checks a call of
+        this executor's does. It stores no images, as nested calls return only text.
+
+        Args:
+            context (ToolContext): The context the subagent's tools run with.
+
+        Returns:
+            ConfiguredToolExecutor: The executor to run the subagent's nested calls.
+        """
+
+        return ConfiguredToolExecutor(
+            registry=self._registry,
+            context=context,
+            policy=self._policy,
+            approval_policy=self._approval_policy,
+            progress_sink=self._progress_sink,
+            mcp_catalog=self._mcp_catalog,
+        )
+
+    @staticmethod
+    def record_model_usage(usage: TokenUsage, cost: UsageCost | None) -> None:
+        """Account one model response to the subagent call that is running.
+
+        The response is added to that call's result, whether the subagent then
+        finishes, fails or reaches its limit. Outside such a call, and once it has
+        ended, the response is dropped.
+
+        Args:
+            usage (TokenUsage): The tokens the response reported.
+            cost (UsageCost | None): Its list-price estimate, if the run has one.
+        """
+
+        log = _SCRIPT_CALLS.get()
+        if log is not None and not log.closed:
+            log.model_usage.append(ModelResponseUsage(usage=usage, cost=cost))
 
     def resolve_target(self, tool_call: ToolCall) -> str | None:
         """Return the MCP tool a proxied `mcp_call` names, or None; never raises.
@@ -462,7 +522,7 @@ class ConfiguredToolExecutor:
                 duration_ms=round((time.monotonic() - started) * 1000),
             )
 
-        ended_first = _ToolRunOutcome(output=_SCRIPT_ENDED_FIRST, is_error=True)
+        ended_first = _ToolRunOutcome(output=log.ended_first, is_error=True)
         index = log.start(recorded(ended_first))
         try:
             await self._publish_nested(
@@ -493,6 +553,10 @@ class ConfiguredToolExecutor:
         if tool_call.name == CODEMODE:
             return _failure_outcome(
                 "A script cannot run another script.", failure_code="policy_denied"
+            )
+        if tool_call.name == SPAWN_AGENT:
+            return _failure_outcome(
+                "A script or a subagent cannot spawn a subagent.", failure_code="policy_denied"
             )
         checked = self._check_call(tool_call)
         if isinstance(checked, _ToolRunOutcome):
@@ -592,7 +656,7 @@ class ConfiguredToolExecutor:
         target: str | None = None,
     ) -> PreparedToolExecution:
         async def run() -> ToolExecutionEnded:
-            if tool_call.name != CODEMODE:
+            if tool_call.name not in _NESTED_CALL_HOSTS:
                 outcome = await self._run_tool(
                     tool,
                     arguments,
@@ -600,7 +664,12 @@ class ConfiguredToolExecutor:
                     tool_name=target or tool_call.name,
                 )
                 return _execution_ended(tool_call, outcome, target=target)
-            log = _ScriptCallLog(tool_call.call_id)
+            log = _ScriptCallLog(
+                tool_call.call_id,
+                ended_first=(
+                    _SUBAGENT_ENDED_FIRST if tool_call.name == SPAWN_AGENT else _SCRIPT_ENDED_FIRST
+                ),
+            )
             token = _SCRIPT_CALLS.set(log)
             try:
                 outcome = await self._run_tool(
@@ -612,7 +681,12 @@ class ConfiguredToolExecutor:
                 # after it.
                 log.close()
                 _SCRIPT_CALLS.reset(token)
-            outcome = replace(outcome, nested_calls=log.calls(), nested_calls_omitted=log.omitted)
+            outcome = replace(
+                outcome,
+                nested_calls=log.calls(),
+                nested_calls_omitted=log.omitted,
+                model_usage=tuple(log.model_usage),
+            )
             return _execution_ended(tool_call, outcome, target=target)
 
         # Scheduling follows the tool that runs: a proxied call is as parallel-safe
@@ -659,8 +733,9 @@ class ConfiguredToolExecutor:
     ) -> _ToolRunOutcome:
         """Run ``tool`` and normalize its result.
 
-        A ``nested`` call, one a codemode script made, reports no progress of its own
-        and stores no images, since only its text reaches the script.
+        A ``nested`` call, one a codemode script or a subagent made, reports no
+        progress of its own and stores no images, since only its text reaches the
+        script or subagent; a result that had an image says it was left out.
         """
 
         try:
@@ -745,7 +820,9 @@ class ConfiguredToolExecutor:
         except Exception as exc:
             raise ToolResultProcessingError(call_id=call_id, tool_name=tool_name) from exc
         if nested:
-            return outcome
+            if not snapshot.images:
+                return outcome
+            return replace(outcome, output=f"{outcome.output}\n{_IMAGE_NOT_ATTACHED}")
         return await self._with_stored_images(outcome, snapshot.images)
 
     async def _with_stored_images(
@@ -770,7 +847,7 @@ class ConfiguredToolExecutor:
         if self._image_store is None:
             return replace(
                 outcome,
-                output=f"{outcome.output}\n[The image could not be attached to this result.]",
+                output=f"{outcome.output}\n{_IMAGE_NOT_ATTACHED}",
             )
         try:
             stored = tuple([await self._image_store(image) for image in images])
@@ -856,6 +933,7 @@ def _execution_ended(
         images=outcome.images,
         nested_calls=outcome.nested_calls,
         nested_calls_omitted=outcome.nested_calls_omitted,
+        model_usage=outcome.model_usage,
     )
 
 

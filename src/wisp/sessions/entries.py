@@ -22,10 +22,12 @@ from typing_extensions import TypeAliasType
 from wisp.events import (
     MAX_EDIT_LOCATIONS,
     MAX_NESTED_CALLS,
+    MAX_TOOL_MODEL_RESPONSES,
     EditLocation,
     JsonObject,
     JsonObjectAdapter,
     KnownWispEvent,
+    ModelResponseUsage,
     NestedToolCall,
     ToolPresentationStatus,
     utc_now,
@@ -100,6 +102,11 @@ class ToolResultPresentationSnapshot(BaseModel):
     )
     # How many more calls the script made than `nested_calls` records.
     nested_calls_omitted: int | None = Field(default=None, ge=1)
+    # The model responses a subagent completed, which session usage and cost count;
+    # absent for other tools.
+    model_usage: tuple[ModelResponseUsage, ...] | None = Field(
+        default=None, min_length=1, max_length=MAX_TOOL_MODEL_RESPONSES
+    )
 
 
 class RepositoryStatusSnapshot(BaseModel):

@@ -39,6 +39,10 @@ class CancellationToken(Protocol):
         ...
 
 
+class ToolIterationLimitError(RuntimeError):
+    """Raised when a run asks for more tool rounds than `max_tool_iterations` allows."""
+
+
 @dataclass(frozen=True, slots=True)
 class AgentLoopConfig:
     """Configure the dependencies and limits for one provider-neutral loop run.
@@ -137,5 +141,6 @@ __all__ = [
     "DEFAULT_CONTEXT_RESERVE_TOKENS",
     "AgentLoopConfig",
     "CancellationToken",
+    "ToolIterationLimitError",
     "UsageCostEstimator",
 ]

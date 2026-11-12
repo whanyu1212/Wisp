@@ -504,6 +504,40 @@ In the terminal UI, `/codemode` shows and saves this setting. RPC and SDK client
 offer the tool, and any `WISP_CODEMODE` value. Without the extra installed, codemode is simply not
 offered.
 
+## Delegating to a subagent (experimental)
+
+With `"subagents": true` in `~/.wisp/settings.json`, or `WISP_SUBAGENTS=1`, the model also gets a
+`spawn_agent` tool. It hands one task to a subagent: a second agent on the same model that starts
+from the task alone, works with the run's read-only tools, and returns only its final message. The
+model is told to do the work itself by default and to delegate only a broad search or investigation
+whose raw output would crowd its context.
+
+- **Fresh context.** A subagent sees the session prompt and the task the model wrote. It sees none
+  of the conversation, and nothing it reads reaches the conversation except its report.
+- **Only read-only tools.** A subagent is offered the read-only tools the run already offers: `read`,
+  `ls`, `grep`, `find`, and MCP tools whose `tool_safety` you set to `"read"`. Tool selection and
+  plan mode apply as for direct calls. It gets neither `spawn_agent` nor `codemode`. With
+  [web search](providers.md#web-search) on, it can search the web as the run can; its searches
+  are not listed in the transcript, and they mark the session's cost as a lower bound.
+  It reads text only: when a tool returns an image, such as `read` on a picture, the result says
+  the image was left out.
+- **Each call is checked on its own.** Every call a subagent makes passes the same checks as a
+  direct call. A subagent cannot ask for an approval, so a call that would need one fails. What it
+  reads does not count as seen by the run, so the model still reads a file itself before editing it.
+- **Each call is recorded.** As for a codemode script, the `spawn_agent` result lists every call
+  the subagent made in `nested_calls`, and clients receive `tool.nested.started` and
+  `tool.nested.ended` while it works. The terminal UI shows one card that lists the task and
+  these calls when opened.
+- **Its model calls are billed.** A subagent makes its own model requests. The result's
+  `model_usage` lists each response's tokens and cost, the session saves it, and session usage and
+  cost totals include it. A run cancelled while a subagent is working records the call as
+  interrupted, with no usage listed, so that subagent's spend is missing from the totals.
+- **Limits.** One subagent runs at a time, for at most 63 tool rounds; one that reaches the limit
+  returns what it has with a note. Cancelling a run stops its subagent.
+
+The setting is user-only, because a subagent spends on your provider account. A run that an
+operation limits to named tools, such as `/init`, is not offered the tool.
+
 ## Saved project permissions
 
 The Rust permission dialog offers allow once, allow this tool for the session, saved project YOLO,

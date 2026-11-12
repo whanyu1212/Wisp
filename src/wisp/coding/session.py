@@ -81,6 +81,12 @@ from wisp.coding.prompt import (
     read_repository_status,
 )
 from wisp.coding.stats import RunStats, build_session_stats
+from wisp.coding.subagent import (
+    SUBAGENT_INSTRUCTIONS,
+    SUBAGENT_MAX_TOOL_ITERATIONS,
+    NestedCallToolExecutor,
+    run_subagent,
+)
 from wisp.coding.tool_execution import ConfiguredToolExecutor, ImageStore
 from wisp.coding.tool_progress import LiveEventSink
 from wisp.events import (
@@ -174,13 +180,14 @@ from wisp.skills.models import SkillCatalog
 from wisp.skills.prompt import build_skill_index
 from wisp.skills.tool import SkillTool
 from wisp.tool_presentation import tool_result_status
-from wisp.tools.approval import ToolApprovalPolicy
+from wisp.tools.approval import ToolApprovalPolicy, confirms_every_call
 from wisp.tools.base import ToolExecutionMetadata
 from wisp.tools.codemode.calls import CODEMODE, NestedCallResult
 from wisp.tools.codemode.tool import CODEMODE_PROMPT, CodemodeTool
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
 from wisp.tools.seen_files import SeenFiles
+from wisp.tools.subagent import SPAWN_AGENT, SPAWN_AGENT_PROMPT, SpawnAgentTool
 
 # A resumed session reuses its persisted Git snapshot only while the provider may
 # still hold the cached prefix built from it. After a longer pause the cache has
@@ -399,9 +406,9 @@ def codemode_available() -> bool:
 
 
 def _no_executor() -> ConfiguredToolExecutor:
-    """Stand in for the executor where a codemode tool is built only to be measured."""
+    """Stand in for the executor where a tool is built only to be measured."""
 
-    raise RuntimeError("This codemode tool only describes a run; it cannot call tools")
+    raise RuntimeError("This tool only describes a run; it cannot call tools")
 
 
 class CodingSession:
@@ -434,6 +441,7 @@ class CodingSession:
         mcp_tool_exposure: McpToolExposure = DEFAULT_MCP_TOOL_EXPOSURE,
         mcp_server_connected: Callable[[str], bool] | None = None,
         codemode: bool | None = None,
+        subagents: bool = False,
     ) -> None:
         self.sessions = sessions
         self.events = events
@@ -442,6 +450,8 @@ class CodingSession:
         # Offer the experimental codemode tool, which scripts the run's read-only
         # tools: always, never, or (None) whenever the run finds MCP tools on demand.
         self.codemode = codemode
+        # Offer `spawn_agent`, which hands a read-only task to a subagent.
+        self.subagents = subagents
         self._mcp_server_connected = mcp_server_connected
         self.tool_policy = tool_policy or ToolPolicy.allow_all_tools()
         self.tool_approval_policy = tool_approval_policy or ToolApprovalPolicy.require_approval()
@@ -522,6 +532,7 @@ class CodingSession:
         mcp_tool_exposure: McpToolExposure = DEFAULT_MCP_TOOL_EXPOSURE,
         mcp_server_connected: Callable[[str], bool] | None = None,
         codemode: bool | None = None,
+        subagents: bool = False,
     ) -> CodingSession:
         """Create a session from one resolved dynamic configuration snapshot."""
 
@@ -549,6 +560,7 @@ class CodingSession:
             mcp_tool_exposure=mcp_tool_exposure,
             mcp_server_connected=mcp_server_connected,
             codemode=codemode,
+            subagents=subagents,
         )
 
     @property
@@ -1365,6 +1377,7 @@ class CodingSession:
             context=operation_context,
             progress_sink=self._progress_sink(live_event_sink),
             image_store=session.store_image,
+            session=session,
         )
         harness, restored_queues = self._start_run_harness(
             session,
@@ -1983,6 +1996,7 @@ class CodingSession:
         context: ToolContext,
         progress_sink: LiveEventSink | None = None,
         image_store: ImageStore | None = None,
+        session: JsonlSession | None = None,
     ) -> tuple[tuple[ToolSpec, ...], ConfiguredToolExecutor]:
         """Select the tools one run may use and build the executor that enforces them.
 
@@ -1996,6 +2010,8 @@ class CodingSession:
             image_store (ImageStore | None, optional): Stores the images a tool
                 returns in the run's session before its result references them.
                 Defaults to None, which drops them.
+            session (JsonlSession | None, optional): The run's session, whose saved
+                Git status a subagent's prompt reuses. Defaults to None.
 
         Returns:
             tuple[tuple[ToolSpec, ...], ConfiguredToolExecutor]: The specs offered
@@ -2037,12 +2053,27 @@ class CodingSession:
             policy = replace(
                 policy, allowed_tools=policy.allowed_tools | frozenset(DISCOVERY_TOOL_NAMES)
             )
+        # A subagent may use what the run offers before the tools below join.
+        subagent_tools = offered_tools
         codemode = self._codemode_tool(offered_tools, registry, lambda: executor, catalog)
         if codemode is not None:
             # Like the discovery tools, the script tool joins without widening what
             # anything else may do: each call a script makes is checked as itself.
             offered_tools = (*offered_tools, ToolSpec.from_tool(codemode))
             policy = replace(policy, allowed_tools=policy.allowed_tools | {CODEMODE})
+        # An operation names the tools its run may use, and what a subagent spends
+        # is not something it asked for; only an ordinary run gets the tool.
+        spawn_agent = (
+            self._spawn_agent_tool(
+                subagent_tools, registry, lambda: executor, context=context, session=session
+            )
+            if operation_tool_names is None
+            else None
+        )
+        if spawn_agent is not None:
+            # The same holds for a subagent: each call it makes is checked as itself.
+            offered_tools = (*offered_tools, ToolSpec.from_tool(spawn_agent))
+            policy = replace(policy, allowed_tools=policy.allowed_tools | {SPAWN_AGENT})
         executor = ConfiguredToolExecutor(
             registry=registry,
             context=context,
@@ -2144,6 +2175,145 @@ class CodingSession:
             prompt=CODEMODE_PROMPT,
         )
         return tool
+
+    def _spawn_agent_tool(
+        self,
+        offered: tuple[ToolSpec, ...],
+        registry: ToolRegistry | None,
+        executor: Callable[[], ConfiguredToolExecutor],
+        *,
+        context: ToolContext,
+        session: JsonlSession | None = None,
+    ) -> SpawnAgentTool | None:
+        """Register the `spawn_agent` tool for one run, when the session offers it.
+
+        A subagent may use the read-only tools among ``offered``: what this run
+        already allows after selection, policy, plan mode and MCP exposure, except
+        tools that confirm every call, since a subagent cannot ask. Its calls run
+        through ``executor``, built after this tool and so looked up when it runs.
+
+        Args:
+            offered (tuple[ToolSpec, ...]): The tools the run offers the model,
+                without the codemode tool.
+            registry (ToolRegistry | None): The operation's registry copy, which the
+                tool is registered in.
+            executor (Callable[[], ConfiguredToolExecutor]): The run's executor.
+            context (ToolContext): The tool context the run's tools use.
+            session (JsonlSession | None, optional): The run's session. Defaults to
+                None.
+
+        Returns:
+            SpawnAgentTool | None: The registered tool, or None when subagents are
+            off, when the run has no registry, when another tool already has the
+            name, or when no read-only tool is offered.
+        """
+
+        if not self.subagents or registry is None or SPAWN_AGENT in registry.names():
+            return None
+        registered = set(registry.names())
+        subagent_tools = tuple(
+            spec
+            for spec in offered
+            if spec.name in registered
+            and (tool := registry.get(spec.name)).safety == "read"
+            and not confirms_every_call(tool)
+        )
+        if not subagent_tools:
+            return None
+
+        async def run(task: str) -> str:
+            return await self._run_subagent(
+                task,
+                tools=subagent_tools,
+                registry=registry,
+                executor=executor(),
+                context=context,
+                session=session,
+            )
+
+        tool = SpawnAgentTool(run)
+        registry.register(
+            tool,
+            replace=False,
+            # One subagent at a time: a provider instance is driven by one run at a
+            # time, and a subagent's tools need not be safe beside a batch's others.
+            execution=ToolExecutionMetadata(parallel_safe=False),
+            prompt=SPAWN_AGENT_PROMPT,
+        )
+        return tool
+
+    async def _run_subagent(
+        self,
+        task: str,
+        *,
+        tools: tuple[ToolSpec, ...],
+        registry: ToolRegistry,
+        executor: ConfiguredToolExecutor,
+        context: ToolContext,
+        session: JsonlSession | None,
+    ) -> str:
+        """Run one subagent for a `spawn_agent` call and return its final message.
+
+        The subagent gets the session prompt built for its own tools, then its
+        instructions and the task; none of the conversation. It keeps its own record
+        of seen files, so what it reads never counts as seen by the run that
+        spawned it. Its model responses are accounted to the `spawn_agent` call.
+
+        Args:
+            task (str): The task the model wrote.
+            tools (tuple[ToolSpec, ...]): The read-only tools the subagent is offered.
+            registry (ToolRegistry): The run's registry, which describes those tools.
+            executor (ConfiguredToolExecutor): The run's executor, whose policy the
+                subagent's calls pass.
+            context (ToolContext): The tool context the run's tools use.
+            session (JsonlSession | None): The run's session, if any.
+
+        Returns:
+            str: The subagent's final message.
+
+        Raises:
+            ToolError: The subagent failed before it could report.
+        """
+
+        subagent_context = replace(
+            context, seen_files=SeenFiles() if context.seen_files is not None else None
+        )
+        subagent_executor = executor.with_context(subagent_context)
+        prompt = await self._prompt_messages_async(
+            tools,
+            registry=registry,
+            context=subagent_context,
+            session_id=session.session_id if session is not None else None,
+            session=session,
+            mcp_catalog=executor.mcp_catalog,
+        )
+        harness = AgentHarness(
+            AgentHarnessConfig(
+                provider=self.provider,
+                tool_executor=NestedCallToolExecutor(subagent_executor.run_nested),
+                model=self.model,
+                tools=tools,
+                max_tool_iterations=(
+                    SUBAGENT_MAX_TOOL_ITERATIONS
+                    if self.max_tool_iterations is None
+                    else min(self.max_tool_iterations, SUBAGENT_MAX_TOOL_ITERATIONS)
+                ),
+                effort=self.effort,
+                # Subagents share a prefix with each other, not with the conversation.
+                prompt_cache_key=(
+                    f"{_prompt_cache_key(session.session_id)}:subagent"
+                    if session is not None
+                    else None
+                ),
+                # The prompt describes web search as the session has it set.
+                web_search=self.web_search,
+                context_window=self._context_window(),
+                context_reserve_tokens=self._effective_context_reserve_tokens(),
+                cost_estimator=self._cost_estimator,
+            ),
+            messages=(*prompt.messages, Message(role="system", content=SUBAGENT_INSTRUCTIONS)),
+        )
+        return await run_subagent(harness, task, record_usage=subagent_executor.record_model_usage)
 
     def _apply_mcp_exposure(
         self, tools: tuple[ToolSpec, ...], registry: ToolRegistry | None
@@ -2754,8 +2924,13 @@ class CodingSession:
             stats_codemode = self._codemode_tool(
                 stats_tools, stats_registry, _no_executor, stats_catalog
             )
+            stats_spawn_agent = self._spawn_agent_tool(
+                stats_tools, stats_registry, _no_executor, context=self.tool_context
+            )
             if stats_codemode is not None:
                 stats_tools = (*stats_tools, ToolSpec.from_tool(stats_codemode))
+            if stats_spawn_agent is not None:
+                stats_tools = (*stats_tools, ToolSpec.from_tool(stats_spawn_agent))
             prompt = await self._prompt_messages_async(
                 stats_tools,
                 registry=stats_registry,
@@ -2812,7 +2987,8 @@ class CodingSession:
             # itself (a proxied call that ran a tool is judged by its `target`). A
             # registered tool that shares their name is judged above by its safety.
             # The codemode tool is the same: a script reaches only read-only tools.
-            return name not in DISCOVERY_TOOL_NAMES and name != CODEMODE
+            # So is `spawn_agent`, whose subagent does too.
+            return name not in DISCOVERY_TOOL_NAMES and name not in (CODEMODE, SPAWN_AGENT)
 
     def _effective_tools(self, registry: ToolRegistry | None = None) -> tuple[ToolSpec, ...]:
         """Return the startup-authorized tools available in the current mode."""
@@ -3094,6 +3270,7 @@ class CodingSession:
                 edit_locations=event.edit_locations or None,
                 nested_calls=event.nested_calls or None,
                 nested_calls_omitted=event.nested_calls_omitted or None,
+                model_usage=event.model_usage or None,
             )
             if isinstance(event, ToolExecutionEnded)
             else None

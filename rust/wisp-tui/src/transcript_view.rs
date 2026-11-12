@@ -3538,12 +3538,15 @@ fn script_projection(card: &crate::tool_cards::ToolCardSnapshot) -> CardProjecti
     let mut detail_tones = Vec::new();
     let mut detail_syntax = Vec::new();
     let mut detail_gutters = Vec::new();
-    push_script_preview(
-        &mut detail,
-        &mut detail_syntax,
-        &mut detail_gutters,
-        &script.code,
-    );
+    match script.host {
+        crate::script_card::NestedHost::Script => push_script_preview(
+            &mut detail,
+            &mut detail_syntax,
+            &mut detail_gutters,
+            &script.code,
+        ),
+        crate::script_card::NestedHost::Subagent => push_task_preview(&mut detail, &script.code),
+    }
     push_script_calls(&mut detail, &mut detail_tones, card, script);
     match card.status {
         ToolStatus::Done => {
@@ -3551,7 +3554,11 @@ fn script_projection(card: &crate::tool_cards::ToolCardSnapshot) -> CardProjecti
             // counted, since the card keeps only the start of a long result.
             let returned = script_returned(&card.retained_output.text);
             for (index, line) in returned.iter().take(SCRIPT_RETURN_LINES).enumerate() {
-                let label = if index == 0 { "Returned " } else { "         " };
+                let label = match (index, script.host) {
+                    (0, crate::script_card::NestedHost::Script) => "Returned ",
+                    (0, crate::script_card::NestedHost::Subagent) => "Reported ",
+                    _ => "         ",
+                };
                 push_detail_row(&mut detail, &format!("{label}{}", line.trim_end()));
             }
             let more = returned.len().saturating_sub(SCRIPT_RETURN_LINES);
@@ -3613,6 +3620,19 @@ fn push_detail_row(detail: &mut String, row: &str) {
         detail.push('\n');
     }
     detail.push_str(row);
+}
+
+/// The first lines of a subagent's task, as written, then how many more there are.
+fn push_task_preview(detail: &mut String, task: &str) {
+    let lines: Vec<&str> = task.lines().collect();
+    for line in lines.iter().take(SCRIPT_PREVIEW_LINES) {
+        push_detail_row(detail, line.trim_end());
+    }
+    let more = lines.len().saturating_sub(SCRIPT_PREVIEW_LINES);
+    if more > 0 {
+        let noun = if more == 1 { "line" } else { "lines" };
+        push_detail_row(detail, &format!("+ {more} more {noun}"));
+    }
 }
 
 /// The script's first lines, numbered and highlighted as Python, then how many
@@ -3701,7 +3721,10 @@ fn push_script_calls(
                     row.push_str(error);
                 }
             }
-            ScriptCallState::Unfinished => row.push_str(" · script ended first"),
+            ScriptCallState::Unfinished => {
+                row.push_str(" · ");
+                row.push_str(script.host.ended_first_note());
+            }
             ScriptCallState::Running | ScriptCallState::Done => {}
         }
         if let Some(duration) = call.duration_ms.filter(|_| run == 1) {

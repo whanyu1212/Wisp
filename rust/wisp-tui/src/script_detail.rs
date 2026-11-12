@@ -17,7 +17,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::reducer::UiState;
-use crate::script_card::{SCRIPT_MAX_BYTES, ScriptCallState, ScriptCard};
+use crate::script_card::{NestedHost, SCRIPT_MAX_BYTES, ScriptCallState, ScriptCard};
 use crate::syntax::{SyntaxClass, SyntaxToken};
 use crate::theme::Palette;
 use crate::tool_cards::{BoundedText, ToolCardSnapshot, ToolStatus};
@@ -154,7 +154,10 @@ impl ScriptDetailView {
                 .as_ref()
                 .is_none_or(|source| source.script.code != script.code)
             {
-                self.script_lines = script_lines(&script.code);
+                self.script_lines = match script.host {
+                    NestedHost::Script => script_lines(&script.code),
+                    NestedHost::Subagent => task_lines(&script.code),
+                };
             }
             self.lines = build_lines(&self.script_lines, card, script);
             self.row_counts = vec![None; self.lines.len()];
@@ -394,6 +397,20 @@ fn build_lines(
     lines
 }
 
+/// A subagent's task, as the model wrote it.
+fn task_lines(task: &str) -> Vec<DetailLine> {
+    let mut lines = vec![DetailLine::new(Tone::Heading, "Task")];
+    if task.trim().is_empty() {
+        lines.push(DetailLine::new(
+            Tone::Muted,
+            "This record does not include the task.",
+        ));
+        return lines;
+    }
+    lines.extend(task.lines().map(|line| DetailLine::new(Tone::Plain, line)));
+    lines
+}
+
 /// The script, numbered and highlighted as Python.
 fn script_lines(code: &str) -> Vec<DetailLine> {
     let mut lines = Vec::new();
@@ -525,7 +542,8 @@ fn push_calls(lines: &mut Vec<DetailLine>, card: &ToolCardSnapshot, script: &Scr
     for (index, call) in script.calls.iter().enumerate() {
         let mut action = crate::transcript_view::script_call_action(card, call);
         if call.state == ScriptCallState::Unfinished {
-            action.push_str(" · script ended first");
+            action.push_str(" · ");
+            action.push_str(script.host.ended_first_note());
         }
         if let Some(duration) = call.duration_ms {
             action.push(' ');

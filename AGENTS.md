@@ -141,6 +141,8 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
   holds compaction planning, summarization, budget checks, and transcript comparison helpers;
   `persistence.py` holds the branch-pinned writer a run uses to append entries;
   `tool_execution.py`, `costs.py`, and `stats.py` cover the remaining supporting concerns.
+  `subagent.py` runs the subagent of a `spawn_agent` call (the tool itself is
+  `wisp.tools.subagent`): a second harness whose tool calls run as nested calls of that call.
   In `prompt/`, `builder.py` assembles instructions in order; `instructions.py` holds core
   instruction text; `project_context.py` assembles the bounded project context and trusted
   instruction files; `project_root.py` finds the project root that also scopes trust;

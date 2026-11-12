@@ -38,7 +38,7 @@ from wisp.providers.base import (
 from wisp.providers.events import ProviderFailureKind
 
 from .boundary_transitions import decide_next_request, recover_from_overflow
-from .config import AgentLoopConfig
+from .config import AgentLoopConfig, ToolIterationLimitError
 from .continuation import ContinuationState
 from .model_response import (
     CancelledModelResponse,
@@ -238,10 +238,10 @@ class _AgentLoopState:
             maximum (int | None): Total allowed batches, or None for no limit.
 
         Raises:
-            RuntimeError: The existing count has already reached the limit.
+            ToolIterationLimitError: The existing count has already reached the limit.
         """
         if maximum is not None and self.tool_iterations >= maximum:
-            raise RuntimeError(f"Maximum tool iterations exceeded: {maximum}")
+            raise ToolIterationLimitError(f"Maximum tool iterations exceeded: {maximum}")
         self.tool_iterations += 1
 
 

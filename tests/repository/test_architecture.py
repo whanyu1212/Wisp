@@ -536,18 +536,25 @@ def test_trust_package_has_no_root_surface_and_permission_mode_lives_in_events()
 
 def test_agent_loop_package_exports_public_contracts() -> None:
     from wisp.agent import loop
-    from wisp.agent.loop.config import AgentLoopConfig, CancellationToken, UsageCostEstimator
+    from wisp.agent.loop.config import (
+        AgentLoopConfig,
+        CancellationToken,
+        ToolIterationLimitError,
+        UsageCostEstimator,
+    )
     from wisp.agent.loop.runner import AgentLoopEvent, run_agent_loop
 
     assert loop.AgentLoopConfig is AgentLoopConfig
     assert loop.AgentLoopEvent is AgentLoopEvent
     assert loop.CancellationToken is CancellationToken
+    assert loop.ToolIterationLimitError is ToolIterationLimitError
     assert loop.UsageCostEstimator is UsageCostEstimator
     assert loop.run_agent_loop is run_agent_loop
     assert loop.__all__ == [
         "AgentLoopConfig",
         "AgentLoopEvent",
         "CancellationToken",
+        "ToolIterationLimitError",
         "UsageCostEstimator",
         "run_agent_loop",
     ]

@@ -137,6 +137,68 @@ def test_google_provider_scopes_reused_call_ids_to_each_fresh_batch() -> None:
     assert (second.id, second.name) == ("provider-new", "read")
 
 
+def test_pending_call_survives_nested_run() -> None:
+    """A call waiting on a long run of other calls is still answered by name and id.
+
+    A subagent streams on the same provider while the `spawn_agent` call that
+    started it waits, and can make more calls than the provider remembers at once.
+    """
+
+    def call_chunk(name: str, index: int) -> genai_types.GenerateContentResponse:
+        return part_chunk(
+            genai_types.Part(
+                function_call=genai_types.FunctionCall(id=f"id-{index}", name=name, args={})
+            ),
+            response_id=f"response-{index}",
+            finish_reason=genai_types.FinishReason.STOP,
+        )
+
+    nested_calls = 130
+    stub_models = StubModels(
+        responses=[
+            [call_chunk("spawn_agent", 0)],
+            *([call_chunk("read", index)] for index in range(1, nested_calls + 1)),
+            [],
+        ]
+    )
+    provider = GoogleProvider(
+        api_key="test-key",
+        client=cast(genai.Client, StubGenaiClient(stub_models)),
+    )
+    messages = [WispMessage(role="user", content="go")]
+
+    async def ask(
+        previous: ProviderResponseCompleted | None = None,
+    ) -> ProviderResponseCompleted | None:
+        events = [
+            event
+            async for event in provider.stream(
+                messages,
+                model="gemini-test",
+                previous_response_id=previous.response_id if previous is not None else None,
+                tool_results=(
+                    [ToolCallResult(call_id=previous.tool_calls[0].call_id, output="ok")]
+                    if previous is not None
+                    else []
+                ),
+            )
+        ]
+        completed = events[-1] if events else None
+        return completed if isinstance(completed, ProviderResponseCompleted) else None
+
+    async def run() -> None:
+        waiting = await ask()
+        nested = await ask()
+        for _ in range(nested_calls - 1):
+            nested = await ask(nested)
+        await ask(waiting)
+
+    anyio.run(run)
+
+    answer = stub_models.calls[-1]["contents"][-1].parts[0].function_response
+    assert (answer.id, answer.name) == ("id-0", "spawn_agent")
+
+
 def test_google_provider_omits_synthetic_ids_in_fresh_tool_exchange() -> None:
     """Fresh replacement context must not invent Gemini function-call IDs."""
 

@@ -150,6 +150,7 @@ def test_projection_keeps_complete_wire_payload() -> None:
         "images": (),
         "nested_calls": (),
         "nested_calls_omitted": 0,
+        "model_usage": (),
     }
 
     envelope_fields = {"type", "schema_version", "timestamp"}

@@ -652,6 +652,7 @@ async def _run_print_with_runtime(
         project_context_root=project_context_root,
         mcp_tool_exposure=config.mcp_tool_exposure,
         codemode=config.codemode,
+        subagents=config.subagents,
         mcp_server_connected=runtime.mcp_server_connected,
     )
     if deadline is not None:

@@ -6,13 +6,22 @@
 //! `nested_calls` records them all. The result's list wins: live rows only fill the
 //! card until then. Everything here is untrusted backend text, kept on one line
 //! and bounded when it is stored.
+//!
+//! A `spawn_agent` call's card is the same card: its subagent's tool calls arrive
+//! and are recorded exactly as a script's are, and its task stands where the
+//! script would. [`NestedHost`] says which of the two a card is.
 
 use serde_json::Value;
 
 /// The tool name codemode calls carry.
 pub(crate) const CODEMODE: &str = "codemode";
-/// How a call is recorded when its script ended before the call finished.
-const ENDED_FIRST: &str = "The script ended before this call finished";
+/// The tool name subagent calls carry.
+pub(crate) const SPAWN_AGENT: &str = "spawn_agent";
+/// How a call is recorded when its script or subagent ended before the call finished.
+const ENDED_FIRST: [&str; 2] = [
+    "The script ended before this call finished",
+    "The subagent ended before this call finished",
+];
 /// The most of a script a card keeps; a longer one is shown up to here.
 pub(crate) const SCRIPT_MAX_BYTES: usize = 16 * 1024;
 /// The longest title shown; the model may write more.
@@ -25,13 +34,31 @@ const CALL_TEXT_MAX_CHARS: usize = 240;
 /// Tools the tally names before it stops.
 const TALLY_TOOLS: usize = 3;
 
-/// A codemode script and the calls it has made so far.
+/// What made a card's calls: a codemode script, or a subagent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NestedHost {
+    Script,
+    Subagent,
+}
+
+impl NestedHost {
+    /// What an unfinished call's row says ended before it.
+    pub fn ended_first_note(self) -> &'static str {
+        match self {
+            Self::Script => "script ended first",
+            Self::Subagent => "subagent ended first",
+        }
+    }
+}
+
+/// A codemode script, or a subagent's task, and the calls it has made so far.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScriptCard {
+    pub host: NestedHost,
     /// The script's own short description, if it gave one.
     pub title: Option<String>,
-    /// The script, up to [`SCRIPT_MAX_BYTES`]; empty when its arguments did not
-    /// carry it, as in a history page that clipped them.
+    /// The script, or the subagent's task, up to [`SCRIPT_MAX_BYTES`]; empty when
+    /// its arguments did not carry it, as in a history page that clipped them.
     pub code: String,
     /// Its calls in the order it made them.
     pub calls: Vec<ScriptCall>,
@@ -91,6 +118,32 @@ impl ScriptResult {
 }
 
 impl ScriptCard {
+    /// The card for a call of `name` with these (already bounded) arguments; None
+    /// for a tool that makes no calls of its own.
+    pub fn for_call(name: &str, arguments: &Value) -> Option<Self> {
+        match name {
+            CODEMODE => Some(Self::from_arguments(arguments)),
+            SPAWN_AGENT => Some(Self::from_task(arguments)),
+            _ => None,
+        }
+    }
+
+    /// The card for a `spawn_agent` call with these (already bounded) arguments.
+    pub fn from_task(arguments: &Value) -> Self {
+        let task = arguments
+            .get("task")
+            .and_then(Value::as_str)
+            .map(|task| head_bytes(task, SCRIPT_MAX_BYTES).to_owned())
+            .unwrap_or_default();
+        Self {
+            host: NestedHost::Subagent,
+            title: None,
+            code: task,
+            calls: Vec::new(),
+            omitted: 0,
+        }
+    }
+
     /// The card for a codemode call with these (already bounded) arguments.
     pub fn from_arguments(arguments: &Value) -> Self {
         let title = arguments
@@ -104,6 +157,7 @@ impl ScriptCard {
             .map(|code| head_bytes(code, SCRIPT_MAX_BYTES).to_owned())
             .unwrap_or_default();
         Self {
+            host: NestedHost::Script,
             title,
             code,
             calls: Vec::new(),
@@ -111,10 +165,19 @@ impl ScriptCard {
         }
     }
 
-    /// What the card's action line says the script does: its title, or how long it is.
+    /// What the card's action line says the script does: its title, or how long it
+    /// is. A subagent's line shows the start of its task.
     pub fn subject(&self) -> String {
         if let Some(title) = &self.title {
             return title.clone();
+        }
+        if self.host == NestedHost::Subagent {
+            let task = clip(&one_line(&self.code), TITLE_MAX_CHARS);
+            return if task.is_empty() {
+                "subagent task".to_owned()
+            } else {
+                task
+            };
         }
         match self.code.lines().count() {
             0 => "Python script".to_owned(),
@@ -257,7 +320,7 @@ impl ScriptCall {
             .map(|error| clip(&one_line(error), CALL_TEXT_MAX_CHARS));
         let state = match (is_error, error.as_deref()) {
             (false, _) => ScriptCallState::Done,
-            (true, Some(ENDED_FIRST)) => ScriptCallState::Unfinished,
+            (true, Some(error)) if ENDED_FIRST.contains(&error) => ScriptCallState::Unfinished,
             (true, _) => ScriptCallState::Failed,
         };
         Some(Self {
@@ -406,7 +469,7 @@ mod tests {
              "is_error": true, "error": "not\u{1b}[31m read-only",
              "started_at": "2026-01-02T03:04:05Z", "duration_ms": 1},
             {"call_id": "c", "name": "read", "arguments": null, "is_error": true,
-             "error": ENDED_FIRST, "started_at": "2026-01-02T03:04:05Z", "duration_ms": 9},
+             "error": ENDED_FIRST[0], "started_at": "2026-01-02T03:04:05Z", "duration_ms": 9},
         ]);
 
         let result = ScriptResult::from_fields(Some(&records), Some(&json!(2)));

@@ -748,6 +748,7 @@ impl ToolCardSnapshot {
             "edit" => "Edit".into(),
             "write" => "Write".into(),
             crate::script_card::CODEMODE => "Script".into(),
+            crate::script_card::SPAWN_AGENT => "Subagent".into(),
             _ if self.mcp_target().is_some() => "MCP".into(),
             name => clip_chars(&one_line(name), TOOL_LABEL_MAX_CHARS),
         }
@@ -765,6 +766,7 @@ impl ToolCardSnapshot {
             "edit" => ("Editing", "Edited", "Edit"),
             "write" => ("Writing", "Wrote", "Write"),
             crate::script_card::CODEMODE => ("Scripting", "Scripted", "Script"),
+            crate::script_card::SPAWN_AGENT => ("Delegating", "Delegated", "Delegate"),
             _ if self.mcp_target().is_some() => ("Calling", "Called", "Call"),
             name => return clip_chars(&one_line(name), TOOL_LABEL_MAX_CHARS),
         };
@@ -1357,6 +1359,17 @@ pub fn bounded_tool_arguments(name: &str, arguments: &Value) -> Value {
             "yield_seconds",
         ],
         "edit" | "write" => &["path"],
+        crate::script_card::SPAWN_AGENT => {
+            let mut bounded = Map::new();
+            if let Some(task) = arguments.get("task").and_then(Value::as_str) {
+                let mut end = task.len().min(crate::script_card::SCRIPT_MAX_BYTES);
+                while !task.is_char_boundary(end) {
+                    end -= 1;
+                }
+                bounded.insert("task".into(), Value::String(task[..end].to_owned()));
+            }
+            return Value::Object(bounded);
+        }
         crate::script_card::CODEMODE => {
             let mut bounded = Map::new();
             if let Some(code) = arguments.get("code").and_then(Value::as_str) {
@@ -1591,13 +1604,9 @@ fn known_tool(name: &str) -> bool {
     )
 }
 
-/// The script card for a codemode call; None for any other tool.
+/// The script card for a codemode or `spawn_agent` call; None for any other tool.
 fn script_of_call(input: &ToolCallInput) -> Option<Box<crate::script_card::ScriptCard>> {
-    (input.name == crate::script_card::CODEMODE).then(|| {
-        Box::new(crate::script_card::ScriptCard::from_arguments(
-            &input.arguments,
-        ))
-    })
+    crate::script_card::ScriptCard::for_call(&input.name, &input.arguments).map(Box::new)
 }
 
 fn format_tool_arguments(name: &str, arguments: &Value) -> String {
@@ -1606,6 +1615,10 @@ fn format_tool_arguments(name: &str, arguments: &Value) -> String {
         return crate::script_card::ScriptCard::from_arguments(arguments)
             .title
             .unwrap_or_else(|| "Python script".to_owned());
+    }
+    // A subagent's line shows the start of its task.
+    if name == crate::script_card::SPAWN_AGENT {
+        return crate::script_card::ScriptCard::from_task(arguments).subject();
     }
     if !known_tool(name) {
         return format_generic_value(arguments);

@@ -2101,6 +2101,89 @@ fn scripts_never_group() {
     assert!(!text.contains("2 calls"), "{text}");
 }
 
+fn subagent_call() -> serde_json::Value {
+    json!({"type": "tool.call", "call_id": "script-1", "name": "spawn_agent",
+           "arguments": {"task": "Find where users are stored.\nReport the file and table."}})
+}
+
+#[test]
+fn subagent_tallies_calls_while_running() {
+    let buffer = script_card(
+        &[
+            subagent_call(),
+            json!({"type": "tool.nested.started", "parent_call_id": "script-1", "call_id": "n1",
+                   "name": "grep", "arguments": {"pattern": "users"}}),
+        ],
+        false,
+        100,
+    );
+
+    let row = buffer_row(&buffer, row_containing(&buffer, "Delegating"));
+    // The action line keeps the start of the task; opening the card shows the rest.
+    assert!(
+        row.contains("Delegating Find where users are stored. Report the … · 1 call · grep"),
+        "{row:?}"
+    );
+}
+
+#[test]
+fn opened_subagent_shows_task_calls_and_report() {
+    let buffer = script_card(
+        &[
+            subagent_call(),
+            json!({"type": "tool.result", "message_entry_id": null, "call_id": "script-1",
+            "name": "spawn_agent", "output": "Users live in db/users.sql.",
+            "is_error": false,
+            "nested_calls": [
+                nested("n1", "read", json!({"path": "db/users.sql"}), None),
+                nested("n2", "read", json!({"path": "db/old.sql"}),
+                       Some("The subagent ended before this call finished")),
+            ]}),
+        ],
+        true,
+        100,
+    );
+
+    let text = screen_text(&buffer);
+    for expected in [
+        "• Delegated Find where users are stored.",
+        "Report the file and table.",
+        "• Read db/users.sql",
+        "Read db/old.sql · subagent ended first",
+        "Reported Users live in db/users.sql.",
+    ] {
+        assert!(
+            text.contains(expected),
+            "{expected:?} missing from:\n{text}"
+        );
+    }
+    // A task is prose: it is not numbered as a script's lines are.
+    assert!(!text.contains("1 Find where"), "{text}");
+}
+
+/// A task with terminal controls on both of its lines.
+const HOSTILE_TASK: &str = "evil\u{1b}[31m\u{202e}task\nsecond\u{1b}]52;c;eA==\u{7} line";
+
+#[test]
+fn subagent_task_is_sanitized() {
+    let buffer = script_card(
+        &[
+            json!({"type": "tool.call", "call_id": "script-1", "name": "spawn_agent",
+                   "arguments": {"task": HOSTILE_TASK}}),
+        ],
+        true,
+        100,
+    );
+
+    let text = screen_text(&buffer);
+    assert!(text.contains("Delegating evil[31mtask"), "{text}");
+    assert!(text.contains("second"), "{text}");
+    assert!(
+        !text.contains(['\u{1b}', '\u{7}', '\u{202e}']),
+        "control reached the screen:\n{text}"
+    );
+}
+
 #[test]
 fn interrupted_script_closes_running_calls() {
     let mut ui = LiveUi::default();
@@ -2457,6 +2540,72 @@ async fn reopened_script_details() {
             "… 3 more calls the record leaves out",
             "Output · 1 line",
         ],
+    );
+}
+
+#[tokio::test]
+async fn reopened_subagent_details() {
+    let assistant = json!({
+        "entry_id": "entry-call", "role": "assistant", "content": "", "content_truncated": false,
+        "is_error": null, "tool_name": null, "tool_call_id": null, "tool_result": null,
+        "tool_calls": [{"call_id": "script-1", "name": "spawn_agent",
+                        "arguments": {"task": "Find where users are stored."}}],
+    });
+    let result = json!({
+        "entry_id": "entry-result", "role": "tool", "content": "Users live in db/users.sql.",
+        "content_truncated": false, "is_error": null, "tool_name": "spawn_agent",
+        "tool_call_id": "script-1", "tool_calls": [],
+        "tool_result": {"status": "done", "nested_calls": [
+            nested("n1", "read", json!({"path": "db/users.sql"}), None),
+        ]},
+    });
+    let mut ui = LiveUi::default();
+    ui.state.transcript = crate::history::project_rpc_messages(&[assistant, result]).unwrap();
+    let (writer, _receiver) = mpsc::channel(8);
+    open_script_details(&mut ui, &writer).await;
+
+    let text = screen_rows(&draw(&mut ui, 100, 40));
+    assert_shows(
+        &text,
+        &[
+            "Delegated Find where users are stored.",
+            "Task",
+            "Calls · 1",
+            "path: \"db/users.sql\"",
+            "Users live in db/users.sql.",
+        ],
+    );
+}
+
+#[tokio::test]
+async fn subagent_details_show_sanitized_task() {
+    let mut ui = LiveUi::default();
+    let (writer, _receiver) = mpsc::channel(8);
+    deliver(
+        &mut ui,
+        &writer,
+        json!({"type": "tool.call", "call_id": "script-1", "name": "spawn_agent",
+               "arguments": {"task": HOSTILE_TASK}}),
+    )
+    .await;
+    deliver(
+        &mut ui,
+        &writer,
+        json!({"type": "tool.result", "message_entry_id": null, "call_id": "script-1",
+               "name": "spawn_agent", "output": "Nothing found.", "is_error": false,
+               "nested_calls": [nested("n1", "read", json!({"path": "a.rs"}), None)]}),
+    )
+    .await;
+    open_script_details(&mut ui, &writer).await;
+
+    let text = screen_rows(&draw(&mut ui, 100, 40));
+
+    assert_shows(&text, &["Task", "second", "Calls · 1", "Nothing found."]);
+    // A task is prose, so it is shown as written, not numbered as a script is.
+    assert!(!text.contains("Script"), "{text}");
+    assert!(
+        !text.contains(['\u{1b}', '\u{7}', '\u{202e}']),
+        "control reached the screen:\n{text}"
     );
 }
 
