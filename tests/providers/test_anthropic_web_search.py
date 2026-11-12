@@ -304,6 +304,61 @@ def test_search_results_and_citations_are_replayed_exactly() -> None:
     assert replayed[-1]["content"][0]["tool_use_id"] == "toolu_1"
 
 
+def test_split_search_turns_not_saved() -> None:
+    """Neither turn of a search split across two tool-use responses is kept for replay.
+
+    The search starts beside one client call and its result arrives beside
+    another. Replaying either turn without the other would send a search with
+    no result, or a result with no search.
+    """
+
+    provider, _ = _provider(
+        [
+            message_start_event("msg-1"),
+            *_search_request("srvtoolu_1", "linear mcp", index=0),
+            tool_use_start_event("toolu_1", "lookup", index=1),
+            input_json_delta_event("{}", index=1),
+            message_delta_event("tool_use"),
+        ],
+        [
+            message_start_event("msg-2"),
+            _search_result("srvtoolu_1", index=0),
+            tool_use_start_event("toolu_2", "lookup", index=1),
+            input_json_delta_event("{}", index=1),
+            message_delta_event("tool_use"),
+        ],
+        [
+            message_start_event("msg-3"),
+            *_search_request("srvtoolu_2", "wisp", index=0),
+            _search_result("srvtoolu_2", index=1),
+            tool_use_start_event("toolu_3", "lookup", index=2),
+            input_json_delta_event("{}", index=2),
+            message_delta_event("tool_use"),
+        ],
+    )
+
+    _stream(provider, tools=[_LOOKUP], web_search=True)
+    _stream(
+        provider,
+        tools=[_LOOKUP],
+        web_search=True,
+        tool_results=[ToolCallResult(call_id="toolu_1", output="ok")],
+        previous_response_id="msg-1",
+    )
+    _stream(
+        provider,
+        tools=[_LOOKUP],
+        web_search=True,
+        tool_results=[ToolCallResult(call_id="toolu_2", output="ok")],
+        previous_response_id="msg-2",
+    )
+
+    assert provider.native_output_for("msg-1") is None
+    assert provider.native_output_for("msg-2") is None
+    # A search that starts and finishes in one turn travels with it.
+    assert provider.native_output_for("msg-3") is not None
+
+
 def test_a_search_beside_a_client_tool_runs_on_the_next_request() -> None:
     # Anthropic stops with tool_use before running the search; its result
     # arrives in the next response, after the client tool's result.
