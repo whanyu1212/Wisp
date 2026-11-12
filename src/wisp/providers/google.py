@@ -13,8 +13,9 @@ import httpx
 from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types as genai_types
+from pydantic import ValidationError
 
-from wisp.messages import Message
+from wisp.messages import Message, NativeOutput
 from wisp.providers.auth import ProviderAuthResolver
 from wisp.providers.base import (
     ProviderConfigurationError,
@@ -65,6 +66,10 @@ _TERMINAL_FINISH_REASON_TO_PROVIDER: dict[genai_types.FinishReason, ProviderFini
 # completion -- default to "length" (incomplete), not "stop", so a caller
 # never mistakes a blocked/truncated turn for success.
 _DEFAULT_FINISH_REASON_FOR_UNKNOWN_FINISH_REASON: ProviderFinishReason = "length"
+# Tool-call turns kept in memory until the session saves them with their rows.
+# Sessions save each one at once, so this bound matters only for callers that
+# keep transcripts without a session.
+_NATIVE_OUTPUT_CAPACITY = 2048
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +124,9 @@ class GoogleProvider:
         # synthetic call_ids, so conversations sharing this provider, as a
         # run and its subagents do, must not share one table of them.
         self._call_info = ContinuationStore[dict[str, _CallInfo]]()
+        # Each tool-call response's model turn, for the session to save with the
+        # response's row; see native_output_for.
+        self._native_outputs = ContinuationStore[NativeOutput](capacity=_NATIVE_OUTPUT_CAPACITY)
 
     def supports_structured_tool_replacement(self, *, effort: str | None) -> bool:
         """Reject fresh tool replay because Gemini thought signatures are opaque.
@@ -127,10 +135,45 @@ class GoogleProvider:
         signature to accompany its matching result. ``Message`` snapshots
         retain portable text and calls, not the provider-native ``Part`` payload,
         so they cannot safely rebuild an active tool exchange as fresh context.
+        An exchange whose row saved that payload is the exception; see
+        `replays_saved_tool_exchange`.
         """
 
         del effort
         return False
+
+    def replays_saved_tool_exchange(self, message: Message, *, model: str | None) -> bool:
+        """Return whether a finished tool exchange can be sent as its own run sent it.
+
+        It can when the assistant row saved Gemini's own model turn for the
+        model now being asked. That turn carries the thought signatures, so the
+        exchange need not be flattened to text, and a later prompt's request
+        still begins the way the run's last request did, which keeps Gemini's
+        implicit cache matching.
+
+        Args:
+            message (Message): The exchange's assistant row.
+            model (str | None): Model the request goes to; None is the default.
+
+        Returns:
+            bool: Whether the row carries a turn this provider and model produced.
+        """
+
+        selected_model = model or self.default_model or DEFAULT_GOOGLE_MODEL
+        return _saved_model_turn(message, provider=self.name, model=selected_model) is not None
+
+    def native_output_for(self, response_id: str) -> NativeOutput | None:
+        """Return the model turn recorded for one of this provider's tool-call responses.
+
+        Args:
+            response_id (str): Response ID from a completed response.
+
+        Returns:
+            NativeOutput | None: The turn as its run replayed it, or None when the
+            response made no tool call, is unknown, or was evicted.
+        """
+
+        return self._native_outputs.get(response_id)
 
     async def stream(
         self,
@@ -313,6 +356,19 @@ class GoogleProvider:
         # not issue a new ID for an existing local replay, update that replay
         # under its current key without changing the public response ID.
         continuation_id = response_id or previous_response_id
+        model_turn = genai_types.Content(role="model", parts=parts)
+        if tool_calls and response_id is not None:
+            # The same turn this run replays, so a later prompt can send the
+            # exchange exactly as this run did. A final answer keeps its portable
+            # form: nothing after it needs its signature.
+            self._native_outputs.remember(
+                response_id,
+                NativeOutput(
+                    provider=self.name,
+                    model=selected_model,
+                    items=(model_turn.model_dump(mode="json", exclude_none=True),),
+                ),
+            )
         if continuation_id is not None:
             previous = self._require_replay(previous_response_id)
             replay_tail = (
@@ -328,8 +384,8 @@ class GoogleProvider:
                     if tool_results
                     else ()
                 ),
-                *_messages_to_google(extra_messages, model=selected_model),
-                genai_types.Content(role="model", parts=parts),
+                *_messages_to_google(extra_messages, model=selected_model, provider=self.name),
+                model_turn,
             )
             if previous_response_id is not None and previous_response_id != continuation_id:
                 self._replays.consume(previous_response_id)
@@ -375,7 +431,7 @@ class GoogleProvider:
         effort: str | None = None,
     ) -> AsyncIterator[genai_types.GenerateContentResponse]:
         client = await self._client_or_create()
-        contents = _messages_to_google(messages, model=model)
+        contents = _messages_to_google(messages, model=model, provider=self.name)
         if previous_response_id is not None:
             contents.extend(self._require_replay(previous_response_id))
         if tool_results:
@@ -384,7 +440,7 @@ class GoogleProvider:
                     tool_results, model=model, previous_response_id=previous_response_id
                 )
             )
-        contents.extend(_messages_to_google(extra_messages, model=model))
+        contents.extend(_messages_to_google(extra_messages, model=model, provider=self.name))
         system_instruction = _system_from_messages(messages)
 
         # thinking_level only -- Gemini 2.5 models need thinking_budget (a
@@ -600,8 +656,47 @@ def _function_responses_content(
     return genai_types.Content(role="user", parts=[*parts, *image_parts])
 
 
-def _messages_to_google(messages: Sequence[Message], *, model: str) -> list[genai_types.Content]:
-    """Encode fresh base context without flattening an active tool exchange."""
+def _saved_model_turn(message: Message, *, provider: str, model: str) -> genai_types.Content | None:
+    """Return the Gemini model turn saved on a tool-call row, when it may be replayed.
+
+    Thought signatures belong to the model that produced them, so a turn saved by
+    another provider or model is not replayed.
+
+    Args:
+        message (Message): Assistant row that made tool calls.
+        provider (str): Name of the provider building the request.
+        model (str): Model the request is sent to.
+
+    Returns:
+        genai_types.Content | None: The turn exactly as its run sent it, or None
+        when the row has none for this provider and model, or it does not parse.
+    """
+
+    native = message.native_output
+    if native is None or native.provider != provider or native.model != model:
+        return None
+    if len(native.items) != 1:
+        return None
+    try:
+        turn = genai_types.Content.model_validate(native.items[0])
+    except ValidationError:
+        return None
+    # The row and its saved turn must describe the same calls, or the results
+    # that follow would not answer them.
+    called = [part.function_call.name for part in turn.parts or () if part.function_call]
+    if turn.role != "model" or called != [call.name for call in message.tool_calls or ()]:
+        return None
+    return turn
+
+
+def _messages_to_google(
+    messages: Sequence[Message], *, model: str, provider: str = "google"
+) -> list[genai_types.Content]:
+    """Encode fresh base context without flattening an active tool exchange.
+
+    A tool-call row that saved Gemini's own model turn for ``model`` is sent as
+    that turn; every other row is rebuilt from its portable text and calls.
+    """
 
     contents: list[genai_types.Content] = []
     # `ToolCallSnapshot.call_id` is Wisp's stable execution key. Gemini can
@@ -641,6 +736,21 @@ def _messages_to_google(messages: Sequence[Message], *, model: str) -> list[gena
                 tool_call.call_id: tool_call.provider_call_id for tool_call in message.tool_calls
             }
             tool_names = {tool_call.call_id: tool_call.name for tool_call in message.tool_calls}
+            saved_turn = _saved_model_turn(message, provider=provider, model=model)
+            if saved_turn is not None:
+                # Answer the calls under the ids Gemini gave them in that turn. A
+                # row read back from a session may not carry them, and the results
+                # must match what the run sent.
+                issued = [
+                    part.function_call.id for part in saved_turn.parts or () if part.function_call
+                ]
+                provider_call_ids = {
+                    tool_call.call_id: strip_or_none(call_id)
+                    for tool_call, call_id in zip(message.tool_calls, issued, strict=True)
+                }
+                contents.append(saved_turn)
+                index += 1
+                continue
             parts = []
             if message.content:
                 parts.append(genai_types.Part(text=message.content))

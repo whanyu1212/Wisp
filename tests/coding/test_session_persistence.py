@@ -76,6 +76,7 @@ def test_harness_failure_releases_state_and_retains_follow_up(
         provider: Provider,
         effort: str | None,
         active_from: int | None = None,
+        model: str | None = None,
     ) -> tuple[Message, ...]:
         raise RuntimeError("startup failed")
 

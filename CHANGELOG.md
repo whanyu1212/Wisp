@@ -54,6 +54,15 @@ this policy.
 - The startup logo's entrance is slower: its dots gather over 1 s instead of 0.75 s, and the
   light band then crosses it over 1 s instead of 0.5 s, moving in smaller steps.
 
+### Gemini
+
+- A new prompt no longer re-reads the previous run at full price. Wisp now saves Gemini's own
+  model turn for each tool call with the session and sends finished tool exchanges to later
+  prompts as their run sent them, so Gemini's implicit cache keeps matching. In a live
+  measurement the first request of the next prompt had 89% of its input cached, where before it
+  had 12%. Tool exchanges from another model, and from sessions saved before this change, are
+  still sent as a text summary.
+
 ### Event contract
 
 - `tool.execution.ended` and `tool.result` gain `model_usage`: the model responses a call's

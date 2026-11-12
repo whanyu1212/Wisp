@@ -482,19 +482,71 @@ def provider_native_output(provider: Provider, response_id: str) -> NativeOutput
     return native if isinstance(native, NativeOutput) else None
 
 
+class SavedToolExchangeReplayProvider(Protocol):
+    """Optional capability to replay one finished tool exchange from its saved row.
+
+    A provider that cannot rebuild tool exchanges from portable snapshots may
+    still replay an exchange whose assistant row carries the provider's own
+    output for it (see ``NativeOutput``). Such an exchange is sent as its run
+    sent it, so the provider's prompt cache keeps matching on later prompts.
+    """
+
+    def replays_saved_tool_exchange(self, message: Message, *, model: str | None) -> bool:
+        """Return whether ``message``'s exchange can be replayed natively on ``model``.
+
+        The answer must depend only on the row and the model, never on state the
+        provider holds in memory, so an exchange keeps one form in every request.
+        """
+        ...
+
+
+def replays_saved_tool_exchange(provider: Provider, message: Message, *, model: str | None) -> bool:
+    """Ask a provider whether it replays one tool exchange from its saved row.
+
+    Args:
+        provider (Provider): Provider the request is sent to.
+        message (Message): The exchange's assistant row.
+        model (str | None): Model the request goes to; None is the default.
+
+    Returns:
+        bool: True only when the provider offers the capability and accepts the
+        row. A provider without the capability replays no single exchange.
+    """
+
+    capability = getattr(provider, "replays_saved_tool_exchange", None)
+    return callable(capability) and capability(message, model=model) is True
+
+
 def prepare_provider_history(
     messages: Sequence[Message],
     *,
     provider: Provider,
     effort: str | None,
     active_from: int | None = None,
+    model: str | None = None,
 ) -> tuple[Message, ...]:
-    """Normalize one request with the target provider's explicit replay support."""
+    """Normalize one request with the target provider's explicit replay support.
+
+    Args:
+        messages (Sequence[Message]): Ordered transcript to normalize.
+        provider (Provider): Provider the request is sent to.
+        effort (str | None): Requested effort, which a provider's replay support
+            may depend on.
+        active_from (int | None): First row of the active turn, if any.
+        model (str | None): Model the request is sent to; None is the provider's
+            default. A provider that replays single saved exchanges decides with it.
+
+    Returns:
+        tuple[Message, ...]: History in the form this provider can replay.
+    """
 
     return normalize_provider_history(
         messages,
         active_from=active_from,
         native_tool_history=(structured_tool_replacement_support(provider, effort=effort) is True),
+        replays_exchange=lambda message: replays_saved_tool_exchange(
+            provider, message, model=model
+        ),
     )
 
 

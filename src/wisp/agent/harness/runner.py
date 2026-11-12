@@ -389,6 +389,7 @@ class AgentHarness:
         boundary = _HarnessBoundaryCoordinator(
             get_messages=lambda: self.messages,
             provider=self._config.provider,
+            model=self._config.model,
             effort=self._config.effort,
             active_from=len(self._messages),
             boundary_preparer=boundary_preparer,
