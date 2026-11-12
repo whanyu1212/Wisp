@@ -769,6 +769,7 @@ class RpcHost:
             project_context_root=project_context_root,
             mcp_tool_exposure=config.mcp_tool_exposure,
             codemode=config.codemode,
+            subagents=config.subagents,
             mcp_server_connected=runtime.mcp_server_connected,
         )
         host: RpcHost | None = None

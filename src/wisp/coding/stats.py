@@ -26,6 +26,7 @@ from wisp.events import (
     ContextObservation,
     MessageCompleted,
     MessageStarted,
+    ModelResponseUsage,
     RunOutcome,
     SessionBranchSummary,
     SessionStats,
@@ -309,6 +310,7 @@ def _usage_records(entries: Sequence[SessionEntry]) -> list[TokenUsage]:
     for entry in entries:
         if isinstance(entry, MessageSessionEntry) and entry.message.usage is not None:
             records.append(entry.message.usage)
+        records.extend(response.usage for response in _subagent_responses(entry))
         if isinstance(entry, CompactionSessionEntry) and entry.compaction.usage is not None:
             records.append(entry.compaction.usage)
         if (
@@ -330,6 +332,7 @@ def _cost_records(entries: Sequence[SessionEntry]) -> list[UsageCost | None]:
     for entry in entries:
         if isinstance(entry, MessageSessionEntry) and entry.message.role == "assistant":
             records.append(entry.message.cost)
+        records.extend(response.cost for response in _subagent_responses(entry))
         if isinstance(entry, CompactionSessionEntry):
             records.append(entry.compaction.cost)
         if (
@@ -345,6 +348,14 @@ def _cost_records(entries: Sequence[SessionEntry]) -> list[UsageCost | None]:
             elif entry.event.payload.get("usage") is not None:
                 records.append(None)
     return records
+
+
+def _subagent_responses(entry: SessionEntry) -> tuple[ModelResponseUsage, ...]:
+    """Return the model responses a `spawn_agent` result's subagent completed."""
+
+    if not isinstance(entry, MessageSessionEntry) or entry.tool_result is None:
+        return ()
+    return entry.tool_result.model_usage or ()
 
 
 def _sum_usage(records: Sequence[TokenUsage]) -> TokenUsage:

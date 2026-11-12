@@ -1479,9 +1479,37 @@
       "title": "ModelProviderAutoSwitched",
       "type": "object"
     },
+    "ModelResponseUsage": {
+      "additionalProperties": false,
+      "description": "What one model response a tool requested itself used, such as a subagent's.\n\nAttributes:\n    usage (TokenUsage): The tokens the response reported.\n    cost (UsageCost | None): Its list-price estimate; None when the run had no\n        cost estimator.",
+      "properties": {
+        "cost": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UsageCost"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "ModelResponseUsageCost"
+        },
+        "usage": {
+          "$ref": "#/$defs/TokenUsage",
+          "title": "ModelResponseUsageUsage"
+        }
+      },
+      "required": [
+        "usage",
+        "cost"
+      ],
+      "title": "ModelResponseUsage",
+      "type": "object"
+    },
     "NestedToolCall": {
       "additionalProperties": false,
-      "description": "One tool call a codemode script made, as its script's result records it.\n\nEvery call is recorded, including those refused before running and those the\nscript ended before they finished, so a session shows everything a script\ntried. Only the script sees the call's output; the model sees what the script\nprints and returns.\n\nAttributes:\n    call_id (str): The call's id, unique within its script.\n    name (str): The tool the script called.\n    target (str | None): The MCP tool a proxied `mcp_call` ran.\n    arguments (JsonObject | None): The call's arguments; None when they were\n        too large to keep.\n    is_error (bool): Whether the call failed or was refused.\n    failure_code (ToolFailureCode | None): Why it failed, when classified.\n    error (str | None): The start of its error message.\n    summary (str | None): A one-line summary, for read-type tools.\n    started_at (datetime): When the script made the call.\n    duration_ms (int): How long it took, waiting for other calls included.",
+      "description": "One tool call a codemode script or a subagent made, as its result records it.\n\nEvery call is recorded, including those refused before running and those the\nscript or subagent ended before they finished, so a session shows everything\nit tried. Only the script or subagent sees the call's output; the model sees\nwhat the script prints and returns, or the subagent's final message.\n\nAttributes:\n    call_id (str): The call's id, unique within its script or subagent.\n    name (str): The tool that was called.\n    target (str | None): The MCP tool a proxied `mcp_call` ran.\n    arguments (JsonObject | None): The call's arguments; None when they were\n        too large to keep.\n    is_error (bool): Whether the call failed or was refused.\n    failure_code (ToolFailureCode | None): Why it failed, when classified.\n    error (str | None): The start of its error message.\n    summary (str | None): A one-line summary, for read-type tools.\n    started_at (datetime): When the call was made.\n    duration_ms (int): How long it took, waiting for other calls included.",
       "properties": {
         "arguments": {
           "anyOf": [
@@ -6395,6 +6423,15 @@
           "default": null,
           "title": "ToolExecutionEndedMessageEntryId"
         },
+        "model_usage": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ModelResponseUsage"
+          },
+          "maxItems": 64,
+          "title": "ToolExecutionEndedModelUsage",
+          "type": "array"
+        },
         "name": {
           "title": "ToolExecutionEndedName",
           "type": "string"
@@ -6644,7 +6681,8 @@
         "process_ended_at",
         "images",
         "nested_calls",
-        "nested_calls_omitted"
+        "nested_calls_omitted",
+        "model_usage"
       ],
       "title": "ToolExecutionEnded",
       "type": "object"
@@ -6771,7 +6809,7 @@
     },
     "ToolNestedCallEnded": {
       "additionalProperties": false,
-      "description": "A tool call a codemode script made finished; transient, like its start.",
+      "description": "A tool call a codemode script or a subagent made finished; transient, like its start.",
       "properties": {
         "call": {
           "$ref": "#/$defs/NestedToolCall",
@@ -6804,7 +6842,7 @@
     },
     "ToolNestedCallStarted": {
       "additionalProperties": false,
-      "description": "A codemode script made a tool call, which may still wait to run.\n\nLike `tool.execution.progress`, it is transient: published only between its\nscript's `tool.execution.started` and `tool.execution.ended`, never persisted\nand never sent to the model. Delivery is best effort. A call can start without\nending when its script ends first; the script's `tool.execution.ended` closes\nit, and its `nested_calls` record every call, unless the run was cancelled\nwhile the script ran, which leaves the result no calls to record.",
+      "description": "A codemode script or a subagent made a tool call, which may still wait to run.\n\nLike `tool.execution.progress`, it is transient: published only between its\nparent's `tool.execution.started` and `tool.execution.ended`, never persisted\nand never sent to the model. Delivery is best effort. A call can start without\nending when its parent ends first; the parent's `tool.execution.ended` closes\nit, and its `nested_calls` record every call, unless the run was cancelled\nwhile the parent ran, which leaves the result no calls to record.",
       "properties": {
         "arguments": {
           "anyOf": [
@@ -6977,6 +7015,15 @@
           ],
           "default": null,
           "title": "ToolResultReadyMessageEntryId"
+        },
+        "model_usage": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ModelResponseUsage"
+          },
+          "maxItems": 64,
+          "title": "ToolResultReadyModelUsage",
+          "type": "array"
         },
         "name": {
           "title": "ToolResultReadyName",
@@ -7227,7 +7274,8 @@
         "process_ended_at",
         "images",
         "nested_calls",
-        "nested_calls_omitted"
+        "nested_calls_omitted",
+        "model_usage"
       ],
       "title": "ToolResultReady",
       "type": "object"

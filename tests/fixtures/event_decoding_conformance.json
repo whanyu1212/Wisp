@@ -4687,6 +4687,14 @@
    "event": "tool.execution.ended",
    "operation": "remove",
    "path": [
+    "model_usage"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.execution.ended",
+   "operation": "remove",
+   "path": [
     "name"
    ],
    "accepted": false
@@ -5300,6 +5308,14 @@
    "operation": "remove",
    "path": [
     "message_entry_id"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.result",
+   "operation": "remove",
+   "path": [
+    "model_usage"
    ],
    "accepted": true
   },

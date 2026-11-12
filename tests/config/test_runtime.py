@@ -346,6 +346,19 @@ def test_config_leaves_codemode_automatic_unless_set(
     assert WispConfig.from_env(session_dir=tmp_path, codemode=True).codemode is True
 
 
+def test_config_keeps_subagents_off_unless_set(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    home = Path.home()
+    (home / ".wisp").mkdir(parents=True)
+    assert WispConfig.from_env(session_dir=tmp_path).subagents is False
+
+    (home / ".wisp" / "settings.json").write_text('{"subagents": true}', encoding="utf-8")
+    assert WispConfig.from_env(session_dir=tmp_path).subagents is True
+
+    monkeypatch.setenv("WISP_SUBAGENTS", "0")
+    assert WispConfig.from_env(session_dir=tmp_path).subagents is False
+    assert WispConfig.from_env(session_dir=tmp_path, subagents=True).subagents is True
+
+
 def test_config_rejects_invalid_auto_compaction_env(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:

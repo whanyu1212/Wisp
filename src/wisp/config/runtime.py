@@ -40,6 +40,7 @@ DEFAULT_PROVIDER = "openai-codex"
 DEFAULT_CONTEXT_RESERVE_TOKENS = 16_384
 DEFAULT_AUTO_COMPACTION_ENABLED = True
 DEFAULT_WEB_SEARCH_ENABLED = False
+DEFAULT_SUBAGENTS_ENABLED = False
 OPENAI_COMPATIBLE_CONFIG_ENV = "WISP_OPENAI_COMPATIBLE_CONFIG"
 _DEFAULT_AUTH_PATH = Path("~/.wisp/auth.json")
 _DEFAULT_SESSION_DIR = Path("~/.wisp/sessions")
@@ -65,6 +66,8 @@ class WispConfig(BaseModel):
     # The experimental codemode tool, which needs the `codemode` extra: True or False
     # when set, None to offer it whenever the run finds its MCP tools on demand.
     codemode: bool | None = None
+    # Offer the `spawn_agent` tool, which hands a read-only task to a subagent.
+    subagents: bool = DEFAULT_SUBAGENTS_ENABLED
     mcp_servers: tuple[McpServerConfig, ...] = Field(
         default=(), max_length=MAX_MCP_SERVERS, repr=False
     )
@@ -140,6 +143,7 @@ class WispConfig(BaseModel):
         auto_compaction_enabled: bool | None = None,
         web_search: bool | None = None,
         codemode: bool | None = None,
+        subagents: bool | None = None,
         mcp_servers: tuple[McpServerConfig, ...] | None = None,
         mcp_tool_exposure: McpToolExposure | None = None,
         openai_compatible: OpenAICompatibleSettings | None = None,
@@ -183,6 +187,10 @@ class WispConfig(BaseModel):
         tools. Unset, it resolves to None: the tool is offered whenever a run finds
         its MCP tools on demand, where scripts help most; true or false always or
         never offers it.
+
+        ``subagents`` (``WISP_SUBAGENTS``) is user-only, because a subagent's model
+        calls are billed to the user's provider account. It offers the `spawn_agent`
+        tool, which hands a read-only task to a subagent, and is off unless enabled.
 
         ``mcp_servers`` is likewise user-only because it defines commands that Wisp
         may later execute. There is deliberately no environment-variable layer for
@@ -287,6 +295,16 @@ class WispConfig(BaseModel):
                 if codemode is not None
                 else _resolve_optional_bool(
                     os.environ.get(_CODEMODE_ENV), settings.codemode, name=_CODEMODE_ENV
+                )
+            ),
+            subagents=(
+                subagents
+                if subagents is not None
+                else _resolve_bool(
+                    os.environ.get("WISP_SUBAGENTS"),
+                    settings.subagents,
+                    default=DEFAULT_SUBAGENTS_ENABLED,
+                    name="WISP_SUBAGENTS",
                 )
             ),
             mcp_servers=mcp_servers if mcp_servers is not None else settings.mcp_servers or (),

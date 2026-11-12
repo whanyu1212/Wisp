@@ -153,3 +153,34 @@ def test_rpc_mode_configure_rejects_unknown_provider(tmp_path: Path) -> None:
 @pytest.fixture(autouse=True)
 def _guard_typed_command_execution(monkeypatch: MonkeyPatch) -> None:
     guard_rpc_command_serialization(monkeypatch)
+
+
+@pytest.mark.parametrize(
+    ("arguments", "stdin"),
+    [
+        (
+            ["--mode", "rpc", "--allow-read-tools"],
+            '{"id":"cmd-1","type":"prompt","prompt":"hello"}\n',
+        ),
+        (["--mode", "json", "--allow-read-tools", "-p", "hello"], None),
+    ],
+    ids=["rpc", "json"],
+)
+@pytest.mark.parametrize("enabled", [True, False], ids=["on", "off"])
+def test_subagents_setting_reaches_runs(
+    tmp_path: Path, arguments: list[str], stdin: str | None, enabled: bool
+) -> None:
+    """Both entry points build their session with the `subagents` setting."""
+
+    result = CliRunner().invoke(
+        app,
+        [*arguments, "--session-dir", str(tmp_path)],
+        input=stdin,
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": "", "WISP_SUBAGENTS": "1" if enabled else "0"},
+    )
+
+    assert result.exit_code == 0, result.output
+    (started,) = [
+        record for record in _jsonl_records(result.stdout) if record["type"] == "agent.started"
+    ]
+    assert ("spawn_agent" in started["setup"]["tool_names"]) is enabled
