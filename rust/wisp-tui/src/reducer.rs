@@ -1243,6 +1243,8 @@ pub enum BackendEvent {
         command_id: String,
         status: discovery::McpReport,
     },
+    /// Servers that were still connecting when the backend started have settled.
+    McpStatusUpdated(discovery::McpReport),
     McpSnippetPreviewed {
         command_id: String,
         servers: discovery::McpPreviewReport,
@@ -5545,6 +5547,7 @@ fn handle_backend_event(
         | BackendEvent::SkillCatalogReported { .. }
         | BackendEvent::SkillCatalogUpdated(_)
         | BackendEvent::McpStatusReported { .. }
+        | BackendEvent::McpStatusUpdated(_)
         | BackendEvent::McpSnippetPreviewed { .. }
         | BackendEvent::McpLoginStarted { .. }
         | BackendEvent::PermissionsReported { .. }
@@ -5602,7 +5605,12 @@ fn observe_backend_event(
     if let Some(mut effects) = discovery::observe(state, event) {
         effects.extend(discovery::read_permissions_again(state, ids)?);
         // Connecting or changing MCP servers changes whether automatic codemode is on.
-        if state.side_panel_visible && matches!(event, BackendEvent::McpStatusReported { .. }) {
+        if state.side_panel_visible
+            && matches!(
+                event,
+                BackendEvent::McpStatusReported { .. } | BackendEvent::McpStatusUpdated(_)
+            )
+        {
             effects.extend(discovery::codemode(state, None, ids)?);
         }
         effects.extend(discovery::read_codemode_again(state, ids)?);
@@ -6828,6 +6836,49 @@ mod tests {
         )
         .unwrap();
         assert_eq!(sent(&reported), ["get_codemode"]);
+    }
+
+    #[test]
+    fn mcp_update_replaces_status() {
+        let server = |status| wisp_protocol::events::McpServerSnapshot {
+            name: "docs".into(),
+            status,
+            tool_names: Vec::new(),
+            error: None,
+            launch: None,
+            sign_in: None,
+        };
+        let snapshot = |status| {
+            std::sync::Arc::new(wisp_protocol::events::McpStatusSnapshot {
+                servers: vec![server(status)],
+            })
+        };
+        use wisp_protocol::events::McpServerStatus::{Connected, Connecting};
+        let mut state = UiState::new("fake".into(), None, None);
+        state.input_ready = true;
+        state.side_panel_visible = true;
+        state.mcp.snapshot = Some(snapshot(Connecting));
+        let mut ids = DeterministicIds::default();
+
+        let updated = reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::McpStatusUpdated(Ok(snapshot(Connected)))),
+            &mut ids,
+        )
+        .unwrap();
+
+        assert_eq!(state.mcp.snapshot, Some(snapshot(Connected)));
+        // Connected servers change whether automatic codemode is on.
+        assert_eq!(sent(&updated), ["get_codemode"]);
+
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::McpStatusUpdated(Err("too large".into()))),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(state.mcp.snapshot, None);
+        assert_eq!(state.mcp.error.as_deref(), Some("too large"));
     }
 
     #[test]

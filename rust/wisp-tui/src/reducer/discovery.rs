@@ -557,6 +557,20 @@ pub(super) fn observe(state: &mut UiState, event: &BackendEvent) -> Option<Vec<U
             state.mcp.report(command_id, status);
             Some(Vec::new())
         }
+        BackendEvent::McpStatusUpdated(status) => {
+            match status {
+                Ok(status) => {
+                    state.mcp.snapshot = Some(Arc::clone(status));
+                    state.mcp.error = None;
+                }
+                Err(error) => {
+                    // The earlier snapshot still says the servers are connecting.
+                    state.mcp.snapshot = None;
+                    state.mcp.error = Some(error.clone());
+                }
+            }
+            Some(vec![UiEffect::RequestRender])
+        }
         BackendEvent::McpSnippetPreviewed {
             command_id,
             servers,

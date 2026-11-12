@@ -229,6 +229,7 @@ def start_rpc_prompt_command(
     running_command_factory: RunningCommandFactory = _RpcRunningCommand,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
     after_run: Callable[[], Awaitable[str | None]] | None = None,
+    tools_ready: Callable[[], Awaitable[None]] | None = None,
 ) -> tuple[_RpcRunningCommand, JsonlSession]:
     lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
     command_type = command.type
@@ -261,6 +262,7 @@ def start_rpc_prompt_command(
         completion_error,
         after_run,
         encoded_images,
+        tools_ready,
     )
     return (
         running_command_factory(
@@ -285,6 +287,7 @@ def start_rpc_init_command(
     render_events: RpcEventRenderer,
     running_command_factory: RunningCommandFactory = _RpcRunningCommand,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
+    tools_ready: Callable[[], Awaitable[None]] | None = None,
 ) -> tuple[_RpcRunningCommand | None, JsonlSession | None]:
     try:
         instructions, target = _project_init_request(agent)
@@ -320,6 +323,7 @@ def start_rpc_init_command(
         completion_error=completion.error,
         running_command_factory=running_command_factory,
         command_completed_factory=command_completed_factory,
+        tools_ready=tools_ready,
     )
 
 
@@ -335,6 +339,7 @@ def start_rpc_compact_command(
     render_events: RpcEventRenderer,
     running_command_factory: RunningCommandFactory = _RpcRunningCommand,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
+    tools_ready: Callable[[], Awaitable[None]] | None = None,
 ) -> _RpcRunningCommand | None:
     lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
     command_id = lifecycle.command_id
@@ -362,6 +367,7 @@ def start_rpc_compact_command(
         write_event,
         render_events,
         command_completed_factory,
+        tools_ready,
     )
     return running_command_factory(
         command_id=command_id,
@@ -479,6 +485,7 @@ async def run_rpc_prompt_command(
     completion_error: Callable[[], str | None] | None = None,
     after_run: Callable[[], Awaitable[str | None]] | None = None,
     encoded_images: tuple[str | ImagePart, ...] = (),
+    tools_ready: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
     error: str | None = None
     run_entry_start = entry_start
@@ -516,6 +523,11 @@ async def run_rpc_prompt_command(
 
     with cancel_scope:
         try:
+            if tools_ready is not None:
+                # MCP servers may still be connecting after startup. The run waits
+                # here, where cancelling the command still ends it, because its
+                # tools cannot change once it has begun.
+                await tools_ready()
             # Reject a bad attachment before the run records anything. Prompts
             # without images skip the worker thread, keeping their event timing.
             images = (
@@ -652,6 +664,7 @@ async def run_rpc_compact_command(
     write_event: RpcEventWriter,
     render_events: RpcEventRenderer,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
+    tools_ready: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
     error: str | None = None
     error_rendered = False
@@ -666,6 +679,10 @@ async def run_rpc_compact_command(
     try:
         with cancel_scope:
             try:
+                if tools_ready is not None:
+                    # Compaction sends no tools, but it holds the session, and the
+                    # startup MCP connect cannot hand a busy session its tools.
+                    await tools_ready()
                 agent.trusted = await trust_gate.resolve()
                 await render_events(track_errors(agent.compact(session, instructions=instructions)))
             except RpcOutputAlreadyReportedError as exc:

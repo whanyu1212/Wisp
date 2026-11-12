@@ -25,6 +25,7 @@ from wisp.coding.prompt import resolve_project_context_root
 from wisp.config.runtime import WispConfig
 from wisp.events import (
     ErrorEvent,
+    McpStatusUpdated,
     PermissionMode,
     PermissionState,
     RpcCommandFinished,
@@ -53,7 +54,7 @@ from wisp.rpc.execution import (
     rpc_session_state,
 )
 from wisp.rpc.handlers.inspection import rpc_skill_catalog_snapshot, rpc_workspace_report
-from wisp.rpc.handlers.mcp import RpcMcpServers, RpcToolSelection
+from wisp.rpc.handlers.mcp import RpcMcpServers, RpcToolSelection, rpc_mcp_status_snapshot
 from wisp.rpc.handlers.project_files import RpcProjectFiles
 from wisp.rpc.working_directory import (
     DirectoryMove,
@@ -1018,6 +1019,10 @@ class RpcHost:
 
         previous_event_task_group = self._event_task_group
         self._event_task_group = task_group
+        if self.mcp_servers is not None and self.runtime.mcp_connecting:
+            # Beside the command queue, so the frontend can read the session while
+            # servers connect. Leaving this method's task group cancels the connect.
+            task_group.start_soon(self._connect_mcp_at_startup, self.mcp_servers)
         try:
             return await self.coordinator.run(
                 receive,
@@ -1027,6 +1032,18 @@ class RpcHost:
         finally:
             await self._wait_for_published_events()
             self._event_task_group = previous_event_task_group
+
+    async def _connect_mcp_at_startup(self, mcp_servers: RpcMcpServers) -> None:
+        """Connect the runtime's MCP servers, then report problems and the new status."""
+
+        try:
+            problems = await mcp_servers.connect_at_startup()
+        except Exception as exc:  # noqa: BLE001 - a failed connect must not stop the host
+            _logger.exception("Could not connect MCP servers at startup")
+            problems = (f"MCP servers could not be started: {type(exc).__name__}",)
+        for problem in problems:
+            self._publish_event(ErrorEvent(message=problem))
+        self._publish_event(McpStatusUpdated(status=rpc_mcp_status_snapshot(self.runtime)))
 
     def _publish_event(self, event: WispEvent) -> None:
         task_group = self._event_task_group
@@ -1154,6 +1171,7 @@ async def build_runtime_for_config(
     config: WispConfig,
     *,
     anthropic_cache_ttl: AnthropicCacheTtl = "5m",
+    connect_mcp: bool = True,
 ) -> WispRuntime:
     """Build a runtime from the configuration's auth, retry, timeout, MCP, and endpoint settings.
 
@@ -1162,6 +1180,8 @@ async def build_runtime_for_config(
         anthropic_cache_ttl (AnthropicCacheTtl, optional): Anthropic prompt-cache
             lifetime. Sessions hosted by `RpcHost` use `build_session_runtime`,
             which passes "1h". Defaults to "5m" for one-off runs.
+        connect_mcp (bool, optional): Whether to connect the configured MCP servers
+            before returning. Defaults to True.
 
     Returns:
         WispRuntime: Runtime with built-in extensions and configured MCP servers.
@@ -1174,10 +1194,11 @@ async def build_runtime_for_config(
         mcp_servers=config.mcp_servers,
         openai_compatible=config.openai_compatible,
         anthropic_cache_ttl=anthropic_cache_ttl,
+        connect_mcp=connect_mcp,
     )
 
 
-async def build_session_runtime(config: WispConfig) -> WispRuntime:
+async def build_session_runtime(config: WispConfig, *, connect_mcp: bool = True) -> WispRuntime:
     """Build the runtime for a session hosted by `RpcHost`, with a 1-hour Anthropic cache.
 
     Hosted sessions (the JSONL-RPC backend, which the TUI drives, and the
@@ -1188,12 +1209,16 @@ async def build_session_runtime(config: WispConfig) -> WispRuntime:
 
     Args:
         config (WispConfig): Runtime configuration.
+        connect_mcp (bool, optional): Whether to connect the configured MCP servers
+            before returning. With False, the `RpcHost` given this runtime connects
+            them in the background once it starts serving, and holds the first
+            agent run until they have. Defaults to True.
 
     Returns:
         WispRuntime: Runtime with built-in extensions and configured MCP servers.
     """
 
-    return await build_runtime_for_config(config, anthropic_cache_ttl="1h")
+    return await build_runtime_for_config(config, anthropic_cache_ttl="1h", connect_mcp=connect_mcp)
 
 
 __all__ = ["InProcessOptions", "RpcHost", "build_runtime_for_config", "build_session_runtime"]

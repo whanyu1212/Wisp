@@ -166,6 +166,12 @@ impl BackendEvent {
                 let status = discovery_report(&value["status"], || event.mcp_status(&command_id));
                 return Ok(Self::McpStatusReported { command_id, status });
             }
+            "mcp.status.updated" => {
+                return Ok(Self::McpStatusUpdated(discovery_report(
+                    &value["status"],
+                    || event.updated_mcp_status(),
+                )));
+            }
             "rpc.mcp.login" => {
                 let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
                 let name = exact_string_field(&value, &event_type, "name", 256)?;
@@ -371,6 +377,7 @@ impl BackendEvent {
             | "rpc.skills"
             | "skill.catalog.updated"
             | "rpc.mcp"
+            | "mcp.status.updated"
             | "rpc.mcp.preview"
             | "rpc.mcp.login"
             | "rpc.permissions"

@@ -45,8 +45,17 @@ this policy.
 - Gemini 4 Carbon (`gemini-4-carbon`) is in the model catalog, with its thinking levels, context
   window and prices, so `/model` offers it and its cost is counted.
 
+### Startup
+
+- The terminal UI's backend connects MCP servers after it starts serving instead of before, so a
+  resumed session's transcript no longer waits for the slowest server. In one measurement with
+  three remote servers, that removed about a second before the first page of a session arrived. A
+  prompt or compaction sent while servers are still connecting waits for them, so a run is offered
+  the same tools as before. One-shot `--prompt` runs and the in-process SDK still connect first.
+
 ### TUI
 
+- The session panel shows `connecting…` for MCP servers until they have connected.
 - The startup logo's entrance is slower: its dots gather over 1 s instead of 0.75 s, and the
   light band then crosses it over 1 s instead of 0.5 s, moving in smaller steps.
 
@@ -65,6 +74,9 @@ this policy.
 - `tool.nested.started`, `tool.nested.ended` and a result's `nested_calls` now also describe the
   tool calls a `spawn_agent` call's subagents make, with that call as `parent_call_id`. Their
   `call_id`s are numbered by Wisp, as `subagent-N-M`, and do not repeat within the call.
+- An MCP server's `status` in `rpc.mcp` may be `connecting`, reported from the JSONL-RPC backend's
+  start until its servers have connected or failed. A new `mcp.status.updated` event then carries
+  the settled status, without a `command_id`.
 - New `warning` event with a `message`: something the user should know that does not stop or fail
   the run. Text output prints it on stderr as `warning: …`. Its first use is the `subagent_model`
   fallback.

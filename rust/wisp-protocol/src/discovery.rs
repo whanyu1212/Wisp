@@ -84,6 +84,8 @@ pub struct SkillCatalogSnapshot {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum McpServerStatus {
+    /// Not started yet: the backend connects servers after it begins serving.
+    Connecting,
     Connected,
     Disconnected,
     Unavailable,
@@ -93,6 +95,7 @@ pub enum McpServerStatus {
 impl McpServerStatus {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Connecting => "connecting",
             Self::Connected => "connected",
             Self::Disconnected => "disconnected",
             Self::Unavailable => "unavailable",

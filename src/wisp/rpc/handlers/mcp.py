@@ -1,4 +1,4 @@
-"""RPC handlers that change MCP servers and restart them without restarting Wisp.
+"""RPC handlers that connect, change, and restart MCP servers without restarting Wisp.
 
 Each command first changes the user settings file (``reconnect_mcp`` changes
 nothing), then reloads every configured server from it, restarts the runtime's MCP
@@ -8,13 +8,21 @@ sequential RPC commands, so they wait for an active prompt to finish instead of
 changing its tools mid-run. Once started they cannot be cancelled: stopping after
 the settings changed would leave the running servers out of step with the file, and
 MCP startup is already bounded by its own timeout.
+
+A host whose runtime was built without connecting its servers connects them here
+too, in the background, so it can serve the session's transcript first. That
+connect is not an RPC command: agent runs wait for it (see
+:meth:`RpcMcpServers.wait_for_startup`), and it takes the same lock as a restart,
+so the two never start servers at once.
 """
 
 from __future__ import annotations
 
 import webbrowser
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
+from importlib import import_module
 from typing import TYPE_CHECKING, Literal
 
 import anyio
@@ -147,6 +155,61 @@ class RpcMcpServers:
         # A confirmed proposal saved settings during a run; servers restart once
         # the run ends, because a run's tools cannot change while it uses them.
         self._restart_after_run = False
+        # The startup connect runs outside the command queue, so without this lock
+        # an MCP command sent meanwhile would start a second set of servers.
+        self._restart_lock = anyio.Lock()
+        self._startup_settled = anyio.Event()
+        if not runtime.mcp_connecting:
+            self._startup_settled.set()
+
+    async def connect_at_startup(self) -> tuple[str, ...]:
+        """Connect the servers a runtime built with ``connect_mcp=False`` left unstarted.
+
+        Runs once, beside the command queue. Agent runs wait for it through
+        :meth:`wait_for_startup` and are released however it ends, including by
+        cancellation, so a failed connect leaves a session without MCP tools
+        instead of one that never answers.
+
+        Returns:
+            tuple[str, ...]: A sanitized message for each server that did not start,
+                or for the MCP runtime as a whole. Empty when every server
+                connected, or when an MCP command restarted them first.
+        """
+
+        try:
+            # Importing the MCP SDK takes a few hundred milliseconds, and seconds
+            # before its bytecode is cached. On the event loop that would stall the
+            # commands this connect runs beside, so a worker thread imports it. A
+            # failure is left to the restart below, which imports it again and
+            # records the servers as failed.
+            with suppress(Exception):
+                await anyio.to_thread.run_sync(
+                    import_module, "wisp.mcp.runtime", abandon_on_cancel=True
+                )
+            async with self._restart_lock:
+                if not self._runtime.mcp_connecting:
+                    return ()
+                error = await self._restart_locked(
+                    self._runtime.mcp_server_configs, beside_command_queue=True
+                )
+            if error is not None:
+                return ("MCP servers could not be started; their tools are unavailable",)
+            mcp_runtime = self._runtime.mcp_runtime
+            if mcp_runtime is None:
+                return ()
+            return tuple(diagnostic.message for diagnostic in mcp_runtime.diagnostics)
+        finally:
+            self._startup_settled.set()
+
+    async def wait_for_startup(self) -> None:
+        """Wait until the startup connect has ended and the session has its tools.
+
+        Returns at once when the runtime's servers were connected before the host
+        started. An agent run awaits this before it begins: a run's tools cannot
+        change while it uses them, so the MCP tools must be registered first.
+        """
+
+        await self._startup_settled.wait()
 
     def confirm_proposal(self, tool_name: str, arguments: Mapping[str, object]) -> str | None:
         """Apply a proposal the user confirmed, from the arguments they were shown.
@@ -391,6 +454,12 @@ class RpcMcpServers:
                 per-server problems are reported in the status instead.
         """
 
+        async with self._restart_lock:
+            return await self._restart_locked(servers)
+
+    async def _restart_locked(
+        self, servers: tuple[McpServerConfig, ...], *, beside_command_queue: bool = False
+    ) -> str | None:
         self._revoke_session_tool_grants(_MCP_TOOL_PREFIX)
         error: str | None = None
         try:
@@ -400,6 +469,13 @@ class RpcMcpServers:
         finally:
             # The old registry refers to closed connections, so the session must
             # switch even when starting failed.
+            if beside_command_queue:
+                # A folder change may hold the session for the moment it takes to
+                # save the move. Runs are still waiting for this connect, so nothing
+                # holds it longer. A restart run as a command never waits: a busy
+                # session there is an error, which replacing the registry raises.
+                while self._agent.busy:
+                    await anyio.sleep(0.01)
             self._agent.replace_tool_registry(self._tool_selection.select(self._runtime))
         return error
 
@@ -533,6 +609,8 @@ def rpc_mcp_status_snapshot(runtime: WispRuntime) -> RpcMcpStatusSnapshot:
                 error=f"MCP server {name} is unavailable: the MCP runtime could not start",
                 launch=launch,
             )
+        elif runtime.mcp_connecting:
+            snapshot = RpcMcpServerSnapshot(name=name, status="connecting", launch=launch)
         elif mcp_runtime is None or name not in running:
             continue
         elif diagnostic is not None:
