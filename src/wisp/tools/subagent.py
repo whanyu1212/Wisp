@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
+from typing import Literal, get_args
 
 import anyio
 from typing_extensions import TypeAliasType
@@ -27,9 +28,12 @@ SPAWN_AGENT = "spawn_agent"
 # `wisp.events.MAX_TOOL_MODEL_RESPONSES`.
 SUBAGENT_MAX_TASKS = 8
 
-# Runs a subagent on a task and returns its final message. It raises `ToolError`
-# when the subagent fails, so the model reads why.
-SubagentRunner = TypeAliasType("SubagentRunner", Callable[[str], Awaitable[str]])
+# What a subagent starts from: its task alone, or the conversation so far.
+SubagentContext = TypeAliasType("SubagentContext", Literal["fresh", "fork"])
+
+# Runs a subagent on a task, from the given context, and returns its final message.
+# It raises `ToolError` when the subagent fails, so the model reads why.
+SubagentRunner = TypeAliasType("SubagentRunner", Callable[[str, SubagentContext], Awaitable[str]])
 
 # What a task's heading and the blank line after its report take from its share of
 # the result, in bytes and in lines.
@@ -42,8 +46,11 @@ SPAWN_AGENT_PROMPT = ToolPromptMetadata(
         "Do the work yourself by default. Use spawn_agent only for a broad search or "
         "investigation whose raw output would crowd your context; read a file or "
         "symbol you can already name directly.",
-        "A subagent sees none of this conversation: put everything it needs in its "
-        "task, and say what to report back.",
+        "A subagent sees none of this conversation by default: put everything it "
+        "needs in its task, and say what to report back. Set context to fork only "
+        "when the tasks depend on what this conversation has established and "
+        "restating it would be long; every forked subagent rereads the whole "
+        "conversation, which costs its length again.",
         "Put every independent task in one spawn_agent call. Each task gets its own "
         "subagent and they run in parallel, where separate calls can run one after "
         "another. You continue only after all of them have reported, so do not plan "
@@ -55,18 +62,19 @@ SPAWN_AGENT_PROMPT = ToolPromptMetadata(
 class SpawnAgentTool:
     """Run a read-only subagent on each task and return their final messages.
 
-    A subagent starts from its task alone, with none of the conversation. It may use
-    the run's read-only tools, and cannot spawn subagents itself. Nothing it reads
-    reaches the caller except its final message. The tasks of one call run at the
-    same time, whatever else the model called beside it.
+    A subagent starts from its task alone, or, when the call forks, from the
+    conversation so far. It may use the run's read-only tools, and cannot spawn
+    subagents itself. Nothing it reads reaches the caller except its final message.
+    The tasks of one call run at the same time, whatever else the model called
+    beside it.
     """
 
     name = SPAWN_AGENT
     description = (
         "Hand one or more bounded, read-only tasks to subagents and get back their "
-        "final reports. Each task gets its own subagent, which starts fresh: it sees "
-        "only the task you write, not this conversation, and it can only read and "
-        "search. Use it rarely, for a broad search or investigation whose raw output "
+        "final reports. Each task gets its own subagent, which by default starts "
+        "fresh: it sees only the task you write, not this conversation. It can only "
+        "read and search. Use it rarely, for a broad search or investigation whose raw output "
         "you do not need to see yourself. It costs extra model calls, so prefer your "
         "own tools for anything you can locate directly. Pass every independent task "
         "in `tasks` in a single call: the subagents run in parallel and you get all "
@@ -84,7 +92,17 @@ class SpawnAgentTool:
                     "and what the report should contain. Tasks must not depend on each "
                     "other's results."
                 ),
-            }
+            },
+            "context": {
+                "type": "string",
+                "enum": list(get_args(SubagentContext.__value__)),
+                "description": (
+                    "What each subagent starts from. fresh (the default): only its "
+                    "task. fork: this whole conversation, then its task, so the task "
+                    "can refer to what was already found or decided; it costs the "
+                    "conversation's length again for every task."
+                ),
+            },
         },
         "required": ["tasks"],
         "additionalProperties": False,
@@ -122,17 +140,19 @@ class SpawnAgentTool:
 
         Raises:
             ToolArgumentError: `tasks` is not a list of one to
-                `SUBAGENT_MAX_TASKS` non-empty strings.
+                `SUBAGENT_MAX_TASKS` non-empty strings, or `context` is not one of
+                its two values.
             ToolError: Every subagent failed before it could report.
         """
 
         tasks = _tasks(arguments)
+        start_from = _context(arguments)
         reports: dict[int, str] = {}
         failures: dict[int, ToolError] = {}
 
         async def work(index: int, task: str) -> None:
             try:
-                reports[index] = await self._run_subagent(task)
+                reports[index] = await self._run_subagent(task, start_from)
             except ToolError as exc:
                 failures[index] = exc
             except Exception:  # noqa: BLE001 - one subagent's failure must not cancel the rest
@@ -178,10 +198,22 @@ def _tasks(arguments: ToolArguments) -> list[str]:
     return tasks
 
 
+def _context(arguments: ToolArguments) -> SubagentContext:
+    """Return what the call's subagents start from; fresh when it does not say."""
+
+    value = arguments.get("context", "fresh")
+    if value == "fresh":
+        return "fresh"
+    if value == "fork":
+        return "fork"
+    raise ToolArgumentError("context must be fresh or fork")
+
+
 __all__ = [
     "SPAWN_AGENT",
     "SPAWN_AGENT_PROMPT",
     "SUBAGENT_MAX_TASKS",
     "SpawnAgentTool",
+    "SubagentContext",
     "SubagentRunner",
 ]

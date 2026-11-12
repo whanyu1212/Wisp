@@ -512,8 +512,16 @@ the same model that starts from its task alone, works with the run's read-only t
 only its final message. The model is told to do the work itself by default and to delegate only a
 broad search or investigation whose raw output would crowd its context.
 
-- **Fresh context.** A subagent sees the session prompt and the task the model wrote. It sees none
-  of the conversation, and nothing it reads reaches the conversation except its report.
+- **Fresh context by default.** A subagent sees the session prompt and the task the model wrote.
+  It sees none of the conversation, and nothing it reads reaches the conversation except its
+  report.
+- **Or a fork of the conversation.** With `context: "fork"`, each subagent starts from the
+  conversation so far and then gets its task, so the task can refer to what was already found or
+  decided. A fork is sent the run's own prompt and tool list, so a provider can reuse what it
+  cached for the conversation up to the current prompt; the tool rounds of the current run are
+  sent again. Every forked subagent rereads the whole conversation, which costs its length again
+  for each task, so the model is told to fork only when restating the context would be long. A
+  fork is shown every tool the run has and is still refused all but the read-only ones.
 - **Only read-only tools.** A subagent is offered the read-only tools the run already offers: `read`,
   `ls`, `grep`, `find`, and MCP tools whose `tool_safety` you set to `"read"`. Tool selection and
   plan mode apply as for direct calls. It gets neither `spawn_agent` nor `codemode`. With

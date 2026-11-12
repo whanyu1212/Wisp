@@ -653,7 +653,7 @@ def test_nested_scheduling(tool_name: str, concurrent: int) -> None:
     [
         # Read-only is checked on its own, so even approving everything grants no more.
         ("mcp__db__drop", ToolApprovalPolicy.approve_all(), "not read-only"),
-        (CODEMODE, ToolApprovalPolicy.approve_all(), "cannot run another script"),
+        (CODEMODE, ToolApprovalPolicy.approve_all(), "cannot run a script"),
         ("missing", ToolApprovalPolicy.approve_all(), "missing"),
     ],
     ids=["not-read-only", "recursion", "unknown"],
