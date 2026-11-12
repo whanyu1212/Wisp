@@ -10,7 +10,19 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## Unreleased
+## 0.9.0 — Unreleased
+
+0.9.0 is a minor release on 0.8.1. It adds subagents, which are experimental and off by default:
+with them on, the model can hand read-only tasks to subagents through a new `spawn_agent` tool,
+and `/subagents` turns them on, chooses their model, and shows what each kind of subagent gets.
+Gemini and Claude sessions also cost less, because a new prompt no longer re-reads or re-writes
+the previous run in the provider's prompt cache. Gemini 4 Carbon joins the model catalog, and the
+terminal UI's backend starts serving before its MCP servers have connected.
+
+The wire contract grows, so the backend and frontend must come from the same release: there are
+new commands and events, and new fields on tool results and `rpc.subagents`. 0.9.0 reads every
+session 0.8.x wrote; 0.8.x cannot open a session that holds a subagent's result. Gemini and Claude
+sessions now save each tool-call turn as the provider sent it, so their session files are larger.
 
 ### Subagents (experimental)
 
