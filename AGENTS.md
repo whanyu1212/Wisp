@@ -30,8 +30,9 @@ These shared instructions apply to the entire repository and are tracked in vers
 - For consequential changes to security, persistence, concurrency, cancellation, the
   tool-execution and approval boundaries listed under Implementation conventions, public
   contracts, or a large rewrite or cross-cutting change, get an independent read-only review from
-  a fresh context against the requirements and the diff. The implementer's own review does not count. If no independent
-  reviewer is available, say so in the handoff instead of implying a review happened.
+  a fresh context against the requirements and the diff. The implementer's own review does not
+  count. If no independent reviewer is available, say so in the handoff instead of implying a
+  review happened.
 - Verify every subagent or reviewer finding against source and tests before acting on it. Reject
   invalid findings with evidence. Raise meaningful readability issues, not style preferences.
 - Prefer the smallest complete change that meets the user's intent. Explain meaningful tradeoffs
