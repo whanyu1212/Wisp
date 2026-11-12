@@ -1375,6 +1375,9 @@ pub fn bounded_tool_arguments(name: &str, arguments: &Value) -> Value {
             }
             let mut bounded = Map::new();
             bounded.insert("tasks".into(), Value::Array(tasks));
+            if arguments.get("context").and_then(Value::as_str) == Some("fork") {
+                bounded.insert("context".into(), Value::String("fork".into()));
+            }
             return Value::Object(bounded);
         }
         crate::script_card::CODEMODE => {

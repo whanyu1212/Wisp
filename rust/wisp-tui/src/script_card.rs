@@ -129,15 +129,25 @@ impl ScriptCard {
     }
 
     /// The card for a `spawn_agent` call with these (already bounded) arguments.
-    /// One task stands as written; several are numbered, a blank line apart.
+    /// One task stands as written; several are numbered, a blank line apart. A call
+    /// that forks the conversation says so on its line.
     pub fn from_task(arguments: &Value) -> Self {
         let tasks = subagent_tasks(arguments.get("tasks"), arguments.get("task"));
+        let forked = arguments.get("context").and_then(Value::as_str) == Some("fork");
         let (title, text) = match tasks.as_slice() {
             [] => (None, String::new()),
-            [task] => (None, (*task).to_owned()),
+            [task] => (
+                forked.then(|| clip(&format!("forked: {}", one_line(task)), TITLE_MAX_CHARS)),
+                (*task).to_owned(),
+            ),
             [first, ..] => (
                 Some(clip(
-                    &format!("{} tasks: {}", tasks.len(), one_line(first)),
+                    &format!(
+                        "{}{} tasks: {}",
+                        if forked { "forked, " } else { "" },
+                        tasks.len(),
+                        one_line(first)
+                    ),
                     TITLE_MAX_CHARS,
                 )),
                 tasks

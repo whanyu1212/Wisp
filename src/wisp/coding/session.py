@@ -82,10 +82,13 @@ from wisp.coding.prompt import (
 )
 from wisp.coding.stats import RunStats, build_session_stats
 from wisp.coding.subagent import (
+    FORK_OVERFLOW_ADVICE,
     SUBAGENT_INSTRUCTIONS,
     SUBAGENT_MAX_PARALLEL,
     SUBAGENT_MAX_TOOL_ITERATIONS,
     NestedCallToolExecutor,
+    fork_prompt,
+    fork_transcript,
     run_subagent,
 )
 from wisp.coding.tool_execution import ConfiguredToolExecutor, ImageStore
@@ -187,8 +190,14 @@ from wisp.tools.codemode.calls import CODEMODE, NestedCallResult
 from wisp.tools.codemode.tool import CODEMODE_PROMPT, CodemodeTool
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
+from wisp.tools.result import ToolError
 from wisp.tools.seen_files import SeenFiles
-from wisp.tools.subagent import SPAWN_AGENT, SPAWN_AGENT_PROMPT, SpawnAgentTool
+from wisp.tools.subagent import (
+    SPAWN_AGENT,
+    SPAWN_AGENT_PROMPT,
+    SpawnAgentTool,
+    SubagentContext,
+)
 
 # A resumed session reuses its persisted Git snapshot only while the provider may
 # still hold the cached prefix built from it. After a longer pause the cache has
@@ -404,6 +413,14 @@ def codemode_available() -> bool:
     """Report whether the `codemode` extra, which runs the scripts, is installed."""
 
     return importlib.util.find_spec("pydantic_monty") is not None
+
+
+@dataclass(frozen=True, slots=True)
+class _ForkPoint:
+    """A running conversation as a forked subagent starts from it."""
+
+    config: AgentHarnessConfig
+    messages: tuple[Message, ...]
 
 
 def _no_executor() -> ConfiguredToolExecutor:
@@ -2225,11 +2242,15 @@ class CodingSession:
         running = anyio.CapacityLimiter(SUBAGENT_MAX_PARALLEL)
         numbers = itertools.count(1)
 
-        async def run(task: str) -> str:
+        async def run(task: str, start_from: SubagentContext) -> str:
             number = next(numbers)
+            # Taken before waiting for a turn, so every task of a call forks the
+            # same conversation however long some of them wait.
+            fork = self._fork_point() if start_from == "fork" else None
             async with running:
                 return await self._run_subagent(
                     task,
+                    fork=fork,
                     number=number,
                     tools=subagent_tools,
                     registry=registry,
@@ -2257,6 +2278,7 @@ class CodingSession:
         self,
         task: str,
         *,
+        fork: _ForkPoint | None,
         number: int,
         tools: tuple[ToolSpec, ...],
         registry: ToolRegistry,
@@ -2266,16 +2288,20 @@ class CodingSession:
     ) -> str:
         """Run one subagent for a `spawn_agent` call and return its final message.
 
-        The subagent gets the session prompt built for its own tools, then its
-        instructions and the task; none of the conversation. It keeps its own record
-        of seen files, so what it reads never counts as seen by the run that
-        spawned it. Its model responses are accounted to the `spawn_agent` call.
+        The subagent starts fresh or forked; see `_fresh_subagent_harness` and
+        `_forked_subagent_harness`. Either way it keeps its own record of seen
+        files, so what it reads never counts as seen by the run that spawned it,
+        its calls are read-only, and its model responses are accounted to the
+        `spawn_agent` call.
 
         Args:
             task (str): The task the model wrote.
+            fork (_ForkPoint | None): The conversation the subagent starts from, or
+                None to start from the task alone.
             number (int): Which of the run's subagents this is, counted from one;
                 it keeps this subagent's recorded call ids apart from the others'.
-            tools (tuple[ToolSpec, ...]): The read-only tools the subagent is offered.
+            tools (tuple[ToolSpec, ...]): The read-only tools a fresh subagent is
+                offered.
             registry (ToolRegistry): The run's registry, which describes those tools.
             executor (ConfiguredToolExecutor): The run's executor, whose policy the
                 subagent's calls pass.
@@ -2286,36 +2312,86 @@ class CodingSession:
             str: The subagent's final message.
 
         Raises:
-            ToolError: The subagent failed before it could report.
+            ToolError: The subagent failed before it could report, or there is no
+                conversation to fork.
         """
 
         subagent_context = replace(
             context, seen_files=SeenFiles() if context.seen_files is not None else None
         )
         subagent_executor = executor.with_context(subagent_context)
-        prompt = await self._prompt_messages_async(
-            tools,
+        tool_executor = NestedCallToolExecutor(
+            subagent_executor.run_nested, call_id_prefix=f"subagent-{number}"
+        )
+        if fork is not None:
+            return await run_subagent(
+                self._forked_subagent_harness(tool_executor, fork),
+                fork_prompt(task),
+                record_usage=subagent_executor.record_model_usage,
+                overflow_advice=FORK_OVERFLOW_ADVICE,
+            )
+        harness = await self._fresh_subagent_harness(
+            tool_executor,
+            tools=tools,
             registry=registry,
             context=subagent_context,
-            session_id=session.session_id if session is not None else None,
             session=session,
             mcp_catalog=executor.mcp_catalog,
         )
-        harness = AgentHarness(
+        return await run_subagent(harness, task, record_usage=subagent_executor.record_model_usage)
+
+    def _subagent_tool_iterations(self) -> int:
+        """Return a subagent's tool-round limit: the run's own, up to the subagent cap."""
+
+        if self.max_tool_iterations is None:
+            return SUBAGENT_MAX_TOOL_ITERATIONS
+        return min(self.max_tool_iterations, SUBAGENT_MAX_TOOL_ITERATIONS)
+
+    async def _fresh_subagent_harness(
+        self,
+        tool_executor: NestedCallToolExecutor,
+        *,
+        tools: tuple[ToolSpec, ...],
+        registry: ToolRegistry,
+        context: ToolContext,
+        session: JsonlSession | None,
+        mcp_catalog: McpCatalog | None,
+    ) -> AgentHarness:
+        """Build the harness of a subagent that starts from its task alone.
+
+        It gets the session prompt built for its own read-only tools, then the
+        subagent instructions; none of the conversation.
+
+        Args:
+            tool_executor (NestedCallToolExecutor): Runs the subagent's tool calls.
+            tools (tuple[ToolSpec, ...]): The read-only tools the subagent is offered.
+            registry (ToolRegistry): The run's registry, which describes those tools.
+            context (ToolContext): The subagent's tool context.
+            session (JsonlSession | None): The run's session, if any.
+            mcp_catalog (McpCatalog | None): The MCP tools found on demand this run.
+
+        Returns:
+            AgentHarness: The harness, ready for the task as its first user message.
+        """
+
+        prompt = await self._prompt_messages_async(
+            tools,
+            registry=registry,
+            context=context,
+            session_id=session.session_id if session is not None else None,
+            session=session,
+            mcp_catalog=mcp_catalog,
+        )
+        return AgentHarness(
             AgentHarnessConfig(
                 provider=self.provider,
-                tool_executor=NestedCallToolExecutor(
-                    subagent_executor.run_nested, call_id_prefix=f"subagent-{number}"
-                ),
+                tool_executor=tool_executor,
                 model=self.model,
                 tools=tools,
-                max_tool_iterations=(
-                    SUBAGENT_MAX_TOOL_ITERATIONS
-                    if self.max_tool_iterations is None
-                    else min(self.max_tool_iterations, SUBAGENT_MAX_TOOL_ITERATIONS)
-                ),
+                max_tool_iterations=self._subagent_tool_iterations(),
                 effort=self.effort,
-                # Subagents share a prefix with each other, not with the conversation.
+                # Fresh subagents share a prefix with each other, not with the
+                # conversation.
                 prompt_cache_key=(
                     f"{_prompt_cache_key(session.session_id)}:subagent"
                     if session is not None
@@ -2329,7 +2405,60 @@ class CodingSession:
             ),
             messages=(*prompt.messages, Message(role="system", content=SUBAGENT_INSTRUCTIONS)),
         )
-        return await run_subagent(harness, task, record_usage=subagent_executor.record_model_usage)
+
+    def _fork_point(self) -> _ForkPoint:
+        """Capture the running conversation for the `spawn_agent` call now forking it.
+
+        Returns:
+            _ForkPoint: The run's request settings and its conversation so far, with
+            every waiting tool call answered.
+
+        Raises:
+            ToolError: No run is active, so there is no conversation to fork.
+        """
+
+        parent = self._active_harness
+        if parent is None:
+            raise ToolError("There is no conversation to fork.")
+        return _ForkPoint(
+            config=parent.config,
+            messages=fork_transcript(
+                parent.messages, started_by=ConfiguredToolExecutor.nested_host_call_id()
+            ),
+        )
+
+    def _forked_subagent_harness(
+        self, tool_executor: NestedCallToolExecutor, fork: _ForkPoint
+    ) -> AgentHarness:
+        """Build the harness of a subagent forked from the running conversation.
+
+        The fork keeps the run's own request settings: its prompt, model, effort,
+        prompt-cache key and every tool schema in the same order. A provider can
+        then reuse what it cached for the conversation, up to this run's prompt;
+        the run's own tool rounds are resent, since a fork does not share the run's
+        continuation with the provider. Because the fork is offered every tool the
+        run has, its read-only rule is enforced where calls run, not by what it is
+        shown.
+
+        Args:
+            tool_executor (NestedCallToolExecutor): Runs the subagent's tool calls.
+            fork (_ForkPoint): The conversation and settings captured at the fork.
+
+        Returns:
+            AgentHarness: The harness, holding the conversation so far, ready for
+            the task as its next user message.
+        """
+
+        return AgentHarness(
+            replace(
+                fork.config,
+                tool_executor=tool_executor,
+                max_tool_iterations=self._subagent_tool_iterations(),
+                # A subagent's tool results carry no images.
+                tool_result_image_loader=None,
+            ),
+            messages=fork.messages,
+        )
 
     def _apply_mcp_exposure(
         self, tools: tuple[ToolSpec, ...], registry: ToolRegistry | None

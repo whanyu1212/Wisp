@@ -1,16 +1,16 @@
 """Run a subagent for one `spawn_agent` call.
 
 A subagent is a second `AgentHarness` on the session's provider. It starts from the
-session prompt and the task, and its tool calls run as nested calls of the
-`spawn_agent` call that started it, through `ConfiguredToolExecutor.run_nested`:
-read-only, never asking for approval, recorded in that call's result. Only its final
-message goes back to the model that spawned it.
+session prompt and the task, or, when forked, from the conversation so far. Its tool
+calls run as nested calls of the `spawn_agent` call that started it, through
+`ConfiguredToolExecutor.run_nested`: read-only, never asking for approval, recorded
+in that call's result. Only its final message goes back to the model that spawned it.
 """
 
 from __future__ import annotations
 
 import itertools
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import replace
 
 import anyio
@@ -31,11 +31,12 @@ from wisp.events import (
     ToolExecutionEnded,
     UsageCost,
 )
+from wisp.messages import Message
 from wisp.providers.base import ContextOverflowError, ProviderError
 from wisp.providers.events import ToolCall
 from wisp.tools.codemode.calls import NestedCallResult
 from wisp.tools.result import ToolError
-from wisp.tools.subagent import SUBAGENT_MAX_TASKS
+from wisp.tools.subagent import SPAWN_AGENT, SUBAGENT_MAX_TASKS
 
 # Every round ends in one model response and the final message is one more, so the
 # responses of every subagent a call runs always fit in the result that accounts
@@ -56,7 +57,32 @@ SUBAGENT_INSTRUCTIONS = (
     "soon as the task is answered."
 )
 
+# A forked subagent keeps the conversation's own prompt, so its instructions arrive
+# with its task, as the user message that follows the copied conversation.
+_FORK_INSTRUCTIONS = (
+    "You are now a subagent forked from the conversation above. The agent in that "
+    "conversation continues separately and will read only your final message. Do "
+    "not continue its work: do only the task below, then stop. You can only read "
+    "and search; every other tool, though listed, is refused. Your final message "
+    "must be a complete, self-contained report: answer first, then the evidence, "
+    "with file paths and line numbers. Keep it short: give conclusions and the "
+    "references that support them, not an account of everything you read. You "
+    "cannot ask questions, so state any assumption you make."
+)
+_FORKED_CALL_RESULT = (
+    "Forked. You are a subagent this call started; your task is in the next message."
+)
+_UNFORKED_CALL_RESULT = "This call belongs to the main agent and has no result in this fork."
+
 _NO_REPORT = "The subagent finished without a report."
+_OVERFLOW = "The subagent ran out of context before it could report."
+# What to try next depends on what filled the context: the subagent's own reading,
+# or the conversation a fork began with.
+FRESH_OVERFLOW_ADVICE = "Give it a narrower task."
+FORK_OVERFLOW_ADVICE = (
+    "This conversation is too long to fork: use context fresh and put what the "
+    "subagent needs in its task."
+)
 
 NestedCallRunner = TypeAliasType(
     "NestedCallRunner", Callable[[ToolCall], Awaitable[NestedCallResult]]
@@ -132,8 +158,63 @@ class NestedCallToolExecutor:
         )
 
 
+def fork_transcript(messages: Sequence[Message], *, started_by: str | None) -> tuple[Message, ...]:
+    """Return a conversation as a subagent forked from it starts with it.
+
+    A fork happens while the conversation's last assistant message still waits for
+    its tool results, the `spawn_agent` call among them. Every call still waiting
+    is given a result here, so the copy is a complete exchange and a provider
+    accepts it: the call that forked says the reader is now its subagent, the
+    others that they belong to the main agent. Results already there are kept.
+
+    Args:
+        messages (Sequence[Message]): The conversation up to the fork, ending in an
+            assistant message with tool calls and any results that have arrived.
+        started_by (str | None): The id of the `spawn_agent` call that forked, or
+            None when it is not known, which marks no call as the subagent's own.
+
+    Returns:
+        tuple[Message, ...]: The conversation with every call of that message
+        answered, in call order after the results already present. A conversation
+        that does not end that way is returned unchanged.
+    """
+
+    calls_at = next(
+        (index for index in range(len(messages) - 1, -1, -1) if messages[index].role != "tool"),
+        None,
+    )
+    if calls_at is None or not messages[calls_at].tool_calls:
+        return tuple(messages)
+    answered = {message.tool_call_id for message in messages[calls_at + 1 :]}
+    placeholders = [
+        Message(
+            role="tool",
+            content=(
+                _FORKED_CALL_RESULT
+                if call.name == SPAWN_AGENT and call.call_id == started_by
+                else _UNFORKED_CALL_RESULT
+            ),
+            tool_call_id=call.call_id,
+            tool_name=call.name,
+        )
+        for call in messages[calls_at].tool_calls or ()
+        if call.call_id not in answered
+    ]
+    return (*messages, *placeholders)
+
+
+def fork_prompt(task: str) -> str:
+    """Return the user message that gives a forked subagent its role and its task."""
+
+    return f"{_FORK_INSTRUCTIONS}\n\nTask:\n{task}"
+
+
 async def run_subagent(
-    harness: AgentHarness, task: str, *, record_usage: ModelUsageRecorder
+    harness: AgentHarness,
+    task: str,
+    *,
+    record_usage: ModelUsageRecorder,
+    overflow_advice: str = FRESH_OVERFLOW_ADVICE,
 ) -> str:
     """Run a subagent on one task and return its final message.
 
@@ -142,10 +223,12 @@ async def run_subagent(
     cancels the subagent; its event stream is closed before this returns or raises.
 
     Args:
-        harness (AgentHarness): The subagent's harness, holding its prompt and no
-            conversation.
-        task (str): The task, sent as the subagent's only user message.
+        harness (AgentHarness): The subagent's harness, holding its prompt and, for
+            a fork, the conversation it was forked from.
+        task (str): The task, sent as the subagent's next user message.
         record_usage (ModelUsageRecorder): Receives each response's usage and cost.
+        overflow_advice (str): What the model should try when the subagent runs out
+            of context. Defaults to narrowing the task.
 
     Returns:
         str: The subagent's final message. When it reached its tool-round limit
@@ -175,9 +258,7 @@ async def run_subagent(
     except ToolIterationLimitError:
         limit_reached = True
     except ContextOverflowError as exc:
-        raise ToolError(
-            "The subagent ran out of context before it could report. Give it a narrower task."
-        ) from exc
+        raise ToolError(f"{_OVERFLOW} {overflow_advice}") from exc
     except ProviderError as exc:
         raise ToolError(f"The subagent failed: {exc}") from exc
     finally:
@@ -196,9 +277,13 @@ async def run_subagent(
 
 
 __all__ = [
+    "FORK_OVERFLOW_ADVICE",
+    "FRESH_OVERFLOW_ADVICE",
     "SUBAGENT_INSTRUCTIONS",
     "SUBAGENT_MAX_PARALLEL",
     "SUBAGENT_MAX_TOOL_ITERATIONS",
     "NestedCallToolExecutor",
+    "fork_prompt",
+    "fork_transcript",
     "run_subagent",
 ]

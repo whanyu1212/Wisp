@@ -19,6 +19,9 @@ this policy.
   gives each report under a `## Task N` heading. It is off unless `"subagents": true` is set in
   `~/.wisp/settings.json` or `WISP_SUBAGENTS=1`. See
   [Delegating to a subagent](site/src/content/pages/guide/tools-and-safety.md#delegating-to-a-subagent-experimental).
+- `spawn_agent` takes `context: "fork"` to start each subagent from the conversation so far
+  instead of from its task alone. A fork keeps the run's prompt, tools and cache key, and is
+  still read-only.
 - A tool result that reaches a subagent or a codemode script without its image now says the image
   was left out, where before it read as a complete result.
 

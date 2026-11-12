@@ -2193,6 +2193,35 @@ fn several_tasks_are_numbered() {
 }
 
 #[test]
+fn forked_subagents_say_so() {
+    for (tasks, expected) in [
+        (
+            json!(["Check the plan."]),
+            "Delegating forked: Check the plan.",
+        ),
+        (
+            json!(["Check the plan.", "Check the tests."]),
+            "Delegating forked, 2 tasks: Check the plan.",
+        ),
+    ] {
+        let buffer = script_card(
+            &[
+                json!({"type": "tool.call", "call_id": "script-1", "name": "spawn_agent",
+                       "arguments": {"tasks": tasks, "context": "fork"}}),
+            ],
+            false,
+            100,
+        );
+
+        let text = screen_text(&buffer);
+        assert!(
+            text.contains(expected),
+            "{expected:?} missing from:\n{text}"
+        );
+    }
+}
+
+#[test]
 fn subagent_task_is_sanitized() {
     let buffer = script_card(
         &[

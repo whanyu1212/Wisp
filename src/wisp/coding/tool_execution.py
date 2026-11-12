@@ -353,6 +353,17 @@ class ConfiguredToolExecutor:
         return executor
 
     @staticmethod
+    def nested_host_call_id() -> str | None:
+        """Return the id of the script or `spawn_agent` call this code runs inside.
+
+        Returns:
+            str | None: That call's id, or None outside such a call.
+        """
+
+        log = _SCRIPT_CALLS.get()
+        return log.parent_call_id if log is not None else None
+
+    @staticmethod
     def record_model_usage(usage: TokenUsage, cost: UsageCost | None) -> None:
         """Account one model response to the subagent call that is running.
 
@@ -559,7 +570,7 @@ class ConfiguredToolExecutor:
 
         if tool_call.name == CODEMODE:
             return _failure_outcome(
-                "A script cannot run another script.", failure_code="policy_denied"
+                "A script or a subagent cannot run a script.", failure_code="policy_denied"
             )
         if tool_call.name == SPAWN_AGENT:
             return _failure_outcome(
@@ -573,14 +584,15 @@ class ConfiguredToolExecutor:
             # Checked on the tool that runs, so no route, such as `mcp_call` naming a
             # command tool, reaches more than a read-only tool even under `--yes`.
             return _failure_outcome(
-                f"{tool.name} is not read-only; a script can call only read-only tools.",
+                f"{tool.name} is not read-only; a script or a subagent can call only "
+                "read-only tools.",
                 failure_code="policy_denied",
             )
         if self._approval_policy.requires_approval(tool) and not self._approval_policy.approves(
             tool
         ):
             return _failure_outcome(
-                f"{tool.name} needs approval, which a script cannot ask for. "
+                f"{tool.name} needs approval, which a script or a subagent cannot ask for. "
                 "Call it directly instead.",
                 failure_code="approval_denied",
             )

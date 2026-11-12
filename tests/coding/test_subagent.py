@@ -20,6 +20,7 @@ import pytest
 from tests.agent.loop.support import tool_call_stream
 from wisp.coding.prompt import WEB_SEARCH_GUIDANCE
 from wisp.coding.session import CodingSession
+from wisp.coding.subagent import fork_prompt, fork_transcript
 from wisp.coding.tool_execution import ConfiguredToolExecutor
 from wisp.events import (
     AgentCompleted,
@@ -28,6 +29,7 @@ from wisp.events import (
     ModelResponseUsage,
     TokenUsage,
     ToolApprovalRequested,
+    ToolCallSnapshot,
     ToolNestedCallEnded,
     ToolNestedCallStarted,
     ToolResultReady,
@@ -58,7 +60,7 @@ from wisp.tools.base import ToolArguments, ToolExecutionMetadata, ToolInputSchem
 from wisp.tools.codemode.calls import CODEMODE
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
-from wisp.tools.result import ToolResult
+from wisp.tools.result import ToolError, ToolResult
 from wisp.tools.seen_files import SeenFiles
 from wisp.tools.subagent import SPAWN_AGENT, SpawnAgentTool
 
@@ -325,7 +327,7 @@ def test_calls_recorded_as_nested(tmp_path: Path) -> None:
         ("drop", "not read-only"),
         ("audit", "needs approval"),
         (SPAWN_AGENT, "cannot spawn a subagent"),
-        (CODEMODE, "cannot run another script"),
+        (CODEMODE, "cannot run a script"),
     ],
 )
 def test_refuses_unoffered_calls(tmp_path: Path, name: str, refusal: str) -> None:
@@ -545,8 +547,8 @@ def test_dropped_image_is_reported(tmp_path: Path) -> None:
 class _RoutedProvider(ScriptedProvider):
     """Serve each conversation its own streams, whatever order requests arrive in.
 
-    A conversation is known by its user message: the run's prompt, or a subagent's
-    task. Subagents running at once interleave their requests, so one shared queue
+    A conversation is known by its latest user message: the run's prompt, or a
+    subagent's task. Subagents running at once interleave their requests, so one shared queue
     of streams would hand a subagent another's response.
     """
 
@@ -557,7 +559,7 @@ class _RoutedProvider(ScriptedProvider):
     async def stream(  # type: ignore[override]
         self, messages: Sequence[Message], **options: object
     ) -> AsyncIterator[ProviderEvent]:
-        (user,) = [message.content for message in messages if message.role == "user"]
+        user = [message.content for message in messages if message.role == "user"][-1]
         self.calls.append(user)  # type: ignore[arg-type]
         for item in self._conversations[user].pop(0):
             await anyio.sleep(0)
@@ -824,7 +826,7 @@ def test_most_tasks_one_call_takes(tmp_path: Path) -> None:
 def test_unexpected_failure_spares_the_rest(tmp_path: Path) -> None:
     """A subagent that crashes costs neither the others' reports nor their run."""
 
-    async def runner(task: str) -> str:
+    async def runner(task: str, start_from: str) -> str:
         if task == "crash":
             raise RuntimeError("secret detail")
         await anyio.sleep(0.01)
@@ -843,7 +845,7 @@ def test_unexpected_failure_spares_the_rest(tmp_path: Path) -> None:
 def test_long_report_leaves_room(tmp_path: Path) -> None:
     """A report over its share of the result is cut; the reports after it stay whole."""
 
-    async def runner(task: str) -> str:
+    async def runner(task: str, start_from: str) -> str:
         return "long line\n" * 200 if task == "long" else f"report on {task}"
 
     tool = SpawnAgentTool(runner)
@@ -874,7 +876,7 @@ def test_long_reports_fit_together(
 ) -> None:
     """Reports that are all too long still fit the result's limit between them."""
 
-    async def runner(task: str) -> str:
+    async def runner(task: str, start_from: str) -> str:
         return f"{task} line\n" * 200
 
     tool = SpawnAgentTool(runner)
@@ -890,6 +892,222 @@ def test_long_reports_fit_together(
     assert measure(result.text) <= next(iter(limits.values()))
     for number, task in enumerate(("a", "b", "c"), start=1):
         assert f"## Task {number}\n{task} line\n" in result.text
+
+
+def _fork(*tasks: str) -> list[ProviderEvent]:
+    """One `spawn_agent` call that forks the conversation for each task."""
+
+    return tool_call_stream(
+        ToolCall(
+            call_id="call-spawn",
+            name=SPAWN_AGENT,
+            arguments={"tasks": list(tasks), "context": "fork"},
+        )
+    )
+
+
+def test_fork_continues_the_conversation(tmp_path: Path) -> None:
+    """A fork is sent the run's own request, then what happened since, then its task."""
+
+    run = _run(
+        tmp_path,
+        _Tools(),
+        [
+            tool_call_stream(ToolCall(call_id="own", name="lookup", arguments={"table": "a"})),
+            _fork("say what a holds"),
+            _says("a holds users"),
+            _says("done"),
+        ],
+    )
+
+    first, _, fork, _ = run.provider.calls
+    # The run's first request is the fork's prefix, message for message, with the
+    # same tools in the same order and the same cache key: what a provider cached
+    # for the conversation still applies.
+    assert fork.messages[: len(first.messages)] == first.messages
+    assert fork.tools == first.tools
+    assert fork.prompt_cache_key == first.prompt_cache_key
+    assert fork.previous_response_id is None
+    since = [message.content for message in fork.messages[len(first.messages) :]]
+    # What the run had found, the note that this reader is the fork, then the task.
+    assert "lookup:a" in since[0]
+    assert "You are a subagent this call started" in since[-2]
+    assert since[-1] == fork_prompt("say what a holds")
+    assert fork.messages[-1].role == "user"
+    assert run.result.output == "a holds users"
+
+
+def _call(call_id: str, name: str) -> ToolCallSnapshot:
+    return ToolCallSnapshot(call_id=call_id, name=name, arguments={})
+
+
+@pytest.mark.parametrize(
+    ("answered", "added"),
+    [
+        ((), ["read-1", "spawn-1", "grep-1"]),
+        (("read-1",), ["spawn-1", "grep-1"]),
+        (("read-1", "grep-1"), ["spawn-1"]),
+    ],
+    ids=["none-answered", "earlier-call-answered", "siblings-answered"],
+)
+def test_fork_answers_waiting_calls(answered: tuple[str, ...], added: list[str]) -> None:
+    """Every call still waiting when the conversation forks gets a result in the copy."""
+
+    conversation = [
+        Message(role="user", content="go"),
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=(
+                _call("read-1", "read"),
+                _call("spawn-1", SPAWN_AGENT),
+                _call("grep-1", "grep"),
+            ),
+        ),
+        *(Message(role="tool", content="result", tool_call_id=call_id) for call_id in answered),
+    ]
+
+    forked = fork_transcript(conversation, started_by="spawn-1")
+
+    assert list(forked[: len(conversation)]) == conversation
+    placeholders = forked[len(conversation) :]
+    assert [message.tool_call_id for message in placeholders] == added
+    assert {
+        message.tool_call_id: "You are a subagent" in message.content for message in placeholders
+    } == {call_id: call_id == "spawn-1" for call_id in added}
+
+
+@pytest.mark.parametrize(
+    "conversation",
+    [
+        [],
+        [Message(role="user", content="go"), Message(role="assistant", content="done")],
+    ],
+    ids=["empty", "settled"],
+)
+def test_fork_without_waiting_calls_unchanged(conversation: list[Message]) -> None:
+    assert list(fork_transcript(conversation, started_by="spawn-1")) == conversation
+
+
+def test_fork_ignores_earlier_rounds_ids() -> None:
+    """A call waiting now is answered though an earlier round used the same call id.
+
+    Models that issue no call ids repeat Wisp's synthetic ones from round to round.
+    """
+
+    conversation = [
+        Message(role="assistant", content="", tool_calls=(_call("call-read-0", "read"),)),
+        Message(role="tool", content="earlier result", tool_call_id="call-read-0"),
+        Message(role="assistant", content="", tool_calls=(_call("call-read-0", "read"),)),
+    ]
+
+    forked = fork_transcript(conversation, started_by=None)
+
+    assert [message.tool_call_id for message in forked[len(conversation) :]] == ["call-read-0"]
+
+
+def test_fork_marks_only_its_own_call() -> None:
+    """Of several `spawn_agent` calls waiting, a fork is told which one started it."""
+
+    conversation = [
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=(_call("spawn-1", SPAWN_AGENT), _call("spawn-2", SPAWN_AGENT)),
+        ),
+    ]
+
+    first, second = fork_transcript(conversation, started_by="spawn-2")[1:]
+
+    assert "belongs to the main agent" in first.content
+    assert "You are a subagent this call started" in second.content
+
+
+def test_fork_needs_a_running_conversation(tmp_path: Path) -> None:
+    session, _ = _session(tmp_path, _Tools(), [])
+
+    with pytest.raises(ToolError, match="no conversation to fork"):
+        session._fork_point()  # noqa: SLF001
+
+
+def test_fork_overflow_says_to_start_fresh(tmp_path: Path) -> None:
+    """A fork too long for the model is told to start fresh, not to narrow its task."""
+
+    run = _run(
+        tmp_path,
+        _Tools(),
+        [_fork("look"), [ContextOverflowError("too long")], _says("done")],  # type: ignore[list-item]
+    )
+
+    assert run.result.is_error
+    assert "too long to fork: use context fresh" in run.result.output
+    assert "narrower task" not in run.result.output
+
+
+def test_fork_is_read_only(tmp_path: Path) -> None:
+    """A fork is shown every tool the run has, and still may only read."""
+
+    tools = _Tools()
+
+    run = _run(
+        tmp_path,
+        tools,
+        [
+            _fork("clean up"),
+            _calls(
+                ("drop", {"table": "users"}),
+                (SPAWN_AGENT, {"tasks": ["again"]}),
+                ("lookup", {"table": "users"}),
+            ),
+            _says("looked only"),
+            _says("done"),
+        ],
+    )
+
+    assert {"drop", SPAWN_AGENT} <= {tool.name for tool in run.provider.calls[1].tools}
+    assert [(call.name, call.is_error) for call in run.result.nested_calls] == [
+        ("drop", True),
+        (SPAWN_AGENT, True),
+        ("lookup", False),
+    ]
+    assert "a script or a subagent can call only read-only tools" in (
+        run.result.nested_calls[0].error or ""
+    )
+    assert tools.drop.calls == []
+    assert len(run.provider.calls) == 4
+
+
+def test_forks_share_one_conversation(tmp_path: Path) -> None:
+    """Each task of a forking call gets the same conversation and its own task."""
+
+    registry = ToolRegistry()
+    registry.register(_Tool("lookup"))
+    session, provider = _task_list(
+        tmp_path,
+        {
+            "go": [_fork("a", "b"), _says("done")],
+            fork_prompt("a"): [_says("report on a")],
+            fork_prompt("b"): [_says("report on b")],
+        },
+        registry,
+    )
+
+    (result,) = [event for event in _collect(session) if isinstance(event, ToolResultReady)]
+
+    assert result.output == "## Task 1\nreport on a\n\n## Task 2\nreport on b"
+    assert sorted(provider.calls) == sorted(["go", fork_prompt("a"), fork_prompt("b"), "go"])  # type: ignore[type-var]
+
+
+def test_unknown_context_rejected(tmp_path: Path) -> None:
+    call = ToolCall(
+        call_id="call-spawn", name=SPAWN_AGENT, arguments={"tasks": ["a"], "context": "sideways"}
+    )
+
+    run = _run(tmp_path, _Tools(), [tool_call_stream(call), _says("done")])
+
+    assert run.result.is_error
+    assert "context must be fresh or fork" in run.result.output
+    assert len(run.provider.calls) == 2
 
 
 def test_cancel_reaches_waiting_subagents(tmp_path: Path) -> None:
