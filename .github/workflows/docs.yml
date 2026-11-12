@@ -44,7 +44,10 @@ concurrency:
 jobs:
   build:
     name: Check Astro site
-    runs-on: ubuntu-latest
+    # setup-python installs the host runner's Python build into the container
+    # below, so the host must be the Ubuntu release the image is built on: a
+    # newer host's Python needs a newer OpenSSL than the image has.
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     # Keep this version aligned with @playwright/test in site/package-lock.json.
     # The image includes browsers and OS dependencies, avoiding apt mirror stalls.
