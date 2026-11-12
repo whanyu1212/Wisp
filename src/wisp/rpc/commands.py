@@ -227,6 +227,28 @@ class SetSubagentsCommand(RpcCommandModel):
     enabled: bool
 
 
+class SetSubagentModelCommand(RpcCommandModel):
+    """Choose the model fresh subagents use from the next run and save it.
+
+    ``model`` names a model on the session's provider; None clears the choice, so
+    subagents use the session's model. When the model catalog lists the provider
+    without that model the command fails and nothing changes. The reply is
+    ``rpc.subagents``.
+    """
+
+    type: Literal["set_subagent_model"] = "set_subagent_model"
+    # Trimmed like the setting it saves; a blank name is rejected, not saved.
+    model: (
+        Annotated[
+            str,
+            StringConstraints(
+                strip_whitespace=True, min_length=1, max_length=MAX_RPC_MODEL_ID_CHARS
+            ),
+        ]
+        | None
+    )
+
+
 class ChangeDirectoryCommand(RpcCommandModel):
     """Move the session's working directory to another folder in its project.
 
@@ -731,6 +753,7 @@ RpcCommand = TypeAliasType(
         | SetCodemodeCommand
         | GetSubagentsCommand
         | SetSubagentsCommand
+        | SetSubagentModelCommand
         | GetCommandsCommand
         | GetModelCatalogCommand
         | GetConnectionCatalogCommand

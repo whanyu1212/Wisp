@@ -582,8 +582,9 @@ def test_model_catalog_reports_image_input(
     [
         ({"type": "get_subagents", "id": "subagents-1"}, True),
         ({"type": "set_subagents", "id": "subagents-1", "enabled": True}, False),
+        ({"type": "set_subagent_model", "id": "subagents-1", "model": "small"}, False),
     ],
-    ids=["read", "change"],
+    ids=["read", "change", "model"],
 )
 def test_subagents_during_a_run(tmp_path: Path, command: dict[str, object], answered: bool) -> None:
     """While another command runs, the setting can be read and cannot be changed."""

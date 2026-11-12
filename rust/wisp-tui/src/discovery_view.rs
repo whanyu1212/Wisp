@@ -1,11 +1,12 @@
-//! Skill selection, MCP server management, and the `/permissions`, `/codemode` and
-//! `/subagents` pickers.
+//! Skill selection, MCP server management, and the `/permissions` and `/codemode`
+//! pickers. The `/subagents` panel is drawn by `subagents_view`.
 
 use crate::{
     mcp_manager::McpView,
     mouse::Rows,
     reducer::{UiAction, UiState},
     session_picker::terminal_row,
+    subagents_view::SubagentsView,
     theme::Palette,
     ui::sanitize_for_terminal,
 };
@@ -38,7 +39,7 @@ pub(crate) enum DiscoveryView {
     Mcp(Box<McpView>),
     Permissions(ChoiceView),
     Codemode(ChoiceView),
-    Subagents(ChoiceView),
+    Subagents(SubagentsView),
 }
 
 /// A picker of a few saved choices, such as `/permissions`. Like a pending
@@ -110,12 +111,6 @@ const CODEMODE_CHOICES: [(char, &str, CodemodeSetting); 3] = [
     ('3', "Never", CodemodeSetting::Never),
 ];
 
-/// The `/subagents` choices; the value is whether runs may use subagents.
-const SUBAGENT_CHOICES: [(char, &str, bool); 2] = [
-    ('1', "On — the model may hand tasks to subagents", true),
-    ('2', "Off", false),
-];
-
 impl DiscoveryView {
     // The scheduler preserves this painted choice while draining a finite event prefix.
     pub fn rendered_selection(&self) -> Option<&str> {
@@ -123,7 +118,7 @@ impl DiscoveryView {
             Self::Skills(view) => view.rendered.as_deref(),
             Self::Permissions(view) => view.rendered.map(|index| PERMISSION_CHOICES[index].1),
             Self::Codemode(view) => view.rendered.map(|index| CODEMODE_CHOICES[index].1),
-            Self::Subagents(view) => view.rendered.map(|index| SUBAGENT_CHOICES[index].1),
+            Self::Subagents(view) => view.rendered_selection(),
             Self::Mcp(_) => None,
         }
     }
@@ -147,7 +142,7 @@ impl DiscoveryView {
     }
 
     pub fn subagents() -> Self {
-        Self::Subagents(ChoiceView::default())
+        Self::Subagents(SubagentsView::default())
     }
 
     pub fn key_activates(&self, key: KeyEvent) -> bool {
@@ -155,7 +150,7 @@ impl DiscoveryView {
             return view.key_activates(key);
         }
         key.code == KeyCode::Enter
-            || (matches!(self, Self::Permissions(_) | Self::Subagents(_))
+            || (matches!(self, Self::Permissions(_))
                 && matches!(key.code, KeyCode::Char('1' | '2')))
             || (matches!(self, Self::Codemode(_)) && matches!(key.code, KeyCode::Char('1'..='3')))
     }
@@ -164,7 +159,10 @@ impl DiscoveryView {
         if let Self::Mcp(view) = self {
             view.invalidate();
         }
-        if let Self::Permissions(view) | Self::Codemode(view) | Self::Subagents(view) = self {
+        if let Self::Permissions(view) | Self::Codemode(view) = self {
+            view.invalidate();
+        }
+        if let Self::Subagents(view) = self {
             view.invalidate();
         }
         if let Self::Skills(view) = self {
@@ -233,9 +231,16 @@ impl DiscoveryView {
         if let Self::Mcp(view) = self {
             return view.handle_key(key, state);
         }
-        if key.code == KeyCode::Esc
-            || (key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL)
-        {
+        if key.code == KeyCode::Esc {
+            // Esc first leaves the subagents panel's model list or instructions.
+            if let Self::Subagents(view) = self {
+                if view.back() {
+                    return DiscoveryAction::None;
+                }
+            }
+            return DiscoveryAction::Close;
+        }
+        if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
             return DiscoveryAction::Close;
         }
         if key.modifiers != KeyModifiers::NONE {
@@ -271,17 +276,7 @@ impl DiscoveryView {
                     },
                 )
             }
-            Self::Subagents(view) => {
-                let ready = !state.subagents.loading() && state.subagents.snapshot.is_some();
-                view.choose(key.code, SUBAGENT_CHOICES.len(), ready).map_or(
-                    DiscoveryAction::None,
-                    |choice| {
-                        DiscoveryAction::Refresh(UiAction::Subagents(Some(
-                            SUBAGENT_CHOICES[choice].2,
-                        )))
-                    },
-                )
-            }
+            Self::Subagents(view) => view.handle_key(key.code, state),
             Self::Skills(view) => view.handle_key(key.code, state.skills.snapshot.as_deref()),
             Self::Mcp(_) => unreachable!("the MCP view handles its own keys"),
         }
@@ -298,7 +293,10 @@ impl DiscoveryView {
         match self {
             Self::Permissions(view) => render_permissions(view, frame, area, state, palette),
             Self::Codemode(view) => render_codemode(view, frame, area, state, palette),
-            Self::Subagents(view) => render_subagents(view, frame, area, state, palette),
+            Self::Subagents(view) => {
+                view.render(frame, area, state, palette);
+                Rows::default()
+            }
             Self::Skills(view) => view.render(frame, area, state, notice, palette),
             Self::Mcp(view) => {
                 view.render(frame, area, state, palette);
@@ -759,119 +757,6 @@ fn codemode_notes(state: &UiState) -> Vec<(String, bool)> {
     notes
 }
 
-fn render_subagents(
-    view: &mut ChoiceView,
-    frame: &mut Frame<'_>,
-    area: Rect,
-    state: &UiState,
-    palette: Palette,
-) -> Rows {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .padding(Padding::horizontal(1))
-        .style(palette.composer())
-        .border_style(palette.border())
-        .title(" Subagents ")
-        .title_bottom(
-            Line::from(" ↑↓ select · Enter apply · Esc close ")
-                .style(Style::default().fg(palette.muted))
-                .right_aligned(),
-        );
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    let width = usize::from(inner.width);
-    let snapshot = state.subagents.snapshot.as_deref();
-    let muted = Style::default().fg(palette.muted);
-    let warning = Style::default().fg(palette.warning);
-    let mut lines = choice_lines(
-        &SUBAGENT_CHOICES,
-        view.selected,
-        snapshot.map(|snapshot| snapshot.enabled),
-        width,
-        palette,
-    );
-    lines.push(Line::default());
-    for (text, style) in subagents_notes(state) {
-        lines.push(Line::styled(
-            terminal_row(&text, width),
-            if style { warning } else { muted },
-        ));
-    }
-    frame.render_widget(Paragraph::new(lines), inner);
-    view.painted = inner.height >= 3 && inner.width >= 22 && !state.subagents.loading();
-    view.rendered = if view.painted { view.selected } else { None };
-    Rows::default()
-}
-
-/// The `/subagents` picker's rows below its choices, each flagged when it warns.
-fn subagents_notes(state: &UiState) -> Vec<(String, bool)> {
-    let mut notes = Vec::new();
-    let snapshot = state.subagents.snapshot.as_deref();
-    if let Some(error) = &state.subagents.error {
-        notes.push((format!("Error: {error}"), true));
-    } else if state.subagents.loading() {
-        let text = if snapshot.is_some() {
-            "Updating subagents…"
-        } else {
-            "Loading subagents…"
-        };
-        notes.push((text.to_owned(), false));
-    }
-    if let Some(snapshot) = snapshot {
-        let offered = if snapshot.offered {
-            "On for the next prompt."
-        } else if snapshot.enabled {
-            "On, but the next prompt has no read-only tool for a subagent to use."
-        } else {
-            "Off for the next prompt."
-        };
-        notes.push((offered.to_owned(), snapshot.enabled && !snapshot.offered));
-        // The model is a setting, not a choice here: this view only says what applies.
-        let in_use = snapshot
-            .model_in_use
-            .as_deref()
-            .unwrap_or("the default model");
-        match snapshot.model.as_deref() {
-            None => notes.push((
-                format!("Subagents use the session's model, {in_use}."),
-                false,
-            )),
-            Some(model) if snapshot.model_in_use.as_deref() == Some(model) => {
-                notes.push((
-                    format!("Fresh subagents use {model} (subagent_model)."),
-                    false,
-                ));
-            }
-            Some(model) => notes.push((
-                format!("subagent_model {model} is not on this provider; using {in_use}."),
-                true,
-            )),
-        }
-        if let Some(env) = snapshot.env_enabled {
-            notes.push((
-                format!(
-                    "WISP_SUBAGENTS turns subagents {} when Wisp starts.",
-                    if env { "on" } else { "off" }
-                ),
-                true,
-            ));
-        }
-    }
-    notes.push((
-        "Saved for you. Applies from the next prompt.".to_owned(),
-        false,
-    ));
-    notes
-}
-
-/// Rows the docked `/subagents` panel needs for `state`, borders included.
-pub(crate) fn subagents_panel_height(state: &UiState) -> u16 {
-    // Borders, two choices and a gap, then the notes.
-    let notes = u16::try_from(subagents_notes(state).len()).unwrap_or(u16::MAX);
-    5_u16.saturating_add(notes)
-}
-
 /// The setting's name as the side panel and picker notes show it.
 pub(crate) fn codemode_label(setting: CodemodeSetting) -> &'static str {
     match setting {
@@ -923,79 +808,6 @@ mod tests {
     }
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
-    }
-
-    fn subagents_state(
-        enabled: bool,
-        offered: bool,
-        model: Option<&str>,
-        model_in_use: Option<&str>,
-    ) -> Arc<wisp_protocol::events::SubagentsState> {
-        Arc::new(wisp_protocol::events::SubagentsState {
-            enabled,
-            offered,
-            env_enabled: None,
-            model: model.map(str::to_owned),
-            model_in_use: model_in_use.map(str::to_owned),
-        })
-    }
-
-    #[test]
-    fn subagents_picker_applies_a_number() {
-        let mut state = UiState::unconfigured();
-        let mut view = DiscoveryView::subagents();
-        // Nothing applies before the setting has loaded and been painted.
-        assert!(matches!(
-            view.handle_key(key(KeyCode::Char('1')), &state),
-            DiscoveryAction::None
-        ));
-        state.subagents.snapshot = Some(Arc::new(wisp_protocol::events::SubagentsState {
-            env_enabled: Some(true),
-            ..(*subagents_state(false, false, None, Some("big-model"))).clone()
-        }));
-        let rendered = draw(&mut view, &state, 72, subagents_panel_height(&state));
-        assert!(rendered.contains("current"));
-        assert!(rendered.contains("Off for the next prompt."));
-        assert!(rendered.contains("Subagents use the session's model, big-model."));
-        assert!(rendered.contains("WISP_SUBAGENTS turns subagents on when Wisp starts."));
-        assert!(rendered.contains("Applies from the next prompt."));
-        assert!(matches!(
-            view.handle_key(key(KeyCode::Char('1')), &state),
-            DiscoveryAction::Refresh(UiAction::Subagents(Some(true)))
-        ));
-        // A number past the choices does nothing.
-        draw(&mut view, &state, 72, subagents_panel_height(&state));
-        assert!(matches!(
-            view.handle_key(key(KeyCode::Char('3')), &state),
-            DiscoveryAction::None
-        ));
-    }
-
-    #[test]
-    fn subagents_picker_names_the_model() {
-        for (model, model_in_use, expected) in [
-            (
-                Some("small-model"),
-                Some("small-model"),
-                "Fresh subagents use small-model (subagent_model).",
-            ),
-            // A model the current provider lacks is flagged, with what runs instead.
-            (
-                Some("other-model"),
-                Some("big-model"),
-                "subagent_model other-model is not on this provider; using big-model.",
-            ),
-        ] {
-            let mut state = UiState::unconfigured();
-            let mut view = DiscoveryView::subagents();
-            state.subagents.snapshot = Some(subagents_state(true, true, model, model_in_use));
-            let rendered = draw(&mut view, &state, 90, subagents_panel_height(&state));
-            assert!(rendered.contains("On for the next prompt."), "{rendered}");
-            assert!(
-                rendered.contains(expected),
-                "{expected:?} missing from:\n{rendered}"
-            );
-        }
     }
 
     #[test]

@@ -111,6 +111,8 @@ from wisp.events.rpc import (
     RpcSubagentsReported,
     RpcWorkspaceReported,
     SkillCatalogUpdated,
+    SubagentKind,
+    SubagentKindName,
     SubagentsState,
 )
 from wisp.events.run import (
@@ -353,6 +355,8 @@ __all__ = [
     "SessionStatsReported",
     "SkillCatalogUpdated",
     "SkillInvoked",
+    "SubagentKind",
+    "SubagentKindName",
     "SubagentsState",
     "TokenUsage",
     "ToolApprovalRequested",

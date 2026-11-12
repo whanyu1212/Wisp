@@ -9,8 +9,10 @@ import pytest
 from tests.support.rpc import RpcExecutorFixture, build_rpc_executor_fixture
 from wisp.config import settings
 from wisp.events import ErrorEvent, RpcCommandFinished, RpcSubagentsReported, SubagentsState
-from wisp.rpc.commands import GetSubagentsCommand, SetSubagentsCommand
+from wisp.providers.catalog import ModelRegistry, builtin_catalog
+from wisp.rpc.commands import GetSubagentsCommand, SetSubagentModelCommand, SetSubagentsCommand
 from wisp.rpc.handlers.subagents import handle_rpc_subagents_command
+from wisp.tools.subagent import SUBAGENT_MAX_TASKS, SUBAGENT_REPORT_MAX_BYTES
 
 
 @pytest.fixture
@@ -26,7 +28,8 @@ def fixture(tmp_path: Path) -> RpcExecutorFixture:
 
 
 def _send(
-    fixture: RpcExecutorFixture, command: GetSubagentsCommand | SetSubagentsCommand
+    fixture: RpcExecutorFixture,
+    command: GetSubagentsCommand | SetSubagentsCommand | SetSubagentModelCommand,
 ) -> SubagentsState:
     handle_rpc_subagents_command(command, agent=fixture.agent, write_event=fixture.events.append)
     finished = fixture.events[-1]
@@ -100,3 +103,70 @@ def test_model_is_reported(fixture: RpcExecutorFixture, settings_path: Path) -> 
 
     assert state.model == "small-model"
     assert state.model_in_use == fixture.agent.subagent_model_in_use()
+
+
+@pytest.mark.parametrize(
+    ("model", "saved"),
+    [
+        ("small-model", {"effort": "high", "subagent_model": "small-model"}),
+        (None, {"effort": "high"}),
+    ],
+    ids=["set", "clear"],
+)
+def test_model_applies_and_saves(
+    fixture: RpcExecutorFixture, settings_path: Path, model: str | None, saved: dict[str, str]
+) -> None:
+    """Choosing a model sets it for the session and the file; clearing removes the key."""
+
+    settings_path.write_text(json.dumps({"subagent_model": "old-model", "effort": "high"}))
+    fixture.agent.subagent_model = "old-model"
+
+    state = _send(fixture, SetSubagentModelCommand(id="subagents-1", model=model))
+
+    assert fixture.agent.subagent_model == model
+    assert state.model == model
+    assert json.loads(settings_path.read_text()) == saved
+
+
+def test_model_name_is_trimmed() -> None:
+    assert SetSubagentModelCommand(id="subagents-1", model=" small ").model == "small"
+    with pytest.raises(ValueError):
+        SetSubagentModelCommand(id="subagents-1", model="   ")
+
+
+def test_unknown_model_refused(fixture: RpcExecutorFixture, settings_path: Path) -> None:
+    """A model the listed provider lacks fails the command and changes nothing."""
+
+    fixture.agent.models = ModelRegistry(builtin_catalog())
+    fixture.agent.provider.name = "anthropic"  # type: ignore[misc]
+    fixture.agent.subagent_model = "claude-haiku-4-5"
+    command = SetSubagentModelCommand(id="subagents-1", model="gpt-6-luna")
+
+    handle_rpc_subagents_command(command, agent=fixture.agent, write_event=fixture.events.append)
+
+    finished = fixture.events[-1]
+    assert isinstance(finished, RpcCommandFinished) and not finished.ok
+    assert finished.error is not None and "gpt-6-luna" in finished.error
+    assert not any(isinstance(event, RpcSubagentsReported) for event in fixture.events)
+    assert fixture.agent.subagent_model == "claude-haiku-4-5"
+    assert not settings_path.exists()
+
+
+def test_report_describes_subagents(
+    fixture: RpcExecutorFixture, settings_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The snapshot carries the kinds, the shared limits and the startup override."""
+
+    monkeypatch.setenv("WISP_SUBAGENT_MODEL", " env-model ")
+
+    state = _send(fixture, GetSubagentsCommand(id="subagents-1"))
+
+    assert [kind.name for kind in state.kinds] == ["fresh", "fork"]
+    assert state.kinds == fixture.agent.subagent_kinds()
+    assert state.env_model == "env-model"
+    assert (state.max_tool_rounds, state.max_tasks, state.max_parallel) == (
+        fixture.agent.subagent_tool_rounds(),
+        SUBAGENT_MAX_TASKS,
+        4,
+    )
+    assert state.report_max_bytes == SUBAGENT_REPORT_MAX_BYTES

@@ -39,6 +39,8 @@ pub(crate) enum Command {
     Codemode(Option<wisp_protocol::commands::CodemodeSetting>),
     /// Show the subagents setting, or turn subagents on or off.
     Subagents(Option<bool>),
+    /// Choose the model fresh subagents use; `None` clears the choice.
+    SubagentModel(Option<String>),
     AutoCompaction(bool),
     Search(Option<bool>),
     Compact(Option<String>),
@@ -69,7 +71,7 @@ fn usage(name: &str) -> Option<&'static str> {
         "mcp" => "/mcp",
         "permissions" => "/permissions [ask|yolo]",
         "codemode" => "/codemode [automatic|always|never]",
-        "subagents" => "/subagents [on|off]",
+        "subagents" => "/subagents [on|off|model <name>|model -]",
         "compact" => "/compact [instructions]",
         "quit" => "/quit",
         "model" => "/model [provider::model] [effort|-]",
@@ -250,12 +252,15 @@ fn parse_codemode(tail: &str, syntax: &str) -> Command {
 }
 
 fn parse_subagents(tail: &str, syntax: &str) -> Command {
-    Command::Subagents(Some(match tail.trim() {
-        "" => return Command::Subagents(None),
-        "on" => true,
-        "off" => false,
-        _ => return Command::Invalid(format!("Usage: {syntax}")),
-    }))
+    match tail.split_whitespace().collect::<Vec<_>>().as_slice() {
+        [] => Command::Subagents(None),
+        ["on"] => Command::Subagents(Some(true)),
+        ["off"] => Command::Subagents(Some(false)),
+        // As with `/model`, a dash clears the choice.
+        ["model", "-"] => Command::SubagentModel(None),
+        ["model", name] => Command::SubagentModel(Some((*name).to_owned())),
+        _ => Command::Invalid(format!("Usage: {syntax}")),
+    }
 }
 
 fn parse_context(tail: &str, syntax: &str) -> Command {
@@ -808,16 +813,29 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn subagents_takes_on_or_off() {
+    fn subagents_arguments() {
         let parsed = |input| match classify(input, None) {
-            Some(Command::Subagents(enabled)) => Ok(enabled),
+            Some(Command::Subagents(enabled)) => Ok((enabled, None)),
+            Some(Command::SubagentModel(model)) => Ok((None, Some(model))),
             Some(Command::Invalid(_)) => Err(()),
             _ => panic!("{input} is not a subagents command"),
         };
-        assert_eq!(parsed("/subagents"), Ok(None));
-        assert_eq!(parsed("/subagents on"), Ok(Some(true)));
-        assert_eq!(parsed("/subagents off"), Ok(Some(false)));
-        assert_eq!(parsed("/subagents maybe"), Err(()));
+        assert_eq!(parsed("/subagents"), Ok((None, None)));
+        assert_eq!(parsed("/subagents on"), Ok((Some(true), None)));
+        assert_eq!(parsed("/subagents off"), Ok((Some(false), None)));
+        assert_eq!(
+            parsed("/subagents model small-model"),
+            Ok((None, Some(Some("small-model".to_owned()))))
+        );
+        // A dash clears the choice, as it clears an effort in `/model`.
+        assert_eq!(parsed("/subagents model -"), Ok((None, Some(None))));
+        for invalid in [
+            "/subagents maybe",
+            "/subagents model",
+            "/subagents model a b",
+        ] {
+            assert_eq!(parsed(invalid), Err(()), "{invalid}");
+        }
     }
 
     #[test]

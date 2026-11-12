@@ -2072,6 +2072,47 @@
       "title": "SetSessionNameCommand",
       "type": "object"
     },
+    "SetSubagentModelCommand": {
+      "additionalProperties": false,
+      "description": "Choose the model fresh subagents use from the next run and save it.\n\n``model`` names a model on the session's provider; None clears the choice, so\nsubagents use the session's model. When the model catalog lists the provider\nwithout that model the command fails and nothing changes. The reply is\n``rpc.subagents``.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Model"
+        },
+        "type": {
+          "const": "set_subagent_model",
+          "default": "set_subagent_model",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "model"
+      ],
+      "title": "SetSubagentModelCommand",
+      "type": "object"
+    },
     "SetSubagentsCommand": {
       "additionalProperties": false,
       "description": "Turn subagents on or off from the next run and save it as the user setting.",
@@ -2354,6 +2395,7 @@
       "set_permissions": "#/$defs/SetPermissionsCommand",
       "set_queue_mode": "#/$defs/SetQueueModeCommand",
       "set_session_name": "#/$defs/SetSessionNameCommand",
+      "set_subagent_model": "#/$defs/SetSubagentModelCommand",
       "set_subagents": "#/$defs/SetSubagentsCommand",
       "shutdown": "#/$defs/ShutdownCommand",
       "steer": "#/$defs/SteerCommand",
@@ -2396,6 +2438,9 @@
     },
     {
       "$ref": "#/$defs/SetSubagentsCommand"
+    },
+    {
+      "$ref": "#/$defs/SetSubagentModelCommand"
     },
     {
       "$ref": "#/$defs/GetCommandsCommand"
@@ -2705,6 +2750,10 @@
     "set_session_name": {
       "name": "Fixture",
       "type": "set_session_name"
+    },
+    "set_subagent_model": {
+      "model": "fixture-model",
+      "type": "set_subagent_model"
     },
     "set_subagents": {
       "enabled": true,

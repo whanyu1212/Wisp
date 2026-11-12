@@ -414,6 +414,24 @@ def try_persist_user_subagents(enabled: bool, *, home_dir: Path | None = None) -
     )
 
 
+def try_persist_user_subagent_model(model: str | None, *, home_dir: Path | None = None) -> bool:
+    """Save the model fresh subagents use, keeping every other user setting.
+
+    Args:
+        model (str | None): The model, or None to remove the saved choice.
+        home_dir (Path | None): User home override, primarily for isolated callers.
+
+    Returns:
+        bool: Whether the atomic settings update succeeded. Failures also warn;
+        unreadable settings are preserved rather than replaced.
+    """
+    return _persist_user_settings(
+        {"subagent_model": model},
+        home_dir=home_dir,
+        preference="subagent model",
+    )
+
+
 def try_persist_user_codemode(codemode: bool | None, *, home_dir: Path | None = None) -> bool:
     """Save the user's codemode setting, keeping every other user setting.
 

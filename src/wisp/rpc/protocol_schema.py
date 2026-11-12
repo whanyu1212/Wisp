@@ -250,6 +250,7 @@ _COMMAND_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     "get_codemode": {},
     "set_codemode": {"setting": "always"},
     "get_subagents": {},
+    "set_subagent_model": {"model": "fixture-model"},
     "set_subagents": {"enabled": True},
     "change_directory": {"path": "src"},
     "cancel": {"target_id": "command-1"},
@@ -559,7 +560,11 @@ _EVENT_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     },
     "rpc.subagents": {
         "command_id": "command-1",
-        "subagents": {"enabled": True, "offered": True},
+        "subagents": {
+            "enabled": True,
+            "offered": True,
+            "kinds": ({"name": "fresh", "instructions": "fixture"},),
+        },
     },
     "session.directory_changed": {
         "session_id": "session-1",

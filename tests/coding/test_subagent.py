@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
-from typing import Literal
+from typing import Literal, get_args
 
 import anyio
 import pytest
@@ -65,7 +65,12 @@ from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
 from wisp.tools.result import ToolError, ToolResult
 from wisp.tools.seen_files import SeenFiles
-from wisp.tools.subagent import SPAWN_AGENT, SUBAGENT_REPORT_MAX_BYTES, SpawnAgentTool
+from wisp.tools.subagent import (
+    SPAWN_AGENT,
+    SUBAGENT_REPORT_MAX_BYTES,
+    SpawnAgentTool,
+    SubagentContext,
+)
 
 _SCHEMA: ToolInputSchema = {
     "type": "object",
@@ -1225,6 +1230,57 @@ def test_uncatalogued_model_used_as_given(tmp_path: Path) -> None:
     assert provider.calls[1].model == "my-local-model"
     # Nothing says the model takes the session's effort, so it gets its default.
     assert provider.calls[1].effort is None
+
+
+def test_kinds_describe_harnesses(tmp_path: Path) -> None:
+    """The report gives each kind the model and effort its harness is built with."""
+
+    session, provider, _ = _model_run(tmp_path, _spawn(), subagent_model="claude-haiku-4-5")
+
+    fresh, fork = session.subagent_kinds()
+
+    _, subagent_request, _ = provider.calls
+    assert (fresh.name, fresh.model, fresh.effort) == (
+        "fresh",
+        subagent_request.model,
+        subagent_request.effort,
+    )
+    # A fork ignores the subagent model and keeps the session's effort.
+    assert (fork.name, fork.model, fork.effort) == ("fork", "claude-opus-5-5", "xhigh")
+    assert fresh.instructions != fork.instructions
+    assert fork.instructions in fork_prompt("task")
+    # The kinds are the words `spawn_agent` takes as its context.
+    assert (fresh.name, fork.name) == get_args(SubagentContext.__value__)
+
+
+@pytest.mark.parametrize("subagents", [True, False], ids=["on", "off"])
+def test_tool_access_report(tmp_path: Path, subagents: bool) -> None:
+    """Access is what a run's subagents get, and is the same while subagents are off."""
+
+    session, _ = _session(tmp_path, _Tools(), [], subagents=subagents)
+
+    allowed, refused = session.subagent_tool_access()
+
+    assert allowed == ("lookup",)
+    # Not read-only, confirms every call, and the tool that starts subagents.
+    assert refused == ("drop", "audit", SPAWN_AGENT)
+
+
+def test_reserved_names_always_refused(tmp_path: Path) -> None:
+    """A read-only tool of the user's under a reserved name is still refused to subagents."""
+
+    registry = ToolRegistry()
+    for name in ("lookup", SPAWN_AGENT, CODEMODE):
+        registry.register(_Tool(name))
+    session = CodingSession(
+        provider=ScriptedProvider([]),
+        sessions=JsonlSessionStore(tmp_path / "sessions"),
+        tool_registry=registry,
+        tool_context=ToolContext(cwd=tmp_path),
+        subagents=True,
+    )
+
+    assert session.subagent_tool_access() == (("lookup",), (CODEMODE, SPAWN_AGENT))
 
 
 def _warnings(events: Sequence[WispEvent]) -> list[str]:
