@@ -102,8 +102,8 @@ class ToolResultPresentationSnapshot(BaseModel):
     )
     # How many more calls the script made than `nested_calls` records.
     nested_calls_omitted: int | None = Field(default=None, ge=1)
-    # The model responses a subagent completed, which session usage and cost count;
-    # absent for other tools.
+    # The model responses a call's subagents completed, which session usage and cost
+    # count; absent for other tools.
     model_usage: tuple[ModelResponseUsage, ...] | None = Field(
         default=None, min_length=1, max_length=MAX_TOOL_MODEL_RESPONSES
     )

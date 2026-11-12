@@ -327,7 +327,11 @@ class ConfiguredToolExecutor:
 
         It shares this executor's registry, policy, approval policy, progress sink
         and MCP catalog, so a subagent's call passes exactly the checks a call of
-        this executor's does. It stores no images, as nested calls return only text.
+        this executor's does. It shares the nested-call scheduling too: across
+        subagents running at once, calls to tools that are not parallel-safe run one
+        at a time and parallel-safe ones stay within one limit together. As within
+        one script, the two kinds may overlap each other. It stores no images, as
+        nested calls return only text.
 
         Args:
             context (ToolContext): The context the subagent's tools run with.
@@ -336,7 +340,7 @@ class ConfiguredToolExecutor:
             ConfiguredToolExecutor: The executor to run the subagent's nested calls.
         """
 
-        return ConfiguredToolExecutor(
+        executor = ConfiguredToolExecutor(
             registry=self._registry,
             context=context,
             policy=self._policy,
@@ -344,6 +348,9 @@ class ConfiguredToolExecutor:
             progress_sink=self._progress_sink,
             mcp_catalog=self._mcp_catalog,
         )
+        executor._nested_serial_lock = self._nested_serial_lock
+        executor._nested_parallel_limit = self._nested_parallel_limit
+        return executor
 
     @staticmethod
     def record_model_usage(usage: TokenUsage, cost: UsageCost | None) -> None:

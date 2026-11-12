@@ -6428,7 +6428,7 @@
           "items": {
             "$ref": "#/$defs/ModelResponseUsage"
           },
-          "maxItems": 64,
+          "maxItems": 512,
           "title": "ToolExecutionEndedModelUsage",
           "type": "array"
         },
@@ -7021,7 +7021,7 @@
           "items": {
             "$ref": "#/$defs/ModelResponseUsage"
           },
-          "maxItems": 64,
+          "maxItems": 512,
           "title": "ToolResultReadyModelUsage",
           "type": "array"
         },

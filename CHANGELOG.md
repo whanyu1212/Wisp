@@ -14,19 +14,22 @@ this policy.
 
 ### Subagents (experimental)
 
-- A `spawn_agent` tool hands one read-only task to a subagent and returns its final message. It is
-  off unless `"subagents": true` is set in `~/.wisp/settings.json` or `WISP_SUBAGENTS=1`. See
+- A `spawn_agent` tool hands a list of read-only tasks to subagents, one each, and returns their
+  final messages. The subagents of one call run at the same time, four at once, and the result
+  gives each report under a `## Task N` heading. It is off unless `"subagents": true` is set in
+  `~/.wisp/settings.json` or `WISP_SUBAGENTS=1`. See
   [Delegating to a subagent](site/src/content/pages/guide/tools-and-safety.md#delegating-to-a-subagent-experimental).
 - A tool result that reaches a subagent or a codemode script without its image now says the image
   was left out, where before it read as a complete result.
 
 ### Event contract
 
-- `tool.execution.ended` and `tool.result` gain `model_usage`: the model responses a subagent
-  completed, each with its `usage` and `cost`. It is empty for every other tool. Session usage
-  and cost totals count these responses.
+- `tool.execution.ended` and `tool.result` gain `model_usage`: the model responses a call's
+  subagents completed, up to 512, each with its `usage` and `cost`. It is empty for every other
+  tool. Session usage and cost totals count these responses.
 - `tool.nested.started`, `tool.nested.ended` and a result's `nested_calls` now also describe the
-  tool calls a `spawn_agent` call's subagent makes, with that call as `parent_call_id`.
+  tool calls a `spawn_agent` call's subagents make, with that call as `parent_call_id`. Their
+  `call_id`s are numbered by Wisp, as `subagent-N-M`, and do not repeat within the call.
 
 <!-- Keeps links to the pre-release "0.8.1 — Unreleased" heading working. -->
 <a id="081--unreleased"></a>

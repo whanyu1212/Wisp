@@ -6877,7 +6877,7 @@
           "items": {
             "$ref": "#/$defs/ModelResponseUsage"
           },
-          "maxItems": 64,
+          "maxItems": 512,
           "title": "Model Usage",
           "type": "array"
         },
@@ -7512,7 +7512,7 @@
           "items": {
             "$ref": "#/$defs/ModelResponseUsage"
           },
-          "maxItems": 64,
+          "maxItems": 512,
           "title": "Model Usage",
           "type": "array"
         },

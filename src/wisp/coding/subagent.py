@@ -9,7 +9,9 @@ message goes back to the model that spawned it.
 
 from __future__ import annotations
 
+import itertools
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import replace
 
 import anyio
 from typing_extensions import TypeAliasType
@@ -33,18 +35,25 @@ from wisp.providers.base import ContextOverflowError, ProviderError
 from wisp.providers.events import ToolCall
 from wisp.tools.codemode.calls import NestedCallResult
 from wisp.tools.result import ToolError
+from wisp.tools.subagent import SUBAGENT_MAX_TASKS
 
-# Every round ends in one model response and the final message is one more, so a
-# subagent's responses always fit in the result that accounts for them.
-SUBAGENT_MAX_TOOL_ITERATIONS = MAX_TOOL_MODEL_RESPONSES - 1
+# Every round ends in one model response and the final message is one more, so the
+# responses of every subagent a call runs always fit in the result that accounts
+# for them.
+SUBAGENT_MAX_TOOL_ITERATIONS = MAX_TOOL_MODEL_RESPONSES // SUBAGENT_MAX_TASKS - 1
+# The most subagents one run works at once. Each is its own stream of model
+# requests, so more would mostly wait on the provider's rate limit.
+SUBAGENT_MAX_PARALLEL = 4
 
 SUBAGENT_INSTRUCTIONS = (
     "You are a subagent. Another agent gave you the task in the next message and "
     "will read only your final message, so that message must be a complete, "
     "self-contained report: answer first, then the evidence, with file paths and "
-    "line numbers. You can only read and search; do not try to change anything. "
-    "You cannot ask questions, so state any assumption you make. Stop as soon as "
-    "the task is answered."
+    "line numbers. Keep it short: give conclusions and the references that support "
+    "them, not an account of everything you read, and leave out code the reader can "
+    "open from a reference. You can only read and search; do not try to change "
+    "anything. You cannot ask questions, so state any assumption you make. Stop as "
+    "soon as the task is answered."
 )
 
 _NO_REPORT = "The subagent finished without a report."
@@ -63,17 +72,25 @@ class NestedCallToolExecutor:
     The loop sees an ordinary executor. Policy, the read-only rule, approvals and
     scheduling all belong to the nested-call runner, so every prepared call is
     reported parallel-safe and the runner makes the calls that are not take turns.
+
+    Each call is recorded under an id this executor numbers itself. A provider may
+    repeat call ids from one response to the next, and the subagents of one
+    `spawn_agent` call share its record, where ids must not repeat.
     """
 
-    def __init__(self, run_nested: NestedCallRunner) -> None:
+    def __init__(self, run_nested: NestedCallRunner, *, call_id_prefix: str) -> None:
         """Create the executor.
 
         Args:
             run_nested (NestedCallRunner): Checks, runs and records one nested call;
                 see `ConfiguredToolExecutor.run_nested`.
+            call_id_prefix (str): Starts every recorded call id, and differs for
+                each subagent of a run.
         """
 
         self._run_nested = run_nested
+        self._call_id_prefix = call_id_prefix
+        self._call_numbers = itertools.count(1)
 
     async def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
         """Run one call and yield its result.
@@ -105,7 +122,8 @@ class NestedCallToolExecutor:
         )
 
     async def _ended(self, tool_call: ToolCall) -> ToolExecutionEnded:
-        result = await self._run_nested(tool_call)
+        recorded_id = f"{self._call_id_prefix}-{next(self._call_numbers)}"
+        result = await self._run_nested(replace(tool_call, call_id=recorded_id))
         return ToolExecutionEnded(
             call_id=tool_call.call_id,
             name=tool_call.name,
@@ -179,6 +197,7 @@ async def run_subagent(
 
 __all__ = [
     "SUBAGENT_INSTRUCTIONS",
+    "SUBAGENT_MAX_PARALLEL",
     "SUBAGENT_MAX_TOOL_ITERATIONS",
     "NestedCallToolExecutor",
     "run_subagent",

@@ -7,8 +7,8 @@
 //! card until then. Everything here is untrusted backend text, kept on one line
 //! and bounded when it is stored.
 //!
-//! A `spawn_agent` call's card is the same card: its subagent's tool calls arrive
-//! and are recorded exactly as a script's are, and its task stands where the
+//! A `spawn_agent` call's card is the same card: its subagents' tool calls arrive
+//! and are recorded exactly as a script's are, and its tasks stand where the
 //! script would. [`NestedHost`] says which of the two a card is.
 
 use serde_json::Value;
@@ -129,16 +129,29 @@ impl ScriptCard {
     }
 
     /// The card for a `spawn_agent` call with these (already bounded) arguments.
+    /// One task stands as written; several are numbered, a blank line apart.
     pub fn from_task(arguments: &Value) -> Self {
-        let task = arguments
-            .get("task")
-            .and_then(Value::as_str)
-            .map(|task| head_bytes(task, SCRIPT_MAX_BYTES).to_owned())
-            .unwrap_or_default();
+        let tasks = subagent_tasks(arguments.get("tasks"), arguments.get("task"));
+        let (title, text) = match tasks.as_slice() {
+            [] => (None, String::new()),
+            [task] => (None, (*task).to_owned()),
+            [first, ..] => (
+                Some(clip(
+                    &format!("{} tasks: {}", tasks.len(), one_line(first)),
+                    TITLE_MAX_CHARS,
+                )),
+                tasks
+                    .iter()
+                    .enumerate()
+                    .map(|(index, task)| format!("{}. {task}", index + 1))
+                    .collect::<Vec<_>>()
+                    .join("\n\n"),
+            ),
+        };
         Self {
             host: NestedHost::Subagent,
-            title: None,
-            code: task,
+            title,
+            code: head_bytes(&text, SCRIPT_MAX_BYTES).to_owned(),
             calls: Vec::new(),
             omitted: 0,
         }
@@ -334,6 +347,18 @@ impl ScriptCall {
                 .and_then(Value::as_u64)
                 .map(|duration| u32::try_from(duration).unwrap_or(u32::MAX)),
         })
+    }
+}
+
+/// The tasks a `spawn_agent` call hands out: its `tasks` argument, or the single
+/// `task` argument that calls recorded before the list carry.
+pub(crate) fn subagent_tasks<'a>(
+    tasks: Option<&'a Value>,
+    task: Option<&'a Value>,
+) -> Vec<&'a str> {
+    match tasks.and_then(Value::as_array) {
+        Some(tasks) => tasks.iter().filter_map(Value::as_str).collect(),
+        None => task.and_then(Value::as_str).into_iter().collect(),
     }
 }
 

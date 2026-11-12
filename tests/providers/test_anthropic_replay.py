@@ -573,3 +573,63 @@ def _redacted_thinking_block_start(*, index: int = 0) -> RawContentBlockStartEve
         index=index,
         type="content_block_start",
     )
+
+
+def test_interleaved_conversations_keep_their_replays() -> None:
+    """Conversations sharing a provider each resend their own tool turn and no other.
+
+    A run waits on its `spawn_agent` calls while their subagents talk to the same
+    provider, taking turns in any order.
+    """
+
+    def calls(name: str) -> list[object]:
+        return [
+            message_start_event(f"response-{name}"),
+            tool_use_start_event(f"call-{name}", "lookup", index=0),
+            input_json_delta_event("{}", index=0),
+            message_delta_event("tool_use"),
+        ]
+
+    messages_resource = StubMessagesResource(
+        responses=[calls("parent"), calls("a"), calls("b"), [], [], []]
+    )
+    provider = AnthropicProvider(
+        api_key="test-key",
+        client=cast(AsyncAnthropic, StubAsyncAnthropic(messages_resource)),
+    )
+
+    async def ask(name: str, *, answer: bool = False) -> None:
+        async for _event in provider.stream(
+            [WispMessage(role="user", content=name)],
+            model="claude-test",
+            tool_results=(
+                [ToolCallResult(call_id=f"call-{name}", output=f"{name} result")] if answer else []
+            ),
+            previous_response_id=f"response-{name}" if answer else None,
+        ):
+            pass
+
+    async def run() -> None:
+        await ask("parent")
+        await ask("a")
+        await ask("b")
+        await ask("b", answer=True)
+        await ask("a", answer=True)
+        await ask("parent", answer=True)
+
+    anyio.run(run)
+
+    def tool_ids(request: dict[str, object]) -> list[str]:
+        return [
+            block.get("id") or block.get("tool_use_id")
+            for message in cast(list[dict[str, list[dict[str, str]]]], request["messages"])
+            for block in message["content"]
+            if block["type"] in ("tool_use", "tool_result")
+        ]
+
+    answers = messages_resource.calls[3:]
+    assert [tool_ids(request) for request in answers] == [
+        ["call-b", "call-b"],
+        ["call-a", "call-a"],
+        ["call-parent", "call-parent"],
+    ]

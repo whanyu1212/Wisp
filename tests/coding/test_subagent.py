@@ -8,7 +8,7 @@ run continues.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -60,7 +60,7 @@ from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
 from wisp.tools.result import ToolResult
 from wisp.tools.seen_files import SeenFiles
-from wisp.tools.subagent import SPAWN_AGENT
+from wisp.tools.subagent import SPAWN_AGENT, SpawnAgentTool
 
 _SCHEMA: ToolInputSchema = {
     "type": "object",
@@ -108,9 +108,15 @@ class _Tools:
         return registry
 
 
-def _spawn(task: str = "find the users table") -> list[ProviderEvent]:
+def _spawn(*tasks: str) -> list[ProviderEvent]:
+    """One `spawn_agent` call handing out the tasks; one default task when none is given."""
+
     return tool_call_stream(
-        ToolCall(call_id="call-spawn", name=SPAWN_AGENT, arguments={"task": task})
+        ToolCall(
+            call_id="call-spawn",
+            name=SPAWN_AGENT,
+            arguments={"tasks": list(tasks or ("find the users table",))},
+        )
     )
 
 
@@ -413,7 +419,7 @@ def test_script_cannot_spawn(tmp_path: Path) -> None:
                 ToolCall(
                     call_id="call-script",
                     name=CODEMODE,
-                    arguments={"code": "await spawn_agent(task='look around')"},
+                    arguments={"code": "await spawn_agent(tasks=['look around'])"},
                 )
             ),
             _says("done"),
@@ -534,6 +540,384 @@ def test_dropped_image_is_reported(tmp_path: Path) -> None:
         "PNG image, 1x1\n[The image could not be attached to this result.]"
     ]
     assert not run.provider.calls[2].tool_results[0].images
+
+
+class _RoutedProvider(ScriptedProvider):
+    """Serve each conversation its own streams, whatever order requests arrive in.
+
+    A conversation is known by its user message: the run's prompt, or a subagent's
+    task. Subagents running at once interleave their requests, so one shared queue
+    of streams would hand a subagent another's response.
+    """
+
+    def __init__(self, streams: dict[str, list[list[ProviderEvent]]]) -> None:
+        super().__init__([])
+        self._conversations = {user: list(queue) for user, queue in streams.items()}
+
+    async def stream(  # type: ignore[override]
+        self, messages: Sequence[Message], **options: object
+    ) -> AsyncIterator[ProviderEvent]:
+        (user,) = [message.content for message in messages if message.role == "user"]
+        self.calls.append(user)  # type: ignore[arg-type]
+        for item in self._conversations[user].pop(0):
+            await anyio.sleep(0)
+            yield item
+
+
+def _spawn_each(*tasks: str) -> list[ProviderEvent]:
+    """One response that hands every task to its own subagent."""
+
+    return tool_call_stream(
+        *(
+            ToolCall(call_id=f"call-{task}", name=SPAWN_AGENT, arguments={"tasks": [task]})
+            for task in tasks
+        )
+    )
+
+
+def _fan_out(
+    tmp_path: Path, tasks: Sequence[str], lookup: _Tool, *, parallel_safe: bool = True
+) -> tuple[CodingSession, _RoutedProvider]:
+    """A session whose run spawns one subagent per task, each calling ``lookup`` once."""
+
+    registry = ToolRegistry()
+    registry.register(lookup, execution=ToolExecutionMetadata(parallel_safe=parallel_safe))
+    provider = _RoutedProvider(
+        {
+            "go": [_spawn_each(*tasks), _says("done")],
+            **{
+                task: [_calls(("lookup", {"table": task})), _says(f"report on {task}")]
+                for task in tasks
+            },
+        }
+    )
+    session = CodingSession(
+        provider=provider,
+        sessions=JsonlSessionStore(tmp_path / "sessions"),
+        tool_registry=registry,
+        tool_context=ToolContext(cwd=tmp_path),
+        subagents=True,
+    )
+    return session, provider
+
+
+def _collect(session: CodingSession) -> list[WispEvent]:
+    async def collect() -> list[WispEvent]:
+        return [event async for event in session.run("go")]
+
+    return anyio.run(collect)
+
+
+@pytest.mark.parametrize(
+    ("tasks", "parallel_safe", "together"),
+    [
+        (("a", "b"), True, 2),
+        # A tool that is not parallel-safe runs for one subagent at a time.
+        (("a", "b"), False, 1),
+        # Six subagents are asked for; four work at once.
+        (("a", "b", "c", "d", "e", "f"), True, 4),
+    ],
+    ids=["together", "unsafe-tool-takes-turns", "limited"],
+)
+def test_subagents_run_together(
+    tmp_path: Path, tasks: tuple[str, ...], parallel_safe: bool, together: int
+) -> None:
+    lookup = _Tool("lookup", delay=0.05)
+    session, _ = _fan_out(tmp_path, tasks, lookup, parallel_safe=parallel_safe)
+
+    events = _collect(session)
+
+    assert lookup.most_running == together
+    results = [event for event in events if isinstance(event, ToolResultReady)]
+    # Each call gets its own subagent's report, in the order the calls were made.
+    assert [(result.call_id, result.output) for result in results] == [
+        (f"call-{task}", f"report on {task}") for task in tasks
+    ]
+
+
+def test_parallel_records_stay_apart(tmp_path: Path) -> None:
+    """Subagents running at once each account for their own calls and responses."""
+
+    session, _ = _fan_out(tmp_path, ("a", "b"), _Tool("lookup", delay=0.05))
+    live: list[WispEvent] = []
+
+    async def sink(event: WispEvent) -> None:
+        live.append(event)
+
+    async def collect() -> list[WispEvent]:
+        return [event async for event in session.run("go", live_event_sink=sink)]
+
+    results = [event for event in anyio.run(collect) if isinstance(event, ToolResultReady)]
+
+    assert [[call.arguments for call in result.nested_calls] for result in results] == [
+        [{"table": "a"}],
+        [{"table": "b"}],
+    ]
+    assert [len(result.model_usage) for result in results] == [2, 2]
+    started = {
+        event.parent_call_id: event.arguments
+        for event in live
+        if isinstance(event, ToolNestedCallStarted)
+    }
+    assert started == {"call-a": {"table": "a"}, "call-b": {"table": "b"}}
+
+
+def test_cancel_stops_every_subagent(tmp_path: Path) -> None:
+    lookup = _Tool("lookup", delay=60)
+    session, provider = _fan_out(tmp_path, ("a", "b"), lookup)
+    started: list[str] = []
+
+    async def sink(event: WispEvent) -> None:
+        if isinstance(event, ToolNestedCallStarted):
+            started.append(event.parent_call_id)
+            if len(started) == 2:
+                assert session.cancel_run()
+
+    async def collect() -> list[WispEvent]:
+        with anyio.fail_after(5):
+            return [event async for event in session.run("go", live_event_sink=sink)]
+
+    events = anyio.run(collect)
+
+    assert [event.outcome for event in events if isinstance(event, AgentCompleted)] == ["cancelled"]
+    results = [event for event in events if isinstance(event, ToolResultReady)]
+    assert sorted((result.call_id, result.is_error) for result in results) == [
+        ("call-a", True),
+        ("call-b", True),
+    ]
+    assert lookup.running == 0
+    # The run and both subagents asked once each; nothing was asked after the cancel.
+    assert sorted(provider.calls) == ["a", "b", "go"]  # type: ignore[comparison-overlap]
+
+
+def _task_list(
+    tmp_path: Path,
+    conversations: dict[str, list[list[ProviderEvent]]],
+    registry: ToolRegistry,
+) -> tuple[CodingSession, _RoutedProvider]:
+    provider = _RoutedProvider(conversations)
+    session = CodingSession(
+        provider=provider,
+        sessions=JsonlSessionStore(tmp_path / "sessions"),
+        tool_registry=registry,
+        tool_context=ToolContext(cwd=tmp_path),
+        tool_approval_policy=ToolApprovalPolicy.approve_all(),
+        subagents=True,
+    )
+    return session, provider
+
+
+def test_one_call_runs_tasks_together(tmp_path: Path) -> None:
+    """A call's tasks overlap even beside a call that makes the response run in order."""
+
+    lookup = _Tool("lookup", delay=0.05)
+    registry = ToolRegistry()
+    registry.register(lookup, execution=ToolExecutionMetadata(parallel_safe=True))
+    registry.register(_Tool("drop", safety="command"))
+    session, _ = _task_list(
+        tmp_path,
+        {
+            "go": [
+                tool_call_stream(
+                    ToolCall(
+                        call_id="call-spawn", name=SPAWN_AGENT, arguments={"tasks": ["a", "b"]}
+                    ),
+                    ToolCall(call_id="call-drop", name="drop", arguments={"table": "x"}),
+                ),
+                _says("done"),
+            ],
+            "a": [_calls(("lookup", {"table": "a"})), _says("report on a")],
+            "b": [_calls(("lookup", {"table": "b"})), _says("report on b")],
+        },
+        registry,
+    )
+
+    events = _collect(session)
+
+    assert lookup.most_running == 2
+    spawn, drop = [event for event in events if isinstance(event, ToolResultReady)]
+    assert spawn.output == "## Task 1\nreport on a\n\n## Task 2\nreport on b"
+    assert drop.output == "drop:x"
+    # One result accounts for both subagents, under ids that never repeat.
+    assert sorted(call.call_id for call in spawn.nested_calls) == ["subagent-1-1", "subagent-2-1"]
+    assert len(spawn.model_usage) == 4
+
+
+def test_failed_task_leaves_the_rest(tmp_path: Path) -> None:
+    registry = ToolRegistry()
+    registry.register(_Tool("lookup"))
+    failed = [ProviderResponseStarted(model="test"), ProviderResponseFailed(message="overloaded")]
+    session, _ = _task_list(
+        tmp_path,
+        {"go": [_spawn("a", "b"), _says("done")], "a": [failed], "b": [_says("report on b")]},
+        registry,
+    )
+
+    (result,) = [event for event in _collect(session) if isinstance(event, ToolResultReady)]
+
+    assert not result.is_error
+    assert result.output == ("## Task 1\nThe subagent failed: overloaded\n\n## Task 2\nreport on b")
+
+
+def test_all_tasks_failing_is_an_error(tmp_path: Path) -> None:
+    registry = ToolRegistry()
+    registry.register(_Tool("lookup"))
+    failed = [ProviderResponseStarted(model="test"), ProviderResponseFailed(message="overloaded")]
+    session, _ = _task_list(
+        tmp_path,
+        {"go": [_spawn("a", "b"), _says("done")], "a": [failed], "b": [failed]},
+        registry,
+    )
+
+    (result,) = [event for event in _collect(session) if isinstance(event, ToolResultReady)]
+
+    assert result.is_error
+    assert result.output.count("The subagent failed: overloaded") == 2
+
+
+@pytest.mark.parametrize(
+    ("tasks", "problem"),
+    [
+        ([], "at least one task"),
+        ("find it", "at least one task"),
+        (["a"] * 9, "at most 8 tasks"),
+        (["a", " "], "non-empty string"),
+        (["a", 3], "non-empty string"),
+    ],
+    ids=["empty", "not-a-list", "too-many", "blank", "not-text"],
+)
+def test_malformed_tasks_rejected(tmp_path: Path, tasks: object, problem: str) -> None:
+    """A malformed task list starts no subagent and tells the model what to fix."""
+
+    call = ToolCall(call_id="call-spawn", name=SPAWN_AGENT, arguments={"tasks": tasks})
+
+    run = _run(tmp_path, _Tools(), [tool_call_stream(call), _says("done")])
+
+    assert run.result.is_error
+    assert problem in run.result.output
+    assert run.result.failure_code == "invalid_arguments"
+    assert len(run.provider.calls) == 2
+
+
+def test_most_tasks_one_call_takes(tmp_path: Path) -> None:
+    """Eight tasks, the most a call may hold, each get a subagent and a report."""
+
+    tasks = [str(number) for number in range(8)]
+    registry = ToolRegistry()
+    registry.register(_Tool("lookup"))
+    session, _ = _task_list(
+        tmp_path,
+        {
+            "go": [_spawn(*tasks), _says("done")],
+            **{task: [_says(f"report on {task}")] for task in tasks},
+        },
+        registry,
+    )
+
+    (result,) = [event for event in _collect(session) if isinstance(event, ToolResultReady)]
+
+    assert not result.is_error
+    assert result.output.count("report on") == 8
+    assert result.output.endswith("## Task 8\nreport on 7")
+
+
+def test_unexpected_failure_spares_the_rest(tmp_path: Path) -> None:
+    """A subagent that crashes costs neither the others' reports nor their run."""
+
+    async def runner(task: str) -> str:
+        if task == "crash":
+            raise RuntimeError("secret detail")
+        await anyio.sleep(0.01)
+        return f"report on {task}"
+
+    tool = SpawnAgentTool(runner)
+
+    async def run() -> ToolResult:
+        return await tool.run({"tasks": ["crash", "b"]}, ToolContext(cwd=tmp_path))
+
+    result = anyio.run(run)
+
+    assert result.text == ("## Task 1\nThe subagent failed unexpectedly.\n\n## Task 2\nreport on b")
+
+
+def test_long_report_leaves_room(tmp_path: Path) -> None:
+    """A report over its share of the result is cut; the reports after it stay whole."""
+
+    async def runner(task: str) -> str:
+        return "long line\n" * 200 if task == "long" else f"report on {task}"
+
+    tool = SpawnAgentTool(runner)
+
+    async def run() -> ToolResult:
+        context = ToolContext(cwd=tmp_path, max_output_bytes=600)
+        return await tool.run({"tasks": ["long", "b", "c"]}, context)
+
+    result = anyio.run(run)
+
+    first, second, third = result.text.split("\n\n")
+    assert first.startswith("## Task 1\nlong line\n") and first.endswith("[truncated]")
+    assert (second, third) == ("## Task 2\nreport on b", "## Task 3\nreport on c")
+    assert result.truncated
+    assert len(result.text.encode()) <= 600
+
+
+@pytest.mark.parametrize(
+    ("limits", "measure"),
+    [
+        ({"max_output_bytes": 600}, lambda text: len(text.encode())),
+        ({"max_output_lines": 30}, lambda text: len(text.splitlines())),
+    ],
+    ids=["bytes", "lines"],
+)
+def test_long_reports_fit_together(
+    tmp_path: Path, limits: dict[str, int], measure: Callable[[str], int]
+) -> None:
+    """Reports that are all too long still fit the result's limit between them."""
+
+    async def runner(task: str) -> str:
+        return f"{task} line\n" * 200
+
+    tool = SpawnAgentTool(runner)
+
+    async def run() -> ToolResult:
+        return await tool.run(
+            {"tasks": ["a", "b", "c"]},
+            ToolContext(cwd=tmp_path, **limits),  # type: ignore[arg-type]
+        )
+
+    result = anyio.run(run)
+
+    assert measure(result.text) <= next(iter(limits.values()))
+    for number, task in enumerate(("a", "b", "c"), start=1):
+        assert f"## Task {number}\n{task} line\n" in result.text
+
+
+def test_cancel_reaches_waiting_subagents(tmp_path: Path) -> None:
+    """A subagent still waiting for its turn when the run is cancelled never starts."""
+
+    tasks = ("a", "b", "c", "d", "e", "f")
+    lookup = _Tool("lookup", delay=60)
+    session, provider = _fan_out(tmp_path, tasks, lookup)
+    started: list[str] = []
+
+    async def sink(event: WispEvent) -> None:
+        if isinstance(event, ToolNestedCallStarted):
+            started.append(event.parent_call_id)
+            if len(started) == 4:
+                session.cancel_run()
+
+    async def collect() -> list[WispEvent]:
+        with anyio.fail_after(5):
+            return [event async for event in session.run("go", live_event_sink=sink)]
+
+    events = anyio.run(collect)
+
+    results = [event for event in events if isinstance(event, ToolResultReady)]
+    assert sorted(result.call_id for result in results) == [f"call-{task}" for task in tasks]
+    assert all(result.is_error for result in results)
+    assert lookup.running == 0
+    # The run and the four subagents that had a turn; the two waiting asked nothing.
+    assert len(provider.calls) == 5
 
 
 def test_reads_stay_unseen(tmp_path: Path) -> None:

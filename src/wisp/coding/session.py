@@ -83,6 +83,7 @@ from wisp.coding.prompt import (
 from wisp.coding.stats import RunStats, build_session_stats
 from wisp.coding.subagent import (
     SUBAGENT_INSTRUCTIONS,
+    SUBAGENT_MAX_PARALLEL,
     SUBAGENT_MAX_TOOL_ITERATIONS,
     NestedCallToolExecutor,
     run_subagent,
@@ -2221,23 +2222,33 @@ class CodingSession:
         if not subagent_tools:
             return None
 
+        running = anyio.CapacityLimiter(SUBAGENT_MAX_PARALLEL)
+        numbers = itertools.count(1)
+
         async def run(task: str) -> str:
-            return await self._run_subagent(
-                task,
-                tools=subagent_tools,
-                registry=registry,
-                executor=executor(),
-                context=context,
-                session=session,
-            )
+            number = next(numbers)
+            async with running:
+                return await self._run_subagent(
+                    task,
+                    number=number,
+                    tools=subagent_tools,
+                    registry=registry,
+                    executor=executor(),
+                    context=context,
+                    session=session,
+                )
 
         tool = SpawnAgentTool(run)
         registry.register(
             tool,
             replace=False,
-            # One subagent at a time: a provider instance is driven by one run at a
-            # time, and a subagent's tools need not be safe beside a batch's others.
-            execution=ToolExecutionMetadata(parallel_safe=False),
+            # One call runs its own tasks together whatever is beside it. Several
+            # calls in one response also run together, when every call in that
+            # response is parallel-safe; the loop runs a batch in order otherwise.
+            # Each has its own context and conversation with the provider. Among
+            # subagents, a tool that is not parallel-safe runs for one at a time; it
+            # can still run beside a parallel-safe call, the run's own included.
+            execution=ToolExecutionMetadata(parallel_safe=True),
             prompt=SPAWN_AGENT_PROMPT,
         )
         return tool
@@ -2246,6 +2257,7 @@ class CodingSession:
         self,
         task: str,
         *,
+        number: int,
         tools: tuple[ToolSpec, ...],
         registry: ToolRegistry,
         executor: ConfiguredToolExecutor,
@@ -2261,6 +2273,8 @@ class CodingSession:
 
         Args:
             task (str): The task the model wrote.
+            number (int): Which of the run's subagents this is, counted from one;
+                it keeps this subagent's recorded call ids apart from the others'.
             tools (tuple[ToolSpec, ...]): The read-only tools the subagent is offered.
             registry (ToolRegistry): The run's registry, which describes those tools.
             executor (ConfiguredToolExecutor): The run's executor, whose policy the
@@ -2290,7 +2304,9 @@ class CodingSession:
         harness = AgentHarness(
             AgentHarnessConfig(
                 provider=self.provider,
-                tool_executor=NestedCallToolExecutor(subagent_executor.run_nested),
+                tool_executor=NestedCallToolExecutor(
+                    subagent_executor.run_nested, call_id_prefix=f"subagent-{number}"
+                ),
                 model=self.model,
                 tools=tools,
                 max_tool_iterations=(

@@ -199,6 +199,60 @@ def test_pending_call_survives_nested_run() -> None:
     assert (answer.id, answer.name) == ("id-0", "spawn_agent")
 
 
+def test_idless_calls_stay_with_their_conversation() -> None:
+    """Conversations whose calls carry no ids still answer them by tool name.
+
+    Models that issue no call ids give every conversation the same synthetic ids,
+    and a run's subagents share its provider. One conversation answering its
+    `grep` call must not cost another conversation the name of its own.
+    """
+
+    def grep_call(conversation: str) -> genai_types.GenerateContentResponse:
+        return part_chunk(
+            genai_types.Part(function_call=genai_types.FunctionCall(name="grep", args={})),
+            response_id=f"response-{conversation}",
+            finish_reason=genai_types.FinishReason.STOP,
+        )
+
+    def done(conversation: str) -> genai_types.GenerateContentResponse:
+        return text_chunk(
+            "done",
+            response_id=f"answered-{conversation}",
+            finish_reason=genai_types.FinishReason.STOP,
+        )
+
+    stub_models = StubModels(
+        responses=[[grep_call("a")], [grep_call("b")], [done("a")], [done("b")]]
+    )
+    provider = GoogleProvider(
+        api_key="test-key",
+        client=cast(genai.Client, StubGenaiClient(stub_models)),
+    )
+
+    async def ask(conversation: str, *, answer: bool = False) -> None:
+        async for event in provider.stream(
+            [WispMessage(role="user", content=conversation)],
+            model="gemini-test",
+            previous_response_id=f"response-{conversation}" if answer else None,
+            tool_results=[ToolCallResult(call_id="call-grep-0", output="ok")] if answer else [],
+        ):
+            if isinstance(event, ProviderResponseCompleted) and event.tool_calls:
+                assert [call.call_id for call in event.tool_calls] == ["call-grep-0"]
+
+    async def run() -> None:
+        await ask("a")
+        await ask("b")
+        await ask("a", answer=True)
+        await ask("b", answer=True)
+
+    anyio.run(run)
+
+    answers = [
+        request["contents"][-1].parts[0].function_response for request in stub_models.calls[2:]
+    ]
+    assert [(answer.id, answer.name) for answer in answers] == [(None, "grep"), (None, "grep")]
+
+
 def test_google_provider_omits_synthetic_ids_in_fresh_tool_exchange() -> None:
     """Fresh replacement context must not invent Gemini function-call IDs."""
 

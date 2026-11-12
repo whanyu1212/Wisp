@@ -349,6 +349,53 @@ def test_stored_provider_auth_resolver_uses_refresh_winner(tmp_path: Path) -> No
     assert store.get("openai-codex") == winner
 
 
+def test_expired_refresh_winner_is_refused(tmp_path: Path) -> None:
+    """A refresh that lost to a credential which has itself expired yields no token."""
+
+    store = JsonAuthStore(tmp_path / "auth.json")
+    store.set("openai-codex", OAuthCredential(access="old", refresh="old-refresh", expires=0))
+    resolver = StoredProviderAuthResolver(store)
+
+    async def refresh(credential: OAuthCredential) -> OAuthCredential:
+        store.set("openai-codex", OAuthCredential(access="winner", refresh="r", expires=1))
+        return OAuthCredential(access="stale", refresh="s", expires=4_102_444_800_000)
+
+    async def run() -> None:
+        assert await resolver.bearer_token("openai-codex", refresh=refresh) is None
+
+    anyio.run(run)
+
+
+def test_concurrent_requests_refresh_once(tmp_path: Path) -> None:
+    """Requests that find the token expired together spend its refresh token once."""
+
+    store = JsonAuthStore(tmp_path / "auth.json")
+    store.set("openai-codex", OAuthCredential(access="old", refresh="old-refresh", expires=0))
+    resolver = StoredProviderAuthResolver(store)
+    refreshes: list[str] = []
+
+    async def refresh(credential: OAuthCredential) -> OAuthCredential:
+        refreshes.append(credential.refresh)
+        await anyio.sleep(0.01)
+        return OAuthCredential(access="new", refresh="new-refresh", expires=4_102_444_800_000)
+
+    tokens: list[str | None] = []
+
+    async def request() -> None:
+        auth = await resolver.bearer_token("openai-codex", refresh=refresh)
+        tokens.append(auth.token if auth is not None else None)
+
+    async def run() -> None:
+        async with anyio.create_task_group() as requests:
+            for _ in range(4):
+                requests.start_soon(request)
+
+    anyio.run(run)
+
+    assert refreshes == ["old-refresh"]
+    assert tokens == ["new"] * 4
+
+
 def test_json_auth_store_syncs_file_and_parent_directory(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
