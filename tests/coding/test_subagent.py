@@ -30,6 +30,7 @@ from wisp.events import (
     TokenUsage,
     ToolApprovalRequested,
     ToolCallSnapshot,
+    ToolExecutionStarted,
     ToolNestedCallEnded,
     ToolNestedCallStarted,
     ToolResultReady,
@@ -63,7 +64,7 @@ from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
 from wisp.tools.result import ToolError, ToolResult
 from wisp.tools.seen_files import SeenFiles
-from wisp.tools.subagent import SPAWN_AGENT, SpawnAgentTool
+from wisp.tools.subagent import SPAWN_AGENT, SUBAGENT_REPORT_MAX_BYTES, SpawnAgentTool
 
 _SCHEMA: ToolInputSchema = {
     "type": "object",
@@ -1222,6 +1223,264 @@ def test_uncatalogued_model_used_as_given(tmp_path: Path) -> None:
     assert provider.calls[1].effort is None
 
 
+def _saved_spend(session: CodingSession) -> tuple[int, list[tuple[str | None, int]]]:
+    """Read back a session's total tokens and each saved tool result's subagent responses."""
+
+    async def read() -> tuple[int, list[tuple[str | None, int]]]:
+        saved = session.sessions.latest()
+        stats = await session.get_session_stats(saved)
+        results = [
+            (entry.tool_result.status, len(entry.tool_result.model_usage or ()))
+            for entry in saved.read_entries()
+            if isinstance(entry, MessageSessionEntry) and entry.tool_result is not None
+        ]
+        return stats.usage.total_tokens, results
+
+    return anyio.run(read)
+
+
+def test_cancelled_spend_is_counted(tmp_path: Path) -> None:
+    """Cancelling a run keeps what its subagents had already spent in the session totals."""
+
+    lookup = _Tool("lookup", delay=60)
+    session, _ = _fan_out(tmp_path, ("a", "b"), lookup)
+    started: list[str] = []
+
+    async def sink(event: WispEvent) -> None:
+        if isinstance(event, ToolNestedCallStarted):
+            started.append(event.call_id)
+            if len(started) == 2:
+                session.cancel_run()
+
+    async def collect() -> list[WispEvent]:
+        with anyio.fail_after(5):
+            return [event async for event in session.run("go", live_event_sink=sink)]
+
+    events = anyio.run(collect)
+
+    # Each subagent had completed the one response that asked for its tool call.
+    results = [event for event in events if isinstance(event, ToolResultReady)]
+    assert [(result.is_error, len(result.model_usage)) for result in results] == [(True, 1)] * 2
+    total_tokens, saved = _saved_spend(session)
+    assert total_tokens == 220
+    assert saved == [("cancelled", 1), ("cancelled", 1)]
+
+
+def test_abandoned_run_keeps_spend(tmp_path: Path) -> None:
+    """A run whose caller stops listening still saves what its subagent had spent."""
+
+    session, _ = _session(
+        tmp_path,
+        _Tools(lookup=_Tool("lookup", delay=60)),
+        [_spawn(), _calls(("lookup", {"table": "a"}))],
+    )
+
+    async def abandon() -> None:
+        with anyio.fail_after(5), anyio.CancelScope() as listening:
+
+            async def sink(event: WispEvent) -> None:
+                if isinstance(event, ToolNestedCallStarted):
+                    listening.cancel()
+
+            async for _ in session.run("go", live_event_sink=sink):
+                pass
+
+    anyio.run(abandon)
+
+    total_tokens, saved = _saved_spend(session)
+    assert total_tokens == 110
+    assert saved == [("cancelled", 1)]
+
+
+def test_abandoned_run_keeps_finished_spend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A call that had finished beside one still running keeps its spend too.
+
+    When the caller stops listening, the run throws away results it had not yet
+    published, the finished call's among them.
+    """
+
+    first_returned = False
+    run_spawn = SpawnAgentTool.run
+
+    async def run_and_note(
+        tool: SpawnAgentTool, arguments: ToolArguments, context: ToolContext
+    ) -> ToolResult:
+        nonlocal first_returned
+        result = await run_spawn(tool, arguments, context)
+        first_returned = first_returned or arguments["tasks"] == ["a"]
+        return result
+
+    monkeypatch.setattr(SpawnAgentTool, "run", run_and_note)
+
+    @dataclass
+    class _WaitsForFirst(_Tool):
+        """Returns only once the first `spawn_agent` call has returned its result."""
+
+        async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
+            while not first_returned:
+                await anyio.sleep(0.001)
+            return await super().run(arguments, context)
+
+    registry = ToolRegistry()
+    registry.register(_WaitsForFirst("lookup"), execution=ToolExecutionMetadata(parallel_safe=True))
+    registry.register(_Tool("scan", delay=60), execution=ToolExecutionMetadata(parallel_safe=True))
+    provider = _RoutedProvider(
+        {
+            "go": [_spawn_each("a", "b")],
+            "a": [_says("report on a")],
+            # The second call stalls two rounds later, long after the first returned.
+            "b": [_calls(("lookup", {"table": "b"})), _calls(("scan", {"table": "b"}))],
+        }
+    )
+    session = CodingSession(
+        provider=provider,
+        sessions=JsonlSessionStore(tmp_path / "sessions"),
+        tool_registry=registry,
+        tool_context=ToolContext(cwd=tmp_path),
+        subagents=True,
+    )
+
+    async def abandon() -> None:
+        with anyio.fail_after(5), anyio.CancelScope() as listening:
+
+            async def sink(event: WispEvent) -> None:
+                if isinstance(event, ToolNestedCallStarted) and event.name == "scan":
+                    listening.cancel()
+
+            async for _ in session.run("go", live_event_sink=sink):
+                pass
+
+    anyio.run(abandon)
+
+    total_tokens, saved = _saved_spend(session)
+    # The finished call's one response, and the stalled call's two.
+    assert saved == [("cancelled", 1), ("cancelled", 2)]
+    assert total_tokens == 330
+
+
+def test_reused_call_id_charged_once(tmp_path: Path) -> None:
+    """A call cancelled under an id an earlier call used is charged only its own spend.
+
+    Models that issue no call ids give every round's `spawn_agent` call the same id.
+    """
+
+    session, _ = _session(
+        tmp_path,
+        _Tools(lookup=_Tool("lookup", delay=60)),
+        [
+            _spawn("first"),
+            _says("first report"),
+            _spawn("second"),
+            _calls(("lookup", {"table": "a"})),
+        ],
+    )
+
+    async def sink(event: WispEvent) -> None:
+        if isinstance(event, ToolNestedCallStarted):
+            session.cancel_run()
+
+    async def collect() -> list[WispEvent]:
+        with anyio.fail_after(5):
+            return [event async for event in session.run("go", live_event_sink=sink)]
+
+    anyio.run(collect)
+
+    total_tokens, saved = _saved_spend(session)
+    assert saved == [("done", 1), ("cancelled", 1)]
+    assert total_tokens == 220
+
+
+def test_finished_call_leaves_no_spend_behind(tmp_path: Path) -> None:
+    """A call that returned is not charged again to a later call cancelled under its id."""
+
+    session, provider = _session(
+        tmp_path, _Tools(), [_spawn("first"), _says("first report"), _spawn("second")]
+    )
+    spawns_started = 0
+
+    async def collect() -> None:
+        nonlocal spawns_started
+        with anyio.fail_after(5):
+            async for event in session.run("go"):
+                if isinstance(event, ToolExecutionStarted) and event.name == SPAWN_AGENT:
+                    spawns_started += 1
+                    if spawns_started == 2:
+                        # Before the second call's subagent has asked the model anything.
+                        session.cancel_run()
+
+    anyio.run(collect)
+
+    total_tokens, saved = _saved_spend(session)
+    assert len(provider.calls) == 3
+    assert saved == [("done", 1), ("cancelled", 0)]
+    assert total_tokens == 110
+
+
+@pytest.mark.parametrize("tasks", [["a"], ["a", "b"]], ids=["one-task", "two-tasks"])
+def test_report_length_is_capped(tmp_path: Path, tasks: list[str]) -> None:
+    """A report longer than the cap is cut and marked, however much room the result has."""
+
+    async def runner(task: str, start_from: str) -> str:
+        return f"{task} finding\n" * 2_000
+
+    tool = SpawnAgentTool(runner)
+
+    async def run() -> ToolResult:
+        return await tool.run({"tasks": tasks}, ToolContext(cwd=tmp_path))
+
+    result = anyio.run(run)
+
+    reports = (
+        [part for part in result.text.split("## Task ") if part]
+        if len(tasks) > 1
+        else [result.text]
+    )
+    assert len(reports) == len(tasks)
+    for report in reports:
+        assert len(report.encode()) <= SUBAGENT_REPORT_MAX_BYTES + 16
+        assert report.rstrip().endswith("[truncated]")
+    assert result.truncated
+
+
+@pytest.mark.parametrize(
+    ("report", "limit"),
+    [
+        # A result limit below the cap wins.
+        ("finding\n" * 500, 1_000),
+        # A cut never lands inside a character, nor past the cap in bytes.
+        ("é" * 10_000, SUBAGENT_REPORT_MAX_BYTES),
+    ],
+    ids=["small-result-limit", "multi-byte"],
+)
+def test_cap_counts_bytes(tmp_path: Path, report: str, limit: int) -> None:
+    async def runner(task: str, start_from: str) -> str:
+        return report
+
+    async def run() -> ToolResult:
+        context = ToolContext(cwd=tmp_path, max_output_bytes=min(limit, 50_000))
+        return await SpawnAgentTool(runner).run({"tasks": ["a"]}, context)
+
+    result = anyio.run(run)
+
+    assert len(result.text.encode()) <= limit
+    assert result.text.endswith("[truncated]")
+    assert result.truncated
+
+
+def test_short_report_is_untouched(tmp_path: Path) -> None:
+    async def runner(task: str, start_from: str) -> str:
+        return "a short report"
+
+    async def run() -> ToolResult:
+        return await SpawnAgentTool(runner).run({"tasks": ["a"]}, ToolContext(cwd=tmp_path))
+
+    result = anyio.run(run)
+
+    assert (result.text, result.truncated) == ("a short report", False)
+
+
 def test_cancel_reaches_waiting_subagents(tmp_path: Path) -> None:
     """A subagent still waiting for its turn when the run is cancelled never starts."""
 
@@ -1361,10 +1620,11 @@ def test_limit_returns_partial(tmp_path: Path) -> None:
     )
 
     assert not run.result.is_error
-    # It keeps the last thing the subagent wrote, though its last response wrote nothing.
+    # It keeps the last thing the subagent wrote, though its last response wrote
+    # nothing. The note comes first, where cutting a long report cannot lose it.
     assert run.result.output == (
-        "a is empty so far\n\n"
-        "[The subagent stopped at its limit of 1 tool rounds before finishing.]"
+        "[The subagent stopped at its limit of 1 tool rounds before finishing.]\n\n"
+        "a is empty so far"
     )
     assert len(run.result.model_usage) == 2
 

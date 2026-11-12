@@ -315,6 +315,11 @@ class ConfiguredToolExecutor:
         # their tool is parallel-safe; those run at most as many at once as in a batch.
         self._nested_serial_lock = anyio.Lock()
         self._nested_parallel_limit = anyio.CapacityLimiter(_MAX_PARALLEL_NESTED_CALLS)
+        # What each `spawn_agent` call's subagents spent, by call id, until the
+        # session has saved the call's result. A call that is cancelled never
+        # returns one from here, and one that returned can still lose it when the
+        # run is abandoned before it is published, so the spend is kept apart.
+        self._unsaved_model_usage: dict[str, tuple[ModelResponseUsage, ...]] = {}
 
     @property
     def mcp_catalog(self) -> McpCatalog | None:
@@ -351,6 +356,28 @@ class ConfiguredToolExecutor:
         executor._nested_serial_lock = self._nested_serial_lock
         executor._nested_parallel_limit = self._nested_parallel_limit
         return executor
+
+    def unsaved_model_usage(self, call_id: str, *, forget: bool) -> tuple[ModelResponseUsage, ...]:
+        """Return what a `spawn_agent` call's subagents spent, if no result has saved it.
+
+        The session reads this for a result it is about to save that carries no
+        usage of its own: one the loop made for a cancelled call, or one it
+        synthesizes for a call whose result never arrived.
+
+        Args:
+            call_id (str): The call.
+            forget (bool): Whether the call's result is now saved, with or without
+                this. A provider may reuse the call id in a later round, which must
+                not be charged these responses again.
+
+        Returns:
+            tuple[ModelResponseUsage, ...]: The responses, or none for a call that
+            made no model request or whose result was already saved.
+        """
+
+        if forget:
+            return self._unsaved_model_usage.pop(call_id, ())
+        return self._unsaved_model_usage.get(call_id, ())
 
     @staticmethod
     def nested_host_call_id() -> str | None:
@@ -700,6 +727,8 @@ class ConfiguredToolExecutor:
                 # after it.
                 log.close()
                 _SCRIPT_CALLS.reset(token)
+                if log.model_usage:
+                    self._unsaved_model_usage[tool_call.call_id] = tuple(log.model_usage)
             outcome = replace(
                 outcome,
                 nested_calls=log.calls(),

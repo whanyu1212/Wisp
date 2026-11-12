@@ -46,15 +46,22 @@ SUBAGENT_MAX_TOOL_ITERATIONS = MAX_TOOL_MODEL_RESPONSES // SUBAGENT_MAX_TASKS - 
 # requests, so more would mostly wait on the provider's rate limit.
 SUBAGENT_MAX_PARALLEL = 4
 
+# A number holds where "keep it short" did not: reports ran to twelve thousand
+# characters. The limit asked for sits well inside what the tool lets through,
+# which is less than its cap when many tasks share one result.
+_REPORT_LENGTH = (
+    "Write at most 500 words: a longer report is cut off and its end never read. "
+    "Give conclusions and the references that support them, not an account of "
+    "everything you read, and leave out code the reader can open from a reference."
+)
+
 SUBAGENT_INSTRUCTIONS = (
     "You are a subagent. Another agent gave you the task in the next message and "
     "will read only your final message, so that message must be a complete, "
     "self-contained report: answer first, then the evidence, with file paths and "
-    "line numbers. Keep it short: give conclusions and the references that support "
-    "them, not an account of everything you read, and leave out code the reader can "
-    "open from a reference. You can only read and search; do not try to change "
-    "anything. You cannot ask questions, so state any assumption you make. Stop as "
-    "soon as the task is answered."
+    f"line numbers. {_REPORT_LENGTH} You can only read and search; do not try to "
+    "change anything. You cannot ask questions, so state any assumption you make. "
+    "Stop as soon as the task is answered."
 )
 
 # A forked subagent keeps the conversation's own prompt, so its instructions arrive
@@ -65,9 +72,8 @@ _FORK_INSTRUCTIONS = (
     "not continue its work: do only the task below, then stop. You can only read "
     "and search; every other tool, though listed, is refused. Your final message "
     "must be a complete, self-contained report: answer first, then the evidence, "
-    "with file paths and line numbers. Keep it short: give conclusions and the "
-    "references that support them, not an account of everything you read. You "
-    "cannot ask questions, so state any assumption you make."
+    f"with file paths and line numbers. {_REPORT_LENGTH} You cannot ask questions, "
+    "so state any assumption you make."
 )
 _FORKED_CALL_RESULT = (
     "Forked. You are a subagent this call started; your task is in the next message."
@@ -232,7 +238,7 @@ async def run_subagent(
 
     Returns:
         str: The subagent's final message. When it reached its tool-round limit
-        first, the last text it wrote, followed by a note that it did not finish.
+        first, a note that it did not finish, followed by the last text it wrote.
 
     Raises:
         ToolError: The subagent's model or provider failed, its context overflowed,
@@ -268,7 +274,8 @@ async def run_subagent(
     if limit_reached:
         limit = harness.config.max_tool_iterations
         note = f"[The subagent stopped at its limit of {limit} tool rounds before finishing.]"
-        return f"{last_text}\n\n{note}" if last_text else note
+        # First, so the note survives when a long partial report is cut at its end.
+        return f"{note}\n\n{last_text}" if last_text else note
     if failure is not None:
         raise ToolError(f"The subagent failed: {failure}")
     if not report:

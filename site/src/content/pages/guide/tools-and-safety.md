@@ -538,15 +538,20 @@ broad search or investigation whose raw output would crowd its context.
   these calls when opened.
 - **Its model calls are billed.** A subagent makes its own model requests. The result's
   `model_usage` lists each response's tokens and cost, the session saves it, and session usage and
-  cost totals include it. A run cancelled while a subagent is working records the call as
-  interrupted, with no usage listed, so that subagent's spend is missing from the totals.
+  cost totals include it. A run cancelled while subagents are working records the call as
+  interrupted and still lists the responses they had completed, so that spend stays in the
+  totals. A response still being written when the run was cancelled reports no usage and is not
+  counted.
 - **Several at once.** One call takes up to eight tasks and runs their subagents at the same
   time, four at once, the rest waiting their turn. The result gives each report under a
   `## Task N` heading; a subagent that fails says why in its place and the others still report.
   The run continues once all of them have. A tool that is not safe to run in parallel still runs
   for one subagent at a time, though it can overlap a parallel-safe call.
+- **Short reports.** A subagent is asked for a report of at most 500 words. A report longer than
+  8,000 bytes, or than its share of the result when seven or eight tasks report at once, is cut
+  and marked, so one subagent cannot fill the context the model delegated to protect.
 - **Limits.** A subagent works for at most 63 tool rounds; one that reaches the limit returns
-  what it has with a note. Cancelling a run stops its subagents.
+  what it has, after a note saying so. Cancelling a run stops its subagents.
 
 The setting is user-only, because a subagent spends on your provider account. A run that an
 operation limits to named tools, such as `/init`, is not offered the tool. In the terminal UI,

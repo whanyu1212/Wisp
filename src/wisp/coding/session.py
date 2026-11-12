@@ -37,6 +37,7 @@ from wisp.agent.harness import (
     DEFAULT_MAX_PENDING_QUEUE_MESSAGES,
     AgentHarness,
     AgentHarnessConfig,
+    AgentHarnessEvent,
     HarnessBoundaryContext,
     QueuedMessages,
     queue_full_message,
@@ -122,6 +123,7 @@ from wisp.events import (
     ToolExecutionEnded,
     ToolExecutionStarted,
     ToolPresentationStatus,
+    ToolResultReady,
     TurnCompleted,
     TurnStarted,
     WispEvent,
@@ -413,6 +415,35 @@ def codemode_available() -> bool:
     """Report whether the `codemode` extra, which runs the scripts, is installed."""
 
     return importlib.util.find_spec("pydantic_monty") is not None
+
+
+def _with_unsaved_subagent_usage(
+    event: AgentHarnessEvent, executor: ConfiguredToolExecutor
+) -> AgentHarnessEvent:
+    """Give a `spawn_agent` call's result what its subagents spent, when it lacks it.
+
+    A call that returned carries its own usage. The loop settles a cancelled call
+    with a result of its own making, which knows nothing of the model responses
+    the call's subagents had completed; adding them here puts them in the saved
+    result, where session usage and cost are counted.
+
+    Args:
+        event (AgentHarnessEvent): An event from the run's loop.
+        executor (ConfiguredToolExecutor): The run's executor, which keeps each
+            call's spend until its result is saved.
+
+    Returns:
+        AgentHarnessEvent: The event, with the spend when it is the terminal or the
+        result of a call that has none. The result comes second, and with it the
+        executor forgets the call: its spend is saved, one way or the other.
+    """
+
+    if not isinstance(event, ToolExecutionEnded | ToolResultReady):
+        return event
+    spent = executor.unsaved_model_usage(event.call_id, forget=isinstance(event, ToolResultReady))
+    if event.model_usage or not spent:
+        return event
+    return event.model_copy(update={"model_usage": spent})
 
 
 @dataclass(frozen=True, slots=True)
@@ -1529,6 +1560,7 @@ class CodingSession:
             async for event in harness_events:
                 for compaction_event in compaction.take_events():
                     yield compaction_event
+                event = _with_unsaved_subagent_usage(event, executor)
                 loop.observe(event, compaction=compaction, tool_is_unsafe=self._tool_is_unsafe)
                 for published in self._persist_loop_event(
                     event,
@@ -1558,6 +1590,7 @@ class CodingSession:
                         session,
                         harness,
                         operation_id=operation_id,
+                        executor=executor,
                     )
 
         if self._cancelled_harness is harness and loop.outcome == "completed":
@@ -3548,15 +3581,36 @@ class CodingSession:
         harness: AgentHarness,
         *,
         operation_id: str | None = None,
+        executor: ConfiguredToolExecutor | None = None,
     ) -> None:
-        """Persist synthetic repairs before the transcript crosses a new boundary."""
+        """Persist synthetic repairs before the transcript crosses a new boundary.
+
+        Args:
+            session (JsonlSession): Session the repairs are appended to.
+            harness (AgentHarness): Harness whose transcript may hold calls with no
+                result.
+            operation_id (str | None, optional): Operation owning the entries.
+                Defaults to None.
+            executor (ConfiguredToolExecutor | None, optional): The run's executor.
+                A repaired `spawn_agent` call takes from it what its subagents
+                spent, whether the call was cut off or had returned a result the
+                run never published, so the spend stays in the session's totals.
+                Defaults to None, for repairs made outside a run.
+        """
 
         for message in harness.repair_interrupted_tool_calls():
+            spent = (
+                executor.unsaved_model_usage(message.tool_call_id, forget=True)
+                if executor is not None and message.tool_call_id is not None
+                else ()
+            )
             self._queue_message(
                 session,
                 message,
                 operation_id=operation_id,
-                tool_result=ToolResultPresentationSnapshot(status="cancelled"),
+                tool_result=ToolResultPresentationSnapshot(
+                    status="cancelled", model_usage=spent or None
+                ),
             )
         await self._flush_pending_entries()
 
