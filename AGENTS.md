@@ -180,6 +180,9 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
   state live in `rpc/session/` (`run.py`, `mutation.py`, `read.py`, `queue.py`, `state.py`);
   configuration, connection, control, inspection, and project-file handlers live in
   `rpc/handlers/`. Both subpackages re-export nothing; import from the defining module.
+  `rpc/handlers/mcp.py` owns every MCP connect and restart. The JSONL-RPC backend builds its
+  runtime without connecting MCP servers; the host connects them beside the command queue, and
+  prompt and compaction runs wait for that connect before they start.
   `working_directory.py` moves the session between folders and, outside the project root,
   between projects, using `configuration.py`'s `apply_project` for the project switch.
 - Keep `wisp.agent.harness`, `wisp.agent.loop`, and `wisp.coding.prompt` as their public import

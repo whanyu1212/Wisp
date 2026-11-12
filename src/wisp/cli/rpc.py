@@ -92,7 +92,9 @@ async def _run_rpc(
 ) -> None:
     if not handshake_complete and not await _negotiate_rpc_connection():
         return
-    runtime = await build_session_runtime(config)
+    # The host connects MCP servers once it is serving, so a resumed session's
+    # transcript does not wait for the slowest server.
+    runtime = await build_session_runtime(config, connect_mcp=False)
     # The receiver stays open through runtime.aclose(), so a second signal sent while
     # cleanup runs waits in its queue instead of ending the process mid-cleanup.
     with _shutdown_signal_receiver() as shutdown_signals:

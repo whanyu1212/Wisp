@@ -90,7 +90,7 @@ def test_cli_frontends_close_runtime_when_execution_fails(
     runtime = _RecordingRuntime()
     config = WispConfig(provider="fake", session_dir=tmp_path)
 
-    async def fake_build(_config: WispConfig) -> Any:
+    async def fake_build(_config: WispConfig, *, connect_mcp: bool = True) -> Any:
         return runtime
 
     async def fail(*_args: object, **_kwargs: object) -> None:
@@ -279,7 +279,7 @@ def test_session_runtime_uses_one_hour_anthropic_cache(
 
     anyio.run(host_module.build_session_runtime, config)
 
-    assert build_kwargs == [{"anthropic_cache_ttl": "1h"}]
+    assert build_kwargs == [{"anthropic_cache_ttl": "1h", "connect_mcp": True}]
 
 
 def test_rpc_backend_and_sdk_build_session_runtimes(

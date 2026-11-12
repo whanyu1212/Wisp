@@ -50,11 +50,18 @@ async def build_runtime(
     openai_compatible: OpenAICompatibleSettings | None = None,
     anthropic_cache_ttl: AnthropicCacheTtl = "5m",
     mcp_token_store: McpTokenStore | None = None,
+    connect_mcp: bool = True,
 ) -> WispRuntime:
     """Create runtime state and activate built-in extensions.
 
     ``mcp_token_store`` holds MCP OAuth credentials; None uses
     ``~/.wisp/mcp-auth.json``.
+
+    With ``connect_mcp`` False the enabled servers are recorded but not started,
+    and the runtime reports ``mcp_connecting``. The caller must then connect them
+    with :func:`restart_mcp_servers` before an agent run uses the runtime's tools;
+    a host does this in the background so it can serve a session's transcript
+    without waiting for every server.
     """
 
     providers = ProviderRegistry()
@@ -88,7 +95,7 @@ async def build_runtime(
             anthropic_cache_ttl=anthropic_cache_ttl,
         )
         enabled_servers = tuple(server for server in mcp_servers if server.enabled)
-        if enabled_servers:
+        if enabled_servers and connect_mcp:
             # `mcp` costs ~430 ms to import and is only reachable through this
             # branch, which already runs solely when servers are configured. Import
             # it here so a session without MCP servers never pays for it.
@@ -129,6 +136,7 @@ async def build_runtime(
             else ()
         ),
         disabled_mcp_servers=tuple(server.name for server in mcp_servers if not server.enabled),
+        mcp_connecting=bool(enabled_servers) and not connect_mcp,
         unavailable_tool_prefixes=_unavailable_tool_prefixes(mcp_servers, mcp_runtime),
     )
 

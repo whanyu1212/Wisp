@@ -375,6 +375,7 @@ class RpcCommandExecutor:
             running_command_factory=self.running_command_factory,
             command_completed_factory=self.command_completed_factory,
             after_run=self._after_run(),
+            tools_ready=self._tools_ready(),
         )
         return _RpcDispatchResult(
             running_command=new_running_command,
@@ -394,6 +395,7 @@ class RpcCommandExecutor:
             render_events=self.render_events,
             running_command_factory=self.running_command_factory,
             command_completed_factory=self.command_completed_factory,
+            tools_ready=self._tools_ready(),
         )
         return _RpcDispatchResult(
             running_command=new_running_command,
@@ -404,6 +406,11 @@ class RpcCommandExecutor:
         """Work for the end of a run that may have confirmed MCP proposals."""
 
         return self.mcp_servers.restart_after_run if self.mcp_servers is not None else None
+
+    def _tools_ready(self) -> Callable[[], Awaitable[None]] | None:
+        """The wait an agent run makes for MCP servers still connecting after startup."""
+
+        return self.mcp_servers.wait_for_startup if self.mcp_servers is not None else None
 
     def _dispatch_compact(self, command: CompactCommand) -> _RpcDispatchResult:
         return _RpcDispatchResult(
@@ -418,6 +425,7 @@ class RpcCommandExecutor:
                 render_events=self.render_events,
                 running_command_factory=self.running_command_factory,
                 command_completed_factory=self.command_completed_factory,
+                tools_ready=self._tools_ready(),
             )
         )
 

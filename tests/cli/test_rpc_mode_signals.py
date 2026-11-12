@@ -38,8 +38,8 @@ build_runtime = cli_rpc.build_session_runtime
 signal_receiver = cli_rpc._shutdown_signal_receiver
 
 
-async def build_with_managed_process(config):
-    runtime = await build_runtime(config)
+async def build_with_managed_process(config, *, connect_mcp):
+    runtime = await build_runtime(config, connect_mcp=connect_mcp)
     await runtime.process_supervisor.start(
         f"echo $$ > {pid_path}; exec sleep 60", cwd=Path.cwd(), timeout=60
     )

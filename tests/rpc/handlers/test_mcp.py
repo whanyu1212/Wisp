@@ -31,7 +31,7 @@ from wisp.rpc.handlers.mcp import (
     rpc_mcp_status_snapshot,
 )
 from wisp.rpc.host import RpcToolApprovalPolicy
-from wisp.runtime.api import ExtensionAPI
+from wisp.runtime.api import ExtensionAPI, WispRuntime
 from wisp.runtime.extensions import build_runtime, restart_mcp_servers
 from wisp.runtime.registry import ToolRegistry, UnknownToolError
 from wisp.sessions.jsonl import JsonlSessionStore
@@ -343,3 +343,168 @@ def test_launch_names_header_values_and_the_variables_headers_send() -> None:
         {"header": "Authorization", "variable": "LINEAR_API_KEY", "scheme": "Bearer"}
     ]
     assert SECRET not in launch.model_dump_json()
+
+
+def _mcp_servers(runtime: WispRuntime, agent: CodingSession) -> RpcMcpServers:
+    return RpcMcpServers(
+        runtime=runtime,
+        agent=agent,
+        tool_selection=_ALL_TOOLS,
+        revoke_session_tool_grants=lambda _prefix: None,
+    )
+
+
+@pytest.mark.process
+def test_startup_connect_matches_an_eager_build(tmp_path: Path) -> None:
+    """Connecting after the build offers the same tools, in the same order."""
+
+    async def scenario() -> None:
+        server = _fixture_server(tmp_path)
+        eager = await build_runtime(mcp_servers=(server,))
+        deferred = await build_runtime(mcp_servers=(server,), connect_mcp=False)
+        try:
+            assert deferred.mcp_connecting
+            assert all(not name.startswith("mcp__") for name in deferred.tools.names())
+            agent = CodingSession(
+                provider=ScriptedProvider(()),
+                sessions=JsonlSessionStore(tmp_path / "sessions"),
+                tool_registry=_ALL_TOOLS.select(deferred),
+            )
+            servers = _mcp_servers(deferred, agent)
+
+            assert await servers.connect_at_startup() == ()
+            await servers.wait_for_startup()
+
+            assert not deferred.mcp_connecting
+            assert deferred.tools.names() == eager.tools.names()
+            assert [tool.name for tool in agent.tools] == list(eager.tools.names())
+            assert rpc_mcp_status_snapshot(deferred) == rpc_mcp_status_snapshot(eager)
+        finally:
+            await deferred.aclose()
+            await eager.aclose()
+
+    anyio.run(scenario)
+
+
+@pytest.mark.process
+def test_startup_connect_waits_for_a_busy_session(tmp_path: Path) -> None:
+    """A folder change being saved when servers connect must not cost the session its tools."""
+
+    async def scenario() -> None:
+        runtime = await build_runtime(mcp_servers=(_fixture_server(tmp_path),), connect_mcp=False)
+        try:
+            agent = CodingSession(
+                provider=ScriptedProvider(()),
+                sessions=JsonlSessionStore(tmp_path / "sessions"),
+                tool_registry=_ALL_TOOLS.select(runtime),
+            )
+            servers = _mcp_servers(runtime, agent)
+            problems: list[tuple[str, ...]] = []
+
+            async def connect() -> None:
+                problems.append(await servers.connect_at_startup())
+
+            async with anyio.create_task_group() as task_group:
+                async with agent._exclusive_operation():  # noqa: SLF001
+                    task_group.start_soon(connect)
+                    while runtime.mcp_connecting:
+                        await anyio.sleep(0.01)
+                    # The servers are up, but the busy session has not been given
+                    # their tools, so runs must keep waiting.
+                    await anyio.sleep(0.05)
+                    assert not servers._startup_settled.is_set()  # noqa: SLF001
+            assert problems == [()]
+            assert [tool.name for tool in agent.tools][-2:] == [
+                "mcp__fixture__echo",
+                "mcp__fixture__runtime_environment",
+            ]
+        finally:
+            await runtime.aclose()
+
+    anyio.run(scenario)
+
+
+def test_startup_connect_and_restart_never_overlap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An MCP command sent while servers connect waits instead of starting a second set."""
+
+    from wisp.mcp.runtime import McpRuntime
+
+    starts_in_progress = 0
+    most_starts_at_once = 0
+    first_start_entered = anyio.Event()
+    release_first_start = anyio.Event()
+
+    async def tracked_start(cls: type[McpRuntime], *_args: object, **_kwargs: object) -> McpRuntime:
+        nonlocal starts_in_progress, most_starts_at_once
+        starts_in_progress += 1
+        most_starts_at_once = max(most_starts_at_once, starts_in_progress)
+        try:
+            first_start_entered.set()
+            await release_first_start.wait()
+            raise RuntimeError("Failed to initialize MCP runtime")
+        finally:
+            starts_in_progress -= 1
+
+    monkeypatch.setattr(McpRuntime, "start", classmethod(tracked_start))
+
+    async def scenario() -> None:
+        server = _fixture_server(tmp_path)
+        runtime = await build_runtime(mcp_servers=(server,), connect_mcp=False)
+        try:
+            agent = CodingSession(
+                provider=ScriptedProvider(()),
+                sessions=JsonlSessionStore(tmp_path / "sessions"),
+                tool_registry=_ALL_TOOLS.select(runtime),
+            )
+            servers = _mcp_servers(runtime, agent)
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(servers.connect_at_startup)
+                await first_start_entered.wait()
+                task_group.start_soon(servers._restart, (server,))
+                await anyio.wait_all_tasks_blocked()
+                release_first_start.set()
+            assert most_starts_at_once == 1
+        finally:
+            await runtime.aclose()
+
+    anyio.run(scenario)
+
+
+def test_startup_connect_is_skipped_after_a_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restart that ran first already connected every server."""
+
+    from wisp.mcp.runtime import McpRuntime
+
+    starts = 0
+
+    async def failing_start(cls: type[McpRuntime], *_args: object, **_kwargs: object) -> McpRuntime:
+        nonlocal starts
+        starts += 1
+        raise RuntimeError("Failed to initialize MCP runtime")
+
+    monkeypatch.setattr(McpRuntime, "start", classmethod(failing_start))
+
+    async def scenario() -> None:
+        server = _fixture_server(tmp_path)
+        runtime = await build_runtime(mcp_servers=(server,), connect_mcp=False)
+        try:
+            agent = CodingSession(
+                provider=ScriptedProvider(()),
+                sessions=JsonlSessionStore(tmp_path / "sessions"),
+                tool_registry=_ALL_TOOLS.select(runtime),
+            )
+            servers = _mcp_servers(runtime, agent)
+
+            await servers._restart((server,))
+            assert await servers.connect_at_startup() == ()
+            await servers.wait_for_startup()
+
+            assert starts == 1
+        finally:
+            await runtime.aclose()
+
+    anyio.run(scenario)

@@ -1298,6 +1298,33 @@
       "title": "ImagePart",
       "type": "object"
     },
+    "McpStatusUpdated": {
+      "additionalProperties": false,
+      "description": "MCP servers that were still connecting when the host started have settled.\n\nSent once, unprompted, when the startup connect ends, so a frontend can replace\nthe \"connecting\" status it was given earlier.",
+      "properties": {
+        "status": {
+          "$ref": "#/$defs/RpcMcpStatusSnapshot"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "mcp.status.updated",
+          "default": "mcp.status.updated",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "timestamp",
+        "status"
+      ],
+      "title": "McpStatusUpdated",
+      "type": "object"
+    },
     "MessageCompleted": {
       "additionalProperties": false,
       "properties": {
@@ -3242,6 +3269,7 @@
         },
         "status": {
           "enum": [
+            "connecting",
             "connected",
             "disconnected",
             "unavailable",
@@ -8512,6 +8540,7 @@
       "context.overflow": "#/$defs/ContextOverflow",
       "context.pressure": "#/$defs/ContextPressure",
       "error": "#/$defs/ErrorEvent",
+      "mcp.status.updated": "#/$defs/McpStatusUpdated",
       "message.completed": "#/$defs/MessageCompleted",
       "message.delta": "#/$defs/MessageDelta",
       "message.started": "#/$defs/MessageStarted",
@@ -8712,6 +8741,9 @@
       "$ref": "#/$defs/RpcMcpLoginStarted"
     },
     {
+      "$ref": "#/$defs/McpStatusUpdated"
+    },
+    {
       "$ref": "#/$defs/SkillCatalogUpdated"
     },
     {
@@ -8866,6 +8898,13 @@
       "message": "fixture error",
       "timestamp": "2026-01-02T03:04:05Z",
       "type": "error"
+    },
+    "mcp.status.updated": {
+      "status": {
+        "servers": []
+      },
+      "timestamp": "2026-01-02T03:04:05Z",
+      "type": "mcp.status.updated"
     },
     "message.completed": {
       "content": "fixture",

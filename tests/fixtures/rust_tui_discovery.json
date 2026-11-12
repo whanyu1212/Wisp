@@ -194,6 +194,37 @@
       ]
     }
   },
+  "mcp.status.updated": {
+    "type": "mcp.status.updated",
+    "timestamp": "2026-09-11T00:00:00Z",
+    "status": {
+      "servers": [
+        {
+          "name": "search",
+          "status": "connected",
+          "tool_names": [
+            "mcp__search__query"
+          ],
+          "error": null,
+          "launch": {
+            "command": "npx",
+            "args": [
+              "-y",
+              "search-server"
+            ],
+            "url": null,
+            "env_names": [],
+            "env_from": [
+              "SEARCH_TOKEN"
+            ],
+            "header_names": [],
+            "headers_from": []
+          },
+          "sign_in": null
+        }
+      ]
+    }
+  },
   "rpc.mcp.preview": {
     "type": "rpc.mcp.preview",
     "timestamp": "2026-09-11T00:00:00Z",

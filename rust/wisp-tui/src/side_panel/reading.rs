@@ -230,7 +230,13 @@ pub(super) fn inventory_rows(
         .snapshot
         .as_ref()
         .map(|snapshot| snapshot.servers.as_slice());
+    let connecting = servers.is_some_and(|servers| {
+        servers
+            .iter()
+            .any(|server| server.status == McpServerStatus::Connecting)
+    });
     let status = servers
+        .filter(|_| !connecting)
         .map(|servers| {
             format!(
                 "{}/{} connected",
@@ -242,7 +248,9 @@ pub(super) fn inventory_rows(
             )
         })
         .unwrap_or_else(|| {
-            if state.mcp.loading() {
+            if connecting {
+                "connecting…"
+            } else if state.mcp.loading() {
                 "reading…"
             } else {
                 "unavailable"
@@ -338,7 +346,7 @@ fn server_rows(
         let expanded = panel.server_details.contains(&server.name);
         let (marker, color) = match server.status {
             McpServerStatus::Connected => ("●", palette.success),
-            McpServerStatus::Disabled => ("○", palette.muted),
+            McpServerStatus::Connecting | McpServerStatus::Disabled => ("○", palette.muted),
             McpServerStatus::Disconnected | McpServerStatus::Unavailable => ("●", palette.error),
         };
         let status = if server.status == McpServerStatus::Connected {
