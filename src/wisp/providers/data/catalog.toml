@@ -499,8 +499,10 @@ default_model = "gemini-3.6-flash"
 docs_url = "https://ai.google.dev/gemini-api/docs"
 # The Google provider uses the Gemini Developer API. These text-output model IDs
 # and capabilities were verified against Google's model and thinking docs on
-# 2026-10-13; account availability can still vary by API key.
+# 2026-10-13; account availability can still vary by API key. gemini-4-carbon
+# was added on 2026-11-12 from its model page and a live request.
 models = [
+    "gemini-4-carbon",
     "gemini-4-argon",
     "gemini-3.8-flash",
     "gemini-3.6-flash",
@@ -514,6 +516,7 @@ models = [
 ]
 # Verified 2026-11-09 on each model's page: inputs include images.
 image_input_models = [
+    "gemini-4-carbon",
     "gemini-4-argon",
     "gemini-3.8-flash",
     "gemini-3.6-flash",
@@ -534,6 +537,7 @@ image_input_models = [
 "gemini-3.5-flash" = "gemini-3.6-flash"
 
 [providers.context_windows]
+"gemini-4-carbon" = 1048576
 "gemini-4-argon" = 1048576
 "gemini-3.8-flash" = 1048576
 "gemini-3.6-flash" = 1048576
@@ -546,6 +550,7 @@ image_input_models = [
 "gemini-3-flash-preview" = 1048576
 
 [providers.model_lifecycle]
+"gemini-4-carbon" = "stable"
 "gemini-4-argon" = "stable"
 "gemini-3.8-flash" = "stable"
 "gemini-3.6-flash" = "stable"
@@ -560,7 +565,9 @@ image_input_models = [
 # Gemini 4 and 3 models support named thinking levels. Gemini 2.5 models use
 # numeric thinking budgets, which this provider intentionally does not map from
 # named tiers.
+# A live request on 2026-11-12 showed gemini-4-carbon rejects MINIMAL.
 [providers.effort_levels]
+"gemini-4-carbon" = ["LOW", "MEDIUM", "HIGH"]
 "gemini-4-argon" = ["LOW", "MEDIUM", "HIGH"]
 "gemini-3.8-flash" = ["LOW", "MEDIUM", "HIGH"]
 "gemini-3.6-flash" = ["MINIMAL", "LOW", "MEDIUM", "HIGH"]
@@ -571,6 +578,8 @@ image_input_models = [
 
 # Default thinking levels from the thinking guide's model table, verified
 # 2026-11-07. gemini-3.1-flash-lite has no row there, so it has none here.
+# gemini-4-carbon's default was not found in the docs on 2026-11-12, so it has
+# none either.
 [providers.default_effort]
 "gemini-4-argon" = "MEDIUM"
 "gemini-3.8-flash" = "MEDIUM"
@@ -584,6 +593,20 @@ image_input_models = [
 # Argon's introductory rates end November 30; Flash's end December 31. Storage
 # and hosted tool fees are not token prices; Wisp does not request explicit
 # cache storage or hosted tools.
+# gemini-4-carbon is listed at Argon's rates, with the same introductory period
+# (pricing page, 2026-11-12).
+[[providers.pricing."gemini-4-carbon"]]
+effective_until = 2026-11-30
+input_usd_per_million = "2"
+cache_read_usd_per_million = "0.1"
+output_usd_per_million = "10"
+
+[[providers.pricing."gemini-4-carbon"]]
+effective_from = 2026-12-01
+input_usd_per_million = "4"
+cache_read_usd_per_million = "0.2"
+output_usd_per_million = "20"
+
 [[providers.pricing."gemini-4-argon"]]
 effective_until = 2026-11-30
 input_usd_per_million = "2"
