@@ -32,6 +32,11 @@ this policy.
 - A tool result that reaches a subagent or a codemode script without its image now says the image
   was left out, where before it read as a complete result.
 
+### TUI
+
+- The startup logo's entrance is slower: its dots gather over 1 s instead of 0.75 s, and the
+  light band then crosses it over 1 s instead of 0.5 s, moving in smaller steps.
+
 ### Event contract
 
 - `tool.execution.ended` and `tool.result` gain `model_usage`: the model responses a call's

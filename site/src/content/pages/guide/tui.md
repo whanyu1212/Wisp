@@ -318,7 +318,7 @@ tip, the Wisp flame, toward its far end: the theme's heading colours run from te
 purple, and the Adal variants from light to deep pink over the terminal background. The `Wisp` name
 under the logo takes the tip's colour. At 16 colours and without colour the logo keeps one colour.
 On the first welcome screen of a launch the logo's dots gather into place, and in truecolor a light
-band then crosses it once, about 1.25 s in all. Any key, paste, or resize shows the finished logo at
+band then crosses it once, about 2 s in all. Any key, paste, or resize shows the finished logo at
 once; `WISP_TUI_MOTION=off` or a terminal in the background shows it finished from the start.
 
 Rust stores theme preferences in `~/.wisp/tui.json` (`theme`, `last_dark_theme`, and
