@@ -35,6 +35,11 @@ SubagentContext = TypeAliasType("SubagentContext", Literal["fresh", "fork"])
 # It raises `ToolError` when the subagent fails, so the model reads why.
 SubagentRunner = TypeAliasType("SubagentRunner", Callable[[str, SubagentContext], Awaitable[str]])
 
+# The most of one report that reaches the caller. A subagent is asked for a report
+# well under this; one that runs longer is cut here and marked, so a single
+# subagent cannot fill the context its caller delegated to protect.
+SUBAGENT_REPORT_MAX_BYTES = 8_000
+
 # What a task's heading and the blank line after its report take from its share of
 # the result, in bytes and in lines.
 _SECTION_BYTES = 16
@@ -135,8 +140,9 @@ class SpawnAgentTool:
         Returns:
             ToolResult: The only subagent's final message, or each subagent's under
             a `## Task N` heading in the order the tasks were given. A report longer
-            than its share of the limit is cut and marked, so a long one never
-            costs a later task its place in the result.
+            than `SUBAGENT_REPORT_MAX_BYTES`, or than its share of the result's own
+            limit when that is smaller, is cut and marked, so a long one never
+            fills the caller's context or costs a later task its place.
 
         Raises:
             ToolArgumentError: `tasks` is not a list of one to
@@ -168,11 +174,17 @@ class SpawnAgentTool:
         if len(tasks) == 1:
             if failures:
                 raise failures[0]
-            return ToolResult(text=reports[0])
+            report = truncate_text(
+                reports[0],
+                max_bytes=min(SUBAGENT_REPORT_MAX_BYTES, context.max_output_bytes),
+                max_lines=context.max_output_lines,
+            )
+            return ToolResult(text=report.text, truncated=report.truncated)
+        share_bytes = max(context.max_output_bytes // len(tasks) - _SECTION_BYTES, 0)
         shares = [
             truncate_text(
                 reports.get(index) or str(failures[index]),
-                max_bytes=max(context.max_output_bytes // len(tasks) - _SECTION_BYTES, 0),
+                max_bytes=min(SUBAGENT_REPORT_MAX_BYTES, share_bytes),
                 max_lines=max(context.max_output_lines // len(tasks) - _SECTION_LINES, 0),
             )
             for index in range(len(tasks))
@@ -213,6 +225,7 @@ __all__ = [
     "SPAWN_AGENT",
     "SPAWN_AGENT_PROMPT",
     "SUBAGENT_MAX_TASKS",
+    "SUBAGENT_REPORT_MAX_BYTES",
     "SpawnAgentTool",
     "SubagentContext",
     "SubagentRunner",

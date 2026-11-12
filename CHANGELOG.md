@@ -22,6 +22,9 @@ this policy.
 - `spawn_agent` takes `context: "fork"` to start each subagent from the conversation so far
   instead of from its task alone. A fork keeps the run's prompt, tools and cache key, and is
   still read-only.
+- A subagent's report is capped at 8,000 bytes, and subagents are asked for at most 500 words.
+- A run cancelled or abandoned while subagents work keeps the responses they had completed in the
+  session's usage and cost totals.
 - `/subagents` in the terminal UI shows and saves whether runs may use subagents. RPC and SDK
   clients use `get_subagents` and `set_subagents`.
 - `"subagent_model"` (or `WISP_SUBAGENT_MODEL`) names a model on the session's provider for
