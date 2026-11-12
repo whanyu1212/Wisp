@@ -334,10 +334,11 @@ fn is_ink(cell: char) -> bool {
     !matches!(cell, ' ' | '\u{2800}')
 }
 
-/// Frames the entrance's gather takes at the 125 ms activity tick: 0.75 s.
-pub(crate) const GATHER_FRAMES: u8 = 6;
-/// Frames the sheen after it takes: 0.5 s.
-pub(crate) const SHEEN_FRAMES: u8 = 4;
+/// Frames the entrance's gather takes at the 125 ms activity tick: 1 s.
+pub(crate) const GATHER_FRAMES: u8 = 8;
+/// Frames the sheen after it takes: 1 s. Each step moves the band less than its width,
+/// so it sweeps across the logo instead of jumping.
+pub(crate) const SHEEN_FRAMES: u8 = 8;
 /// Half the sheen band's width, in the gradient's 0 to 1 distance from the tip.
 const SHEEN_HALF_WIDTH: f64 = 0.15;
 
