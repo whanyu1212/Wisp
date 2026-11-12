@@ -770,6 +770,7 @@ class RpcHost:
             mcp_tool_exposure=config.mcp_tool_exposure,
             codemode=config.codemode,
             subagents=config.subagents,
+            subagent_model=config.subagent_model,
             mcp_server_connected=runtime.mcp_server_connected,
         )
         host: RpcHost | None = None

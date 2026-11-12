@@ -22,6 +22,10 @@ this policy.
 - `spawn_agent` takes `context: "fork"` to start each subagent from the conversation so far
   instead of from its task alone. A fork keeps the run's prompt, tools and cache key, and is
   still read-only.
+- `/subagents` in the terminal UI shows and saves whether runs may use subagents. RPC and SDK
+  clients use `get_subagents` and `set_subagents`.
+- `"subagent_model"` (or `WISP_SUBAGENT_MODEL`) names a model on the session's provider for
+  subagents that start fresh. A forked subagent keeps the session's model.
 - A tool result that reaches a subagent or a codemode script without its image now says the image
   was left out, where before it read as a complete result.
 
@@ -30,6 +34,8 @@ this policy.
 - `tool.execution.ended` and `tool.result` gain `model_usage`: the model responses a call's
   subagents completed, up to 512, each with its `usage` and `cost`. It is empty for every other
   tool. Session usage and cost totals count these responses.
+- New commands `get_subagents` and `set_subagents`, answered by a new `rpc.subagents` event that
+  carries the setting, whether the next run would offer the tool, and the subagent model in use.
 - `tool.nested.started`, `tool.nested.ended` and a result's `nested_calls` now also describe the
   tool calls a `spawn_agent` call's subagents make, with that call as `parent_call_id`. Their
   `call_id`s are numbered by Wisp, as `subagent-N-M`, and do not repeat within the call.

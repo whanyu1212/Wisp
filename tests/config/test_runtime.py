@@ -359,6 +359,19 @@ def test_config_keeps_subagents_off_unless_set(tmp_path: Path, monkeypatch: Monk
     assert WispConfig.from_env(session_dir=tmp_path, subagents=True).subagents is True
 
 
+def test_config_reads_subagent_model(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    home = Path.home()
+    (home / ".wisp").mkdir(parents=True)
+    assert WispConfig.from_env(session_dir=tmp_path).subagent_model is None
+
+    (home / ".wisp" / "settings.json").write_text('{"subagent_model": "small"}', encoding="utf-8")
+    assert WispConfig.from_env(session_dir=tmp_path).subagent_model == "small"
+
+    monkeypatch.setenv("WISP_SUBAGENT_MODEL", "smaller")
+    assert WispConfig.from_env(session_dir=tmp_path).subagent_model == "smaller"
+    assert WispConfig.from_env(session_dir=tmp_path, subagent_model="mine").subagent_model == "mine"
+
+
 def test_config_rejects_invalid_auto_compaction_env(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:

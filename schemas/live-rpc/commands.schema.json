@@ -1301,6 +1301,33 @@
       "title": "GetStateCommand",
       "type": "object"
     },
+    "GetSubagentsCommand": {
+      "additionalProperties": false,
+      "description": "Read the subagents setting and what the next run's subagents would use.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "type": {
+          "const": "get_subagents",
+          "default": "get_subagents",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "GetSubagentsCommand",
+      "type": "object"
+    },
     "ImagePart": {
       "additionalProperties": false,
       "description": "A reference to one validated image held in a session's image store.\n\nThe bytes live outside the transcript, addressed by their SHA-256 digest, so\nmessages and events carry only this description of them.",
@@ -2045,6 +2072,38 @@
       "title": "SetSessionNameCommand",
       "type": "object"
     },
+    "SetSubagentsCommand": {
+      "additionalProperties": false,
+      "description": "Turn subagents on or off from the next run and save it as the user setting.",
+      "properties": {
+        "enabled": {
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "type": {
+          "const": "set_subagents",
+          "default": "set_subagents",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "enabled"
+      ],
+      "title": "SetSubagentsCommand",
+      "type": "object"
+    },
     "ShutdownCommand": {
       "additionalProperties": false,
       "description": "Ask the RPC process to exit cleanly.",
@@ -2278,6 +2337,7 @@
       "get_sessions": "#/$defs/GetSessionsCommand",
       "get_skills": "#/$defs/GetSkillsCommand",
       "get_state": "#/$defs/GetStateCommand",
+      "get_subagents": "#/$defs/GetSubagentsCommand",
       "init": "#/$defs/InitCommand",
       "login_mcp_server": "#/$defs/LoginMcpServerCommand",
       "logout_mcp_server": "#/$defs/LogoutMcpServerCommand",
@@ -2294,6 +2354,7 @@
       "set_permissions": "#/$defs/SetPermissionsCommand",
       "set_queue_mode": "#/$defs/SetQueueModeCommand",
       "set_session_name": "#/$defs/SetSessionNameCommand",
+      "set_subagents": "#/$defs/SetSubagentsCommand",
       "shutdown": "#/$defs/ShutdownCommand",
       "steer": "#/$defs/SteerCommand",
       "store_api_key": "#/$defs/StoreApiKeyCommand",
@@ -2329,6 +2390,12 @@
     },
     {
       "$ref": "#/$defs/SetCodemodeCommand"
+    },
+    {
+      "$ref": "#/$defs/GetSubagentsCommand"
+    },
+    {
+      "$ref": "#/$defs/SetSubagentsCommand"
     },
     {
       "$ref": "#/$defs/GetCommandsCommand"
@@ -2559,6 +2626,9 @@
     "get_state": {
       "type": "get_state"
     },
+    "get_subagents": {
+      "type": "get_subagents"
+    },
     "init": {
       "type": "init"
     },
@@ -2635,6 +2705,10 @@
     "set_session_name": {
       "name": "Fixture",
       "type": "set_session_name"
+    },
+    "set_subagents": {
+      "enabled": true,
+      "type": "set_subagents"
     },
     "shutdown": {
       "type": "shutdown"

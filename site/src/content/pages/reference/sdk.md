@@ -164,6 +164,8 @@ request. Completion and results arrive through `events()`.
 | `set_permissions` | `(mode: PermissionMode, *, command_id: str \| None = None)` | Saved project default, then `RpcPermissionsReported` |
 | `get_codemode` | `(*, command_id: str \| None = None)` | `RpcCodemodeReported` |
 | `set_codemode` | `(setting: CodemodeSetting, *, command_id: str \| None = None)` | Applied from the next run and saved as the user setting, then `RpcCodemodeReported` |
+| `get_subagents` | `(*, command_id: str \| None = None)` | `RpcSubagentsReported` |
+| `set_subagents` | `(enabled: bool, *, command_id: str \| None = None)` | Applied from the next run and saved as the user setting, then `RpcSubagentsReported` |
 | `change_directory` | `(path: str, *, command_id: str \| None = None)` | After running work: `SessionDirectoryChanged` when a move was saved; for another project, `ProjectConfigApplied` when its configuration differs, `SkillCatalogUpdated`, and `RpcPermissionsReported`; then `RpcWorkspaceReported` |
 | `get_state` | `(*, command_id: str \| None = None)` | `RpcStateReported` |
 | `get_commands` | `(*, command_id: str \| None = None)` | `RpcCommandsReported` |
@@ -280,6 +282,12 @@ whether the `codemode` extra is `available`, whether a run started now would be 
 and `env_setting`, the setting `WISP_CODEMODE` gives at startup. `set_codemode` waits for the
 current operation; when saving fails, the setting still applies to the session and an `error`
 event comes first.
+
+`SubagentsState` reports whether subagents are `enabled`, whether a run started now would be
+`offered` the `spawn_agent` tool, and `env_enabled`, what `WISP_SUBAGENTS` sets at startup. It
+also reports `model`, the `subagent_model` user setting, and `model_in_use`, the model a subagent
+that starts fresh would use now: the setting, unless the model catalog lists the current provider
+without that model, in which case the session's own. `set_subagents` waits for the current operation and saves like `set_codemode`.
 
 #### Persisted sessions
 

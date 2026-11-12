@@ -118,6 +118,74 @@ async fn permissions_dock_above_the_composer_and_apply_only_a_painted_highlight(
 }
 
 #[tokio::test]
+async fn subagents_dock_above_the_composer_and_apply_a_painted_choice() {
+    use wisp_protocol::events::SubagentsState;
+    let (writer, mut receiver) = mpsc::channel(16);
+    let mut ui = ui("/subagents", false);
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    let request = frame(&mut receiver);
+    assert_eq!(request["type"], "get_subagents");
+    assert!(ui.editor.text().is_empty());
+    let id = request["id"].as_str().unwrap().to_string();
+    ui.dispatch(
+        UiAction::BackendEvent(BackendEvent::SubagentsReported {
+            command_id: id.clone(),
+            subagents: Ok(Arc::new(SubagentsState {
+                enabled: false,
+                offered: false,
+                env_enabled: None,
+                model: Some("small-model".into()),
+                model_in_use: Some("small-model".into()),
+            })),
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    ui.dispatch(
+        UiAction::BackendEvent(BackendEvent::CommandFinished {
+            command_id: id,
+            command_type: "get_subagents".into(),
+            ok: true,
+            error: None,
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    let painted = draw(&mut ui, 80, 24);
+    let cells: Vec<char> = painted.chars().collect();
+    let rows: Vec<String> = cells.chunks(80).map(|row| row.iter().collect()).collect();
+    let off = rows
+        .iter()
+        .find(|row| row.contains("2  Off"))
+        .expect("Off choice");
+    assert!(off.contains("current"), "{painted}");
+    assert!(
+        painted.contains("Fresh subagents use small-model (subagent_model)."),
+        "{painted}"
+    );
+    // Docked: the panel's bottom border sits just above the composer and footer.
+    let bottom = rows
+        .iter()
+        .position(|row| row.contains("Enter apply"))
+        .expect("panel hint");
+    assert!(bottom >= rows.len() - 7, "{painted}");
+
+    // A number applies its choice once the panel is painted.
+    ui.handle_input(key(KeyCode::Char('1')), &writer, 8192)
+        .await
+        .unwrap();
+    let change = frame(&mut receiver);
+    assert_eq!(change["type"], "set_subagents");
+    assert_eq!(change["enabled"], true);
+}
+
+#[tokio::test]
 async fn permissions_in_the_home_folder_say_yolo_is_not_saved() {
     use wisp_protocol::{commands::PermissionMode, events::PermissionState};
     let (writer, mut receiver) = mpsc::channel(16);

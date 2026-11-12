@@ -88,6 +88,16 @@ impl BackendEvent {
         let value = event.to_value()?;
         let event_type = string_field(&value, "<unknown>", "type")?;
         match event_type.as_str() {
+            "rpc.subagents" => {
+                let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
+                let subagents = discovery_report(&value["subagents"], || {
+                    serde_json::from_value(value["subagents"].clone()).ok()
+                });
+                return Ok(Self::SubagentsReported {
+                    command_id,
+                    subagents,
+                });
+            }
             "rpc.codemode" => {
                 let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
                 let codemode = discovery_report(&value["codemode"], || {
@@ -365,6 +375,7 @@ impl BackendEvent {
             | "rpc.mcp.login"
             | "rpc.permissions"
             | "rpc.codemode"
+            | "rpc.subagents"
             | "rpc.commands"
             | "rpc.state"
             | "session.stats"

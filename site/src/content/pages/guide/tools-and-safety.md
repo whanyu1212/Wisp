@@ -549,7 +549,19 @@ broad search or investigation whose raw output would crowd its context.
   what it has with a note. Cancelling a run stops its subagents.
 
 The setting is user-only, because a subagent spends on your provider account. A run that an
-operation limits to named tools, such as `/init`, is not offered the tool.
+operation limits to named tools, such as `/init`, is not offered the tool. In the terminal UI,
+`/subagents` shows and saves the setting; RPC and SDK clients use `get_subagents` and
+`set_subagents`.
+
+**A cheaper model for subagents.** `"subagent_model"` in `~/.wisp/settings.json`, or
+`WISP_SUBAGENT_MODEL`, names the model a subagent that starts fresh uses, on the same provider
+as the session. Subagents mostly read and search, so a smaller model often does. The session's
+reasoning effort carries over when that model supports it, and otherwise the model's default
+applies. If the model catalog lists the current provider without that model, as after switching
+provider, subagents use the session's model and `/subagents` says so. On a provider the catalog
+does not list, such as an OpenAI-compatible endpoint, the setting is used as given. A forked subagent always uses the session's model,
+because only that model can reuse what the provider cached for the conversation. The setting is
+user-only, like `subagents`.
 
 ## Saved project permissions
 

@@ -81,6 +81,15 @@ still decides the setting when Wisp starts, and the panel says so when it is set
 side panel names codemode as on or off for the next prompt, except while the automatic setting
 leaves it off.
 
+Use `/subagents` to turn [subagents](.././tools-and-safety#delegating-to-a-subagent-experimental)
+on or off; `/subagents on` and `/subagents off` apply one directly. The panel docks above the
+composer like `/codemode`, marks the current setting, and says whether the next prompt offers the
+`spawn_agent` tool. Choose with `1` or `2`, or highlight with `↑`/`↓` and press `Enter`. The choice
+applies from the next prompt and is saved as the user `subagents` setting, so it survives
+restarts; wait for the current operation to finish before changing it. `WISP_SUBAGENTS` still
+decides the setting when Wisp starts, and the panel says so when it is set. The panel also names
+the model subagents use. It shows the `subagent_model` setting and does not change it.
+
 ## Managing MCP servers
 
 `/mcp` lists the configured MCP servers with their status. `↑`/`↓` select a server; below the list
@@ -145,6 +154,7 @@ reconnect.
 /build                                    switch to normal build mode
 /permissions [ask|yolo]                   inspect or change the project permission default
 /codemode [automatic|always|never]        inspect or save when runs offer the codemode tool
+/subagents [on|off]                       inspect or save whether runs may use subagents
 /history                                  search prompts submitted in this TUI run
 /theme [name]                             preview or select a curated color theme
 /logo [name]                              preview or select a startup logo

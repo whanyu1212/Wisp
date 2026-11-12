@@ -125,6 +125,15 @@ def builtin_command_descriptors() -> tuple[CommandDescriptor, ...]:
             order=28,
         ),
         CommandDescriptor(
+            name="subagents",
+            title="Subagents",
+            description="View or save whether runs may hand tasks to subagents",
+            category=CommandCategory.configuration,
+            arguments=(CommandArgument("setting", "Optional 'on' or 'off'"),),
+            accepts_arguments=True,
+            order=28,
+        ),
+        CommandDescriptor(
             name="plan",
             title="Plan mode",
             description="Switch to read-only planning mode",

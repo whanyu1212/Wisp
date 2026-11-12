@@ -214,6 +214,19 @@ class SetCodemodeCommand(RpcCommandModel):
     setting: CodemodeSetting
 
 
+class GetSubagentsCommand(RpcCommandModel):
+    """Read the subagents setting and what the next run's subagents would use."""
+
+    type: Literal["get_subagents"] = "get_subagents"
+
+
+class SetSubagentsCommand(RpcCommandModel):
+    """Turn subagents on or off from the next run and save it as the user setting."""
+
+    type: Literal["set_subagents"] = "set_subagents"
+    enabled: bool
+
+
 class ChangeDirectoryCommand(RpcCommandModel):
     """Move the session's working directory to another folder in its project.
 
@@ -716,6 +729,8 @@ RpcCommand = TypeAliasType(
         | SetPermissionsCommand
         | GetCodemodeCommand
         | SetCodemodeCommand
+        | GetSubagentsCommand
+        | SetSubagentsCommand
         | GetCommandsCommand
         | GetModelCatalogCommand
         | GetConnectionCatalogCommand

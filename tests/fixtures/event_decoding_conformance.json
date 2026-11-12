@@ -3422,6 +3422,89 @@
    "accepted": false
   },
   {
+   "event": "rpc.subagents",
+   "operation": "remove",
+   "path": [
+    "command_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.subagents",
+   "operation": "remove",
+   "path": [
+    "subagents"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.subagents",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.subagents",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "rpc.subagents",
+   "operation": "remove",
+   "path": [
+    "subagents",
+    "enabled"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.subagents",
+   "operation": "remove",
+   "path": [
+    "subagents",
+    "env_enabled"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.subagents",
+   "operation": "remove",
+   "path": [
+    "subagents",
+    "model"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.subagents",
+   "operation": "remove",
+   "path": [
+    "subagents",
+    "model_in_use"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.subagents",
+   "operation": "remove",
+   "path": [
+    "subagents",
+    "offered"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.subagents",
+   "operation": "add_unknown",
+   "path": [
+    "subagents"
+   ],
+   "accepted": false
+  },
+  {
    "event": "rpc.workspace",
    "operation": "remove",
    "path": [

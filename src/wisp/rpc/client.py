@@ -55,6 +55,7 @@ from wisp.rpc.commands import (
     GetSessionTreeCommand,
     GetSkillsCommand,
     GetStateCommand,
+    GetSubagentsCommand,
     InitCommand,
     LoginMcpServerCommand,
     LogoutMcpServerCommand,
@@ -72,6 +73,7 @@ from wisp.rpc.commands import (
     SetPermissionsCommand,
     SetQueueModeCommand,
     SetSessionNameCommand,
+    SetSubagentsCommand,
     ShutdownCommand,
     SteerCommand,
     StoreApiKeyCommand,
@@ -226,6 +228,28 @@ class RpcController:
 
         selected_id = command_id or self._command_id_factory("codemode")
         await self._transport.send(SetCodemodeCommand(id=selected_id, setting=setting))
+        return selected_id
+
+    async def get_subagents(self, *, command_id: str | None = None) -> str:
+        """Request the subagents setting and what the next run's subagents would use."""
+
+        selected_id = command_id or self._command_id_factory("subagents")
+        await self._transport.send(GetSubagentsCommand(id=selected_id))
+        return selected_id
+
+    async def set_subagents(self, enabled: bool, *, command_id: str | None = None) -> str:
+        """Turn subagents on or off from the next run and save it as the user setting.
+
+        Args:
+            enabled (bool): Whether runs offer the `spawn_agent` tool.
+            command_id (str | None): Optional identifier for matching the response.
+
+        Returns:
+            str: The submitted command identifier. The reported event confirms success.
+        """
+
+        selected_id = command_id or self._command_id_factory("subagents")
+        await self._transport.send(SetSubagentsCommand(id=selected_id, enabled=enabled))
         return selected_id
 
     async def change_directory(self, path: str, *, command_id: str | None = None) -> str:

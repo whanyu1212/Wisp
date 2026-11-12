@@ -460,6 +460,7 @@ class CodingSession:
         mcp_server_connected: Callable[[str], bool] | None = None,
         codemode: bool | None = None,
         subagents: bool = False,
+        subagent_model: str | None = None,
     ) -> None:
         self.sessions = sessions
         self.events = events
@@ -470,6 +471,8 @@ class CodingSession:
         self.codemode = codemode
         # Offer `spawn_agent`, which hands a read-only task to a subagent.
         self.subagents = subagents
+        # The model a subagent that starts fresh should use; see `subagent_model_in_use`.
+        self.subagent_model = subagent_model
         self._mcp_server_connected = mcp_server_connected
         self.tool_policy = tool_policy or ToolPolicy.allow_all_tools()
         self.tool_approval_policy = tool_approval_policy or ToolApprovalPolicy.require_approval()
@@ -551,6 +554,7 @@ class CodingSession:
         mcp_server_connected: Callable[[str], bool] | None = None,
         codemode: bool | None = None,
         subagents: bool = False,
+        subagent_model: str | None = None,
     ) -> CodingSession:
         """Create a session from one resolved dynamic configuration snapshot."""
 
@@ -579,6 +583,7 @@ class CodingSession:
             mcp_server_connected=mcp_server_connected,
             codemode=codemode,
             subagents=subagents,
+            subagent_model=subagent_model,
         )
 
     @property
@@ -2194,6 +2199,46 @@ class CodingSession:
         )
         return tool
 
+    def subagents_offered(self) -> bool:
+        """Report whether a run started now would offer the `spawn_agent` tool.
+
+        The tools are worked out as a run would work them out, after mode, policy
+        and MCP exposure, without starting one.
+
+        Returns:
+            bool: Whether the tool would be offered. False when subagents are off or
+            the run would have no read-only tool for a subagent to use.
+        """
+
+        registry = self._operation_tool_registry()
+        tools, _ = self._apply_mcp_exposure(self._effective_tools(registry), registry)
+        return (
+            self._spawn_agent_tool(tools, registry, _no_executor, context=self.tool_context)
+            is not None
+        )
+
+    def subagent_model_in_use(self) -> str | None:
+        """Return the model a subagent that starts fresh would use now.
+
+        That is the `subagent_model` setting, unless the model catalog lists the
+        current provider and not that model on it, as after a switch to another
+        provider. Subagents then fall back to the session's own model and keep
+        working. A provider the catalog does not list, such as an OpenAI-compatible
+        endpoint, cannot be checked, so its setting is used as given.
+
+        Returns:
+            str | None: The model's id; None means the provider's default model.
+        """
+
+        if self.subagent_model is None:
+            return self.model
+        if self.models is None:
+            return self.subagent_model
+        provider_listed = any(entry.name == self.provider.name for entry in self.models.providers())
+        if provider_listed and not self.models.knows_model(self.provider.name, self.subagent_model):
+            return self.model
+        return self.subagent_model
+
     def _spawn_agent_tool(
         self,
         offered: tuple[ToolSpec, ...],
@@ -2360,7 +2405,10 @@ class CodingSession:
         """Build the harness of a subagent that starts from its task alone.
 
         It gets the session prompt built for its own read-only tools, then the
-        subagent instructions; none of the conversation.
+        subagent instructions; none of the conversation. It runs on
+        `subagent_model_in_use`. On a model other than the session's, the session's
+        effort is kept only when that model supports it, and the context window is
+        that model's own.
 
         Args:
             tool_executor (NestedCallToolExecutor): Runs the subagent's tool calls.
@@ -2382,14 +2430,15 @@ class CodingSession:
             session=session,
             mcp_catalog=mcp_catalog,
         )
+        model = self.subagent_model_in_use()
         return AgentHarness(
             AgentHarnessConfig(
                 provider=self.provider,
                 tool_executor=tool_executor,
-                model=self.model,
+                model=model,
                 tools=tools,
                 max_tool_iterations=self._subagent_tool_iterations(),
-                effort=self.effort,
+                effort=self._effort_for(model),
                 # Fresh subagents share a prefix with each other, not with the
                 # conversation.
                 prompt_cache_key=(
@@ -2399,8 +2448,8 @@ class CodingSession:
                 ),
                 # The prompt describes web search as the session has it set.
                 web_search=self.web_search,
-                context_window=self._context_window(),
-                context_reserve_tokens=self._effective_context_reserve_tokens(),
+                context_window=self._context_window_for(model),
+                context_reserve_tokens=self._context_reserve_tokens_for(model),
                 cost_estimator=self._cost_estimator,
             ),
             messages=(*prompt.messages, Message(role="system", content=SUBAGENT_INSTRUCTIONS)),
@@ -3336,22 +3385,55 @@ class CodingSession:
         )
 
     def _context_window(self) -> int | None:
+        return self._context_window_for(self.model)
+
+    def _context_window_for(self, model: str | None) -> int | None:
+        """Return ``model``'s context window on the session's provider, if known."""
+
         if self.models is None:
             return None
         return self.models.context_window(
             self.provider.name,
-            self.model,
+            model,
             default_model=self.provider.default_model,
         )
 
     def _effective_context_reserve_tokens(self) -> int:
+        return self._context_reserve_tokens_for(self.model)
+
+    def _context_reserve_tokens_for(self, model: str | None) -> int:
+        """Return the context reserve that applies to ``model`` on the session's provider."""
+
         if self.models is None:
             return self.context_reserve_tokens
         return self.models.effective_context_reserve_tokens(
             self.provider.name,
-            self.model,
+            model,
             reserve_tokens=self.context_reserve_tokens,
             default_model=self.provider.default_model,
+        )
+
+    def _effort_for(self, model: str | None) -> str | None:
+        """Return the session's effort when ``model`` can take it, else the model's default.
+
+        Args:
+            model (str | None): The model about to be asked; None is the provider's
+                default model.
+
+        Returns:
+            str | None: The session's effort for its own model, or for another one
+            the model catalog says supports it. None otherwise.
+        """
+
+        if model == self.model or self.effort is None:
+            return self.effort
+        named = model or self.provider.default_model
+        if self.models is None or named is None:
+            return None
+        return (
+            self.effort
+            if self.models.supports_effort(self.provider.name, named, self.effort)
+            else None
         )
 
     def _has_provider_auto_compaction_limit(self) -> bool:

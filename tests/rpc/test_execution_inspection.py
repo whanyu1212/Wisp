@@ -25,6 +25,7 @@ from wisp.events import (
     RpcModelCatalogReported,
     RpcSkillsReported,
     RpcStateReported,
+    RpcSubagentsReported,
     RpcWorkspaceReported,
     WispEvent,
 )
@@ -175,6 +176,7 @@ def test_executor_reports_commands_from_runtime_registry_without_replacing_runni
             "mcp",
             "permissions",
             "plan",
+            "subagents",
             "build",
             "model",
             "new",
@@ -573,3 +575,37 @@ def test_model_catalog_reports_image_input(
 
     assert snapshot.selection.image_input is image_input
     assert snapshot.selection.max_request_image_bytes == budget
+
+
+@pytest.mark.parametrize(
+    ("command", "answered"),
+    [
+        ({"type": "get_subagents", "id": "subagents-1"}, True),
+        ({"type": "set_subagents", "id": "subagents-1", "enabled": True}, False),
+    ],
+    ids=["read", "change"],
+)
+def test_subagents_during_a_run(tmp_path: Path, command: dict[str, object], answered: bool) -> None:
+    """While another command runs, the setting can be read and cannot be changed."""
+
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        running = _RpcRunningCommand("active-1", "prompt", anyio.CancelScope())
+        parsed = parsed_command(command)
+
+        send, receive = anyio.create_memory_object_stream(1)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+            result = await executor.dispatch_parsed(parsed, running)
+            task_group.cancel_scope.cancel()
+
+        assert result.running_command is running
+        assert fixture.agent.subagents is False
+        reports = [event for event in fixture.events if isinstance(event, RpcSubagentsReported)]
+        (finished,) = [event for event in fixture.events if isinstance(event, RpcCommandFinished)]
+        assert (len(reports) == 1) is answered
+        assert finished.ok is answered
+        if not answered:
+            assert finished.error == "Change subagents after the current operation finishes"
+
+    anyio.run(scenario)

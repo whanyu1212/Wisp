@@ -108,8 +108,10 @@ from wisp.events.rpc import (
     RpcSkillsReported,
     RpcStateReported,
     RpcStateSnapshot,
+    RpcSubagentsReported,
     RpcWorkspaceReported,
     SkillCatalogUpdated,
+    SubagentsState,
 )
 from wisp.events.run import (
     AgentCompleted,
@@ -338,6 +340,7 @@ __all__ = [
     "RpcSkillInvocationSnapshot",
     "RpcSkillsReported",
     "RpcStateReported",
+    "RpcSubagentsReported",
     "RpcWorkspaceReported",
     "RpcStateSnapshot",
     "RunOutcome",
@@ -350,6 +353,7 @@ __all__ = [
     "SessionStatsReported",
     "SkillCatalogUpdated",
     "SkillInvoked",
+    "SubagentsState",
     "TokenUsage",
     "ToolApprovalRequested",
     "ToolApprovalResolved",
@@ -416,6 +420,7 @@ KnownWispEvent = TypeAliasType(
         | RpcWorkspaceReported
         | RpcPermissionsReported
         | RpcCodemodeReported
+        | RpcSubagentsReported
         | RpcCommandsReported
         | RpcModelCatalogReported
         | RpcConnectionCatalogReported

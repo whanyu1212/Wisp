@@ -37,6 +37,8 @@ pub(crate) enum Command {
     Mcp,
     Permissions(Option<wisp_protocol::commands::PermissionMode>),
     Codemode(Option<wisp_protocol::commands::CodemodeSetting>),
+    /// Show the subagents setting, or turn subagents on or off.
+    Subagents(Option<bool>),
     AutoCompaction(bool),
     Search(Option<bool>),
     Compact(Option<String>),
@@ -67,6 +69,7 @@ fn usage(name: &str) -> Option<&'static str> {
         "mcp" => "/mcp",
         "permissions" => "/permissions [ask|yolo]",
         "codemode" => "/codemode [automatic|always|never]",
+        "subagents" => "/subagents [on|off]",
         "compact" => "/compact [instructions]",
         "quit" => "/quit",
         "model" => "/model [provider::model] [effort|-]",
@@ -170,6 +173,7 @@ fn parse_command(canonical: &str, tail: &str, syntax: &str) -> Command {
         "mcp" => Command::Mcp,
         "permissions" => parse_permissions(tail, syntax),
         "codemode" => parse_codemode(tail, syntax),
+        "subagents" => parse_subagents(tail, syntax),
         "plan" => Command::Mode(AgentMode::Plan),
         "build" => Command::Mode(AgentMode::Build),
         "context" => parse_context(tail, syntax),
@@ -241,6 +245,15 @@ fn parse_codemode(tail: &str, syntax: &str) -> Command {
         "automatic" => CodemodeSetting::Automatic,
         "always" => CodemodeSetting::Always,
         "never" => CodemodeSetting::Never,
+        _ => return Command::Invalid(format!("Usage: {syntax}")),
+    }))
+}
+
+fn parse_subagents(tail: &str, syntax: &str) -> Command {
+    Command::Subagents(Some(match tail.trim() {
+        "" => return Command::Subagents(None),
+        "on" => true,
+        "off" => false,
         _ => return Command::Invalid(format!("Usage: {syntax}")),
     }))
 }
@@ -792,6 +805,19 @@ pub(crate) mod tests {
             classify("/search maybe", None),
             Some(Command::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn subagents_takes_on_or_off() {
+        let parsed = |input| match classify(input, None) {
+            Some(Command::Subagents(enabled)) => Ok(enabled),
+            Some(Command::Invalid(_)) => Err(()),
+            _ => panic!("{input} is not a subagents command"),
+        };
+        assert_eq!(parsed("/subagents"), Ok(None));
+        assert_eq!(parsed("/subagents on"), Ok(Some(true)));
+        assert_eq!(parsed("/subagents off"), Ok(Some(false)));
+        assert_eq!(parsed("/subagents maybe"), Err(()));
     }
 
     #[test]

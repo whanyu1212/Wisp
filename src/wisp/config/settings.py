@@ -62,6 +62,7 @@ _USER_ONLY_SETTINGS_FIELDS = frozenset(
         "web_search",
         "codemode",
         "subagents",
+        "subagent_model",
         "mcp_servers",
         "mcp_tool_exposure",
         "openai_compatible",
@@ -138,6 +139,7 @@ class WispSettings(BaseModel):
     web_search: bool | None = None
     codemode: bool | None = None
     subagents: bool | None = None
+    subagent_model: str | None = None
     mcp_servers: tuple[McpServerConfig, ...] | None = Field(
         default=None, max_length=MAX_MCP_SERVERS, repr=False
     )
@@ -238,6 +240,7 @@ class ResolvedSettings(BaseModel):
     web_search: bool | None = None
     codemode: bool | None = None
     subagents: bool | None = None
+    subagent_model: str | None = None
     mcp_servers: tuple[McpServerConfig, ...] | None = Field(default=None, repr=False)
     mcp_tool_exposure: McpToolExposure | None = None
     openai_compatible: OpenAICompatibleSettings | None = None
@@ -333,6 +336,7 @@ def resolve_settings(
         web_search=user_settings.web_search,
         codemode=user_settings.codemode,
         subagents=user_settings.subagents,
+        subagent_model=user_settings.subagent_model,
         mcp_servers=user_settings.mcp_servers,
         mcp_tool_exposure=user_settings.mcp_tool_exposure,
         openai_compatible=user_settings.openai_compatible,
@@ -389,6 +393,24 @@ def try_persist_user_model_selection(
         {"provider": provider, "model": model, "effort": effort},
         home_dir=home_dir,
         preference="model selection",
+    )
+
+
+def try_persist_user_subagents(enabled: bool, *, home_dir: Path | None = None) -> bool:
+    """Save whether runs offer subagents, keeping every other user setting.
+
+    Args:
+        enabled (bool): Whether runs offer the `spawn_agent` tool.
+        home_dir (Path | None): User home override, primarily for isolated callers.
+
+    Returns:
+        bool: Whether the atomic settings update succeeded. Failures also warn;
+        unreadable settings are preserved rather than replaced.
+    """
+    return _persist_user_settings(
+        {"subagents": enabled},
+        home_dir=home_dir,
+        preference="subagents setting",
     )
 
 
