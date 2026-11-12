@@ -45,6 +45,8 @@ OPENAI_COMPATIBLE_CONFIG_ENV = "WISP_OPENAI_COMPATIBLE_CONFIG"
 _DEFAULT_AUTH_PATH = Path("~/.wisp/auth.json")
 _DEFAULT_SESSION_DIR = Path("~/.wisp/sessions")
 _CODEMODE_ENV = "WISP_CODEMODE"
+_SUBAGENTS_ENV = "WISP_SUBAGENTS"
+_SUBAGENT_MODEL_ENV = "WISP_SUBAGENT_MODEL"
 
 
 class WispConfig(BaseModel):
@@ -68,6 +70,9 @@ class WispConfig(BaseModel):
     codemode: bool | None = None
     # Offer the `spawn_agent` tool, which hands a read-only task to a subagent.
     subagents: bool = DEFAULT_SUBAGENTS_ENABLED
+    # The model a subagent that starts fresh uses, on the session's provider. None
+    # leaves it on the session's model.
+    subagent_model: str | None = None
     mcp_servers: tuple[McpServerConfig, ...] = Field(
         default=(), max_length=MAX_MCP_SERVERS, repr=False
     )
@@ -144,6 +149,7 @@ class WispConfig(BaseModel):
         web_search: bool | None = None,
         codemode: bool | None = None,
         subagents: bool | None = None,
+        subagent_model: str | None = None,
         mcp_servers: tuple[McpServerConfig, ...] | None = None,
         mcp_tool_exposure: McpToolExposure | None = None,
         openai_compatible: OpenAICompatibleSettings | None = None,
@@ -191,6 +197,9 @@ class WispConfig(BaseModel):
         ``subagents`` (``WISP_SUBAGENTS``) is user-only, because a subagent's model
         calls are billed to the user's provider account. It offers the `spawn_agent`
         tool, which hands a read-only task to a subagent, and is off unless enabled.
+        ``subagent_model`` (``WISP_SUBAGENT_MODEL``) is user-only for the same
+        reason: it names the model a subagent that starts fresh uses, on the
+        session's provider, and unset leaves subagents on the session's model.
 
         ``mcp_servers`` is likewise user-only because it defines commands that Wisp
         may later execute. There is deliberately no environment-variable layer for
@@ -301,11 +310,15 @@ class WispConfig(BaseModel):
                 subagents
                 if subagents is not None
                 else _resolve_bool(
-                    os.environ.get("WISP_SUBAGENTS"),
+                    os.environ.get(_SUBAGENTS_ENV),
                     settings.subagents,
                     default=DEFAULT_SUBAGENTS_ENABLED,
-                    name="WISP_SUBAGENTS",
+                    name=_SUBAGENTS_ENV,
                 )
+            ),
+            subagent_model=(
+                _first_non_empty(subagent_model, os.environ.get(_SUBAGENT_MODEL_ENV))
+                or settings.subagent_model
             ),
             mcp_servers=mcp_servers if mcp_servers is not None else settings.mcp_servers or (),
             mcp_tool_exposure=(
@@ -422,6 +435,19 @@ def codemode_from_env() -> bool | None:
         ValueError: If the variable is set to something other than a boolean word.
     """
     return _resolve_optional_bool(os.environ.get(_CODEMODE_ENV), None, name=_CODEMODE_ENV)
+
+
+def subagents_from_env() -> bool | None:
+    """Return what ``WISP_SUBAGENTS`` sets, which outranks the saved setting.
+
+    Returns:
+        bool | None: Whether the variable turns subagents on or off, or None when it
+        is unset.
+
+    Raises:
+        ValueError: If the variable is set to something other than a boolean word.
+    """
+    return _resolve_optional_bool(os.environ.get(_SUBAGENTS_ENV), None, name=_SUBAGENTS_ENV)
 
 
 def _resolve_optional_bool(

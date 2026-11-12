@@ -395,6 +395,43 @@ pub(super) fn codemode(
     ])
 }
 
+/// Read the subagents setting, or turn subagents on or off and save that. The
+/// setting changes what a run offers, so it waits for the current operation.
+pub(super) fn subagents(
+    state: &mut UiState,
+    enabled: Option<bool>,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    if state.exit_requested {
+        return Ok(Vec::new());
+    }
+    if state.subagents.loading() {
+        // A read already in flight answers a second one; a change must be asked again.
+        return Ok(match enabled {
+            Some(_) => vec![UiEffect::Notice(
+                "Subagents are still loading; try again.".into(),
+            )],
+            None => Vec::new(),
+        });
+    }
+    if enabled.is_some() && (!state.can_select_model() || super::session_sync_pending(state)) {
+        return Ok(vec![UiEffect::Notice(
+            "Finish the current operation before changing subagents.".into(),
+        )]);
+    }
+    let id = ids.next_id(CommandKind::Subagents);
+    let command = WispTypedClientRpcCommands::subagents(&id, enabled)?;
+    if enabled.is_some() {
+        state.subagents.start_change(id);
+    } else {
+        state.subagents.start(id);
+    }
+    Ok(vec![
+        UiEffect::SendCommand(command),
+        UiEffect::RequestRender,
+    ])
+}
+
 /// Send the codemode read that was asked for while another request was in flight,
 /// once that request has finished.
 pub(super) fn read_codemode_again(
@@ -452,6 +489,23 @@ pub(super) fn observe(state: &mut UiState, event: &BackendEvent) -> Option<Vec<U
             error,
         } if matches!(command_type.as_str(), "get_codemode" | "set_codemode")
             && state.codemode.finish(command_id, *ok, error.as_deref()) =>
+        {
+            Some(vec![UiEffect::RequestRender])
+        }
+        BackendEvent::SubagentsReported {
+            command_id,
+            subagents,
+        } => {
+            state.subagents.report(command_id, subagents);
+            Some(Vec::new())
+        }
+        BackendEvent::CommandFinished {
+            command_id,
+            command_type,
+            ok,
+            error,
+        } if matches!(command_type.as_str(), "get_subagents" | "set_subagents")
+            && state.subagents.finish(command_id, *ok, error.as_deref()) =>
         {
             Some(vec![UiEffect::RequestRender])
         }

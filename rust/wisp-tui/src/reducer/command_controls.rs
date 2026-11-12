@@ -27,6 +27,7 @@ impl UiState {
             // leaves the editor usable.
             || self.permissions.changing()
             || self.codemode.changing()
+            || self.subagents.changing()
     }
 
     pub(crate) fn command_catalog_loading(&self) -> bool {

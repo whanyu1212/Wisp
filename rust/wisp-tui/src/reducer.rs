@@ -848,6 +848,7 @@ pub struct UiState {
     pub(crate) mcp_sign_in: Option<McpSignInState>,
     pub(crate) permissions: discovery::Inspection<wisp_protocol::events::PermissionState>,
     pub(crate) codemode: discovery::Inspection<wisp_protocol::events::CodemodeState>,
+    pub(crate) subagents: discovery::Inspection<wisp_protocol::events::SubagentsState>,
     pub(crate) git_diff: git_diff::GitDiff,
     /// Whether the side panel is on screen, so the changed files stay loaded and
     /// refresh after each run.
@@ -937,6 +938,7 @@ impl UiState {
             mcp_sign_in: None,
             permissions: discovery::Inspection::default(),
             codemode: discovery::Inspection::default(),
+            subagents: discovery::Inspection::default(),
             project_files: project_files::ProjectFiles::default(),
             git_diff: git_diff::GitDiff::default(),
             side_panel_visible: false,
@@ -1099,6 +1101,7 @@ pub enum CommandKind {
     ChangeMcpServers,
     Permissions,
     Codemode,
+    Subagents,
     GetProjectFiles,
     GetGitDiff,
     GetSessions,
@@ -1144,6 +1147,7 @@ impl CommandKind {
             Self::ChangeMcpServers => "mcp_change",
             Self::Permissions => "permissions",
             Self::Codemode => "codemode",
+            Self::Subagents => "subagents",
             Self::GetGitDiff => "get_git_diff",
             Self::GetProjectFiles => "get_project_files",
             Self::GetSessions => "get_sessions",
@@ -1230,6 +1234,10 @@ pub enum BackendEvent {
     CodemodeReported {
         command_id: String,
         codemode: Result<std::sync::Arc<wisp_protocol::events::CodemodeState>, String>,
+    },
+    SubagentsReported {
+        command_id: String,
+        subagents: Result<std::sync::Arc<wisp_protocol::events::SubagentsState>, String>,
     },
     McpStatusReported {
         command_id: String,
@@ -1433,6 +1441,8 @@ pub enum UiAction {
     Permissions(Option<wisp_protocol::commands::PermissionMode>),
     /// Read the codemode setting, or apply and save a new one.
     Codemode(Option<wisp_protocol::commands::CodemodeSetting>),
+    /// Read the subagents setting, or turn subagents on or off and save that.
+    Subagents(Option<bool>),
     SetProjectFilesOpen(bool),
     LoadContext,
     SetGitDiffOpen(bool),
@@ -1645,6 +1655,7 @@ pub fn reduce(
         UiAction::CancelMcpSignIn => Ok(discovery::cancel_mcp_sign_in(state, ids)?),
         UiAction::Permissions(mode) => Ok(discovery::permissions(state, mode, ids)?),
         UiAction::Codemode(setting) => Ok(discovery::codemode(state, setting, ids)?),
+        UiAction::Subagents(enabled) => Ok(discovery::subagents(state, enabled, ids)?),
         UiAction::SetProjectFilesOpen(open) => {
             state.project_files.set_open(open);
             Ok(vec![UiEffect::ProjectFilesChanged, UiEffect::RequestRender])
@@ -1827,6 +1838,7 @@ fn close_transport(state: &mut UiState) -> Vec<UiEffect> {
     state.mcp_preview.close();
     state.permissions.close();
     state.codemode.close();
+    state.subagents.close();
     state.project_files.close();
     state.git_diff.close();
     state.model_operation = None;
@@ -5532,6 +5544,7 @@ fn handle_backend_event(
         | BackendEvent::McpLoginStarted { .. }
         | BackendEvent::PermissionsReported { .. }
         | BackendEvent::CodemodeReported { .. }
+        | BackendEvent::SubagentsReported { .. }
         | BackendEvent::SessionStatsReported { .. }
         | BackendEvent::ContextEstimated(_)
         | BackendEvent::CompactionStarted(_)
@@ -6608,6 +6621,58 @@ mod tests {
         )
         .unwrap();
         assert!(sent(&effects).contains(&"get_permissions".to_owned()));
+    }
+
+    #[test]
+    fn subagents_change_round_trip() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.input_ready = true;
+        let mut ids = DeterministicIds::default();
+        let change = reduce(&mut state, UiAction::Subagents(Some(true)), &mut ids).unwrap();
+        assert_eq!(sent(&change), ["set_subagents"]);
+        let id = sent_id(&change, "set_subagents");
+        let snapshot = wisp_protocol::events::SubagentsState {
+            enabled: true,
+            offered: true,
+            env_enabled: None,
+            model: None,
+            model_in_use: Some("fake".into()),
+        };
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::SubagentsReported {
+                command_id: id.clone(),
+                subagents: Ok(std::sync::Arc::new(snapshot.clone())),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(state.subagents.loading());
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished(&id, "set_subagents", true)),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(!state.subagents.loading());
+        assert_eq!(state.subagents.snapshot.as_deref(), Some(&snapshot));
+    }
+
+    #[test]
+    fn subagents_change_waits_for_run() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.input_ready = true;
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = InteractionStatus::Running;
+        let mut ids = DeterministicIds::default();
+        let change = reduce(&mut state, UiAction::Subagents(Some(false)), &mut ids).unwrap();
+        assert!(sent(&change).is_empty());
+        assert!(change.iter().any(
+            |effect| matches!(effect, UiEffect::Notice(text) if text.contains("Finish the current"))
+        ));
+        // Reading the setting is still allowed while a run is active.
+        let read = reduce(&mut state, UiAction::Subagents(None), &mut ids).unwrap();
+        assert_eq!(sent(&read), ["get_subagents"]);
     }
 
     #[test]

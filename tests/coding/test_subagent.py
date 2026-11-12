@@ -40,6 +40,7 @@ from wisp.events import (
 from wisp.mcp.discovery import MCP_CALL
 from wisp.messages import Message
 from wisp.providers.base import ContextOverflowError, ProviderError
+from wisp.providers.catalog import ModelRegistry, builtin_catalog
 from wisp.providers.events import (
     ProviderEvent,
     ProviderResponseCompleted,
@@ -1108,6 +1109,117 @@ def test_unknown_context_rejected(tmp_path: Path) -> None:
     assert run.result.is_error
     assert "context must be fresh or fork" in run.result.output
     assert len(run.provider.calls) == 2
+
+
+class _CataloguedProvider(ScriptedProvider):
+    """A scripted provider the model catalog knows, so model names can be checked."""
+
+    name = "anthropic"
+
+
+def _model_run(
+    tmp_path: Path,
+    spawn: list[ProviderEvent],
+    *,
+    subagent_model: str | None,
+    with_catalog: bool = True,
+) -> tuple[CodingSession, _CataloguedProvider, list[WispEvent]]:
+    """Run one prompt that spawns one subagent, on `claude-opus-5-5` at effort xhigh."""
+
+    provider = _CataloguedProvider([spawn, _says("report"), _says("done")])
+    session = CodingSession(
+        provider=provider,
+        sessions=JsonlSessionStore(tmp_path / "sessions"),
+        model="claude-opus-5-5",
+        effort="xhigh",
+        models=ModelRegistry(builtin_catalog()) if with_catalog else None,
+        tool_registry=_Tools().registry(),
+        tool_context=ToolContext(cwd=tmp_path),
+        subagents=True,
+        subagent_model=subagent_model,
+    )
+    return session, provider, _collect(session)
+
+
+@pytest.mark.parametrize(
+    ("subagent_model", "model", "effort"),
+    [
+        (None, "claude-opus-5-5", "xhigh"),
+        # Another model that takes the session's effort keeps it.
+        ("claude-fable-5-1", "claude-fable-5-1", "xhigh"),
+        # One that does not is asked at its own default.
+        ("claude-haiku-4-5", "claude-haiku-4-5", None),
+        # A name this provider does not have falls back to the session's model.
+        ("gpt-6-luna", "claude-opus-5-5", "xhigh"),
+    ],
+    ids=["unset", "same-efforts", "no-efforts", "other-providers-model"],
+)
+def test_fresh_subagent_model(
+    tmp_path: Path, subagent_model: str | None, model: str, effort: str | None
+) -> None:
+    session, provider, _ = _model_run(tmp_path, _spawn(), subagent_model=subagent_model)
+
+    run_request, subagent_request, _ = provider.calls
+    assert (run_request.model, run_request.effort) == ("claude-opus-5-5", "xhigh")
+    assert (subagent_request.model, subagent_request.effort) == (model, effort)
+    assert session.subagent_model_in_use() == model
+
+
+def test_subagent_cost_names_its_model(tmp_path: Path) -> None:
+    """A subagent's cost record names the model that was asked, not the session's."""
+
+    _, _, events = _model_run(tmp_path, _spawn(), subagent_model="claude-haiku-4-5")
+
+    (result,) = [event for event in events if isinstance(event, ToolResultReady)]
+    (response,) = result.model_usage
+    assert response.cost is not None
+    assert response.cost.requested_model == "claude-haiku-4-5"
+
+
+def test_fork_keeps_run_model(tmp_path: Path) -> None:
+    """A fork ignores the subagent model: only the run's model can reuse its cache."""
+
+    _, provider, _ = _model_run(tmp_path, _fork("look"), subagent_model="claude-haiku-4-5")
+
+    assert [(request.model, request.effort) for request in provider.calls] == [
+        ("claude-opus-5-5", "xhigh")
+    ] * 3
+
+
+def test_unlisted_provider_model_used_as_given(tmp_path: Path) -> None:
+    """On a provider the catalog does not list, the setting cannot be checked and is used."""
+
+    provider = ScriptedProvider([_spawn(), _says("report"), _says("done")])
+    session = CodingSession(
+        provider=provider,
+        sessions=JsonlSessionStore(tmp_path / "sessions"),
+        model="big-local-model",
+        models=ModelRegistry(builtin_catalog()),
+        tool_registry=_Tools().registry(),
+        tool_context=ToolContext(cwd=tmp_path),
+        subagents=True,
+        subagent_model="small-local-model",
+    )
+
+    _collect(session)
+
+    assert [request.model for request in provider.calls] == [
+        "big-local-model",
+        "small-local-model",
+        "big-local-model",
+    ]
+
+
+def test_uncatalogued_model_used_as_given(tmp_path: Path) -> None:
+    """With no model catalog to check against, the setting is taken at its word."""
+
+    _, provider, _ = _model_run(
+        tmp_path, _spawn(), subagent_model="my-local-model", with_catalog=False
+    )
+
+    assert provider.calls[1].model == "my-local-model"
+    # Nothing says the model takes the session's effort, so it gets its default.
+    assert provider.calls[1].effort is None
 
 
 def test_cancel_reaches_waiting_subagents(tmp_path: Path) -> None:

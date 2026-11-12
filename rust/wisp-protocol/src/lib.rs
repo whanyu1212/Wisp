@@ -655,6 +655,19 @@ pub mod commands {
             };
             deserialize(value)
         }
+        /// Read the subagents setting, or turn subagents on or off and save that.
+        pub fn subagents(
+            id: &str,
+            enabled: Option<bool>,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            let value = match enabled {
+                Some(enabled) => {
+                    serde_json::json!({"type": "set_subagents", "id": id, "enabled": enabled})
+                }
+                None => serde_json::json!({"type": "get_subagents", "id": id}),
+            };
+            deserialize(value)
+        }
         /// Change only the current process's execution mode.
         pub fn configure_mode(
             id: &str,
@@ -1350,6 +1363,21 @@ pub mod events {
         pub offered: bool,
         /// The setting `WISP_CODEMODE` gives, which outranks the saved one at startup.
         pub env_setting: Option<crate::commands::CodemodeSetting>,
+    }
+
+    /// The session's subagents setting and what its next run's subagents would use.
+    #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq)]
+    pub struct SubagentsState {
+        /// Whether runs offer the `spawn_agent` tool.
+        pub enabled: bool,
+        /// Whether a run started now would offer the tool.
+        pub offered: bool,
+        /// What `WISP_SUBAGENTS` sets, which outranks the saved setting at startup.
+        pub env_enabled: Option<bool>,
+        /// The `subagent_model` user setting, if any.
+        pub model: Option<String>,
+        /// The model a subagent that starts fresh would use now.
+        pub model_in_use: Option<String>,
     }
 
     pub use crate::context::{

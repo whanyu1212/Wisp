@@ -415,6 +415,34 @@ class RpcCodemodeReported(WispEvent):
     codemode: CodemodeState
 
 
+class SubagentsState(BaseModel):
+    """The session's subagents setting and what its next run's subagents would use."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    # Whether runs offer the `spawn_agent` tool. Saved as the user setting ``subagents``.
+    enabled: bool
+    # Whether a run started now would offer the tool, given its tools and mode.
+    offered: bool
+    # What `WISP_SUBAGENTS` sets, which outranks the saved setting at startup.
+    env_enabled: bool | None = None
+    # The user setting ``subagent_model``: the model a subagent that starts fresh
+    # should use. None leaves it on the session's model.
+    model: str | None = None
+    # The model such a subagent would use now: the setting, unless the model catalog
+    # lists the current provider without that model, when it is the session's own. A
+    # forked subagent always uses the session's model.
+    model_in_use: str | None = None
+
+
+class RpcSubagentsReported(WispEvent):
+    """Subagents snapshot returned by a subagents inspection or change."""
+
+    type: Literal["rpc.subagents"] = "rpc.subagents"
+    command_id: str
+    subagents: SubagentsState
+
+
 class RpcWorkspaceReported(WispEvent):
     """Where the session's commands run and the Git branch checked out there.
 

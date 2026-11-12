@@ -2055,6 +2055,10 @@ impl LiveUi {
                 && matches!(self.discovery_view, Some(DiscoveryView::Codemode(_)))
             {
                 Some(discovery_view::codemode_panel_height(&self.state))
+            } else if overlay == Some(OverlayKind::Discovery)
+                && matches!(self.discovery_view, Some(DiscoveryView::Subagents(_)))
+            {
+                Some(discovery_view::subagents_panel_height(&self.state))
             } else if let Some(height) =
                 docked_mcp_height.filter(|_| overlay == Some(OverlayKind::Discovery))
             {
@@ -3469,6 +3473,14 @@ impl LiveUi {
                 self.notice = None;
                 self.render_pending = true;
                 self.dispatch(UiAction::Codemode(setting), writer, limit)
+                    .await
+            }
+            Command::Subagents(enabled) => {
+                self.discovery_view = Some(DiscoveryView::subagents());
+                self.editor.clear();
+                self.notice = None;
+                self.render_pending = true;
+                self.dispatch(UiAction::Subagents(enabled), writer, limit)
                     .await
             }
             Command::Skills | Command::Mcp => {

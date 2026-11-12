@@ -182,6 +182,10 @@ def test_user_protected_paths_are_used(tmp_path: Path) -> None:
         pytest.param("auto_compaction_enabled", False, True, False, id="auto-compaction"),
         # Searches are billed to the user's provider account; a repo must not turn them on.
         pytest.param("web_search", None, True, None, id="web-search-unset"),
+        # Subagents spend on the user's account, and a repo must not pick their model.
+        pytest.param("subagents", None, True, None, id="subagents-unset"),
+        pytest.param("subagent_model", "small", "large", "small", id="subagent-model"),
+        pytest.param("subagent_model", None, "large", None, id="subagent-model-unset"),
         pytest.param(
             "tui_keybindings",
             {"prompt.submit": ["ctrl+enter"]},

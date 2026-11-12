@@ -635,6 +635,7 @@ def test_build_runtime_activates_builtin_providers_tools_and_commands() -> None:
             "mcp",
             "permissions",
             "plan",
+            "subagents",
             "build",
             "model",
             "new",

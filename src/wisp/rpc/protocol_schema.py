@@ -249,6 +249,8 @@ _COMMAND_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     "set_permissions": {"mode": "ask"},
     "get_codemode": {},
     "set_codemode": {"setting": "always"},
+    "get_subagents": {},
+    "set_subagents": {"enabled": True},
     "change_directory": {"path": "src"},
     "cancel": {"target_id": "command-1"},
     "clear_queue": {},
@@ -554,6 +556,10 @@ _EVENT_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     "rpc.codemode": {
         "command_id": "command-1",
         "codemode": {"setting": "automatic", "available": True, "offered": False},
+    },
+    "rpc.subagents": {
+        "command_id": "command-1",
+        "subagents": {"enabled": True, "offered": True},
     },
     "session.directory_changed": {
         "session_id": "session-1",

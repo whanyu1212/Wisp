@@ -41,6 +41,7 @@ from wisp.rpc.commands import (
     GetSessionTreeCommand,
     GetSkillsCommand,
     GetStateCommand,
+    GetSubagentsCommand,
     InitCommand,
     LoginMcpServerCommand,
     LogoutMcpServerCommand,
@@ -58,6 +59,7 @@ from wisp.rpc.commands import (
     SetPermissionsCommand,
     SetQueueModeCommand,
     SetSessionNameCommand,
+    SetSubagentsCommand,
     ShutdownCommand,
     SteerCommand,
     StoreApiKeyCommand,
@@ -105,6 +107,7 @@ from .handlers.inspection import (
     handle_rpc_skills_command,
     handle_rpc_state_command,
 )
+from .handlers.subagents import handle_rpc_subagents_command
 from .lifecycle import RpcCommandLifecycle, RpcEventWriter
 from .session.mutation import (
     start_rpc_clone_session_command,
@@ -252,6 +255,8 @@ class RpcCommandExecutor:
             return self._dispatch_permissions(known, running_command)
         if isinstance(known, (GetCodemodeCommand, SetCodemodeCommand)):
             return self._dispatch_codemode(known, running_command)
+        if isinstance(known, (GetSubagentsCommand, SetSubagentsCommand)):
+            return self._dispatch_subagents(known, running_command)
         if isinstance(known, GetCommandsCommand):
             self.coordinator.running_command = running_command
             return self._dispatch_commands(known, running_command)
@@ -690,6 +695,20 @@ class RpcCommandExecutor:
             )
             return _RpcDispatchResult(running_command=running_command)
         handle_rpc_codemode_command(command, agent=self.agent, write_event=self.write_event)
+        return _RpcDispatchResult(running_command=running_command)
+
+    def _dispatch_subagents(
+        self,
+        command: GetSubagentsCommand | SetSubagentsCommand,
+        running_command: _RpcRunningCommand | None,
+    ) -> _RpcDispatchResult:
+        if isinstance(command, SetSubagentsCommand) and running_command is not None:
+            # Inspection answers during a run; a change waits behind it, like configure.
+            RpcCommandLifecycle.for_command(command, write_event=self.write_event).fail(
+                "Change subagents after the current operation finishes"
+            )
+            return _RpcDispatchResult(running_command=running_command)
+        handle_rpc_subagents_command(command, agent=self.agent, write_event=self.write_event)
         return _RpcDispatchResult(running_command=running_command)
 
     def _dispatch_commands(
