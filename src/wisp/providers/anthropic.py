@@ -38,7 +38,7 @@ from anthropic.types import (
     WebSearchToolResultBlockParam,
 )
 
-from wisp.messages import Message
+from wisp.messages import Message, NativeOutput
 from wisp.providers.auth import ProviderAuthResolver
 from wisp.providers.base import (
     ProviderConfigurationError,
@@ -118,6 +118,11 @@ _DEFAULT_FINISH_REASON_FOR_UNKNOWN_STOP_REASON: ProviderFinishReason = "length"
 # Anthropic's Messages API is stateless. The adapter keeps the exact native
 # replay tail keyed by the provider cursor so it can append each request's new
 # tool results or user steering without flattening structured tool history.
+
+# Tool-use turns kept in memory until the session saves them with their rows.
+# Sessions save each one at once, so this bound matters only for callers that
+# keep transcripts without a session.
+_NATIVE_OUTPUT_CAPACITY = 2048
 
 # Anthropic's server-side web search. The basic tool version
 # (web_search_20250305, in _create_stream) is used on purpose: later versions
@@ -342,6 +347,9 @@ class AnthropicProvider:
         self._auth_resolver = auth_resolver
         self._retry_policy = retry_policy or RetryPolicy()
         self._replays = ContinuationStore[tuple[MessageParam, ...]]()
+        # Each tool-use response's assistant turn, for the session to save with
+        # the response's row; see native_output_for.
+        self._native_outputs = ContinuationStore[NativeOutput](capacity=_NATIVE_OUTPUT_CAPACITY)
 
     def supports_structured_tool_replacement(self, *, effort: str | None) -> bool:
         """Reject fresh tool replay that could discard signed thinking blocks.
@@ -356,10 +364,45 @@ class AnthropicProvider:
             effort (str | None): Requested effort; omission does not disable thinking.
 
         Returns:
-            bool: Always False; tool continuation must preserve native replay.
+            bool: Always False; tool continuation must preserve native replay. An
+            exchange whose row saved the turn is the exception; see
+            `replays_saved_tool_exchange`.
         """
 
         return False
+
+    def replays_saved_tool_exchange(self, message: Message, *, model: str | None) -> bool:
+        """Return whether a finished tool exchange can be sent as its own run sent it.
+
+        It can when the assistant row saved Anthropic's own turn for the model
+        now being asked. That turn carries the signed thinking blocks, so the
+        exchange need not be flattened to text, and a later prompt's request
+        still begins the way the run's last request did, which lets the prompt
+        cache be read instead of written again.
+
+        Args:
+            message (Message): The exchange's assistant row.
+            model (str | None): Model the request goes to; None is the default.
+
+        Returns:
+            bool: Whether the row carries a turn this provider and model produced.
+        """
+
+        selected_model = model or self.default_model or DEFAULT_ANTHROPIC_MODEL
+        return _saved_assistant_turn(message, provider=self.name, model=selected_model) is not None
+
+    def native_output_for(self, response_id: str) -> NativeOutput | None:
+        """Return the assistant turn recorded for one of this provider's tool-use responses.
+
+        Args:
+            response_id (str): Message ID from a completed response.
+
+        Returns:
+            NativeOutput | None: The turn as its run replayed it, or None when the
+            response made no tool call, is unknown, or was evicted.
+        """
+
+        return self._native_outputs.get(response_id)
 
     async def stream(
         self,
@@ -531,13 +574,30 @@ class AnthropicProvider:
         # does not change the public completion; an already-active local replay
         # safely advances under its existing key.
         continuation_id = response_id or previous_response_id
+        assistant_turn = _replay_message_from_stream(content_blocks)
+        if (
+            tool_calls
+            and response_id is not None
+            and not _has_unanswered_server_tool(assistant_turn["content"])
+        ):
+            # The same turn this run replays, so a later prompt can send the
+            # exchange exactly as this run did. A final answer keeps its portable
+            # form: nothing after it needs its thinking blocks.
+            self._native_outputs.remember(
+                response_id,
+                NativeOutput(
+                    provider=self.name,
+                    model=selected_model,
+                    items=(cast("dict[str, object]", assistant_turn),),
+                ),
+            )
         if continuation_id is not None:
             previous = self._require_replay(previous_response_id)
             replay_tail = (
                 *previous,
                 *((_tool_results_to_message(tool_results),) if tool_results else ()),
-                *_messages_to_anthropic(extra_messages),
-                _replay_message_from_stream(content_blocks),
+                *_messages_to_anthropic(extra_messages, model=selected_model, provider=self.name),
+                assistant_turn,
             )
             if previous_response_id is not None and previous_response_id != continuation_id:
                 self._replays.consume(previous_response_id)
@@ -639,12 +699,14 @@ class AnthropicProvider:
         web_search_max_uses: int = _WEB_SEARCH_MAX_USES,
     ) -> AsyncIterator[RawMessageStreamEvent]:
         client = await self._client_or_create()
-        anthropic_messages = _messages_to_anthropic(messages)
+        anthropic_messages = _messages_to_anthropic(messages, model=model, provider=self.name)
         if previous_response_id is not None:
             anthropic_messages.extend(self._require_replay(previous_response_id))
         if tool_results:
             anthropic_messages.append(_tool_results_to_message(tool_results))
-        anthropic_messages.extend(_messages_to_anthropic(extra_messages))
+        anthropic_messages.extend(
+            _messages_to_anthropic(extra_messages, model=model, provider=self.name)
+        )
         if paused_turn is not None:
             # Anthropic resumes a paused turn when it is sent back unchanged as
             # the last message.
@@ -885,8 +947,79 @@ def _system_from_messages(messages: Sequence[Message]) -> str | None:
     return "\n\n".join(system_parts) or None
 
 
-def _messages_to_anthropic(messages: Sequence[Message]) -> list[MessageParam]:
-    """Encode fresh base context without flattening an active tool exchange."""
+def _saved_assistant_turn(message: Message, *, provider: str, model: str) -> MessageParam | None:
+    """Return the Anthropic turn saved on a tool-call row, when it may be replayed.
+
+    Signed thinking blocks belong to the model that produced them, so a turn
+    saved by another provider or model is not replayed.
+
+    Args:
+        message (Message): Assistant row that made tool calls.
+        provider (str): Name of the provider building the request.
+        model (str): Model the request is sent to.
+
+    Returns:
+        MessageParam | None: The turn exactly as its run sent it, or None when
+        the row has none for this provider and model, or it is not such a turn.
+    """
+
+    native = message.native_output
+    if native is None or native.provider != provider or native.model != model:
+        return None
+    if len(native.items) != 1:
+        return None
+    turn = native.items[0]
+    content = turn.get("content")
+    if turn.get("role") != "assistant" or not isinstance(content, list):
+        return None
+    # The row and its saved turn must make the same calls under the same ids, or
+    # the results that follow would not answer them.
+    used = [
+        (block.get("id"), block.get("name"))
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "tool_use"
+    ]
+    if used != [(call.call_id, call.name) for call in message.tool_calls or ()]:
+        return None
+    if _has_unanswered_server_tool(content):
+        return None
+    return cast(MessageParam, turn)
+
+
+def _has_unanswered_server_tool(content: object) -> bool:
+    """Report whether a turn starts a server tool whose result is not in the turn.
+
+    A search issued beside a client tool call is answered in the next response,
+    which keeps its portable form in later prompts. Replaying the first turn
+    alone would then send a search with no result, which Anthropic rejects, so
+    such a turn is never saved or replayed.
+
+    Args:
+        content (object): An assistant turn's content blocks.
+
+    Returns:
+        bool: Whether any ``server_tool_use`` block lacks a result block for its
+        id in the same turn. Content that is not a list of blocks has none.
+    """
+
+    if not isinstance(content, list):
+        return False
+    blocks = [block for block in content if isinstance(block, dict)]
+    answered = {block.get("tool_use_id") for block in blocks if "tool_use_id" in block}
+    return any(
+        block.get("type") == "server_tool_use" and block.get("id") not in answered
+        for block in blocks
+    )
+
+
+def _messages_to_anthropic(
+    messages: Sequence[Message], *, model: str | None = None, provider: str = "anthropic"
+) -> list[MessageParam]:
+    """Encode fresh base context without flattening an active tool exchange.
+
+    A tool-call row that saved Anthropic's own turn for ``model`` is sent as that
+    turn; every other row is rebuilt from its portable text and calls.
+    """
 
     anthropic_messages: list[MessageParam] = []
     index = 0
@@ -906,6 +1039,15 @@ def _messages_to_anthropic(messages: Sequence[Message]) -> list[MessageParam]:
             anthropic_messages.append(_tool_results_to_message(results))
             continue
         if message.role == "assistant" and message.tool_calls:
+            saved_turn = (
+                _saved_assistant_turn(message, provider=provider, model=model)
+                if model is not None
+                else None
+            )
+            if saved_turn is not None:
+                anthropic_messages.append(saved_turn)
+                index += 1
+                continue
             blocks: list[_ReplayBlockParam] = []
             if message.content:
                 blocks.append({"type": "text", "text": message.content})

@@ -68,6 +68,15 @@ this policy.
   had 12%. Tool exchanges from another model, and from sessions saved before this change, are
   still sent as a text summary.
 
+### Claude
+
+- A new prompt no longer writes the previous run to Anthropic's prompt cache a second time. As
+  for Gemini, Wisp now saves Claude's own turn for each tool use with the session and sends
+  finished tool exchanges to later prompts as their run sent them. In a live measurement the
+  first request of the next prompt read 32,064 tokens from cache and wrote 413, where before it
+  read 13,144 and wrote 21,897. Tool exchanges from another model, and from sessions saved
+  before this change, are still sent as a text summary.
+
 ### Event contract
 
 - `tool.execution.ended` and `tool.result` gain `model_usage`: the model responses a call's
