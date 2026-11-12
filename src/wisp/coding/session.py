@@ -162,6 +162,7 @@ from wisp.providers.base import (
     provider_image_request_byte_budget,
     provider_native_output,
     provider_supports_web_search,
+    replays_saved_tool_exchange,
     structured_tool_replacement_support,
 )
 from wisp.providers.catalog import ModelRegistry
@@ -998,9 +999,24 @@ class CodingSession:
         replays_tool_images = (
             structured_tool_replacement_support(self.provider, effort=self.effort) is True
         )
+        # An exchange the provider replays from its saved row is sent with its
+        # results as they were, images included.
+        replayed_tool_rows: set[int] = set()
+        replayed = False
+        for index, message in enumerate(prepared):
+            if message.role != "tool":
+                replayed = bool(message.tool_calls) and replays_saved_tool_exchange(
+                    self.provider, message, model=self.model
+                )
+            elif replayed:
+                replayed_tool_rows.add(index)
         for index in range(len(prepared) - 1, -1, -1):
             message = prepared[index]
-            if message.images is None or (message.role == "tool" and not replays_tool_images):
+            if message.images is None or (
+                message.role == "tool"
+                and not replays_tool_images
+                and index not in replayed_tool_rows
+            ):
                 continue
             size = sum(image.byte_size for image in message.images)
             image_bytes = None
@@ -3551,6 +3567,7 @@ class CodingSession:
             provider=self.provider,
             effort=self.effort,
             active_from=active_from,
+            model=self.model,
         )
 
     def _context_window(self) -> int | None:

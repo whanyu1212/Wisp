@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from .models import Message
 
@@ -198,12 +198,14 @@ def normalize_provider_history(
     *,
     active_from: int | None = None,
     native_tool_history: bool = False,
+    replays_exchange: Callable[[Message], bool] | None = None,
 ) -> tuple[Message, ...]:
     """Validate and normalize complete tool exchanges for provider replay.
 
     A complete historical exchange remains native only when the target provider
-    explicitly supports reconstruction from portable snapshots. Otherwise the
-    exchange becomes one canonical assistant-role JSON envelope, so tool output
+    explicitly supports reconstruction from portable snapshots, or says it can
+    replay that one exchange, as from output saved on its assistant row. Otherwise
+    the exchange becomes one canonical assistant-role JSON envelope, so tool output
     never acquires user-instruction semantics. Complete exchanges belonging to the
     active turn remain structured regardless of historical replay support.
 
@@ -219,6 +221,10 @@ def normalize_provider_history(
             treats every exchange as historical.
         native_tool_history (bool): Whether complete historical exchanges may
             retain structured calls and results for this provider.
+        replays_exchange (Callable[[Message], bool] | None): Given a complete
+            historical exchange's assistant row, whether the provider can replay
+            that exchange natively. The answer must depend only on the row, so
+            an exchange keeps one form across requests. None replays none.
 
     Returns:
         tuple[Message, ...]: Normalized history in transcript order, with each
@@ -247,7 +253,11 @@ def normalize_provider_history(
             results = tuple(messages[index + 1 : result_end])
             ordered_results = _ordered_exchange_results(message, results)
             is_active = active_from is not None and index >= active_from
-            if ordered_results is not None and (is_active or native_tool_history):
+            if ordered_results is not None and (
+                is_active
+                or native_tool_history
+                or (replays_exchange is not None and replays_exchange(message))
+            ):
                 normalized.append(message)
                 normalized.extend(ordered_results)
             else:

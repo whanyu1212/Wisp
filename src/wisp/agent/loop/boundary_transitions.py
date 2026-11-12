@@ -19,6 +19,7 @@ from wisp.messages import Message
 from wisp.providers.base import (
     provider_supports_context_rebase,
     provider_supports_continuation_messages,
+    replays_saved_tool_exchange,
     structured_tool_replacement_support,
 )
 
@@ -90,6 +91,23 @@ def has_valid_replacement_tool_order(messages: Sequence[Message]) -> bool:
     return True
 
 
+def _in_replayed_exchange(config: AgentLoopConfig, messages: Sequence[Message], index: int) -> bool:
+    """Report whether a tool-shaped row belongs to an exchange the provider replays.
+
+    Args:
+        config (AgentLoopConfig): Provider and model the request goes to.
+        messages (Sequence[Message]): History with valid tool order.
+        index (int): Position of an assistant row with calls, or of a tool result.
+
+    Returns:
+        bool: Whether the provider replays the exchange from its assistant row.
+    """
+
+    while index > 0 and messages[index].role == "tool":
+        index -= 1
+    return replays_saved_tool_exchange(config.provider, messages[index], model=config.model)
+
+
 def validate_replacement_messages(
     config: AgentLoopConfig, messages: Sequence[Message]
 ) -> tuple[Message, ...]:
@@ -112,8 +130,11 @@ def validate_replacement_messages(
         raise RequestBoundaryUnsupportedError(
             "RequestBoundaryDecision.messages contains an unpaired structured tool exchange"
         )
-    if any(is_tool_shaped(message) for message in replacement) and (
-        structured_tool_replacement_support(config.provider, effort=config.effort) is False
+    # A provider that cannot rebuild tool exchanges from portable rows may still
+    # replay the ones whose rows saved its own output; only the others are refused.
+    if structured_tool_replacement_support(config.provider, effort=config.effort) is False and any(
+        is_tool_shaped(message) and not _in_replayed_exchange(config, replacement, index)
+        for index, message in enumerate(replacement)
     ):
         raise RequestBoundaryUnsupportedError(
             "The provider cannot fresh-replay a structured tool exchange for this effort"

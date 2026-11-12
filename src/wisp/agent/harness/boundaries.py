@@ -75,6 +75,9 @@ class _HarnessBoundaryCoordinator:
     context_overflow_hook: ContextOverflowHook | None
     armed_boundary: _ArmedRequestBoundary | None = None
     pending_transcript_replacement: tuple[Message, ...] | None = None
+    # The model requests go to; None is the provider's default. A provider that
+    # replays single saved tool exchanges decides with it.
+    model: str | None = None
 
     def provider_history(self) -> tuple[Message, ...]:
         """Normalize the current transcript for a fresh provider request.
@@ -88,6 +91,7 @@ class _HarnessBoundaryCoordinator:
             provider=self.provider,
             effort=self.effort,
             active_from=self.active_from,
+            model=self.model,
         )
 
     def arm(
