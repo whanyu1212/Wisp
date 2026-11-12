@@ -17,6 +17,8 @@ this policy.
 - A `spawn_agent` tool hands one read-only task to a subagent and returns its final message. It is
   off unless `"subagents": true` is set in `~/.wisp/settings.json` or `WISP_SUBAGENTS=1`. See
   [Delegating to a subagent](site/src/content/pages/guide/tools-and-safety.md#delegating-to-a-subagent-experimental).
+- A tool result that reaches a subagent or a codemode script without its image now says the image
+  was left out, where before it read as a complete result.
 
 ### Event contract
 

@@ -328,6 +328,11 @@ class GoogleProvider:
             if previous_response_id is not None and previous_response_id != continuation_id:
                 self._replays.consume(previous_response_id)
             self._replays.remember(continuation_id, replay_tail)
+        # These calls are answered now, and the replay tail carries their responses.
+        # Forgetting them keeps the cache to calls still waiting for a result, so a
+        # long nested run, such as a subagent's, cannot push out the call it runs under.
+        for result in tool_results:
+            self._call_info.pop(result.call_id, None)
         for tool_call, provider_id in zip(tool_calls, tool_call_provider_ids, strict=True):
             self._remember_call_info(
                 tool_call.call_id,

@@ -519,6 +519,8 @@ whose raw output would crowd its context.
   plan mode apply as for direct calls. It gets neither `spawn_agent` nor `codemode`. With
   [web search](providers.md#web-search) on, it can search the web as the run can; its searches
   are not listed in the transcript, and they mark the session's cost as a lower bound.
+  It reads text only: when a tool returns an image, such as `read` on a picture, the result says
+  the image was left out.
 - **Each call is checked on its own.** Every call a subagent makes passes the same checks as a
   direct call. A subagent cannot ask for an approval, so a call that would need one fails. What it
   reads does not count as seen by the run, so the model still reads a file itself before editing it.

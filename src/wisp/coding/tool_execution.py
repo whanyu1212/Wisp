@@ -83,6 +83,9 @@ _MAX_PARALLEL_NESTED_CALLS = 8
 # How a nested call is recorded when its script ended before the call finished.
 _SCRIPT_ENDED_FIRST = "The script ended before this call finished"
 _SUBAGENT_ENDED_FIRST = "The subagent ended before this call finished"
+# Appended to a result whose image the reader does not get, so it is never taken for
+# one that was seen.
+_IMAGE_NOT_ATTACHED = "[The image could not be attached to this result.]"
 _MAX_RESULT_COUNT = (1 << 63) - 1
 _MIN_EXIT_CODE = -(1 << 31)
 _MAX_EXIT_CODE = (1 << 31) - 1
@@ -730,8 +733,9 @@ class ConfiguredToolExecutor:
     ) -> _ToolRunOutcome:
         """Run ``tool`` and normalize its result.
 
-        A ``nested`` call, one a codemode script made, reports no progress of its own
-        and stores no images, since only its text reaches the script.
+        A ``nested`` call, one a codemode script or a subagent made, reports no
+        progress of its own and stores no images, since only its text reaches the
+        script or subagent; a result that had an image says it was left out.
         """
 
         try:
@@ -816,7 +820,9 @@ class ConfiguredToolExecutor:
         except Exception as exc:
             raise ToolResultProcessingError(call_id=call_id, tool_name=tool_name) from exc
         if nested:
-            return outcome
+            if not snapshot.images:
+                return outcome
+            return replace(outcome, output=f"{outcome.output}\n{_IMAGE_NOT_ATTACHED}")
         return await self._with_stored_images(outcome, snapshot.images)
 
     async def _with_stored_images(
@@ -841,7 +847,7 @@ class ConfiguredToolExecutor:
         if self._image_store is None:
             return replace(
                 outcome,
-                output=f"{outcome.output}\n[The image could not be attached to this result.]",
+                output=f"{outcome.output}\n{_IMAGE_NOT_ATTACHED}",
             )
         try:
             stored = tuple([await self._image_store(image) for image in images])

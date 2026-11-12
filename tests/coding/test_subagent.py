@@ -515,6 +515,27 @@ def test_calls_keep_their_scheduling(tmp_path: Path, parallel_safe: bool, togeth
     assert lookup.most_running == together
 
 
+@dataclass
+class _ImageTool(_Tool):
+    async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
+        return ToolResult(text="PNG image, 1x1", images=(b"image bytes",))
+
+
+def test_dropped_image_is_reported(tmp_path: Path) -> None:
+    """A subagent gets a tool result's text only, and is told its image was left out."""
+
+    run = _run(
+        tmp_path,
+        _Tools(lookup=_ImageTool("lookup")),
+        [_spawn(), _calls(("lookup", {"table": "a"})), _says("found"), _says("done")],
+    )
+
+    assert [result.output for result in run.provider.calls[2].tool_results] == [
+        "PNG image, 1x1\n[The image could not be attached to this result.]"
+    ]
+    assert not run.provider.calls[2].tool_results[0].images
+
+
 def test_reads_stay_unseen(tmp_path: Path) -> None:
     """What a subagent reads is not recorded as seen by the run that spawned it."""
 
