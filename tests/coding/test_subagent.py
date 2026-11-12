@@ -36,6 +36,7 @@ from wisp.events import (
     ToolResultReady,
     UsageCost,
     UsageCostRates,
+    WarningEvent,
     WispEvent,
 )
 from wisp.mcp.discovery import MCP_CALL
@@ -55,7 +56,7 @@ from wisp.providers.fake import ScriptedProvider
 from wisp.runtime.registry import ToolRegistry
 from wisp.sessions import MessageSessionEntry
 from wisp.sessions.entries import ToolResultPresentationSnapshot, session_entry_from_json
-from wisp.sessions.jsonl import JsonlSessionStore
+from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 from wisp.tool_types import ToolSafety
 from wisp.tools.approval import ToolApprovalPolicy
 from wisp.tools.base import ToolArguments, ToolExecutionMetadata, ToolInputSchema
@@ -605,9 +606,11 @@ def _fan_out(
     return session, provider
 
 
-def _collect(session: CodingSession) -> list[WispEvent]:
+def _collect(session: CodingSession, saved: JsonlSession | None = None) -> list[WispEvent]:
+    """Run one prompt, in the conversation ``saved`` or else in a new one."""
+
     async def collect() -> list[WispEvent]:
-        return [event async for event in session.run("go")]
+        return [event async for event in session.run("go", session=saved)]
 
     return anyio.run(collect)
 
@@ -1202,13 +1205,14 @@ def test_unlisted_provider_model_used_as_given(tmp_path: Path) -> None:
         subagent_model="small-local-model",
     )
 
-    _collect(session)
+    events = _collect(session)
 
     assert [request.model for request in provider.calls] == [
         "big-local-model",
         "small-local-model",
         "big-local-model",
     ]
+    assert _warnings(events) == []
 
 
 def test_uncatalogued_model_used_as_given(tmp_path: Path) -> None:
@@ -1221,6 +1225,129 @@ def test_uncatalogued_model_used_as_given(tmp_path: Path) -> None:
     assert provider.calls[1].model == "my-local-model"
     # Nothing says the model takes the session's effort, so it gets its default.
     assert provider.calls[1].effort is None
+
+
+def _warnings(events: Sequence[WispEvent]) -> list[str]:
+    return [event.message for event in events if isinstance(event, WarningEvent)]
+
+
+def test_fallback_warned_once(tmp_path: Path) -> None:
+    """A model the provider lacks is reported once, however many subagents run."""
+
+    provider = _CataloguedProvider(
+        [_spawn("a", "b"), _says("report"), _says("report"), *[_says("done")] * 3]
+    )
+    session = CodingSession(
+        provider=provider,
+        sessions=JsonlSessionStore(tmp_path / "sessions"),
+        model="claude-opus-5-5",
+        models=ModelRegistry(builtin_catalog()),
+        tool_registry=_Tools().registry(),
+        tool_context=ToolContext(cwd=tmp_path),
+        subagents=True,
+        subagent_model="gpt-6-luna",
+    )
+
+    saved = session.sessions.create()
+    first = _collect(session, saved)
+    second = _collect(session, saved)
+    elsewhere = _collect(session)
+
+    assert _warnings(first) == [
+        'Subagent model "gpt-6-luna" is not a known model on provider anthropic; '
+        'subagents use "claude-opus-5-5" instead.'
+    ]
+    (completed,) = [event for event in first if isinstance(event, AgentCompleted)]
+    assert completed.outcome == "completed"
+    # The same fallback is not repeated on the conversation's next run.
+    assert _warnings(second) == []
+    # Another conversation has not been told.
+    assert _warnings(elsewhere) == _warnings(first)
+
+
+def test_changed_fallback_warned_again(tmp_path: Path) -> None:
+    provider = _CataloguedProvider([_says("done")] * 4)
+    session = CodingSession(
+        provider=provider,
+        sessions=JsonlSessionStore(tmp_path / "sessions"),
+        models=ModelRegistry(builtin_catalog()),
+        tool_registry=_Tools().registry(),
+        tool_context=ToolContext(cwd=tmp_path),
+        subagents=True,
+        subagent_model="gpt-6-luna",
+    )
+
+    saved = session.sessions.create()
+    first = _collect(session, saved)
+    session.subagent_model = "claude-haiku-4-5"
+    fixed = _collect(session, saved)
+    session.subagent_model = "gpt-6-luna"
+    broken_again = _collect(session, saved)
+    session.model = "claude-opus-5-5"
+    other_model = _collect(session, saved)
+
+    # With no session model, the provider's default is what subagents get.
+    expected = [
+        'Subagent model "gpt-6-luna" is not a known model on provider anthropic; '
+        "subagents use the provider's default model instead."
+    ]
+    assert (_warnings(first), _warnings(fixed), _warnings(broken_again)) == (
+        expected,
+        [],
+        expected,
+    )
+    # A different fallback model is news too.
+    assert _warnings(other_model) == [
+        'Subagent model "gpt-6-luna" is not a known model on provider anthropic; '
+        'subagents use "claude-opus-5-5" instead.'
+    ]
+
+
+@pytest.mark.parametrize(
+    ("subagent_model", "with_catalog", "subagents"),
+    [
+        (None, True, True),
+        ("claude-haiku-4-5", True, True),
+        # Without a catalog the name cannot be checked, so it is used as given.
+        ("my-local-model", False, True),
+        # No subagent can run, so the setting is not in play.
+        ("gpt-6-luna", True, False),
+    ],
+    ids=["unset", "in-use", "no-catalog", "subagents-off"],
+)
+def test_no_fallback_warning(
+    tmp_path: Path, subagent_model: str | None, with_catalog: bool, subagents: bool
+) -> None:
+    session = CodingSession(
+        provider=_CataloguedProvider([_says("done")]),
+        sessions=JsonlSessionStore(tmp_path / "sessions"),
+        model="claude-opus-5-5",
+        models=ModelRegistry(builtin_catalog()) if with_catalog else None,
+        tool_registry=_Tools().registry(),
+        tool_context=ToolContext(cwd=tmp_path),
+        subagents=subagents,
+        subagent_model=subagent_model,
+    )
+
+    assert _warnings(_collect(session)) == []
+
+
+def test_own_spawn_tool_not_warned(tmp_path: Path) -> None:
+    """A tool of the user's named `spawn_agent` runs no subagent, so nothing falls back."""
+
+    registry = ToolRegistry()
+    registry.register(_Tool(SPAWN_AGENT))
+    session = CodingSession(
+        provider=_CataloguedProvider([_says("done")]),
+        sessions=JsonlSessionStore(tmp_path / "sessions"),
+        models=ModelRegistry(builtin_catalog()),
+        tool_registry=registry,
+        tool_context=ToolContext(cwd=tmp_path),
+        subagents=True,
+        subagent_model="gpt-6-luna",
+    )
+
+    assert _warnings(_collect(session)) == []
 
 
 def _saved_spend(session: CodingSession) -> tuple[int, list[tuple[str | None, int]]]:

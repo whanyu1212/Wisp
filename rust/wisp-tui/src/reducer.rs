@@ -12838,6 +12838,16 @@ mod tests {
     }
 
     #[test]
+    fn warning_is_diagnostic() {
+        let event = BackendEvent::from_projection_value(&serde_json::json!({
+            "type": "warning",
+            "message": "check this",
+        }))
+        .unwrap();
+        assert!(matches!(event, BackendEvent::Diagnostic(message) if message == "check this"));
+    }
+
+    #[test]
     fn model_change_resets_context() {
         for (provider, model, resets) in [
             ("fake", "model", false),

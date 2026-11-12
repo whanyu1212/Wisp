@@ -625,6 +625,7 @@ _EVENT_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     },
     "turn.completed": {"turn": 1, "outcome": "completed", "finish_reason": "stop"},
     "turn.started": {"turn": 1},
+    "warning": {"message": "fixture warning"},
     "web.search": {
         "turn": 1,
         "provider": "fixture",

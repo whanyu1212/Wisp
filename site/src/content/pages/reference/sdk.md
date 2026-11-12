@@ -420,7 +420,7 @@ deprecation policy.
 |---|---|
 | Command lifecycle | `RpcCommandStarted`, `RpcCommandFinished` |
 | Assistant output | `MessageStarted`, `MessageDelta`, `WebSearchPerformed`, `MessageCompleted` |
-| Run lifecycle | `AgentStarted`, `TurnStarted`, `TurnCompleted`, `AgentCompleted`, `ErrorEvent` |
+| Run lifecycle | `AgentStarted`, `TurnStarted`, `TurnCompleted`, `AgentCompleted`, `ErrorEvent`, `WarningEvent` |
 | Safety | `TrustRequested`, `TrustResolved`, `ToolApprovalRequested`, `ToolApprovalResolved` |
 | Tools | `ToolCallRequested`, `ToolExecutionStarted`, `ToolExecutionProgress`, `ToolExecutionEnded`, `ToolResultReady` |
 | Compaction/context | `ContextEstimated`, `ContextPressure`, `ContextOverflow`, `CompactionStarted`, `CompactionCompleted` |
