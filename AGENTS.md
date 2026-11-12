@@ -15,14 +15,25 @@ These shared instructions apply to the entire repository and are tracked in vers
 - State assumptions and distinguish verified behavior from hypotheses. Do not claim broader test or
   runtime coverage than the evidence supports.
 
-## Astra collaboration
+## Delegation and review
 
-- Keep Astra as the primary implementer by default, respecting an explicit user model choice.
-  The primary agent owns design decisions, implementation, verification, and final integration.
-- Use the configured explorer, researcher, and reviewer roles selectively for bounded, independent
-  investigation or review. Keep their work read-only and integrate consequential findings against
-  the source and test evidence. Follow the global productivity-subagent instructions for role and
-  model selection; independent review should focus on correctness and meaningful readability issues.
+- The primary agent, whatever harness or model the user runs, owns design decisions,
+  implementation, verification, and final integration. Respect an explicit user choice of model
+  or agent. Map the roles below onto what your harness provides; role names and model selection
+  belong in user-level configuration, not in this file.
+- Delegate only bounded work: read-only code, dependency, or documentation research to an
+  exploration subagent; independent implementation, debugging, or testing to a general-purpose
+  one. Give each implementation assignment explicit file ownership so no two agents edit the same
+  file, and keep decisions about the architecture boundaries below with the primary agent.
+- Delegated agents follow this file. Restate task-specific constraints in the brief: scope,
+  files not to touch, and that no delivery step (commit, push, PR) is authorized.
+- For consequential changes to security, persistence, concurrency, cancellation, the
+  tool-execution and approval boundaries listed under Implementation conventions, public
+  contracts, or a large rewrite or cross-cutting change, get an independent read-only review from
+  a fresh context against the requirements and the diff. The implementer's own review does not count. If no independent
+  reviewer is available, say so in the handoff instead of implying a review happened.
+- Verify every subagent or reviewer finding against source and tests before acting on it. Reject
+  invalid findings with evidence. Raise meaningful readability issues, not style preferences.
 - Prefer the smallest complete change that meets the user's intent. Explain meaningful tradeoffs
   in plain language and carry authorized work through verification without repeated confirmation.
 
