@@ -116,6 +116,32 @@ with `write_constraint`, under the exception below. Tool behavior changes are li
 `bash` runs commands in bash rather than `/bin/sh`, and that the read-only file tools follow
 symbolic links whose targets stay inside the workspace.
 
+## Wisp 0.9 compatibility
+
+0.9.0 reads every session 0.8.x wrote. The session `schema_version` stays 6, because each new
+record is optional and is written only when it has a value. A 0.8.x reader still rejects one of
+them:
+
+- A session holding a `spawn_agent` result (its result records `model_usage`) fails to open in
+  0.8.x.
+
+Gemini and Claude sessions now save each tool-call turn as the provider sent it, in the
+`native_output` field that 0.8.x already wrote for OpenAI models. 0.8.x opens those sessions and
+does not use the saved turns.
+
+Settings, credential, and trust formats are unchanged. `subagents` and `subagent_model` are user
+settings that `/subagents`, `set_subagents` and `set_subagent_model` now save; 0.8.x ignores them.
+
+Commands and events gain members and fields: the `get_subagents`, `set_subagents` and
+`set_subagent_model` commands; the `rpc.subagents`, `warning` and `mcp.status.updated` events; and
+`model_usage` on tool results, all listed in the
+[changelog](https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md). A 0.8 reader rejects them,
+so the backend and every frontend must be the same release, and external RPC clients should use the
+0.9.0 schema bundle.
+
+The supported Python API only gains methods and fields: `RpcController.get_subagents()`,
+`set_subagents()` and `set_subagent_model()`, and `WispConfig`'s `subagents` and `subagent_model`.
+
 ## Wisp 0.8 compatibility
 
 0.8.0 reads every session 0.7.x wrote. The session `schema_version` stays 6, because each new
