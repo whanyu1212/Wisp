@@ -59,6 +59,7 @@ from wisp.rpc.commands import (
     SetPermissionsCommand,
     SetQueueModeCommand,
     SetSessionNameCommand,
+    SetSubagentModelCommand,
     SetSubagentsCommand,
     ShutdownCommand,
     SteerCommand,
@@ -255,7 +256,7 @@ class RpcCommandExecutor:
             return self._dispatch_permissions(known, running_command)
         if isinstance(known, (GetCodemodeCommand, SetCodemodeCommand)):
             return self._dispatch_codemode(known, running_command)
-        if isinstance(known, (GetSubagentsCommand, SetSubagentsCommand)):
+        if isinstance(known, (GetSubagentsCommand, SetSubagentsCommand, SetSubagentModelCommand)):
             return self._dispatch_subagents(known, running_command)
         if isinstance(known, GetCommandsCommand):
             self.coordinator.running_command = running_command
@@ -699,10 +700,10 @@ class RpcCommandExecutor:
 
     def _dispatch_subagents(
         self,
-        command: GetSubagentsCommand | SetSubagentsCommand,
+        command: GetSubagentsCommand | SetSubagentsCommand | SetSubagentModelCommand,
         running_command: _RpcRunningCommand | None,
     ) -> _RpcDispatchResult:
-        if isinstance(command, SetSubagentsCommand) and running_command is not None:
+        if not isinstance(command, GetSubagentsCommand) and running_command is not None:
             # Inspection answers during a run; a change waits behind it, like configure.
             RpcCommandLifecycle.for_command(command, write_event=self.write_event).fail(
                 "Change subagents after the current operation finishes"

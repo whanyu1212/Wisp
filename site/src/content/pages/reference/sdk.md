@@ -166,6 +166,7 @@ request. Completion and results arrive through `events()`.
 | `set_codemode` | `(setting: CodemodeSetting, *, command_id: str \| None = None)` | Applied from the next run and saved as the user setting, then `RpcCodemodeReported` |
 | `get_subagents` | `(*, command_id: str \| None = None)` | `RpcSubagentsReported` |
 | `set_subagents` | `(enabled: bool, *, command_id: str \| None = None)` | Applied from the next run and saved as the user setting, then `RpcSubagentsReported` |
+| `set_subagent_model` | `(model: str \| None, *, command_id: str \| None = None)` | The model fresh subagents use, or `None` for the session's; saved as the user setting, then `RpcSubagentsReported`. Fails when the listed provider has no such model |
 | `change_directory` | `(path: str, *, command_id: str \| None = None)` | After running work: `SessionDirectoryChanged` when a move was saved; for another project, `ProjectConfigApplied` when its configuration differs, `SkillCatalogUpdated`, and `RpcPermissionsReported`; then `RpcWorkspaceReported` |
 | `get_state` | `(*, command_id: str \| None = None)` | `RpcStateReported` |
 | `get_commands` | `(*, command_id: str \| None = None)` | `RpcCommandsReported` |
@@ -287,7 +288,16 @@ event comes first.
 `offered` the `spawn_agent` tool, and `env_enabled`, what `WISP_SUBAGENTS` sets at startup. It
 also reports `model`, the `subagent_model` user setting, and `model_in_use`, the model a subagent
 that starts fresh would use now: the setting, unless the model catalog lists the current provider
-without that model, in which case the session's own. `set_subagents` waits for the current operation and saves like `set_codemode`.
+without that model, in which case the session's own. `env_model` is what `WISP_SUBAGENT_MODEL`
+names at startup.
+
+The same report describes what a subagent of a run started now would get. `tools` are the tools
+it could use and `refused_tools` the ones that run offers which it could not. `kinds` has one
+entry for `fresh` and one for `fork`, each with the `model` and `effort` it would be asked with
+(`None` is the provider's or the model's default) and the `instructions` it is given.
+`max_tool_rounds`, `max_tasks`, `max_parallel` and `report_max_bytes` are the limits every
+subagent shares. `set_subagents` and `set_subagent_model` wait for the current operation and save
+like `set_codemode`.
 
 #### Persisted sessions
 

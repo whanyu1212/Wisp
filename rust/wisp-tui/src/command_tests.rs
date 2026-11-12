@@ -118,7 +118,7 @@ async fn permissions_dock_above_the_composer_and_apply_only_a_painted_highlight(
 }
 
 #[tokio::test]
-async fn subagents_dock_above_the_composer_and_apply_a_painted_choice() {
+async fn subagents_panel_docks_and_toggles() {
     use wisp_protocol::events::SubagentsState;
     let (writer, mut receiver) = mpsc::channel(16);
     let mut ui = ui("/subagents", false);
@@ -138,6 +138,7 @@ async fn subagents_dock_above_the_composer_and_apply_a_painted_choice() {
                 env_enabled: None,
                 model: Some("small-model".into()),
                 model_in_use: Some("small-model".into()),
+                ..Default::default()
             })),
         }),
         &writer,
@@ -160,24 +161,29 @@ async fn subagents_dock_above_the_composer_and_apply_a_painted_choice() {
     let painted = draw(&mut ui, 80, 24);
     let cells: Vec<char> = painted.chars().collect();
     let rows: Vec<String> = cells.chunks(80).map(|row| row.iter().collect()).collect();
-    let off = rows
+    let setting = rows
         .iter()
-        .find(|row| row.contains("2  Off"))
-        .expect("Off choice");
-    assert!(off.contains("current"), "{painted}");
-    assert!(
-        painted.contains("Fresh subagents use small-model (subagent_model)."),
-        "{painted}"
-    );
+        .find(|row| row.contains("Subagents  "))
+        .expect("the on/off row");
+    assert!(setting.contains("Off"), "{painted}");
+    let model = rows
+        .iter()
+        .find(|row| row.contains("Model  "))
+        .expect("the model row");
+    assert!(model.contains("small-model"), "{painted}");
     // Docked: the panel's bottom border sits just above the composer and footer.
     let bottom = rows
         .iter()
-        .position(|row| row.contains("Enter apply"))
+        .position(|row| row.contains("Enter change"))
         .expect("panel hint");
     assert!(bottom >= rows.len() - 7, "{painted}");
 
-    // A number applies its choice once the panel is painted.
-    ui.handle_input(key(KeyCode::Char('1')), &writer, 8192)
+    // Enter toggles the highlighted setting once the highlight is painted.
+    ui.handle_input(key(KeyCode::Down), &writer, 8192)
+        .await
+        .unwrap();
+    draw(&mut ui, 80, 24);
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
         .await
         .unwrap();
     let change = frame(&mut receiver);

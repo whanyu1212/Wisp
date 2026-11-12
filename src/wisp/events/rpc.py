@@ -415,6 +415,25 @@ class RpcCodemodeReported(WispEvent):
     codemode: CodemodeState
 
 
+# The ways a subagent can start; `spawn_agent` takes the same words as ``context``.
+SubagentKindName = TypeAliasType("SubagentKindName", Literal["fresh", "fork"])
+
+
+class SubagentKind(BaseModel):
+    """One way a subagent starts, and what a subagent started that way would get now."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: SubagentKindName
+    # The model it would be asked on. None is the provider's default model.
+    model: str | None = None
+    # The reasoning effort it would be asked at. None is the model's own default.
+    effort: str | None = None
+    # What it is told about being a subagent. A fresh one reads this after the
+    # session prompt; a forked one after the conversation, with its task.
+    instructions: str
+
+
 class SubagentsState(BaseModel):
     """The session's subagents setting and what its next run's subagents would use."""
 
@@ -433,6 +452,20 @@ class SubagentsState(BaseModel):
     # lists the current provider without that model, when it is the session's own. A
     # forked subagent always uses the session's model.
     model_in_use: str | None = None
+    # What `WISP_SUBAGENT_MODEL` names, which outranks the saved setting at startup.
+    env_model: str | None = None
+    # The tools a subagent of a run started now could use, and the tools that run
+    # offers which a subagent is refused. Both are empty when the run would have no
+    # tools; they do not depend on whether subagents are on.
+    tools: tuple[str, ...] = ()
+    refused_tools: tuple[str, ...] = ()
+    kinds: tuple[SubagentKind, ...] = ()
+    # Limits every subagent shares: tool rounds each, tasks one call may hand out,
+    # subagents working at once, and the bytes of one report that are kept.
+    max_tool_rounds: int = Field(default=0, ge=0)
+    max_tasks: int = Field(default=0, ge=0)
+    max_parallel: int = Field(default=0, ge=0)
+    report_max_bytes: int = Field(default=0, ge=0)
 
 
 class RpcSubagentsReported(WispEvent):

@@ -668,6 +668,13 @@ pub mod commands {
             };
             deserialize(value)
         }
+        /// Choose the model fresh subagents use and save it; None clears the choice.
+        pub fn subagent_model(
+            id: &str,
+            model: Option<&str>,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({"type": "set_subagent_model", "id": id, "model": model}))
+        }
         /// Change only the current process's execution mode.
         pub fn configure_mode(
             id: &str,
@@ -1366,7 +1373,7 @@ pub mod events {
     }
 
     /// The session's subagents setting and what its next run's subagents would use.
-    #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq)]
+    #[derive(Clone, Debug, Default, serde::Deserialize, Eq, PartialEq)]
     pub struct SubagentsState {
         /// Whether runs offer the `spawn_agent` tool.
         pub enabled: bool,
@@ -1378,6 +1385,43 @@ pub mod events {
         pub model: Option<String>,
         /// The model a subagent that starts fresh would use now.
         pub model_in_use: Option<String>,
+        /// What `WISP_SUBAGENT_MODEL` names, which outranks the saved setting at startup.
+        #[serde(default)]
+        pub env_model: Option<String>,
+        /// The tools a subagent of a run started now could use.
+        #[serde(default)]
+        pub tools: Vec<String>,
+        /// The tools that run offers which a subagent is refused.
+        #[serde(default)]
+        pub refused_tools: Vec<String>,
+        /// Each way a subagent can start, as one started now would be set up.
+        #[serde(default)]
+        pub kinds: Vec<SubagentKind>,
+        /// Tool rounds each subagent may take.
+        #[serde(default)]
+        pub max_tool_rounds: u64,
+        /// Tasks one `spawn_agent` call may hand out.
+        #[serde(default)]
+        pub max_tasks: u64,
+        /// Subagents that work at once.
+        #[serde(default)]
+        pub max_parallel: u64,
+        /// Bytes of one subagent's report that are kept.
+        #[serde(default)]
+        pub report_max_bytes: u64,
+    }
+
+    /// One way a subagent starts: `fresh` from its task alone, `fork` from the conversation.
+    #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq)]
+    pub struct SubagentKind {
+        /// `fresh` or `fork`.
+        pub name: String,
+        /// The model it would be asked on; None is the provider's default.
+        pub model: Option<String>,
+        /// The reasoning effort it would be asked at; None is the model's default.
+        pub effort: Option<String>,
+        /// What it is told about being a subagent.
+        pub instructions: String,
     }
 
     pub use crate::context::{
