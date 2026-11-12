@@ -21,6 +21,7 @@ from wisp.events import (
     ToolResultReady,
     UsageCost,
     UsageCostRates,
+    WarningEvent,
     WispEvent,
 )
 from wisp.messages import CompactionRecord
@@ -80,6 +81,10 @@ def test_bare_interactive_cli_honors_explicit_text_mode_env(
 
     assert result.exit_code == 0, result.output
     assert "Usage:" in result.output
+
+
+def test_warning_line() -> None:
+    assert _print_event_line(WarningEvent(message="check this")) == "warning: check this"
 
 
 def test_print_output_renders_threshold_compaction_as_automatic_notices() -> None:

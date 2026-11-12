@@ -22,6 +22,7 @@ from wisp.events import (
     ToolCallRequested,
     ToolResultReady,
     UsageCost,
+    WarningEvent,
     WispEvent,
 )
 from wisp.rpc.errors import RpcOutputAlreadyReportedError
@@ -115,6 +116,8 @@ def _print_event_line(event: WispEvent) -> str | None:
         if event.outcome == "cancelled":
             return "Context overflow recovery cancelled."
         return f"Context overflow recovery failed: {event.error or 'unknown error'}"
+    if isinstance(event, WarningEvent):
+        return f"warning: {event.message}"
     if isinstance(event, ToolCallRequested):
         return f"→ tool {event.name} {_format_event_arguments(event.arguments)}"
     if isinstance(event, ToolApprovalRequested):

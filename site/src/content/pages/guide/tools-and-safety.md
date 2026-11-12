@@ -563,7 +563,8 @@ operation limits to named tools, such as `/init`, is not offered the tool. In th
 as the session. Subagents mostly read and search, so a smaller model often does. The session's
 reasoning effort carries over when that model supports it, and otherwise the model's default
 applies. If the model catalog lists the current provider without that model, as after switching
-provider, subagents use the session's model and `/subagents` says so. On a provider the catalog
+provider, subagents use the session's model; a run warns about it, once per conversation, and
+`/subagents` says so. On a provider the catalog
 does not list, such as an OpenAI-compatible endpoint, the setting is used as given. A forked subagent always uses the session's model,
 because only that model can reuse what the provider cached for the conversation. The setting is
 user-only, like `subagents`.

@@ -29,6 +29,9 @@ this policy.
   clients use `get_subagents` and `set_subagents`.
 - `"subagent_model"` (or `WISP_SUBAGENT_MODEL`) names a model on the session's provider for
   subagents that start fresh. A forked subagent keeps the session's model.
+- A run warns when its subagents will not use the configured `subagent_model` because the
+  provider has no such model, naming the model they use instead. A conversation says it once for
+  each such fallback.
 - A tool result that reaches a subagent or a codemode script without its image now says the image
   was left out, where before it read as a complete result.
 
@@ -47,6 +50,9 @@ this policy.
 - `tool.nested.started`, `tool.nested.ended` and a result's `nested_calls` now also describe the
   tool calls a `spawn_agent` call's subagents make, with that call as `parent_call_id`. Their
   `call_id`s are numbered by Wisp, as `subagent-N-M`, and do not repeat within the call.
+- New `warning` event with a `message`: something the user should know that does not stop or fail
+  the run. Text output prints it on stderr as `warning: …`. Its first use is the `subagent_model`
+  fallback.
 
 <!-- Keeps links to the pre-release "0.8.1 — Unreleased" heading working. -->
 <a id="081--unreleased"></a>

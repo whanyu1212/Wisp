@@ -5729,6 +5729,28 @@
    "accepted": false
   },
   {
+   "event": "warning",
+   "operation": "remove",
+   "path": [
+    "message"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "warning",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "warning",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
    "event": "web.search",
    "operation": "remove",
    "path": [

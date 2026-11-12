@@ -10,7 +10,7 @@ models by the runtime stage that produces them:
 - ``tools``: tool call, approval, trust, and tool-result events
 - ``sessions``: persisted-session, transcript, session-tree, and queue events
 - ``rpc``: RPC command lifecycle, backend state, catalog, and project-file reports
-- ``errors``: the terminal ``ErrorEvent``
+- ``errors``: the terminal ``ErrorEvent`` and the non-fatal ``WarningEvent``
 
 ``KnownWispEvent`` is the discriminated union the live RPC protocol bundle is
 generated from; its member order is part of the generated schema and must stay
@@ -42,7 +42,7 @@ from wisp.events._base import (
     _MessageOriginEvent,
     utc_now,
 )
-from wisp.events.errors import ErrorEvent
+from wisp.events.errors import ErrorEvent, WarningEvent
 from wisp.events.rpc import (
     DEFAULT_AGENT_MODE,
     MAX_GIT_DIFF_FILE_EDITS,
@@ -372,6 +372,7 @@ __all__ = [
     "TurnStarted",
     "UsageCost",
     "UsageCostRates",
+    "WarningEvent",
     "WebSearchPerformed",
     "WebSearchSource",
     "WispEvent",
@@ -450,7 +451,8 @@ KnownWispEvent = TypeAliasType(
         | ModelProviderAutoSwitched
         | ErrorEvent
         | ToolNestedCallStarted
-        | ToolNestedCallEnded,
+        | ToolNestedCallEnded
+        | WarningEvent,
         Field(discriminator="type"),
     ],
 )

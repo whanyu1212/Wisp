@@ -7717,6 +7717,34 @@
       "title": "UsageCostRates",
       "type": "object"
     },
+    "WarningEvent": {
+      "additionalProperties": false,
+      "description": "Something the user should know that does not stop or fail the run.",
+      "properties": {
+        "message": {
+          "title": "WarningEventMessage",
+          "type": "string"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "WarningEventTimestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "warning",
+          "default": "warning",
+          "title": "WarningEventType",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "timestamp",
+        "message"
+      ],
+      "title": "WarningEvent",
+      "type": "object"
+    },
     "WebSearchPerformed": {
       "additionalProperties": false,
       "description": "The provider searched the web on its own servers during a response.\n\nThe model already has the results; this event reports the search so\nfrontends can show it. Every text field comes from the web and is\nuntrusted: frontends must bound and sanitize it before display.\n``action`` is ``search`` for a query, ``open_page`` when the model opened a\nURL, and ``find_in_page`` when it searched within a page (``query`` holds\nthe pattern). ``error`` is the provider's error code for a failed search.",
@@ -7891,6 +7919,7 @@
       "trust.resolved": "#/$defs/TrustResolved",
       "turn.completed": "#/$defs/TurnCompleted",
       "turn.started": "#/$defs/TurnStarted",
+      "warning": "#/$defs/WarningEvent",
       "web.search": "#/$defs/WebSearchPerformed"
     },
     "propertyName": "type"
@@ -8087,6 +8116,9 @@
     },
     {
       "$ref": "#/$defs/ToolNestedCallEnded"
+    },
+    {
+      "$ref": "#/$defs/WarningEvent"
     }
   ],
   "title": "Wisp current live event output"

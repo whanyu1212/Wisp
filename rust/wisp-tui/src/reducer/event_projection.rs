@@ -361,7 +361,7 @@ impl BackendEvent {
     pub fn from_projection_value(value: &Value) -> Result<Self, EventProjectionError> {
         let event_type = string_field(value, "<unknown>", "type")?;
         let projected = match event_type.as_str() {
-            "error" => Self::Diagnostic(super::bounded_session_text(
+            "error" | "warning" => Self::Diagnostic(super::bounded_session_text(
                 &string_field(value, &event_type, "message")?,
                 super::SESSION_NOTICE_MAX_BYTES,
             )),

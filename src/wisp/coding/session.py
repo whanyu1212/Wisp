@@ -126,6 +126,7 @@ from wisp.events import (
     ToolResultReady,
     TurnCompleted,
     TurnStarted,
+    WarningEvent,
     WispEvent,
     utc_now,
 )
@@ -504,6 +505,8 @@ class CodingSession:
         self.subagents = subagents
         # The model a subagent that starts fresh should use; see `subagent_model_in_use`.
         self.subagent_model = subagent_model
+        # The fallback the user was last warned about, so a conversation says it once.
+        self._warned_subagent_fallback: tuple[str, str, str, str | None] | None = None
         self._mcp_server_connected = mcp_server_connected
         self.tool_policy = tool_policy or ToolPolicy.allow_all_tools()
         self.tool_approval_policy = tool_approval_policy or ToolApprovalPolicy.require_approval()
@@ -1486,6 +1489,15 @@ class CodingSession:
                 setup=_run_setup(effective_tools, prompt_messages),
             )
         )
+        # A tool of the user's may hold the name; only Wisp's own runs subagents.
+        if (
+            operation_registry is not None
+            and SPAWN_AGENT in operation_registry.names()
+            and isinstance(operation_registry.get(SPAWN_AGENT), SpawnAgentTool)
+        ):
+            fallback_warning = self._subagent_fallback_warning(session.session_id)
+            if fallback_warning is not None:
+                yield await emit(fallback_warning)
 
         await self._persist_run_prompt(
             persistence,
@@ -2263,14 +2275,53 @@ class CodingSession:
             str | None: The model's id; None means the provider's default model.
         """
 
-        if self.subagent_model is None:
-            return self.model
-        if self.models is None:
-            return self.subagent_model
-        provider_listed = any(entry.name == self.provider.name for entry in self.models.providers())
-        if provider_listed and not self.models.knows_model(self.provider.name, self.subagent_model):
+        if self.subagent_model is None or self._subagent_model_unavailable():
             return self.model
         return self.subagent_model
+
+    def _subagent_model_unavailable(self) -> bool:
+        """Report whether the catalog lists the provider but not `subagent_model` on it."""
+
+        if self.subagent_model is None or self.models is None:
+            return False
+        provider_listed = any(entry.name == self.provider.name for entry in self.models.providers())
+        return provider_listed and not self.models.knows_model(
+            self.provider.name, self.subagent_model
+        )
+
+    def _subagent_fallback_warning(self, session_id: str) -> WarningEvent | None:
+        """Return the warning for a run whose subagents will not use `subagent_model`.
+
+        A conversation warns once for each fallback: the next run is told again
+        only after the setting, the provider or the session's model changes, or in
+        another conversation.
+
+        Args:
+            session_id (str): The conversation the run belongs to.
+
+        Returns:
+            WarningEvent | None: The warning, naming the configured model and the
+            one used instead, or None when the setting is in use, was already
+            reported, or names the session's own model.
+        """
+
+        fallback = (
+            (session_id, self.subagent_model, self.provider.name, self.model)
+            if self.subagent_model is not None
+            and self.subagent_model != self.model
+            and self._subagent_model_unavailable()
+            else None
+        )
+        previous, self._warned_subagent_fallback = self._warned_subagent_fallback, fallback
+        if fallback is None or fallback == previous:
+            return None
+        used = f'"{self.model}"' if self.model is not None else "the provider's default model"
+        return WarningEvent(
+            message=(
+                f'Subagent model "{self.subagent_model}" is not a known model on '
+                f"provider {self.provider.name}; subagents use {used} instead."
+            )
+        )
 
     def _spawn_agent_tool(
         self,
