@@ -229,12 +229,14 @@ def _turn(*uses: tuple[str, str], role: str = "assistant") -> dict[str, object]:
 _GOOD = _turn(("c1", "lookup"))
 
 
-def _turn_with_search(*, answered: bool) -> dict[str, object]:
-    """The usable turn with a server web search added, with or without its result."""
+def _turn_with_search(*, started: bool = True, answered: bool) -> dict[str, object]:
+    """The usable turn with a server web search's call, its result, or both added."""
 
-    search: list[dict[str, object]] = [
-        {"type": "server_tool_use", "id": "srv1", "name": "web_search", "input": {"query": "q"}}
-    ]
+    search: list[dict[str, object]] = []
+    if started:
+        search.append(
+            {"type": "server_tool_use", "id": "srv1", "name": "web_search", "input": {"query": "q"}}
+        )
     if answered:
         search.append({"type": "web_search_tool_result", "tool_use_id": "srv1", "content": []})
     return {"role": "assistant", "content": [*search, *cast("list[object]", _GOOD["content"])]}
@@ -264,6 +266,12 @@ def _turn_with_search(*, answered: bool) -> dict[str, object]:
         NativeOutput(
             provider="anthropic", model=_MODEL, items=(_turn_with_search(answered=False),)
         ),
+        # The other half: the result of a search an earlier, unreplayed turn started.
+        NativeOutput(
+            provider="anthropic",
+            model=_MODEL,
+            items=(_turn_with_search(started=False, answered=True),),
+        ),
     ],
     ids=[
         "none",
@@ -276,6 +284,7 @@ def _turn_with_search(*, answered: bool) -> dict[str, object]:
         "malformed",
         "two-items",
         "unanswered-search",
+        "orphaned-search-result",
     ],
 )
 def test_unusable_saved_turn_is_flattened(native: NativeOutput | None) -> None:

@@ -578,7 +578,7 @@ class AnthropicProvider:
         if (
             tool_calls
             and response_id is not None
-            and not _has_unanswered_server_tool(assistant_turn["content"])
+            and not _has_unpaired_server_tool(assistant_turn["content"])
         ):
             # The same turn this run replays, so a later prompt can send the
             # exchange exactly as this run did. A final answer keeps its portable
@@ -981,35 +981,37 @@ def _saved_assistant_turn(message: Message, *, provider: str, model: str) -> Mes
     ]
     if used != [(call.call_id, call.name) for call in message.tool_calls or ()]:
         return None
-    if _has_unanswered_server_tool(content):
+    if _has_unpaired_server_tool(content):
         return None
     return cast(MessageParam, turn)
 
 
-def _has_unanswered_server_tool(content: object) -> bool:
-    """Report whether a turn starts a server tool whose result is not in the turn.
+def _has_unpaired_server_tool(content: object) -> bool:
+    """Report whether a turn holds half of a server-tool exchange.
 
-    A search issued beside a client tool call is answered in the next response,
-    which keeps its portable form in later prompts. Replaying the first turn
-    alone would then send a search with no result, which Anthropic rejects, so
-    such a turn is never saved or replayed.
+    A search issued beside a client tool call is answered in the next response.
+    Only one of those two turns may be replayable: the other keeps its portable
+    form in later prompts, or is flattened. Replaying one alone would send a
+    search without its result, or a result without its search, and Anthropic
+    rejects both, so a turn with either half is never saved or replayed.
 
     Args:
         content (object): An assistant turn's content blocks.
 
     Returns:
-        bool: Whether any ``server_tool_use`` block lacks a result block for its
-        id in the same turn. Content that is not a list of blocks has none.
+        bool: Whether a ``server_tool_use`` block has no result block for its id
+        in the same turn, or a result block names a server tool the turn did not
+        start. Content that is not a list of blocks has neither.
     """
 
     if not isinstance(content, list):
         return False
     blocks = [block for block in content if isinstance(block, dict)]
+    started = {block.get("id") for block in blocks if block.get("type") == "server_tool_use"}
+    # Client tool results never appear in an assistant turn, so every block that
+    # names a tool use here is a server tool's result.
     answered = {block.get("tool_use_id") for block in blocks if "tool_use_id" in block}
-    return any(
-        block.get("type") == "server_tool_use" and block.get("id") not in answered
-        for block in blocks
-    )
+    return started != answered
 
 
 def _messages_to_anthropic(
