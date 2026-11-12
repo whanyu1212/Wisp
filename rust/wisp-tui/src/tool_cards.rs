@@ -1360,14 +1360,21 @@ pub fn bounded_tool_arguments(name: &str, arguments: &Value) -> Value {
         ],
         "edit" | "write" => &["path"],
         crate::script_card::SPAWN_AGENT => {
-            let mut bounded = Map::new();
-            if let Some(task) = arguments.get("task").and_then(Value::as_str) {
-                let mut end = task.len().min(crate::script_card::SCRIPT_MAX_BYTES);
+            // The tasks together keep to what a card holds of a script.
+            let mut room = crate::script_card::SCRIPT_MAX_BYTES;
+            let mut tasks = Vec::new();
+            for task in
+                crate::script_card::subagent_tasks(arguments.get("tasks"), arguments.get("task"))
+            {
+                let mut end = task.len().min(room);
                 while !task.is_char_boundary(end) {
                     end -= 1;
                 }
-                bounded.insert("task".into(), Value::String(task[..end].to_owned()));
+                room -= end;
+                tasks.push(Value::String(task[..end].to_owned()));
             }
+            let mut bounded = Map::new();
+            bounded.insert("tasks".into(), Value::Array(tasks));
             return Value::Object(bounded);
         }
         crate::script_card::CODEMODE => {

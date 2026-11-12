@@ -13,9 +13,11 @@ T = TypeVar("T")
 class ContinuationStore(Generic[T]):
     """Store provider-native continuation payloads by response ID.
 
-    Operations are synchronous and contain no suspension points. The store is
-    therefore safe under Wisp's current assumption that a provider instance is
-    driven by one active run at a time; it does not coordinate concurrent runs.
+    Operations are synchronous and contain no suspension points, and entries are
+    keyed by response ID. Conversations that interleave on one provider instance,
+    as a run and its subagents do, therefore never touch each other's entries. The
+    store does not coordinate them beyond that: enough interleaved conversations to
+    exceed its capacity would evict the oldest entry while it is still needed.
     """
 
     def __init__(self, *, capacity: int = 128) -> None:

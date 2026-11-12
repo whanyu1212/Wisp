@@ -2103,7 +2103,7 @@ fn scripts_never_group() {
 
 fn subagent_call() -> serde_json::Value {
     json!({"type": "tool.call", "call_id": "script-1", "name": "spawn_agent",
-           "arguments": {"task": "Find where users are stored.\nReport the file and table."}})
+           "arguments": {"tasks": ["Find where users are stored.\nReport the file and table."]}})
 }
 
 #[test]
@@ -2165,11 +2165,39 @@ fn opened_subagent_shows_task_calls_and_report() {
 const HOSTILE_TASK: &str = "evil\u{1b}[31m\u{202e}task\nsecond\u{1b}]52;c;eA==\u{7} line";
 
 #[test]
+fn several_tasks_are_numbered() {
+    let buffer = script_card(
+        &[
+            json!({"type": "tool.call", "call_id": "script-1", "name": "spawn_agent",
+                   "arguments": {"tasks": ["Map the Rust side.", "Map the Python side."]}}),
+            json!({"type": "tool.nested.started", "parent_call_id": "script-1",
+                   "call_id": "subagent-1-1", "name": "grep", "arguments": {"pattern": "a"}}),
+            json!({"type": "tool.nested.started", "parent_call_id": "script-1",
+                   "call_id": "subagent-2-1", "name": "read", "arguments": {"path": "b.py"}}),
+        ],
+        true,
+        100,
+    );
+
+    let text = screen_text(&buffer);
+    for expected in [
+        "Delegating 2 tasks: Map the Rust side. · 2 calls · grep, read",
+        "1. Map the Rust side.",
+        "2. Map the Python side.",
+    ] {
+        assert!(
+            text.contains(expected),
+            "{expected:?} missing from:\n{text}"
+        );
+    }
+}
+
+#[test]
 fn subagent_task_is_sanitized() {
     let buffer = script_card(
         &[
             json!({"type": "tool.call", "call_id": "script-1", "name": "spawn_agent",
-                   "arguments": {"task": HOSTILE_TASK}}),
+                   "arguments": {"tasks": [HOSTILE_TASK]}}),
         ],
         true,
         100,
@@ -2585,7 +2613,7 @@ async fn subagent_details_show_sanitized_task() {
         &mut ui,
         &writer,
         json!({"type": "tool.call", "call_id": "script-1", "name": "spawn_agent",
-               "arguments": {"task": HOSTILE_TASK}}),
+               "arguments": {"tasks": [HOSTILE_TASK]}}),
     )
     .await;
     deliver(

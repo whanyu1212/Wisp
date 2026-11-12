@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from collections import OrderedDict
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from json import dumps
@@ -57,8 +56,6 @@ DEFAULT_GOOGLE_MODEL = "gemini-3.6-flash"
 # the tool call (including any thought_signature parts) must be resent ahead
 # of the tool's functionResponse, since AgentHarness's `messages` never grows
 # across tool rounds. Mirrors AnthropicProvider's replay behavior exactly.
-_MAX_PENDING_CALL_INFO = 128
-
 _TERMINAL_FINISH_REASON_TO_PROVIDER: dict[genai_types.FinishReason, ProviderFinishReason] = {
     genai_types.FinishReason.STOP: "stop",
     genai_types.FinishReason.MAX_TOKENS: "length",
@@ -116,9 +113,12 @@ class GoogleProvider:
         # Remember each call's name (and whether Gemini actually issued an
         # id, vs. Wisp's synthetic fallback -- see _tool_call_from_google) at
         # the moment its tool call is emitted, so the next round's
-        # functionResponse can look both up. Keyed the same way as _replays
-        # and evicted alongside it.
-        self._call_info: OrderedDict[str, _CallInfo] = OrderedDict()
+        # functionResponse can look both up. Keyed by the response that made
+        # the calls, like _replays, and holding each call under its call_id:
+        # a model that issues no ids gives every conversation the same
+        # synthetic call_ids, so conversations sharing this provider, as a
+        # run and its subagents do, must not share one table of them.
+        self._call_info = ContinuationStore[dict[str, _CallInfo]]()
 
     def supports_structured_tool_replacement(self, *, effort: str | None) -> bool:
         """Reject fresh tool replay because Gemini thought signatures are opaque.
@@ -318,7 +318,13 @@ class GoogleProvider:
             replay_tail = (
                 *previous,
                 *(
-                    (self._tool_results_to_content(tool_results, model=selected_model),)
+                    (
+                        self._tool_results_to_content(
+                            tool_results,
+                            model=selected_model,
+                            previous_response_id=previous_response_id,
+                        ),
+                    )
                     if tool_results
                     else ()
                 ),
@@ -328,15 +334,23 @@ class GoogleProvider:
             if previous_response_id is not None and previous_response_id != continuation_id:
                 self._replays.consume(previous_response_id)
             self._replays.remember(continuation_id, replay_tail)
-        # These calls are answered now, and the replay tail carries their responses.
-        # Forgetting them keeps the cache to calls still waiting for a result, so a
-        # long nested run, such as a subagent's, cannot push out the call it runs under.
-        for result in tool_results:
-            self._call_info.pop(result.call_id, None)
-        for tool_call, provider_id in zip(tool_calls, tool_call_provider_ids, strict=True):
-            self._remember_call_info(
-                tool_call.call_id,
-                _CallInfo(name=tool_call.name, provider_id=strip_or_none(provider_id)),
+        if tool_results:
+            # The previous response's calls are answered now, and the replay tail
+            # carries their responses. Forgetting them keeps the store to responses
+            # still waiting for results, so a long nested run, such as a subagent's,
+            # cannot push out the calls it runs under.
+            self._call_info.consume(previous_response_id)
+        if tool_calls and response_id is not None:
+            self._call_info.remember(
+                response_id,
+                {
+                    tool_call.call_id: _CallInfo(
+                        name=tool_call.name, provider_id=strip_or_none(provider_id)
+                    )
+                    for tool_call, provider_id in zip(
+                        tool_calls, tool_call_provider_ids, strict=True
+                    )
+                },
             )
 
         yield ProviderResponseCompleted(
@@ -365,7 +379,11 @@ class GoogleProvider:
         if previous_response_id is not None:
             contents.extend(self._require_replay(previous_response_id))
         if tool_results:
-            contents.append(self._tool_results_to_content(tool_results, model=model))
+            contents.append(
+                self._tool_results_to_content(
+                    tool_results, model=model, previous_response_id=previous_response_id
+                )
+            )
         contents.extend(_messages_to_google(extra_messages, model=model))
         system_instruction = _system_from_messages(messages)
 
@@ -448,15 +466,16 @@ class GoogleProvider:
             )
         return continuation
 
-    def _remember_call_info(self, call_id: str, info: _CallInfo) -> None:
-        self._call_info.pop(call_id, None)
-        self._call_info[call_id] = info
-        while len(self._call_info) > _MAX_PENDING_CALL_INFO:
-            self._call_info.popitem(last=False)
-
     def _tool_results_to_content(
-        self, tool_results: Sequence[ToolCallResult], *, model: str
+        self,
+        tool_results: Sequence[ToolCallResult],
+        *,
+        model: str,
+        previous_response_id: str | None,
     ) -> genai_types.Content:
+        """Build the functionResponse turn answering ``previous_response_id``'s calls."""
+
+        call_info = self._call_info.get(previous_response_id) or {}
         return _function_responses_content(
             [
                 (
@@ -469,7 +488,7 @@ class GoogleProvider:
                     info.name if info is not None else result.call_id,
                 )
                 for result in tool_results
-                for info in (self._call_info.get(result.call_id),)
+                for info in (call_info.get(result.call_id),)
             ],
             model=model,
         )

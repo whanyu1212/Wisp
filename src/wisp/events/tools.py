@@ -161,9 +161,10 @@ NESTED_CALL_ARGUMENTS_MAX_CHARS = 2_000
 NESTED_CALL_TEXT_MAX_CHARS = 500
 
 
-# The most model responses one tool result accounts for. A subagent is limited to
-# one fewer tool rounds, so every response it completes fits.
-MAX_TOOL_MODEL_RESPONSES = 64
+# The most model responses one tool result accounts for: enough for every subagent
+# one `spawn_agent` call may run (8), each at its limit of 63 tool rounds and a
+# final message.
+MAX_TOOL_MODEL_RESPONSES = 512
 
 
 class NestedToolCall(BaseModel):
@@ -309,8 +310,8 @@ class _ToolResultEvent(_MessageOriginEvent):
     # how many more it made than the result records. Empty for every other tool.
     nested_calls: tuple[NestedToolCall, ...] = Field(default=(), max_length=MAX_NESTED_CALLS)
     nested_calls_omitted: int = Field(default=0, ge=0)
-    # The model responses a subagent completed, so its spend counts toward the
-    # session's. Empty for every other tool.
+    # The model responses a call's subagents completed, so their spend counts toward
+    # the session's. Empty for every other tool.
     model_usage: tuple[ModelResponseUsage, ...] = Field(
         default=(), max_length=MAX_TOOL_MODEL_RESPONSES
     )

@@ -507,10 +507,10 @@ offered.
 ## Delegating to a subagent (experimental)
 
 With `"subagents": true` in `~/.wisp/settings.json`, or `WISP_SUBAGENTS=1`, the model also gets a
-`spawn_agent` tool. It hands one task to a subagent: a second agent on the same model that starts
-from the task alone, works with the run's read-only tools, and returns only its final message. The
-model is told to do the work itself by default and to delegate only a broad search or investigation
-whose raw output would crowd its context.
+`spawn_agent` tool. It hands a list of tasks to subagents, one each: a subagent is a second agent on
+the same model that starts from its task alone, works with the run's read-only tools, and returns
+only its final message. The model is told to do the work itself by default and to delegate only a
+broad search or investigation whose raw output would crowd its context.
 
 - **Fresh context.** A subagent sees the session prompt and the task the model wrote. It sees none
   of the conversation, and nothing it reads reaches the conversation except its report.
@@ -532,8 +532,13 @@ whose raw output would crowd its context.
   `model_usage` lists each response's tokens and cost, the session saves it, and session usage and
   cost totals include it. A run cancelled while a subagent is working records the call as
   interrupted, with no usage listed, so that subagent's spend is missing from the totals.
-- **Limits.** One subagent runs at a time, for at most 63 tool rounds; one that reaches the limit
-  returns what it has with a note. Cancelling a run stops its subagent.
+- **Several at once.** One call takes up to eight tasks and runs their subagents at the same
+  time, four at once, the rest waiting their turn. The result gives each report under a
+  `## Task N` heading; a subagent that fails says why in its place and the others still report.
+  The run continues once all of them have. A tool that is not safe to run in parallel still runs
+  for one subagent at a time, though it can overlap a parallel-safe call.
+- **Limits.** A subagent works for at most 63 tool rounds; one that reaches the limit returns
+  what it has with a note. Cancelling a run stops its subagents.
 
 The setting is user-only, because a subagent spends on your provider account. A run that an
 operation limits to named tools, such as `/init`, is not offered the tool.
