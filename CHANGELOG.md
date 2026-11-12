@@ -40,6 +40,11 @@ this policy.
 - A tool result that reaches a subagent or a codemode script without its image now says the image
   was left out, where before it read as a complete result.
 
+### Models
+
+- Gemini 4 Carbon (`gemini-4-carbon`) is in the model catalog, with its thinking levels, context
+  window and prices, so `/model` offers it and its cost is counted.
+
 ### TUI
 
 - The startup logo's entrance is slower: its dots gather over 1 s instead of 0.75 s, and the
