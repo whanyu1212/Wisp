@@ -85,6 +85,26 @@ fn inspection_builders_use_existing_commands_and_status_validation() {
 }
 
 #[test]
+fn startup_mcp_status_projects_connecting_and_its_update() {
+    let mut connecting = fixture("rpc.mcp");
+    connecting["status"]["servers"][0]["status"] = json!("connecting");
+    let status = events::deserialize(connecting)
+        .unwrap()
+        .mcp_status("mcp-1")
+        .unwrap();
+    assert_eq!(status.servers[0].status, McpServerStatus::Connecting);
+
+    let updated = events::deserialize(fixture("mcp.status.updated")).unwrap();
+    assert!(updated.mcp_status("mcp-1").is_none());
+    let status = updated.updated_mcp_status().unwrap();
+    assert_eq!(status.servers.len(), 1);
+    assert_eq!(status.servers[0].status, McpServerStatus::Connected);
+    // A request's own report is not the unprompted update.
+    let reported = events::deserialize(fixture("rpc.mcp")).unwrap();
+    assert!(reported.updated_mcp_status().is_none());
+}
+
+#[test]
 fn actionable_skill_names_match_the_backend_directive_grammar() {
     let mut entry = events::deserialize(fixture("rpc.skills"))
         .unwrap()

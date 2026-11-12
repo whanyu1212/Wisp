@@ -189,7 +189,9 @@ class RpcMcpServerSnapshot(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     name: str = Field(min_length=1)
-    status: Literal["connected", "disconnected", "unavailable", "disabled"]
+    # "connecting" is reported only between a host starting and its startup
+    # connect ending; a server never returns to it.
+    status: Literal["connecting", "connected", "disconnected", "unavailable", "disabled"]
     tool_names: tuple[str, ...] = ()
     error: str | None = None
     # The configuration the server was last started (or skipped) with.
@@ -633,6 +635,17 @@ class RpcMcpLoginStarted(WispEvent):
     command_id: str
     name: str = Field(min_length=1)
     authorization_url: str = Field(min_length=1, max_length=8_192)
+
+
+class McpStatusUpdated(WispEvent):
+    """MCP servers that were still connecting when the host started have settled.
+
+    Sent once, unprompted, when the startup connect ends, so a frontend can replace
+    the "connecting" status it was given earlier.
+    """
+
+    type: Literal["mcp.status.updated"] = "mcp.status.updated"
+    status: RpcMcpStatusSnapshot
 
 
 class SkillCatalogUpdated(WispEvent):

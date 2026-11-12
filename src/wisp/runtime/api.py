@@ -136,6 +136,10 @@ class WispRuntime:
     # Enabled servers left without a connection because a restart of the whole MCP
     # runtime failed; per-server failures are in `mcp_runtime.diagnostics` instead.
     failed_mcp_servers: tuple[str, ...] = ()
+    # The enabled servers in `mcp_server_configs` have not been started yet: the
+    # runtime was built with `connect_mcp=False` and its host connects them. Until
+    # then the runtime holds no MCP tools.
+    mcp_connecting: bool = False
     auth_store: JsonAuthStore | None = field(default=None, repr=False)
     # MCP OAuth credentials; None uses ~/.wisp/mcp-auth.json.
     mcp_token_store: McpTokenStore | None = field(default=None, repr=False)
@@ -182,6 +186,7 @@ class WispRuntime:
         """
 
         object.__setattr__(self, "mcp_runtime", mcp_runtime)
+        object.__setattr__(self, "mcp_connecting", False)
         object.__setattr__(self, "mcp_server_configs", mcp_server_configs)
         object.__setattr__(self, "disabled_mcp_servers", disabled_mcp_servers)
         object.__setattr__(self, "failed_mcp_servers", failed_mcp_servers)

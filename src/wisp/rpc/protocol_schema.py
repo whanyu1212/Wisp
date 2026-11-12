@@ -423,6 +423,7 @@ _EVENT_FIXTURE_VALUES: dict[str, dict[str, object]] = {
         "provider": "openai-codex",
         "attempt": 1,
     },
+    "mcp.status.updated": {"status": {"servers": ()}},
     "rpc.mcp": {"command_id": "command-1", "status": {"servers": ()}},
     "rpc.mcp.login": {
         "command_id": "command-1",

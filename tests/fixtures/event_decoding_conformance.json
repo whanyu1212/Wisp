@@ -649,6 +649,45 @@
    "accepted": false
   },
   {
+   "event": "mcp.status.updated",
+   "operation": "remove",
+   "path": [
+    "status"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "mcp.status.updated",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "mcp.status.updated",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "mcp.status.updated",
+   "operation": "remove",
+   "path": [
+    "status",
+    "servers"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "mcp.status.updated",
+   "operation": "add_unknown",
+   "path": [
+    "status"
+   ],
+   "accepted": false
+  },
+  {
    "event": "message.completed",
    "operation": "remove",
    "path": [

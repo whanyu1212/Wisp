@@ -1753,6 +1753,21 @@ mod tests {
     }
 
     #[test]
+    fn connecting_servers_are_not_failures() {
+        let mut state = reading_session();
+        let mut panel = SidePanel::default();
+        set_linear(&mut state, McpServerStatus::Connecting);
+        let text = panel_text(&screen(&state, &mut panel, 200), 200);
+        assert!(text.contains("connecting…"), "{text}");
+        assert!(!text.contains("connected"), "{text}");
+        // Still connecting is not a failure, so the list stays folded.
+        assert!(!mcp_open(&state, &mut panel));
+        panel.activate(PanelAction::Toggle(Disclosure::Mcp));
+        let text = panel_text(&screen(&state, &mut panel, 200), 200);
+        assert!(text.contains("○ linear"), "{text}");
+    }
+
+    #[test]
     fn mcp_fold_follows_failures() {
         let mut state = reading_session();
         let mut panel = SidePanel::default();

@@ -65,6 +65,7 @@ from wisp.events.rpc import (
     CodemodeSetting,
     CodemodeState,
     CodingSessionState,
+    McpStatusUpdated,
     PermissionMode,
     PermissionState,
     ProjectFilesInvalidated,
@@ -269,6 +270,7 @@ __all__ = [
     "KnownWispEvent",
     "KnownWispEventAdapter",
     "ManagedProcessState",
+    "McpStatusUpdated",
     "MessageCompleted",
     "MessageDelta",
     "MessageRole",
@@ -434,6 +436,7 @@ KnownWispEvent = TypeAliasType(
         | RpcMcpStatusReported
         | RpcMcpSnippetPreviewed
         | RpcMcpLoginStarted
+        | McpStatusUpdated
         | SkillCatalogUpdated
         | RpcMessagesReported
         | RpcSessionsReported

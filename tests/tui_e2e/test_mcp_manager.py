@@ -21,12 +21,9 @@ from wisp import __version__
 SECRET = "sentinel-typed-value-42"
 
 
-@pytest.mark.process
-def test_pasted_snippet_adds_a_connected_server_without_showing_values(tmp_path: Path) -> None:
-    binary = _rust_binary()
-    home = tmp_path / "home"
-    home.mkdir()
-    closed_file = tmp_path / "fixture-closed"
+def _start_tui(tmp_path: Path, home: Path, environment: dict[str, str]) -> _TuiProcess:
+    """Run the Rust TUI over the real backend in a PTY, with ``home`` as its home folder."""
+
     backend = tmp_path / "backend.py"
     backend.write_text(
         """import sys
@@ -37,6 +34,102 @@ main()
 """,
         encoding="utf-8",
     )
+    binary = _rust_binary()
+    child, fd = pty.fork()
+    if child == 0:
+        child_environment = {
+            **os.environ,
+            "HOME": str(home),
+            "USERPROFILE": str(home),
+            "WISP_TRUST": "1",
+            **environment,
+        }
+        for key in ("WISP_PROVIDER", "WISP_MODEL", "WISP_FAKE_STREAM_INTERVAL_MS"):
+            child_environment.pop(key, None)
+        os.execve(
+            str(binary),
+            [
+                str(binary),
+                "--expected-backend-version",
+                __version__,
+                "--",
+                sys.executable,
+                str(backend),
+                str(tmp_path / "sessions"),
+            ],
+            child_environment,
+        )
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
+    return _TuiProcess(child, fd, termios.tcgetattr(fd))
+
+
+def _wait_painted(tui: _TuiProcess, text: str, failure: str, timeout: float = 20) -> None:
+    """Wait until the replayed screen shows ``text`` on one row.
+
+    Incremental frames send only changed cells, so a phrase that replaces
+    similar text is not contiguous in the output. Forcing full repaints with
+    resizes is no substitute: each resize makes the TUI ignore a choice key
+    until its next frame, so the key sent after the wait could be dropped.
+
+    Args:
+        tui (_TuiProcess): The running TUI.
+        text (str): Text a single screen row must contain, compared without spacing.
+        failure (str): Message used if the screen never shows the text.
+        timeout (float): Seconds to wait.
+    """
+    marker = "".join(text.split())
+
+    def shown(output: bytes) -> bool:
+        rows = screen_rows(complete_frames(output))
+        return any(marker in "".join(row.split()) for row in rows)
+
+    tui.wait_until(shown, timeout=timeout, failure=failure)
+
+
+@pytest.mark.process
+def test_configured_server_connects_after_startup(tmp_path: Path) -> None:
+    """A server still starting when the TUI opens shows as connecting, then connected."""
+
+    home = tmp_path / "home"
+    (home / ".wisp").mkdir(parents=True)
+    # The server starts only once the gate file exists, which is after `/mcp` has
+    # shown it connecting. Nothing asks for status again afterwards, so only the
+    # backend's update can show it connected.
+    gate = tmp_path / "start-server"
+    gated_start = (
+        "import os, runpy, time\n"
+        f"while not os.path.exists({str(gate)!r}): time.sleep(0.05)\n"
+        f"runpy.run_path({str(FIXTURES_DIR / 'mcp_stdio_server.py')!r}, run_name='__main__')"
+    )
+    (home / ".wisp" / "settings.json").write_text(
+        json.dumps(
+            {
+                "mcp_servers": {
+                    "fixture": {"command": sys.executable, "args": ["-u", "-c", gated_start]}
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    tui = _start_tui(tmp_path, home, {})
+    try:
+        tui.wait_ready()
+        tui.send(b"/mcp\r")
+        _wait_painted(tui, "fixture connecting", "the server was not shown connecting")
+        gate.touch()
+        # The connect allows the server 10 s from when the backend started serving.
+        _wait_painted(tui, "fixture connected · 2 tools", "the server was not shown connected")
+    finally:
+        # The first Ctrl+C closes the open `/mcp` view.
+        tui.send(b"\x03")
+        tui.quit()
+
+
+@pytest.mark.process
+def test_pasted_snippet_adds_a_connected_server_without_showing_values(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    closed_file = tmp_path / "fixture-closed"
     # Published snippets carry placeholder values; the TUI asks for each again.
     snippet = json.dumps(
         {
@@ -52,55 +145,11 @@ main()
             }
         }
     )
-
-    child, fd = pty.fork()
-    if child == 0:
-        environment = {
-            **os.environ,
-            "HOME": str(home),
-            "USERPROFILE": str(home),
-            "WISP_TRUST": "1",
-            # Forwarded to the server by the choice made below.
-            "WISP_MCP_TEST_CLOSED_FILE": str(closed_file),
-        }
-        for key in ("WISP_PROVIDER", "WISP_MODEL", "WISP_FAKE_STREAM_INTERVAL_MS"):
-            environment.pop(key, None)
-        os.execve(
-            str(binary),
-            [
-                str(binary),
-                "--expected-backend-version",
-                __version__,
-                "--",
-                sys.executable,
-                str(backend),
-                str(tmp_path / "sessions"),
-            ],
-            environment,
-        )
-    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
-    tui = _TuiProcess(child, fd, termios.tcgetattr(fd))
+    # Forwarded to the server by the choice made below.
+    tui = _start_tui(tmp_path, home, {"WISP_MCP_TEST_CLOSED_FILE": str(closed_file)})
 
     def wait_painted(text: str, failure: str, timeout: float = 20) -> None:
-        """Wait until the replayed screen shows ``text`` on one row.
-
-        Incremental frames send only changed cells, so a phrase that replaces
-        similar text is not contiguous in the output. Forcing full repaints with
-        resizes is no substitute: each resize makes the TUI ignore a choice key
-        until its next frame, so the key sent after the wait could be dropped.
-
-        Args:
-            text (str): Text a single screen row must contain, compared without spacing.
-            failure (str): Message used if the screen never shows the text.
-            timeout (float): Seconds to wait.
-        """
-        marker = "".join(text.split())
-
-        def shown(output: bytes) -> bool:
-            rows = screen_rows(complete_frames(output))
-            return any(marker in "".join(row.split()) for row in rows)
-
-        tui.wait_until(shown, timeout=timeout, failure=failure)
+        _wait_painted(tui, text, failure, timeout)
 
     try:
         tui.wait_ready()

@@ -1581,6 +1581,15 @@ pub mod events {
             serde_json::from_value(value["status"].clone()).ok()
         }
 
+        /// Project the status broadcast once servers that were connecting at startup settle.
+        pub fn updated_mcp_status(&self) -> Option<McpStatusSnapshot> {
+            let value = self.wire_value();
+            if value["type"] != "mcp.status.updated" {
+                return None;
+            }
+            serde_json::from_value(value["status"].clone()).ok()
+        }
+
         /// Project the servers parsed from a pasted snippet for one exact request.
         pub fn mcp_snippet_preview(&self, id: &str) -> Option<Vec<McpServerPreview>> {
             let value = self.wire_value();
