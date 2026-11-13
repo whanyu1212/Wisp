@@ -10,6 +10,13 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
+## Unreleased
+
+### Models
+
+- Gemini 4 Hydrogen (`gemini-4-hydrogen`) is in the model catalog, with its thinking levels,
+  default thinking level, context window and prices, so `/model` offers it and its cost is counted.
+
 <!-- Keeps links to the pre-release "0.9.0 — Unreleased" heading working. -->
 <a id="090--unreleased"></a>
 
