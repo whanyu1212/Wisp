@@ -21,7 +21,7 @@ from wisp.messages import Message
 from wisp.providers.base import (
     ToolSpec,
 )
-from wisp.sessions.jsonl import JsonlSessionStore
+from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 from wisp.tools.context import ToolContext
 
 
@@ -198,6 +198,33 @@ def test_each_session_keeps_own_scratch(tmp_path: Path) -> None:
     assert stat.S_IMODE(first_folder.stat().st_mode) == 0o700
     assert Path(named_folder(first)) == first_folder
     assert Path(named_folder(second)).name == second.session_id
+
+
+def test_unsafe_session_id_runs_without_scratch(tmp_path: Path) -> None:
+    provider = CapturingProvider()
+    store = JsonlSessionStore(tmp_path / "sessions")
+    session = JsonlSession(session_id="../escape", path=tmp_path / "sessions" / "s.jsonl")
+    tool = ToolSpec(
+        name="lookup",
+        description="Look something up.",
+        input_schema={"type": "object", "properties": {}},
+    )
+
+    async def run_agent() -> list[object]:
+        agent = CodingSession(
+            provider=provider,
+            sessions=store,
+            tools=[tool],
+            tool_context=ToolContext(cwd=tmp_path, session_scratch=True),
+        )
+        return [event async for event in agent.run("hello", session=session)]
+
+    events = anyio.run(run_agent)
+
+    assert any(isinstance(event, MessageCompleted) and event.content == "done" for event in events)
+    assert provider.seen_messages is not None
+    assert not any("scratch folder:" in m.content for m in provider.seen_messages)
+    assert not (tmp_path / "escape").exists()
 
 
 def test_custom_prompt_replaces_defaults(tmp_path: Path) -> None:
