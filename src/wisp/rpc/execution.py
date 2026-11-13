@@ -74,6 +74,7 @@ from wisp.rpc.handlers.mcp import (
     handle_rpc_mcp_snippet_preview_command,
 )
 from wisp.rpc.handlers.project_files import ProjectFilesPublisher, RpcProjectFiles
+from wisp.rpc.session.process_exits import background_processes
 from wisp.rpc.working_directory import DirectoryMove, directory_move_events
 from wisp.runtime.api import WispRuntime
 from wisp.sessions.jsonl import JsonlSessionStore
@@ -627,6 +628,7 @@ class RpcCommandExecutor:
             session_name=self.session_state.name,
             running_command=running_command,
             pending_prompt_queue_commands=tuple(self.coordinator.pending_prompt_queue_commands),
+            background_processes=background_processes(self.runtime.process_supervisor),
             write_event=self.write_event,
         )
         return _RpcDispatchResult(running_command=running_command)

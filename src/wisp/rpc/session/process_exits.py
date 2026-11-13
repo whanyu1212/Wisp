@@ -1,4 +1,4 @@
-"""Background-process exits: announced to frontends, held for the model's next prompt."""
+"""Background processes: exits announced to frontends and held for the next prompt."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ from collections.abc import Callable, Sequence
 
 from wisp.events import (
     PROCESS_COMMAND_SUMMARY_MAX_CHARS,
+    BackgroundProcess,
     EndedProcessState,
     ProcessEnded,
     WispEvent,
@@ -55,7 +56,7 @@ class ProcessExitNotices:
         self._publish(
             ProcessEnded(
                 process_id=exit.process_id,
-                command=_command_summary(exit.command),
+                command=command_summary(exit.command),
                 state=_ended_state(exit.state),
                 exit_code=exit.exit_code,
                 duration_ms=max(0, int(duration.total_seconds() * 1000)),
@@ -105,7 +106,37 @@ def _ended_state(state: ProcessState) -> EndedProcessState:
     return state
 
 
-def _command_summary(command: str) -> str:
+def background_processes(supervisor: ProcessSupervisor) -> tuple[BackgroundProcess, ...]:
+    """Describe the supervisor's running background processes for frontends.
+
+    Args:
+        supervisor (ProcessSupervisor): The supervisor that started them.
+
+    Returns:
+        tuple[BackgroundProcess, ...]: One entry per running process, oldest first.
+    """
+
+    return tuple(
+        BackgroundProcess(
+            process_id=process.process_id,
+            command=command_summary(process.command),
+            started_at_ms=max(0, int(process.started_at.timestamp() * 1000)),
+            notify=process.notify,
+        )
+        for process in supervisor.running_processes()
+    )
+
+
+def command_summary(command: str) -> str:
+    """Cut a command to the length events carry for display.
+
+    Args:
+        command (str): The command as started.
+
+    Returns:
+        str: The command, or its start and an ellipsis.
+    """
+
     if len(command) <= PROCESS_COMMAND_SUMMARY_MAX_CHARS:
         return command
     return command[: PROCESS_COMMAND_SUMMARY_MAX_CHARS - 1] + "…"

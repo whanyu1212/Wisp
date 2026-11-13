@@ -3402,6 +3402,15 @@
    "operation": "remove",
    "path": [
     "state",
+    "background_processes"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.state",
+   "operation": "remove",
+   "path": [
+    "state",
     "cancel_requested"
    ],
    "accepted": true
@@ -3519,6 +3528,60 @@
    "operation": "add_unknown",
    "path": [
     "state"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.state",
+   "operation": "remove",
+   "path": [
+    "state",
+    "background_processes",
+    0,
+    "command"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.state",
+   "operation": "remove",
+   "path": [
+    "state",
+    "background_processes",
+    0,
+    "notify"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.state",
+   "operation": "remove",
+   "path": [
+    "state",
+    "background_processes",
+    0,
+    "process_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.state",
+   "operation": "remove",
+   "path": [
+    "state",
+    "background_processes",
+    0,
+    "started_at_ms"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.state",
+   "operation": "add_unknown",
+   "path": [
+    "state",
+    "background_processes",
+    0
    ],
    "accepted": false
   },

@@ -308,17 +308,22 @@ impl BackendEvent {
                     event_type,
                     field: "commands",
                 }),
-            "rpc.state" => event
-                .agent_mode(&command_id)
-                .map(|mode| Self::ModeReported {
-                    command_id,
-                    mode,
-                    web_search: value["state"]["web_search"].as_bool().unwrap_or(false),
-                })
-                .ok_or(EventProjectionError::InvalidField {
-                    event_type,
-                    field: "state.mode",
-                }),
+            "rpc.state" => {
+                let background_processes =
+                    background_processes(&value["state"]["background_processes"], &event_type)?;
+                event
+                    .agent_mode(&command_id)
+                    .map(|mode| Self::StateReported {
+                        command_id,
+                        mode,
+                        web_search: value["state"]["web_search"].as_bool().unwrap_or(false),
+                        background_processes,
+                    })
+                    .ok_or(EventProjectionError::InvalidField {
+                        event_type,
+                        field: "state.mode",
+                    })
+            }
             "rpc.model_catalog" => event
                 .model_catalog(&command_id)
                 .map(|catalog| Self::ModelCatalogReported {
@@ -381,6 +386,7 @@ impl BackendEvent {
                     })?;
                 Self::ProcessEnded {
                     process_id: exact_string_field(value, &event_type, "process_id", 128)?,
+                    command: string_field(value, &event_type, "command")?,
                     state: ended_process_state(value, &event_type, exit_code)?,
                     exit_code,
                     duration_ms: u64_field(value, &event_type, "duration_ms")?,
@@ -1660,6 +1666,33 @@ fn string_field_ref<'a>(
             event_type: event_type.to_owned(),
             field,
         })
+}
+
+/// The running processes a `get_state` reply lists; an absent list is empty.
+fn background_processes(
+    value: &Value,
+    event_type: &str,
+) -> Result<Vec<super::background_processes::BackgroundProcess>, EventProjectionError> {
+    let Some(entries) = value.as_array() else {
+        return if value.is_null() {
+            Ok(Vec::new())
+        } else {
+            Err(EventProjectionError::InvalidField {
+                event_type: event_type.to_owned(),
+                field: "state.background_processes",
+            })
+        };
+    };
+    entries
+        .iter()
+        .map(|entry| {
+            Ok(super::background_processes::BackgroundProcess {
+                process_id: exact_string_field(entry, event_type, "process_id", 128)?,
+                command: string_field(entry, event_type, "command")?,
+                started_at_ms: optional_i64_field(entry, event_type, "started_at_ms")?,
+            })
+        })
+        .collect()
 }
 
 /// How the card of a process that stopped on its own reads: a non-zero exit fails.

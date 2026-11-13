@@ -141,10 +141,11 @@ pub(super) fn observe(
             }
             return Ok(Some(Vec::new()));
         }
-        BackendEvent::ModeReported {
+        BackendEvent::StateReported {
             command_id,
             mode,
             web_search,
+            ..
         } => {
             if let Some(read) = &mut state.search_read {
                 if read.id == *command_id {
@@ -332,10 +333,11 @@ mod tests {
         search(&mut state, None, &mut ids).unwrap();
         observe(
             &mut state,
-            &BackendEvent::ModeReported {
+            &BackendEvent::StateReported {
                 command_id: "get_state-2".into(),
                 mode: AgentMode::Build,
                 web_search: true,
+                background_processes: Vec::new(),
             },
             &mut ids,
         )
@@ -457,10 +459,11 @@ mod tests {
         let active = state.current_command.clone();
         observe(
             &mut state,
-            &BackendEvent::ModeReported {
+            &BackendEvent::StateReported {
                 command_id: "get_state-1".into(),
                 mode: AgentMode::Plan,
                 web_search: false,
+                background_processes: Vec::new(),
             },
             &mut ids,
         )
@@ -518,10 +521,11 @@ mod tests {
         .unwrap();
         observe(
             &mut state,
-            &BackendEvent::ModeReported {
+            &BackendEvent::StateReported {
                 command_id: "get_state-1".into(),
                 mode: AgentMode::Build,
                 web_search: false,
+                background_processes: Vec::new(),
             },
             &mut ids,
         )

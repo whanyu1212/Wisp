@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from typing_extensions import TypeAliasType
 
 from wisp.events._base import QueueMode, WispEvent
+from wisp.events.tools import PROCESS_COMMAND_SUMMARY_MAX_CHARS
 from wisp.project_files import (
     MAX_PROJECT_FILES,
     MAX_PROJECT_PATH_CHARS,
@@ -67,6 +68,20 @@ class CodingSessionState(BaseModel):
     pending_follow_up_count: int = Field(ge=0)
 
 
+class BackgroundProcess(BaseModel):
+    """A process started with ``bash operation=start`` that is still running."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    process_id: str = Field(min_length=1, max_length=128)
+    # The command as started, cut to a summary for display.
+    command: str = Field(max_length=PROCESS_COMMAND_SUMMARY_MAX_CHARS)
+    # When it started, in Unix milliseconds, like a tool result's process times.
+    started_at_ms: int = Field(ge=0)
+    # Whether the model asked to be told when it stops.
+    notify: bool = False
+
+
 class RpcStateSnapshot(CodingSessionState):
     """RPC-facing state extended with session and active-command identity."""
 
@@ -76,6 +91,9 @@ class RpcStateSnapshot(CodingSessionState):
     active_command_id: str | None = None
     active_command_type: str | None = None
     cancel_requested: bool = False
+    # The session's background processes, oldest first. They belong to the
+    # session: changing sessions stops them.
+    background_processes: tuple[BackgroundProcess, ...] = ()
 
 
 class RpcCommandArgument(BaseModel):

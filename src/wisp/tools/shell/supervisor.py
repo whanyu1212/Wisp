@@ -116,6 +116,23 @@ class ProcessExit:
 ProcessExitListener = Callable[[ProcessExit], None]
 
 
+@dataclass(frozen=True, slots=True)
+class RunningProcess:
+    """A started process that has not stopped yet.
+
+    Attributes:
+        process_id (str): The handle ``start`` returned.
+        command (str): The command as started.
+        started_at (datetime): When the process started, in UTC.
+        notify (bool): Whether the caller asked to be told of its exit.
+    """
+
+    process_id: str
+    command: str
+    started_at: datetime
+    notify: bool
+
+
 @dataclass
 class _PendingFragment:
     text: str
@@ -474,6 +491,26 @@ class ProcessSupervisor:
         """Whether a listener will hear about processes that stop on their own."""
 
         return self._exit_listener is not None
+
+    def running_processes(self) -> tuple[RunningProcess, ...]:
+        """Return the started processes still running, in the order they started.
+
+        One-shot ``run`` commands are not included: they end within their call.
+
+        Returns:
+            tuple[RunningProcess, ...]: One entry per running process.
+        """
+
+        return tuple(
+            RunningProcess(
+                process_id=managed.process_id,
+                command=managed.command,
+                started_at=managed.started_at,
+                notify=managed.notify_on_exit,
+            )
+            for managed in self._managed.values()
+            if managed.state == "running" and not _completion_ended(managed)
+        )
 
     def is_terminal_reported(self, process_id: str) -> bool:
         """Whether a poll or cancel has already returned this process's final state.

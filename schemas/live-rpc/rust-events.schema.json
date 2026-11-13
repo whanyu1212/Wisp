@@ -192,6 +192,41 @@
       "title": "AgentStarted",
       "type": "object"
     },
+    "BackgroundProcess": {
+      "additionalProperties": false,
+      "description": "A process started with ``bash operation=start`` that is still running.",
+      "properties": {
+        "command": {
+          "maxLength": 500,
+          "title": "BackgroundProcessCommand",
+          "type": "string"
+        },
+        "notify": {
+          "default": false,
+          "title": "BackgroundProcessNotify",
+          "type": "boolean"
+        },
+        "process_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "BackgroundProcessProcessId",
+          "type": "string"
+        },
+        "started_at_ms": {
+          "minimum": 0,
+          "title": "BackgroundProcessStartedAtMs",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "process_id",
+        "command",
+        "started_at_ms",
+        "notify"
+      ],
+      "title": "BackgroundProcess",
+      "type": "object"
+    },
     "BillableTokenUsage": {
       "additionalProperties": false,
       "description": "Provider-normalized token buckets used only for list-price estimates.",
@@ -5455,6 +5490,14 @@
           "title": "RpcStateSnapshotAutoCompactionEnabled",
           "type": "boolean"
         },
+        "background_processes": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/BackgroundProcess"
+          },
+          "title": "RpcStateSnapshotBackgroundProcesses",
+          "type": "array"
+        },
         "cancel_requested": {
           "default": false,
           "title": "RpcStateSnapshotCancelRequested",
@@ -5578,7 +5621,8 @@
         "session_name",
         "active_command_id",
         "active_command_type",
-        "cancel_requested"
+        "cancel_requested",
+        "background_processes"
       ],
       "title": "RpcStateSnapshot",
       "type": "object"

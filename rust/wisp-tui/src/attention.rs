@@ -97,6 +97,8 @@ pub(crate) struct Attention {
     focused: Option<bool>,
     last_state: Option<RunState>,
     last_title: Option<String>,
+    /// Background-process exits already accounted for; `None` until first observed.
+    seen_exits: Option<u64>,
 }
 
 impl Attention {
@@ -138,20 +140,62 @@ impl Attention {
         let previous = self.last_state.replace(state);
         let message = previous.and_then(|previous| notification(previous, state));
         if let Some(message) = message.filter(|_| self.focus_lost()) {
-            match self.mode {
-                NotifyMode::Desktop => {
-                    let text = match folder {
-                        Some(folder) => format!("{message} · {folder}"),
-                        None => message.to_owned(),
-                    };
-                    output.extend_from_slice(format!("\x1b]9;{text}\x07").as_bytes());
-                }
-                NotifyMode::Bell => output.push(0x07),
-                NotifyMode::Off => {}
-            }
+            self.notify(&mut output, message, folder.as_deref());
         }
         output
     }
+
+    /// Records how many background processes have stopped on their own and returns a
+    /// notification for those that stopped since the last call, if the terminal is
+    /// in the background. Exits seen while focused are accounted for without one, so
+    /// losing focus later does not announce them.
+    ///
+    /// `latest` describes the newest exit; it is model-influenced text and is made
+    /// safe here before it goes into the notification.
+    pub(crate) fn observe_exits(
+        &mut self,
+        exits: u64,
+        latest: Option<&str>,
+        folder: Option<&str>,
+    ) -> Vec<u8> {
+        let mut output = Vec::new();
+        let Some(previous) = self.seen_exits.replace(exits) else {
+            return output;
+        };
+        let new = exits.saturating_sub(previous);
+        if new == 0 || !self.focus_lost() {
+            return output;
+        }
+        let message = match latest.map(notice_text) {
+            Some(latest) if new == 1 && !latest.is_empty() => latest,
+            _ => format!("{new} background processes stopped"),
+        };
+        let folder = folder.and_then(folder_name);
+        self.notify(&mut output, &message, folder.as_deref());
+        output
+    }
+
+    fn notify(&self, output: &mut Vec<u8>, message: &str, folder: Option<&str>) {
+        match self.mode {
+            NotifyMode::Desktop => {
+                let text = match folder {
+                    Some(folder) => format!("{message} · {folder}"),
+                    None => message.to_owned(),
+                };
+                output.extend_from_slice(format!("\x1b]9;{text}\x07").as_bytes());
+            }
+            NotifyMode::Bell => output.push(0x07),
+            NotifyMode::Off => {}
+        }
+    }
+}
+
+/// Text made safe to place inside an OSC string, on one line.
+fn notice_text(text: &str) -> String {
+    crate::ui::sanitize_for_terminal(text)
+        .replace('\n', " ")
+        .trim()
+        .to_owned()
 }
 
 fn title(state: RunState, folder: Option<&str>) -> String {
@@ -183,9 +227,8 @@ fn notification(previous: RunState, current: RunState) -> Option<&'static str> {
 /// control characters could end the sequence early or start another one.
 fn folder_name(path: &str) -> Option<String> {
     let name = path.rsplit('/').find(|part| !part.is_empty())?;
-    let safe = crate::ui::sanitize_for_terminal(name).replace('\n', " ");
-    let safe = safe.trim();
-    (!safe.is_empty()).then(|| safe.to_owned())
+    let safe = notice_text(name);
+    (!safe.is_empty()).then_some(safe)
 }
 
 #[cfg(test)]
@@ -233,6 +276,63 @@ mod tests {
         );
         assert_eq!(run(Some(true)), "\x1b]0;Wisp · app\x07");
         assert_eq!(run(None), "\x1b]0;Wisp · app\x07");
+    }
+
+    #[test]
+    fn exit_notified_once_unfocused() {
+        let mut attention = Attention::new(NotifyMode::Desktop);
+        attention.observe_exits(0, None, Some("/srv/app"));
+        attention.set_focus(false);
+
+        let first = text(attention.observe_exits(
+            1,
+            Some("Background process finished: make"),
+            Some("/srv/app"),
+        ));
+        let again = text(attention.observe_exits(
+            1,
+            Some("Background process finished: make"),
+            Some("/srv/app"),
+        ));
+        let burst = text(attention.observe_exits(3, Some("Background process failed: x"), None));
+
+        assert_eq!(first, "\x1b]9;Background process finished: make · app\x07");
+        assert_eq!(again, "");
+        assert_eq!(burst, "\x1b]9;2 background processes stopped\x07");
+    }
+
+    #[test]
+    fn focused_exits_not_replayed() {
+        let mut attention = Attention::new(NotifyMode::Desktop);
+        attention.observe_exits(0, None, None);
+        attention.set_focus(true);
+        assert_eq!(text(attention.observe_exits(2, Some("done"), None)), "");
+
+        attention.set_focus(false);
+
+        assert_eq!(text(attention.observe_exits(2, Some("done"), None)), "");
+        assert_eq!(text(attention.observe_exits(0, None, None)), "");
+    }
+
+    #[test]
+    fn exit_notice_sanitized() {
+        let mut attention = Attention::new(NotifyMode::Desktop);
+        attention.observe_exits(0, None, None);
+        attention.set_focus(false);
+
+        let output = text(attention.observe_exits(
+            1,
+            Some("Background process finished: x\x07\x1b]0;owned\x07\nnext"),
+            None,
+        ));
+
+        assert!(
+            output.starts_with("\x1b]9;Background process finished: x"),
+            "{output:?}"
+        );
+        assert_eq!(output.matches('\x07').count(), 1, "{output:?}");
+        assert_eq!(output.matches('\x1b').count(), 1, "{output:?}");
+        assert!(!output.contains('\n'), "{output:?}");
     }
 
     #[test]

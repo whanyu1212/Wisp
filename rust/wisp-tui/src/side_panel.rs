@@ -126,6 +126,7 @@ struct Resize {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Section {
     Queue,
+    Background,
     Context,
     Mcp,
     Skills,
@@ -720,6 +721,9 @@ pub(crate) fn render(
             }
         }
     }
+    if let Some(lines) = background_lines(state, width, palette) {
+        rows.section(Section::Background, lines);
+    }
     reading_context(&mut rows, state, panel, width, palette);
     inventory_rows(&mut rows, state, panel, width, palette);
     rows.section(
@@ -987,6 +991,50 @@ fn duration(elapsed: Duration) -> String {
 
 /// Queued rows listed before the rest are counted.
 const MAX_QUEUE_ROWS: usize = 5;
+/// Background processes listed before the rest are counted.
+const MAX_BACKGROUND_ROWS: usize = 5;
+
+/// `Background`: processes the agent started that are still running, with how long
+/// each has run. Nothing while none run.
+fn background_lines(state: &UiState, width: usize, palette: Palette) -> Option<Vec<Line<'static>>> {
+    let running = state.background_processes.running();
+    if running.is_empty() {
+        return None;
+    }
+    let muted = Style::default().fg(palette.muted);
+    let mut lines = vec![Line::from(vec![
+        heading("Background ", palette),
+        Span::styled(running.len().to_string(), muted),
+    ])];
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+        });
+    for process in running.iter().take(MAX_BACKGROUND_ROWS) {
+        let elapsed = process
+            .started_at_ms
+            .and_then(|started| u64::try_from(now_ms.checked_sub(started)?).ok())
+            .map(crate::tool_cards::format_duration)
+            .unwrap_or_default();
+        let room = width.saturating_sub(elapsed.width() + 3);
+        lines.push(spread(
+            vec![
+                Span::styled("● ", Style::default().fg(palette.secondary)),
+                Span::raw(ui::clip_columns(&first_line(&process.command), room)),
+            ],
+            vec![Span::styled(elapsed, muted)],
+            width,
+        ));
+    }
+    if running.len() > MAX_BACKGROUND_ROWS {
+        lines.push(Line::styled(
+            format!("+{} more", running.len() - MAX_BACKGROUND_ROWS),
+            muted,
+        ));
+    }
+    Some(lines)
+}
 
 /// Messages waiting for the run, in the order it takes them in: steers join at its
 /// next step, follow-ups once it ends. Nothing while the queue is empty.
@@ -2511,6 +2559,46 @@ mod tests {
         // The turn list folds, and an empty queue takes no rows.
         assert!(!panel.contains("4m 12s ✓"), "{panel}");
         assert!(!panel.contains("Queue"), "{panel}");
+    }
+
+    #[test]
+    fn background_lists_running() {
+        let mut state = session();
+        let process = |id: &str, command: &str| serde_json::json!({"process_id": id, "command": command, "started_at_ms": 0});
+        let processes = vec![
+            process("server", "npm run dev\u{1b}]0;owned\u{7}"),
+            process("ci", "gh pr checks 1 --watch"),
+        ];
+        backend(
+            &mut state,
+            crate::reducer::BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "rpc.state", "command_id": "get_state-1",
+                "timestamp": "2026-11-13T09:00:00Z",
+                "state": {
+                    "provider": "fake", "auto_compaction_enabled": true,
+                    "steering_mode": "one_at_a_time", "follow_up_mode": "one_at_a_time",
+                    "pending_steering_count": 0, "pending_follow_up_count": 0,
+                    "background_processes": processes
+                }
+            }))
+            .unwrap(),
+        );
+
+        let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
+
+        assert!(panel.contains("Background 2"), "{panel}");
+        assert!(panel.contains("● gh pr checks 1 --watch"), "{panel}");
+        assert!(panel.contains("● npm run dev"), "{panel}");
+        assert!(
+            !panel.contains('\u{1b}') && !panel.contains('\u{7}'),
+            "{panel:?}"
+        );
+    }
+
+    #[test]
+    fn idle_panel_has_no_background() {
+        let panel = panel_text(&screen(&session(), &mut SidePanel::default(), 200), 200);
+        assert!(!panel.contains("Background"), "{panel}");
     }
 
     #[test]

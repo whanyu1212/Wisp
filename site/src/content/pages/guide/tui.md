@@ -259,7 +259,9 @@ historical replay displays raw content. Markers are never written into session h
 On a terminal at least 148 columns wide, the Reading sidebar shows the session name and status,
 folder and branch, compact context usage, MCP servers, skills, changed files, and up to three
 earlier turns. The latest turn is left out because its prompt stays pinned above its reply, so a
-session with one turn has no turn list. Model, effort, and YOLO remain in the composer,
+session with one turn has no turn list. While processes the agent started with
+`bash operation=start` are running, a **Background** section lists them with how long each has
+run; a process leaves the list when it stops or is cancelled. Model, effort, and YOLO remain in the composer,
 and the panel's keys join the main footer. Context's **Breakdown** expands source totals and costs; `/context` opens
 full details.
 
@@ -352,7 +354,7 @@ the previous title when it starts and restores it on exit. Terminals and multipl
 title stack, tmux among them, keep Wisp's last title until something else sets one, such as a shell
 prompt that sets the title. When a run finishes, fails, or stops for an approval or trust decision
 while the terminal is in the background, Wisp sends a desktop notification (OSC 9, shown by terminals such as iTerm2, Ghostty, and
-WezTerm). It notifies only after the terminal has reported losing focus, so in tmux turn on
+WezTerm). So does a background process that stops on its own, naming its command and how it ended. It notifies only after the terminal has reported losing focus, so in tmux turn on
 `focus-events`; tmux also drops OSC 9 unless passthrough is allowed. Set `WISP_TUI_NOTIFY=bell` to
 ring the terminal bell instead, which macOS Terminal.app and tmux turn into a badge or an alert, or
 `WISP_TUI_NOTIFY=off` to stop notifications.
