@@ -10,7 +10,10 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.9.1 — Unreleased
+<!-- Keeps links to the pre-release "0.9.1 — Unreleased" heading working. -->
+<a id="091--unreleased"></a>
+
+## 0.9.1 — 2026-11-13
 
 0.9.1 is a patch release on 0.9.0 that adds Gemini 4 Hydrogen to the model catalog. It changes no
 command, event, handshake, session, settings, credential, or trust format, so 0.9.0 and 0.9.1 read
