@@ -473,16 +473,25 @@ async def _await_process_cleanup(cleanup: Awaitable[bool]) -> bool:
         raise
 
 
+# Homebrew's bash comes before the system one. macOS ships bash 3.2 as /bin/bash,
+# which misparses quotes in a heredoc inside $(...) and has no associative arrays or
+# mapfile. The folders are checked by path because a Wisp started outside a
+# terminal may not have Homebrew's on PATH: Apple silicon, then Intel.
+_PREFERRED_BASH_PATHS = ("/opt/homebrew/bin/bash", "/usr/local/bin/bash", "/bin/bash")
+
+
 @functools.cache
 def _command_shell() -> str:
     """Return the shell that runs commands: bash when installed, else ``/bin/sh``.
 
     The tool is named bash and models write bash, but ``/bin/sh`` is dash on Debian
-    and Ubuntu, where ``[[``, arrays, and ``pipefail`` fail.
+    and Ubuntu, where ``[[``, arrays, and ``pipefail`` fail. A Homebrew bash is
+    preferred to ``/bin/bash``; see ``_PREFERRED_BASH_PATHS``.
     """
 
-    if os.access("/bin/bash", os.X_OK):
-        return "/bin/bash"
+    for path in _PREFERRED_BASH_PATHS:
+        if os.access(path, os.X_OK):
+            return path
     return shutil.which("bash") or "/bin/sh"
 
 
