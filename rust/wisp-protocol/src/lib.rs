@@ -1261,6 +1261,16 @@ pub mod commands {
             deserialize(serde_json::json!({"type": "cancel", "id": id, "target_id": target_id}))
         }
 
+        /// Stop a background process the agent started, on the user's behalf.
+        pub fn cancel_process(
+            id: &str,
+            process_id: &str,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(
+                serde_json::json!({"type": "cancel_process", "id": id, "process_id": process_id}),
+            )
+        }
+
         /// Request the active or retained queue state.
         pub fn get_queue_state(id: &str) -> Result<Self, super::ProtocolDecodeError> {
             deserialize(serde_json::json!({"type": "get_queue_state", "id": id}))

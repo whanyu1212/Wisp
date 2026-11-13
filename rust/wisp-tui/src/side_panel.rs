@@ -153,6 +153,8 @@ pub(crate) enum Target {
     Skills,
     Context,
     Tree,
+    /// A running background process, by its number in the list (from 1).
+    Process(usize),
 }
 
 /// What a key in the overlay asks of the app.
@@ -723,6 +725,14 @@ pub(crate) fn render(
     }
     if let Some(lines) = background_lines(state, width, palette) {
         rows.section(Section::Background, lines);
+        let listed = state
+            .background_processes
+            .running()
+            .len()
+            .min(MAX_BACKGROUND_ROWS);
+        for number in 1..=listed {
+            rows.action(number, PanelAction::Open(Target::Process(number)));
+        }
     }
     reading_context(&mut rows, state, panel, width, palette);
     inventory_rows(&mut rows, state, panel, width, palette);
@@ -994,8 +1004,8 @@ const MAX_QUEUE_ROWS: usize = 5;
 /// Background processes listed before the rest are counted.
 const MAX_BACKGROUND_ROWS: usize = 5;
 
-/// `Background`: processes the agent started that are still running, with how long
-/// each has run. Nothing while none run.
+/// `Background`: processes the agent started that are still running, numbered as
+/// `/ps` and `/kill` number them, with how long each has run. Nothing while none run.
 fn background_lines(state: &UiState, width: usize, palette: Palette) -> Option<Vec<Line<'static>>> {
     let running = state.background_processes.running();
     if running.is_empty() {
@@ -1011,16 +1021,17 @@ fn background_lines(state: &UiState, width: usize, palette: Palette) -> Option<V
         .map_or(0, |since| {
             i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
         });
-    for process in running.iter().take(MAX_BACKGROUND_ROWS) {
+    for (index, process) in running.iter().enumerate().take(MAX_BACKGROUND_ROWS) {
         let elapsed = process
             .started_at_ms
             .and_then(|started| u64::try_from(now_ms.checked_sub(started)?).ok())
             .map(crate::tool_cards::format_duration)
             .unwrap_or_default();
-        let room = width.saturating_sub(elapsed.width() + 3);
+        let lead = format!("{} ● ", index + 1);
+        let room = width.saturating_sub(elapsed.width() + lead.width() + 1);
         lines.push(spread(
             vec![
-                Span::styled("● ", Style::default().fg(palette.secondary)),
+                Span::styled(lead, Style::default().fg(palette.secondary)),
                 Span::raw(ui::clip_columns(&first_line(&process.command), room)),
             ],
             vec![Span::styled(elapsed, muted)],
@@ -2587,11 +2598,19 @@ mod tests {
         let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
 
         assert!(panel.contains("Background 2"), "{panel}");
-        assert!(panel.contains("● gh pr checks 1 --watch"), "{panel}");
-        assert!(panel.contains("● npm run dev"), "{panel}");
+        assert!(panel.contains("1 ● npm run dev"), "{panel}");
+        assert!(panel.contains("2 ● gh pr checks 1 --watch"), "{panel}");
         assert!(
             !panel.contains('\u{1b}') && !panel.contains('\u{7}'),
             "{panel:?}"
+        );
+
+        // Enter on a row asks to stop that process.
+        let mut panel = overlay(&state);
+        focus_section(&mut panel, &state, Section::Background);
+        assert_eq!(
+            panel.key(KeyCode::Enter, &state),
+            OverlayKey::Open(Target::Process(1))
         );
     }
 

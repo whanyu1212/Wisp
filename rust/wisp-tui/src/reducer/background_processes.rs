@@ -39,6 +39,8 @@ pub struct BackgroundProcess {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct BackgroundProcesses {
     running: Vec<BackgroundProcess>,
+    /// `cancel_process` commands sent and not finished, so a failure is reported.
+    stops: Vec<String>,
     /// Commands of `start` calls by call id, until their result names the process.
     starts: VecDeque<(String, String)>,
     ended: VecDeque<String>,
@@ -136,7 +138,8 @@ pub(super) fn observe_tool_result(state: &mut UiState, result: &ToolResultInput)
     }
 }
 
-/// Drops a process that stopped on its own and counts its exit for the notification.
+/// Drops a process that stopped and, unless the user stopped it, counts its exit for
+/// the notification.
 pub(super) fn observe_process_ended(
     state: &mut UiState,
     process_id: &str,
@@ -146,6 +149,9 @@ pub(super) fn observe_process_ended(
 ) {
     let processes = &mut state.background_processes;
     processes.remove(process_id);
+    if ended == ProcessDisplayState::Cancelled {
+        return;
+    }
     processes.exits = processes.exits.saturating_add(1);
     processes.last_exit = Some(exit_notice(command, ended, exit_code));
 }
@@ -166,6 +172,79 @@ pub(super) fn reload(
     Ok(vec![UiEffect::SendCommand(command)])
 }
 
+/// `/ps`: the running processes, numbered as `/kill` and the side panel number them.
+pub(super) fn list(state: &UiState) -> Vec<UiEffect> {
+    let running = state.background_processes.running();
+    let notice = if running.is_empty() {
+        "No background processes are running.".to_owned()
+    } else {
+        let rows = running
+            .iter()
+            .enumerate()
+            .map(|(index, process)| {
+                format!(
+                    "{} {} ({})",
+                    index + 1,
+                    command_line(&process.command),
+                    process.process_id
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" · ");
+        format!("Background: {rows} · /kill <number> stops one")
+    };
+    vec![
+        UiEffect::Notice(bounded_session_text(&notice, SESSION_NOTICE_MAX_BYTES)),
+        UiEffect::RequestRender,
+    ]
+}
+
+/// `/kill`: stops the running process with this number from `/ps`, or this id.
+pub(super) fn stop(
+    state: &mut UiState,
+    target: &str,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    let target = target.trim();
+    let running = state.background_processes.running();
+    let process = match target.parse::<usize>() {
+        Ok(number) => number.checked_sub(1).and_then(|index| running.get(index)),
+        Err(_) => running.iter().find(|process| process.process_id == target),
+    };
+    let Some(process) = process else {
+        let notice = format!("No running background process {target}. /ps lists them.");
+        return Ok(vec![
+            UiEffect::Notice(bounded_session_text(&notice, SESSION_NOTICE_MAX_BYTES)),
+            UiEffect::RequestRender,
+        ]);
+    };
+    let notice = format!("Stopping {}", command_line(&process.command));
+    let id = ids.next_id(CommandKind::CancelProcess);
+    let command = WispTypedClientRpcCommands::cancel_process(&id, &process.process_id)?;
+    let stops = &mut state.background_processes.stops;
+    if stops.len() == MAX_LISTED {
+        stops.remove(0);
+    }
+    stops.push(id);
+    Ok(vec![
+        UiEffect::SendCommand(command),
+        UiEffect::Notice(bounded_session_text(&notice, SESSION_NOTICE_MAX_BYTES)),
+        UiEffect::RequestRender,
+    ])
+}
+
+/// A command's first line, made safe to show, cut to a notice's width.
+pub(crate) fn command_line(command: &str) -> String {
+    let line = crate::ui::sanitize_for_terminal(command.lines().next().unwrap_or(""));
+    let line = line.trim();
+    if line.chars().count() > NOTICE_COMMAND_MAX_CHARS {
+        let kept: String = line.chars().take(NOTICE_COMMAND_MAX_CHARS - 1).collect();
+        format!("{kept}…")
+    } else {
+        line.to_owned()
+    }
+}
+
 /// Applies the list from any `get_state` reply, and retires this module's own read.
 ///
 /// A reply is not consumed, since another reader may have asked for it; only the
@@ -184,6 +263,29 @@ pub(super) fn observe(state: &mut UiState, event: &BackendEvent) -> Option<Vec<U
         {
             state.background_processes.read = None;
             Some(vec![UiEffect::RequestRender])
+        }
+        BackendEvent::CommandFinished {
+            command_id,
+            ok,
+            error,
+            ..
+        } if state.background_processes.stops.contains(command_id) => {
+            state
+                .background_processes
+                .stops
+                .retain(|stop| stop != command_id);
+            // A stop that worked shows through `process.ended`.
+            Some(if *ok {
+                vec![UiEffect::RequestRender]
+            } else {
+                let error = error
+                    .as_deref()
+                    .unwrap_or("The process could not be stopped.");
+                vec![
+                    UiEffect::Notice(bounded_session_text(error, SESSION_NOTICE_MAX_BYTES)),
+                    UiEffect::RequestRender,
+                ]
+            })
         }
         _ => None,
     }
@@ -278,6 +380,104 @@ mod tests {
                 "mode": "build", "background_processes": processes
             }
         })
+    }
+
+    fn notices(effects: &[UiEffect]) -> Vec<&str> {
+        effects
+            .iter()
+            .filter_map(|effect| match effect {
+                UiEffect::Notice(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn sent(effects: &[UiEffect]) -> Vec<serde_json::Value> {
+        effects
+            .iter()
+            .filter_map(|effect| match effect {
+                UiEffect::SendCommand(command) => Some(command.to_value().unwrap()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn kill_by_number_or_id() {
+        let mut state = UiState::new("fake".into(), None, None);
+        start(&mut state, "server", "npm run dev");
+        start(&mut state, "tests", "make test");
+
+        for (target, process_id) in [("2", "tests"), ("server", "server")] {
+            let effects = stop(&mut state, target, &mut Ids::default()).unwrap();
+            let [command] = sent(&effects).try_into().unwrap();
+            assert_eq!(command["type"], "cancel_process");
+            assert_eq!(command["process_id"], process_id);
+        }
+        for missing in ["0", "3", "other"] {
+            let effects = stop(&mut state, missing, &mut Ids::default()).unwrap();
+            assert!(sent(&effects).is_empty(), "{missing}");
+            assert!(notices(&effects)[0].starts_with("No running background process"));
+        }
+    }
+
+    #[test]
+    fn failed_stop_is_reported() {
+        let mut state = UiState::new("fake".into(), None, None);
+        start(&mut state, "server", "npm run dev");
+        stop(&mut state, "1", &mut Ids::default()).unwrap();
+
+        let effects = apply(
+            &mut state,
+            serde_json::json!({
+                "type": "rpc.command.finished", "timestamp": "2026-11-13T09:00:00Z",
+                "command_id": "cancel_process-1", "command_type": "cancel_process",
+                "ok": false, "error": "No running background process has the id server"
+            }),
+        );
+
+        assert_eq!(
+            notices(&effects),
+            ["No running background process has the id server"]
+        );
+    }
+
+    #[test]
+    fn user_stop_not_announced() {
+        let mut state = UiState::new("fake".into(), None, None);
+        start(&mut state, "server", "npm run dev");
+
+        apply(
+            &mut state,
+            serde_json::json!({
+                "type": "process.ended", "timestamp": "2026-11-13T09:00:00Z",
+                "process_id": "server", "command": "npm run dev", "state": "cancelled",
+                "duration_ms": 1000, "notify": false
+            }),
+        );
+
+        assert!(listed(&state).is_empty());
+        assert_eq!(state.background_processes.exits(), (0, None));
+    }
+
+    #[test]
+    fn ps_lists_numbered() {
+        let mut state = UiState::new("fake".into(), None, None);
+        assert_eq!(
+            notices(&list(&state)),
+            ["No background processes are running."]
+        );
+        start(&mut state, "server", "npm run dev\u{1b}]0;x\u{7}");
+
+        let listing = list(&state);
+
+        let [notice] = notices(&listing).try_into().unwrap();
+        assert!(notice.starts_with("Background: 1 npm run dev"), "{notice}");
+        assert!(
+            notice.ends_with("(server) · /kill <number> stops one"),
+            "{notice}"
+        );
+        assert!(!notice.contains(['\u{1b}', '\u{7}']), "{notice:?}");
     }
 
     #[test]

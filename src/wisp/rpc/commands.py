@@ -649,6 +649,18 @@ class CancelCommand(RpcCommandModel):
     target_id: str = Field(min_length=1)
 
 
+class CancelProcessCommand(RpcCommandModel):
+    """Stop a background process the agent started, on the user's behalf.
+
+    It runs beside any active command. The process's exit is published as
+    ``process.ended`` with state ``cancelled``; the command fails when no running
+    background process has this id.
+    """
+
+    type: Literal["cancel_process"] = "cancel_process"
+    process_id: str = Field(min_length=1, max_length=128)
+
+
 class ApprovalCommand(RpcCommandModel):
     """Resolve a pending tool approval request."""
 
@@ -788,6 +800,7 @@ RpcCommand = TypeAliasType(
         | PopQueueCommand
         | ClearQueueCommand
         | CancelCommand
+        | CancelProcessCommand
         | ApprovalCommand
         | TrustCommand
         | ShutdownCommand

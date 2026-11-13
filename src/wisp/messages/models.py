@@ -71,6 +71,8 @@ def process_notices_text(notices: Sequence[ProcessNotice]) -> str:
         outcome = (
             f"exit code {notice.exit_code}"
             if notice.state == "completed"
+            else "stopped by the user"
+            if notice.state == "cancelled"
             else notice.state.replace("_", " ")
         )
         command = " ".join(notice.command.split())

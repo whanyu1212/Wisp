@@ -351,11 +351,12 @@ class ToolExecutionEnded(_ToolResultEvent):
 
 
 class ProcessEnded(WispEvent):
-    """A process started with ``bash operation=start`` stopped on its own.
+    """A process started with ``bash operation=start`` stopped on its own or by the user.
 
     Published whenever it happens, with or without a run in progress, so a
-    frontend can close the process's card. A cancelled process publishes nothing:
-    the cancel's tool result already reports it.
+    frontend can close the process's card. A process the user stopped is published
+    as ``cancelled``; one the agent cancelled publishes nothing, since the cancel's
+    tool result already reports it.
     """
 
     type: Literal["process.ended"] = "process.ended"

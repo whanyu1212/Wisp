@@ -415,6 +415,8 @@ class _ManagedProcess:
     terminal_reported: bool = False
     notify_on_exit: bool = False
     exit_announced: bool = False
+    # A user stopped it, so its exit is announced like one that ended on its own.
+    announce_cancel: bool = False
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     started_monotonic: float = field(default_factory=time.monotonic)
     ended_at: datetime | None = None
@@ -808,6 +810,34 @@ class ProcessSupervisor:
             if until == "output":
                 return
 
+    async def stop(self, process_id: str) -> ProcessState:
+        """Terminate a running process for the user, leaving it for the caller to poll.
+
+        Unlike ``cancel``, this reads nothing: the process's output and final state
+        stay for the caller's next poll, as for a process that stopped on its own,
+        and the exit is announced to the exit listener as ``cancelled``.
+
+        Args:
+            process_id (str): The handle ``start`` returned.
+
+        Returns:
+            ProcessState: The final state: ``cancelled``, or ``failed`` when the
+            process tree could not be stopped. A process that had already stopped
+            keeps the state it stopped with.
+
+        Raises:
+            ToolError: No managed process has this handle.
+        """
+
+        managed = await self._get(process_id)
+        async with managed.operation_lock:
+            if managed.state == "running":
+                managed.terminal_override = "cancelled"
+                managed.announce_cancel = True
+                cleanup_task = asyncio.create_task(self._terminate_managed(managed))
+                await self._await_task_before_propagating_cancellation(cleanup_task)
+            return managed.state
+
     async def cancel(self, process_id: str) -> ProcessUpdate:
         """Terminate one managed process tree and return its final snapshot."""
 
@@ -1192,13 +1222,18 @@ class ProcessSupervisor:
             self._announce_exit(managed)
 
     def _announce_exit(self, managed: _ManagedProcess) -> None:
-        """Tell the exit listener, once, about a process that stopped on its own."""
+        """Tell the exit listener, once, about a process that stopped on its own.
+
+        A cancelled process is announced only when the user stopped it; a caller's
+        own cancel already reports the final state to that caller.
+        """
 
         listener = self._exit_listener
         if (
             listener is None
             or managed.exit_announced
-            or managed.state in ("running", "cancelled")
+            or managed.state == "running"
+            or (managed.state == "cancelled" and not managed.announce_cancel)
             or managed.ended_at is None
         ):
             return

@@ -1826,7 +1826,7 @@
     },
     "ProcessEnded": {
       "additionalProperties": false,
-      "description": "A process started with ``bash operation=start`` stopped on its own.\n\nPublished whenever it happens, with or without a run in progress, so a\nfrontend can close the process's card. A cancelled process publishes nothing:\nthe cancel's tool result already reports it.",
+      "description": "A process started with ``bash operation=start`` stopped on its own or by the user.\n\nPublished whenever it happens, with or without a run in progress, so a\nfrontend can close the process's card. A process the user stopped is published\nas ``cancelled``; one the agent cancelled publishes nothing, since the cancel's\ntool result already reports it.",
       "properties": {
         "command": {
           "maxLength": 500,
@@ -1865,7 +1865,8 @@
           "enum": [
             "completed",
             "failed",
-            "timed_out"
+            "timed_out",
+            "cancelled"
           ],
           "title": "State",
           "type": "string"

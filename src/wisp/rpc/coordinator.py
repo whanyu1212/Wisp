@@ -151,6 +151,7 @@ _QUEUED_MESSAGE_COMMAND_TYPES = frozenset({"steer", "follow_up"})
 _ACTIVE_COMMAND_BYPASS_COMMANDS = QUEUE_RPC_COMMAND_TYPES | {
     "approval",
     "cancel",
+    "cancel_process",
     "get_commands",
     "get_mcp_status",
     "preview_mcp_snippet",

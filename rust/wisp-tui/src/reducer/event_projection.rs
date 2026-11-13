@@ -1713,6 +1713,7 @@ fn ended_process_state(
         "completed" if exit_code == Some(0) => Ok(ProcessDisplayState::Completed),
         "completed" | "failed" => Ok(ProcessDisplayState::Failed),
         "timed_out" => Ok(ProcessDisplayState::TimedOut),
+        "cancelled" => Ok(ProcessDisplayState::Cancelled),
         _ => Err(EventProjectionError::InvalidField {
             event_type: event_type.to_owned(),
             field: "state",

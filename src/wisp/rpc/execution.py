@@ -18,6 +18,7 @@ from wisp.rpc.commands import (
     ApprovalCommand,
     BeginDeviceCodeCommand,
     CancelCommand,
+    CancelProcessCommand,
     ChangeDirectoryCommand,
     ClearQueueCommand,
     CloneSessionCommand,
@@ -74,6 +75,7 @@ from wisp.rpc.handlers.mcp import (
     RpcMcpServers,
     handle_rpc_mcp_snippet_preview_command,
 )
+from wisp.rpc.handlers.processes import start_cancel_process_command
 from wisp.rpc.handlers.project_files import ProjectFilesPublisher, RpcProjectFiles
 from wisp.rpc.session.process_exits import background_processes
 from wisp.rpc.working_directory import DirectoryMove, directory_move_events
@@ -330,6 +332,15 @@ class RpcCommandExecutor:
         ):
             self.coordinator.running_command = running_command
             return await self._dispatch_queue(known, running_command)
+        if isinstance(known, CancelProcessCommand):
+            self.coordinator.running_command = running_command
+            start_cancel_process_command(
+                known,
+                supervisor=self.runtime.process_supervisor,
+                task_group=self.task_group,
+                write_event=self.write_event,
+            )
+            return _RpcDispatchResult(running_command=running_command)
         if isinstance(known, (CancelCommand, ApprovalCommand, TrustCommand, ShutdownCommand)):
             self.coordinator.running_command = running_command
             return self._dispatch_control(known, running_command)

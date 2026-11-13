@@ -46,6 +46,10 @@ pub(crate) enum Command {
     Compact(Option<String>),
     /// `/cd`: the folder to work from, as typed.
     ChangeDirectory(String),
+    /// `/ps`: list the running background processes.
+    Processes,
+    /// `/kill`: the process to stop, by `/ps` number or id.
+    KillProcess(String),
     Quit,
     Model(ModelCommand),
     Session(SessionCommand),
@@ -84,6 +88,8 @@ fn usage(name: &str) -> Option<&'static str> {
         "tree" => "/tree",
         "unrevert" => "/unrevert",
         "cd" => "/cd <path>",
+        "ps" => "/ps",
+        "kill" => "/kill <number|process-id>",
         _ => return None,
     })
 }
@@ -157,7 +163,7 @@ fn canonical_name<'a>(
 fn parse_command(canonical: &str, tail: &str, syntax: &str) -> Command {
     match canonical {
         "diff" | "help" | "init" | "history" | "plan" | "build" | "quit" | "skills" | "mcp"
-        | "queue"
+        | "queue" | "ps"
             if !tail.trim().is_empty() =>
         {
             Command::Invalid(format!("Usage: {syntax}"))
@@ -183,6 +189,11 @@ fn parse_command(canonical: &str, tail: &str, syntax: &str) -> Command {
         // The whole tail is the path, spaces included; the backend resolves it.
         "cd" if tail.trim().is_empty() => Command::Invalid(format!("Usage: {syntax}")),
         "cd" => Command::ChangeDirectory(tail.trim().to_owned()),
+        "ps" => Command::Processes,
+        "kill" if tail.split_whitespace().count() != 1 => {
+            Command::Invalid(format!("Usage: {syntax}"))
+        }
+        "kill" => Command::KillProcess(tail.trim().to_owned()),
         "quit" => Command::Quit,
         "model" | "provider" => Command::Model(
             model_picker::command(&format!("/{canonical}{tail}")).expect("known model command"),
@@ -869,6 +880,21 @@ pub(crate) mod tests {
             classify("/cd", None),
             Some(Command::Invalid(usage)) if usage == "Usage: /cd <path>"
         ));
+    }
+
+    #[test]
+    fn ps_and_kill_parse() {
+        assert!(matches!(classify("/ps", None), Some(Command::Processes)));
+        assert!(matches!(
+            classify("/kill 2", None),
+            Some(Command::KillProcess(target)) if target == "2"
+        ));
+        for invalid in ["/kill", "/kill 1 2", "/ps 1"] {
+            assert!(
+                matches!(classify(invalid, None), Some(Command::Invalid(_))),
+                "{invalid}"
+            );
+        }
     }
 
     #[test]

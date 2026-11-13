@@ -74,7 +74,9 @@ class ProcessExitNotices:
                     exit_code=exit.exit_code,
                 )
             )
-            self._wake_due = True
+            # The user stopping a process tells the agent at the next prompt, but
+            # does not wake it: the user is there.
+            self._wake_due = self._wake_due or exit.state != "cancelled"
         duration = exit.ended_at - exit.started_at
         self._publish(
             ProcessEnded(
@@ -86,7 +88,7 @@ class ProcessExitNotices:
                 notify=exit.notify,
             )
         )
-        if exit.notify and self._wake_listener is not None:
+        if exit.notify and exit.state != "cancelled" and self._wake_listener is not None:
             self._wake_listener()
 
     def pending(self) -> tuple[ProcessNotice, ...]:
@@ -171,9 +173,9 @@ class ProcessExitNotices:
 
 
 def _ended_state(state: ProcessState) -> EndedProcessState:
-    # The supervisor announces neither a running nor a cancelled process.
-    if state == "running" or state == "cancelled":
-        raise ValueError(f"A process that is {state} has not ended on its own")
+    # The supervisor never announces a running process.
+    if state == "running":
+        raise ValueError("A running process has not ended")
     return state
 
 

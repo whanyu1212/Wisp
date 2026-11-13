@@ -179,8 +179,9 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
   (dispatch from `commands.py` models to handlers). Session-scoped handlers and transient session
   state live in `rpc/session/` (`run.py`, `mutation.py`, `read.py`, `queue.py`, `state.py`,
   and `process_exits.py`, which publishes background-process exits and holds the model's notices);
-  configuration, connection, control, inspection, and project-file handlers live in
-  `rpc/handlers/`. Both subpackages re-export nothing; import from the defining module.
+  configuration, connection, control, inspection, project-file, and process (`processes.py`,
+  stopping a background process for the user) handlers live in `rpc/handlers/`. Both
+  subpackages re-export nothing; import from the defining module.
   `rpc/handlers/mcp.py` owns every MCP connect and restart. The JSONL-RPC backend builds its
   runtime without connecting MCP servers; the host connects them beside the command queue, and
   prompt and compaction runs wait for that connect before they start.

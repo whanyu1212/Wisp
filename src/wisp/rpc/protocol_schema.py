@@ -254,6 +254,7 @@ _COMMAND_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     "set_subagents": {"enabled": True},
     "change_directory": {"path": "src"},
     "cancel": {"target_id": "command-1"},
+    "cancel_process": {"process_id": "process-1"},
     "clear_queue": {},
     "clone_session": {},
     "compact": {},
