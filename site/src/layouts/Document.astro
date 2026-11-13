@@ -64,7 +64,7 @@ const hasToc = toc.length > 0 && page.layout !== "home";
         />
       </>
     )}
-    <title>{page.title === 'Wisp' ? 'Wisp — a coding agent you can steer' : `${page.title} · Wisp`}</title>
+    <title>{page.title === 'Wisp' ? 'Wisp — terminal coding agent in Python and Rust' : `${page.title} · Wisp`}</title>
     <link rel="canonical" href={new URL(href(page.route), Astro.site)} />
     {(!page.searchable || compatibility) && (
       <meta name="robots" content="noindex" />

@@ -1945,16 +1945,16 @@ async fn click_toggles_explored_group() {
         );
     }
     let buffer = draw(&mut ui, 80, 24);
-    let (x, y) = cell_of(&buffer, "Explored 2 actions");
+    let (x, y) = cell_of(&buffer, "Explored 2 files");
     plain_click(&mut ui, &writer, x, y).await;
     let start = ui.state.transcript.entries()[1].id;
     assert!(ui.transcript_row_cache.fold().is_group_expanded(start));
     let opened = draw(&mut ui, 80, 24);
     assert!(row_text(&opened, cell_of(&opened, "a.rs").1).contains("Read"));
-    let (x, y) = cell_of(&opened, "Explored 2 actions");
+    let (x, y) = cell_of(&opened, "Explored 2 files");
     plain_click(&mut ui, &writer, x, y).await;
     assert!(!ui.transcript_row_cache.fold().is_group_expanded(start));
-    cell_of(&draw(&mut ui, 80, 24), "Explored 2 actions");
+    cell_of(&draw(&mut ui, 80, 24), "Explored 2 files");
 }
 
 #[tokio::test]
