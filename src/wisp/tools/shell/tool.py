@@ -46,6 +46,15 @@ _EXIT_NOTICE_PROMISED = (
     "[You will be told when this process stops, with the next prompt, if it is still "
     "running when this turn ends. To wait for it now, poll with until=exit.]"
 )
+_MOVED_NOTICE_PROMISED = (
+    "[The user moved this command to the background; it is still running under the "
+    "process_id above. You will be told when it stops, with the next prompt. Poll it to "
+    "read its output, or with until=exit to wait for it.]"
+)
+_MOVED_NOTICE_UNAVAILABLE = (
+    "[The user moved this command to the background; it is still running under the "
+    "process_id above. Poll it to read its output and see when it stops.]"
+)
 _EXIT_NOTICE_UNAVAILABLE = (
     "[Exit notices are not available here; poll this process to see when it stops.]"
 )
@@ -186,7 +195,7 @@ class BashTool:
                 max_output_bytes=context.max_output_bytes,
                 env=_command_environment(context),
             )
-        else:
+        elif context.background_request is None:
             result = await self._process_supervisor.run_to_completion(
                 command,
                 cwd=context.cwd,
@@ -195,6 +204,25 @@ class BashTool:
                 env=_command_environment(context),
                 progress=context.progress,
             )
+        else:
+            outcome = await self._process_supervisor.run_to_completion(
+                command,
+                cwd=context.cwd,
+                timeout=float(timeout),
+                max_output_bytes=context.max_output_bytes,
+                env=_command_environment(context),
+                progress=context.progress,
+                background=context.background_request,
+            )
+            if isinstance(outcome, ProcessUpdate):
+                moved = await _managed_update_result(outcome, context=context)
+                notice = (
+                    _MOVED_NOTICE_PROMISED
+                    if self._process_supervisor.has_exit_listener
+                    else _MOVED_NOTICE_UNAVAILABLE
+                )
+                return replace(moved, text=f"{moved.text}\n{notice}")
+            result = outcome
         stdout = truncate_text_tail(
             result.stdout,
             max_bytes=context.max_output_bytes,

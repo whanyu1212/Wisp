@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -81,6 +82,9 @@ class ToolContext:
     # Where the running call reports progress. The executor sets one per call when
     # a frontend is listening; None means nobody is, and tools skip reporting.
     progress: ToolProgress | None = None
+    # Set when the user asks to move this foreground command to the background. The
+    # executor gives one to each top-level foreground ``bash`` call it can reach.
+    background_request: asyncio.Event | None = None
 
     def __post_init__(self) -> None:
         # Checked once here: ``boundary`` runs for every directory a search walks, and

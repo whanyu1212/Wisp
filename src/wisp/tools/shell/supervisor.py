@@ -9,9 +9,10 @@ from collections import deque
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from importlib import import_module
 from pathlib import Path
-from typing import Any, Literal, Protocol, TypeVar, cast
+from typing import Any, Literal, Protocol, TypeVar, cast, overload
 from uuid import uuid4
 
 import anyio
@@ -21,11 +22,14 @@ from wisp.tools.progress import OutputProgress, ToolProgress
 from wisp.tools.result import ToolError
 from wisp.tools.shell.process import (
     ProcessResult,
+    _CapturedOutput,
     _close_process_pipes,
     _collect_limited_output,
     _create_shell_process,
     _kill_process_tree_and_wait,
     _process_output_parts,
+    _start_tail_readers,
+    _stop_readers,
     _StreamTail,
     _terminate_process_tree,
     _wait_for_exit,
@@ -46,6 +50,8 @@ _logger = logging.getLogger(__name__)
 DEFAULT_MAX_MANAGED_PROCESSES = 8
 DEFAULT_MAX_RETAINED_BYTES = 50_000
 DEFAULT_MAX_RETAINED_LINES = 2_000
+# How long a foreground command moved to the background may run from then on.
+DEFAULT_BACKGROUND_LIFETIME_SECONDS = 3600.0
 POST_TERMINATION_DRAIN_TIMEOUT = 0.25
 # The last output a timeout error shows. The full output is saved, and an error
 # message has a small budget of its own.
@@ -536,6 +542,7 @@ class ProcessSupervisor:
 
         return self._output_store
 
+    @overload
     async def run_to_completion(
         self,
         command: str,
@@ -545,21 +552,64 @@ class ProcessSupervisor:
         max_output_bytes: int,
         env: Mapping[str, str] | None = None,
         progress: ToolProgress | None = None,
-    ) -> ProcessResult:
+        background: None = None,
+        background_lifetime: float = ...,
+    ) -> ProcessResult: ...
+
+    @overload
+    async def run_to_completion(
+        self,
+        command: str,
+        *,
+        cwd: Path,
+        timeout: float,
+        max_output_bytes: int,
+        env: Mapping[str, str] | None = None,
+        progress: ToolProgress | None = None,
+        background: asyncio.Event,
+        background_lifetime: float = ...,
+    ) -> ProcessResult | ProcessUpdate: ...
+
+    async def run_to_completion(
+        self,
+        command: str,
+        *,
+        cwd: Path,
+        timeout: float,
+        max_output_bytes: int,
+        env: Mapping[str, str] | None = None,
+        progress: ToolProgress | None = None,
+        background: asyncio.Event | None = None,
+        background_lifetime: float = DEFAULT_BACKGROUND_LIFETIME_SECONDS,
+    ) -> ProcessResult | ProcessUpdate:
         """Run one command to completion while tracking it for shutdown.
+
+        If ``background`` is set while the command runs, the command moves to the
+        background instead: it becomes a managed process, as ``start`` makes, that
+        tells the exit listener when it stops, and this returns at once with its
+        output so far. Its readers carry on into the managed process, so no output
+        is lost or repeated, and its process tree stays owned throughout.
 
         Args:
             command (str): Shell command to run.
             cwd (Path): Working directory.
-            timeout (float): Seconds before the process tree is stopped.
+            timeout (float): Seconds before the process tree is stopped, while the
+                command runs in the foreground.
             max_output_bytes (int): Bytes of each stream's tail to keep.
             env (Mapping[str, str] | None, optional): Environment for the command.
                 Defaults to None.
             progress (ToolProgress | None, optional): Receives the output so far
                 while the command runs. Defaults to None.
+            background (asyncio.Event | None, optional): Set to move the command to
+                the background. Defaults to None.
+            background_lifetime (float, optional): Seconds a command moved to the
+                background may run from then on. Defaults to an hour.
 
         Returns:
-            ProcessResult: The exit status and captured output.
+            ProcessResult | ProcessUpdate: The exit status and captured output, or,
+            once moved to the background, the running process's id and its output
+            so far. A command that finishes as the move is asked for returns its
+            result.
 
         Raises:
             ToolError: The command timed out, or its process tree could not be stopped.
@@ -571,6 +621,8 @@ class ProcessSupervisor:
             if self._owned_process_count() >= self._max_processes:
                 raise self._capacity_error()
             process = await self._spawn(command, cwd=cwd, env=env)
+            started_at = datetime.now(UTC)
+            started_monotonic = time.monotonic()
             self._one_shot_locks[process] = asyncio.Lock()
             stdout_tail = _StreamTail(
                 max_output_bytes,
@@ -580,13 +632,17 @@ class ProcessSupervisor:
                 max_output_bytes,
                 self._open_saved_stream("stderr", command, spill_threshold=max_output_bytes),
             )
+            # The readers belong to this call, not to capture, so a move to the
+            # background can hand them on while they keep reading.
+            readers = _start_tail_readers(process, stdout_tail, stderr_tail)
             capture_task = asyncio.create_task(
-                _collect_limited_output(process, stdout_tail, stderr_tail)
+                _collect_limited_output(process, stdout_tail, stderr_tail, readers=readers)
             )
             self._one_shot[process] = capture_task
 
         release_ownership = False
         output_reported = False
+        moved: ProcessUpdate | None = None
         sampler = (
             asyncio.create_task(_sample_progress(progress, stdout_tail, stderr_tail))
             if progress is not None
@@ -594,10 +650,24 @@ class ProcessSupervisor:
         )
         try:
             try:
-                captured = await asyncio.wait_for(
-                    capture_task,
-                    timeout=timeout,
-                )
+                captured = await _capture_or_background(capture_task, readers, background, timeout)
+                if captured is None:
+                    moved = await self._move_to_background(
+                        _OneShotHandover(
+                            process=process,
+                            command=command,
+                            capture=capture_task,
+                            readers=readers,
+                            stdout_tail=stdout_tail,
+                            stderr_tail=stderr_tail,
+                            started_at=started_at,
+                            started_monotonic=started_monotonic,
+                        ),
+                        lifetime=background_lifetime,
+                    )
+                    if moved is None:
+                        # It finished as the move was asked for.
+                        captured = capture_task.result()
             except TimeoutError as exc:
                 cleanup_task = asyncio.create_task(self._terminate_one_shot(process, wait=True))
                 try:
@@ -640,7 +710,14 @@ class ProcessSupervisor:
                 release_ownership = cleanup_succeeded
                 raise
 
-            cleanup_task = asyncio.create_task(self._terminate_one_shot(process))
+            if moved is not None:
+                # The managed process owns the tree, readers, and saved output now.
+                output_reported = True
+                return moved
+            assert captured is not None
+            # One task freezes the output, as capture's own readers stopped then, and
+            # reaps the group, so a cancel landing between them cannot skip the reap.
+            cleanup_task = asyncio.create_task(self._stop_and_reap_one_shot(readers, process))
             try:
                 cleanup_succeeded = await self._await_task_before_propagating_cancellation(
                     cleanup_task
@@ -688,6 +765,10 @@ class ProcessSupervisor:
                 # skip the cleanup below. The sampler is parked in its sleep, so it
                 # cannot report again, and the executor ignores reports after the call.
                 sampler.cancel()
+            if moved is None:
+                # Normally stopped already; not awaited, as for the sampler.
+                for reader in readers:
+                    reader.cancel()
             if not output_reported:
                 # No result will name this output, so nothing could ever read it.
                 for tail in (stdout_tail, stderr_tail):
@@ -696,6 +777,97 @@ class ProcessSupervisor:
             if release_ownership:
                 release_task = asyncio.create_task(self._release_one_shot(process))
                 await self._await_task_before_propagating_cancellation(release_task)
+
+    async def _stop_and_reap_one_shot(
+        self,
+        readers: tuple[asyncio.Task[None], asyncio.Task[None]],
+        process: asyncio.subprocess.Process,
+    ) -> bool:
+        """Stop a finished command's readers, then reap its process group."""
+
+        await _stop_readers(readers)
+        return await self._terminate_one_shot(process)
+
+    async def _move_to_background(
+        self, handover: _OneShotHandover, *, lifetime: float
+    ) -> ProcessUpdate | None:
+        """Turn a running foreground command into a managed process that notifies.
+
+        Everything that changes hands does so under the supervisor lock with no await
+        in between, so a reader sees each chunk on exactly one side of the move, and
+        the process tree is owned by the foreground call or the managed process,
+        never neither.
+
+        Args:
+            handover (_OneShotHandover): The foreground command and what it owns.
+            lifetime (float): Seconds the managed process may run from now.
+
+        Returns:
+            ProcessUpdate | None: The new process's id and the output the foreground
+            call had, or None if the command had already finished.
+        """
+
+        process = handover.process
+        async with self._lock:
+            self._ensure_open()
+            if handover.capture.done():
+                return None
+            stdout_so_far = handover.stdout_tail.result()
+            stderr_so_far = handover.stderr_tail.result()
+            # A character the cut split goes to the managed buffer, where the rest of it
+            # arrives, rather than being decoded half here.
+            stdout_text, stdout_partial = _split_incomplete_utf8(stdout_so_far.output)
+            stderr_text, stderr_partial = _split_incomplete_utf8(stderr_so_far.output)
+            assert handover.stdout_tail.saved is not None
+            assert handover.stderr_tail.saved is not None
+            managed = _ManagedProcess(
+                process_id=uuid4().hex,
+                process=process,
+                command=handover.command,
+                stdout=self._pending_text_class(
+                    DEFAULT_MAX_RETAINED_BYTES, DEFAULT_MAX_RETAINED_LINES
+                ),
+                stderr=self._pending_text_class(
+                    DEFAULT_MAX_RETAINED_BYTES, DEFAULT_MAX_RETAINED_LINES
+                ),
+                stdout_saved=handover.stdout_tail.saved,
+                stderr_saved=handover.stderr_tail.saved,
+                notify_on_exit=True,
+                started_at=handover.started_at,
+                started_monotonic=handover.started_monotonic,
+            )
+            managed.stdout_task, managed.stderr_task = handover.readers
+            managed.stdout.append_bytes(stdout_partial)
+            managed.stderr.append_bytes(stderr_partial)
+            handover.stdout_tail.sink = partial(_forward_output, managed, managed.stdout)
+            handover.stderr_tail.sink = partial(_forward_output, managed, managed.stderr)
+            self._managed[managed.process_id] = managed
+            del self._one_shot[process]
+            self._one_shot_locks.pop(process, None)
+            # Capture only waited on the readers, which carry on; nothing to await.
+            handover.capture.cancel()
+            managed.completion_task = asyncio.create_task(
+                self._wait_for_completion(managed, lifetime)
+            )
+        stdout, stdout_lengths = decode_utf8_with_source_byte_lengths(stdout_text)
+        stderr, stderr_lengths = decode_utf8_with_source_byte_lengths(stderr_text)
+        return ProcessUpdate(
+            process_id=managed.process_id,
+            state="running",
+            stdout=stdout,
+            stderr=stderr,
+            stdout_truncated=stdout_so_far.truncated,
+            stderr_truncated=stderr_so_far.truncated,
+            stdout_dropped_bytes=stdout_so_far.dropped_bytes,
+            stderr_dropped_bytes=stderr_so_far.dropped_bytes,
+            stdout_retained_bytes=len(stdout_text),
+            stderr_retained_bytes=len(stderr_text),
+            stdout_source_byte_lengths=stdout_lengths,
+            stderr_source_byte_lengths=stderr_lengths,
+            started_at=handover.started_at,
+            stdout_saved=managed.stdout_saved,
+            stderr_saved=managed.stderr_saved,
+        )
 
     async def start(
         self,
@@ -1387,6 +1559,98 @@ async def _sample_progress(
                 stderr_bytes=totals[1],
             )
         )
+
+
+@dataclass(frozen=True, slots=True)
+class _OneShotHandover:
+    """A running foreground command and what it owns, as a move to the background takes it."""
+
+    process: asyncio.subprocess.Process
+    command: str
+    capture: asyncio.Task[_CapturedOutput]
+    readers: tuple[asyncio.Task[None], asyncio.Task[None]]
+    stdout_tail: _StreamTail
+    stderr_tail: _StreamTail
+    started_at: datetime
+    started_monotonic: float
+
+
+def _split_incomplete_utf8(data: bytes) -> tuple[bytes, bytes]:
+    """Split off a UTF-8 character cut short at the end, if any."""
+
+    start = len(data)
+    # A character is at most four bytes: look back past up to three continuation bytes.
+    while start > 0 and len(data) - start < 3 and data[start - 1] & 0xC0 == 0x80:
+        start -= 1
+    if start == 0:
+        return data, b""
+    lead = data[start - 1]
+    if lead < 0xC0:
+        return data, b""
+    needed = 2 if lead < 0xE0 else 3 if lead < 0xF0 else 4
+    if len(data) - (start - 1) >= needed:
+        return data, b""
+    return data[: start - 1], data[start - 1 :]
+
+
+def _forward_output(
+    managed: _ManagedProcess, output: _PendingTextLike, chunk: bytes, final: bool
+) -> None:
+    """Hand a moved command's next output to its managed process, as `_read_stream` does."""
+
+    output.append_bytes(chunk, final=final)
+    managed.changed.set()
+
+
+async def _capture_or_background(
+    capture: asyncio.Task[_CapturedOutput],
+    readers: tuple[asyncio.Task[None], asyncio.Task[None]],
+    background: asyncio.Event | None,
+    timeout: float,
+) -> _CapturedOutput | None:
+    """Wait for capture, its deadline, or a request to move the command to the background.
+
+    Like ``asyncio.wait_for``, capture is cancelled, and waited for, on the deadline
+    or when this is cancelled; the readers stop then too, and when capture fails,
+    so nothing the cleanup that follows prints is read. Capture finishing wins over
+    a move asked for at the same moment, and the readers keep going after a move.
+
+    Args:
+        capture (asyncio.Task[_CapturedOutput]): The command's capture.
+        readers (tuple[asyncio.Task[None], asyncio.Task[None]]): Its stream readers.
+        background (asyncio.Event | None): Set to move the command to the background.
+        timeout (float): Seconds to wait.
+
+    Returns:
+        _CapturedOutput | None: The captured output, or None when the move was
+        asked for first.
+
+    Raises:
+        TimeoutError: The deadline passed first.
+    """
+
+    requested = asyncio.create_task(background.wait()) if background is not None else None
+    waiting: set[asyncio.Task[Any]] = {capture} if requested is None else {capture, requested}
+    try:
+        done, _ = await asyncio.wait(waiting, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+    except BaseException:
+        capture.cancel()
+        await asyncio.gather(capture, return_exceptions=True)
+        await _stop_readers(readers)
+        raise
+    finally:
+        if requested is not None:
+            requested.cancel()
+    if capture in done:
+        if capture.cancelled() or capture.exception() is not None:
+            await _stop_readers(readers)
+        return capture.result()
+    if not done:
+        capture.cancel()
+        await asyncio.gather(capture, return_exceptions=True)
+        await _stop_readers(readers)
+        raise TimeoutError
+    return None
 
 
 async def _timeout_message(timeout: float, stdout: _StreamTail, stderr: _StreamTail) -> str:

@@ -45,7 +45,8 @@ the entire default keymap; other valid user settings still apply.
 | `history.open` | Ctrl+R | Search submitted prompts |
 | `prompt.external_editor` | Ctrl+O | Edit the draft, or open a browsed card's file, in `$VISUAL` or `$EDITOR` |
 | `theme.toggle` | Unbound (`/theme`) | Toggle Paper / last dark theme |
-| `panel.toggle` | Ctrl+B | Show or hide the side panel |
+| `panel.toggle` | Ctrl+P | Show or hide the side panel |
+| `run.background` | Ctrl+B | Move the running shell command to the background |
 | `panel.focus` | F8 | Focus the side panel; Esc returns to the composer |
 | `session.tree` | Ctrl+T | Open the session tree to switch branches (`/tree`) |
 | `transcript.browse` | F6 | Select transcript cards |
@@ -143,7 +144,8 @@ characters per chord.
 | `Left` / `Right` | Collapse/expand the selected directory in tree mode |
 | `Shift+Tab` | Toggle plan/build mode |
 | `Ctrl+T` | Open the session tree to switch branches (`/tree`) |
-| `Ctrl+B` | Hide or show the side panel on a wide terminal; open or close it as an overlay otherwise |
+| `Ctrl+P` | Hide or show the side panel on a wide terminal; open or close it as an overlay otherwise |
+| `Ctrl+B` | While the agent runs a shell command in the foreground, move it to the background (in tmux, press it twice) |
 | `F8` | Focus the side panel for keyboard navigation |
 | `F6` | Browse transcript cards; Right expands, Left collapses, and Enter opens retained detail |
 | `Ctrl+G` | Toggle contextual help for the focused Rust surface |

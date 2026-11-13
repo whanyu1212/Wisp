@@ -1,5 +1,5 @@
 //! The side panel: what the session is, what it costs, and what it changed, beside
-//! the transcript on a wide terminal or over it as an overlay opened with Ctrl+B.
+//! the transcript on a wide terminal or over it as an overlay opened with Ctrl+P.
 //!
 //! The panel only reads state. The reducer keeps its data loaded while it is on
 //! screen (see `UiAction::SetSidePanelVisible`); this module decides where it goes
@@ -58,9 +58,9 @@ pub(crate) fn docks(width: u16) -> bool {
 /// Where the panel is and whether the reducer knows it is on screen.
 #[derive(Debug, Default)]
 pub(crate) struct SidePanel {
-    /// Hidden with Ctrl+B on a terminal wide enough to dock it.
+    /// Hidden with Ctrl+P on a terminal wide enough to dock it.
     hidden: bool,
-    /// Opened with Ctrl+B on a terminal too narrow to dock it.
+    /// Opened with Ctrl+P on a terminal too narrow to dock it.
     overlay: bool,
     /// The width of the last frame, which decides whether the panel docks.
     width: u16,
@@ -181,7 +181,7 @@ impl SidePanel {
         self.docked() || self.overlay_open()
     }
 
-    /// Ctrl+B: hide or show the docked panel, or open or close the overlay. An
+    /// Ctrl+P: hide or show the docked panel, or open or close the overlay. An
     /// overlay opens with focus on the first row it can act on.
     pub(crate) fn toggle(&mut self) {
         if docks(self.width) {
@@ -378,7 +378,7 @@ impl SidePanel {
         *self.painted.borrow_mut() = Painted::default();
     }
 
-    /// Whether Ctrl+B would open or close the overlay rather than the docked panel.
+    /// Whether Ctrl+P would open or close the overlay rather than the docked panel.
     pub(crate) fn toggles_overlay(&self) -> bool {
         !docks(self.width)
     }
@@ -1687,11 +1687,11 @@ mod tests {
         }
         // The composer names YOLO, the main footer carries the panel's keys, and the
         // transcript pins the latest prompt.
-        for moved in ["Permissions", "Ctrl+B panel", "add a read timeout setting"] {
+        for moved in ["Permissions", "Ctrl+P panel", "add a read timeout setting"] {
             assert!(!panel.contains(moved), "{moved}\n{panel}");
         }
         assert!(
-            rows.iter().any(|row| row.contains("Ctrl+B panel")),
+            rows.iter().any(|row| row.contains("Ctrl+P panel")),
             "{rows:#?}"
         );
     }
@@ -2156,7 +2156,7 @@ mod tests {
         let footer = rows.last().unwrap();
         assert!(!rows.iter().any(|row| row.contains("Changed files")));
         assert!(footer.contains("/srv/wisp · fix/timeouts"), "{footer}");
-        assert!(footer.contains("Ctrl+B panel"), "{footer}");
+        assert!(footer.contains("Ctrl+P panel"), "{footer}");
     }
 
     #[test]
@@ -3057,7 +3057,7 @@ mod tests {
         assert_eq!(panel.take_visibility_change(), None);
         panel.toggle();
         assert_eq!(panel.take_visibility_change(), Some(false));
-        // Narrowing leaves the panel hidden until Ctrl+B opens the overlay.
+        // Narrowing leaves the panel hidden until Ctrl+P opens the overlay.
         panel.observe_width(100);
         assert_eq!(panel.take_visibility_change(), None);
         panel.toggle();

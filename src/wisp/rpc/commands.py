@@ -649,6 +649,18 @@ class CancelCommand(RpcCommandModel):
     target_id: str = Field(min_length=1)
 
 
+class BackgroundToolCallCommand(RpcCommandModel):
+    """Move a running foreground ``bash`` call to the background, for the user.
+
+    It runs beside the active run. The call ends with the id of the background
+    process it became, which tells the agent when it stops; the command fails when
+    no foreground ``bash`` call with this id is running.
+    """
+
+    type: Literal["background_tool_call"] = "background_tool_call"
+    call_id: str = Field(min_length=1, max_length=256)
+
+
 class CancelProcessCommand(RpcCommandModel):
     """Stop a background process the agent started, on the user's behalf.
 
@@ -801,6 +813,7 @@ RpcCommand = TypeAliasType(
         | ClearQueueCommand
         | CancelCommand
         | CancelProcessCommand
+        | BackgroundToolCallCommand
         | ApprovalCommand
         | TrustCommand
         | ShutdownCommand

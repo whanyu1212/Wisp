@@ -11,6 +11,9 @@ const MAX_CONFIG_ENTRIES: usize = 64;
 const MAX_CHORDS_PER_ACTION: usize = 8;
 const MAX_CHORD_CHARS: usize = 64;
 const MAX_DIAGNOSTIC_CHARS: usize = 512;
+/// Actions whose default chord changed in 0.9.2: the panel moved to Ctrl+P so
+/// Ctrl+B could move a running command to the background.
+const RECENT_DEFAULTS: [Action; 2] = [Action::TogglePanel, Action::BackgroundCommand];
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum Action {
@@ -32,10 +35,11 @@ pub(crate) enum Action {
     FocusPanel,
     SessionTree,
     ExternalEditor,
+    BackgroundCommand,
 }
 
 impl Action {
-    pub(crate) const ALL: [Self; 18] = [
+    pub(crate) const ALL: [Self; 19] = [
         Self::Submit,
         Self::AlternateSubmit,
         Self::Newline,
@@ -54,6 +58,7 @@ impl Action {
         Self::FocusPanel,
         Self::SessionTree,
         Self::ExternalEditor,
+        Self::BackgroundCommand,
     ];
 
     pub(crate) const fn id(self) -> &'static str {
@@ -67,6 +72,7 @@ impl Action {
             Self::FocusPanel => "panel.focus",
             Self::SessionTree => "session.tree",
             Self::ExternalEditor => "prompt.external_editor",
+            Self::BackgroundCommand => "run.background",
             Self::History => "history.open",
             Self::ToggleTheme => "theme.toggle",
             Self::Browse => "transcript.browse",
@@ -90,6 +96,7 @@ impl Action {
             Self::FocusPanel => "Focus the side panel (Esc returns to the composer)",
             Self::SessionTree => "Open the session tree to switch branches (/tree)",
             Self::ExternalEditor => "Edit the draft, or open a browsed card's file, in $EDITOR",
+            Self::BackgroundCommand => "Move the running shell command to the background",
             Self::History => "Open prompt history",
             Self::ToggleTheme => "Toggle the theme",
             Self::Browse => "Browse transcript details",
@@ -266,6 +273,12 @@ impl Default for Bindings {
         chords[Browse.index()] = vec![Chord::exact(KeyCode::F(6), KeyModifiers::NONE, "F6")];
         chords[FocusPanel.index()] = vec![Chord::exact(KeyCode::F(8), KeyModifiers::NONE, "F8")];
         chords[TogglePanel.index()] = vec![Chord::exact(
+            KeyCode::Char('p'),
+            KeyModifiers::CONTROL,
+            "Ctrl+P",
+        )];
+        // Ctrl+B, as other coding agents use it; tmux users press it twice.
+        chords[BackgroundCommand.index()] = vec![Chord::exact(
             KeyCode::Char('b'),
             KeyModifiers::CONTROL,
             "Ctrl+B",
@@ -286,7 +299,9 @@ impl Bindings {
     ///
     /// Missing actions keep their defaults. An array replaces an action's
     /// complete default chord list, and an empty array unbinds an optional
-    /// action. Any invalid member rejects the complete set.
+    /// action. A configured chord takes precedence over the default of an action
+    /// in `RECENT_DEFAULTS`, so those new defaults never invalidate a configuration
+    /// that worked before them. Any invalid member rejects the complete set.
     pub(crate) fn from_json(json: &str) -> Result<Self, String> {
         if json.len() > MAX_CONFIG_BYTES {
             return Err(diagnostic(format_args!(
@@ -297,6 +312,7 @@ impl Bindings {
             .map_err(|error| diagnostic(format_args!("invalid keybinding JSON: {error}")))?;
 
         let mut resolved = Self::default();
+        let mut configured = Vec::new();
         for (id, values) in overrides {
             let Some(action) = Action::from_id(&id) else {
                 return Err(diagnostic(format_args!(
@@ -333,7 +349,9 @@ impl Bindings {
                 })?);
             }
             resolved.chords[action.index()] = parsed;
+            configured.push(action);
         }
+        resolved.yield_defaults_to(&configured);
         resolved.validate_conflicts()?;
         Ok(resolved)
     }
@@ -370,6 +388,22 @@ impl Bindings {
                 label: self.label(action),
             })
             .collect()
+    }
+
+    /// Drops chords a configured action uses from `RECENT_DEFAULTS` actions still
+    /// on their defaults.
+    fn yield_defaults_to(&mut self, configured: &[Action]) {
+        let claimed: Vec<Chord> = configured
+            .iter()
+            .flat_map(|action| self.chords[action.index()].clone())
+            .collect();
+        for action in RECENT_DEFAULTS {
+            if configured.contains(&action) {
+                continue;
+            }
+            self.chords[action.index()]
+                .retain(|chord| !claimed.iter().any(|taken| taken.overlaps(chord)));
+        }
     }
 
     fn validate_conflicts(&self) -> Result<(), String> {
@@ -922,6 +956,22 @@ mod tests {
         assert!(
             Bindings::from_json(r#"{"theme.toggle":["Alt+X"],"prompt.newline":["Ctrl+J"]}"#)
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn ctrl_b_backgrounds_ctrl_p_panel() {
+        let ctrl = |letter| key(KeyCode::Char(letter), KeyModifiers::CONTROL);
+        let defaults = Bindings::default();
+        assert_eq!(defaults.action(ctrl('b')), Some(Action::BackgroundCommand));
+        assert_eq!(defaults.action(ctrl('p')), Some(Action::TogglePanel));
+
+        // A configuration that used Ctrl+P before it was the panel's default keeps it.
+        let configured = Bindings::from_json(r#"{"history.open":["Ctrl+P"]}"#).unwrap();
+        assert_eq!(configured.action(ctrl('p')), Some(Action::History));
+        assert_eq!(
+            configured.action(ctrl('b')),
+            Some(Action::BackgroundCommand)
         );
     }
 

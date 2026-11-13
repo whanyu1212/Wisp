@@ -16,6 +16,7 @@ from wisp.events import RpcPermissionsReported, WispEvent
 from wisp.rpc.commands import (
     AddMcpServerCommand,
     ApprovalCommand,
+    BackgroundToolCallCommand,
     BeginDeviceCodeCommand,
     CancelCommand,
     CancelProcessCommand,
@@ -75,7 +76,10 @@ from wisp.rpc.handlers.mcp import (
     RpcMcpServers,
     handle_rpc_mcp_snippet_preview_command,
 )
-from wisp.rpc.handlers.processes import start_cancel_process_command
+from wisp.rpc.handlers.processes import (
+    handle_background_tool_call,
+    start_cancel_process_command,
+)
 from wisp.rpc.handlers.project_files import ProjectFilesPublisher, RpcProjectFiles
 from wisp.rpc.session.process_exits import background_processes
 from wisp.rpc.working_directory import DirectoryMove, directory_move_events
@@ -332,6 +336,10 @@ class RpcCommandExecutor:
         ):
             self.coordinator.running_command = running_command
             return await self._dispatch_queue(known, running_command)
+        if isinstance(known, BackgroundToolCallCommand):
+            self.coordinator.running_command = running_command
+            handle_background_tool_call(known, agent=self.agent, write_event=self.write_event)
+            return _RpcDispatchResult(running_command=running_command)
         if isinstance(known, CancelProcessCommand):
             self.coordinator.running_command = running_command
             start_cancel_process_command(

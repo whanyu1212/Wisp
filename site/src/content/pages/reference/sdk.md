@@ -238,6 +238,7 @@ current setting untouched; use `clear_effort=True` to restore the provider defau
 | `clear_queue` | `(kind: QueueKind \| None = None, *, command_id: str \| None = None, expected_token: str \| None = None)` |
 | `cancel` | `(target_id: str, *, command_id: str \| None = None)` |
 | `cancel_process` | `(process_id: str, *, command_id: str \| None = None)` |
+| `background_tool_call` | `(call_id: str, *, command_id: str \| None = None)` |
 
 Connection catalogs and progress events contain sanitized status only. API keys and OAuth tokens are
 write-only inputs and never appear in results, events, or session JSONL. `RpcDeviceCodeReported`

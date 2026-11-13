@@ -1,11 +1,12 @@
-"""Stop a background process on the user's behalf."""
+"""Stop a background process, or move a foreground one there, on the user's behalf."""
 
 from __future__ import annotations
 
 import anyio
 from anyio.abc import TaskGroup
 
-from wisp.rpc.commands import CancelProcessCommand
+from wisp.coding.session import CodingSession
+from wisp.rpc.commands import BackgroundToolCallCommand, CancelProcessCommand
 from wisp.rpc.lifecycle import RpcCommandLifecycle, RpcEventWriter
 from wisp.tools.result import ToolError
 from wisp.tools.shell.supervisor import ProcessSupervisor
@@ -61,3 +62,27 @@ def start_cancel_process_command(
             lifecycle.fail(f"Background process {process_id} had already stopped ({state})")
 
     task_group.start_soon(stop)
+
+
+def handle_background_tool_call(
+    command: BackgroundToolCallCommand,
+    *,
+    agent: CodingSession,
+    write_event: RpcEventWriter,
+) -> None:
+    """Ask a running foreground ``bash`` call to move to the background.
+
+    The command finishes as soon as the request is made; the call then ends with
+    the id of the background process, unless its command finishes first.
+
+    Args:
+        command (BackgroundToolCallCommand): The command naming the call.
+        agent (CodingSession): The session running the call.
+        write_event (RpcEventWriter): Writes the command's lifecycle events.
+    """
+
+    lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
+    if agent.background_tool_call(command.call_id):
+        lifecycle.finish()
+    else:
+        lifecycle.fail(f"No running foreground command has the call id {command.call_id}")

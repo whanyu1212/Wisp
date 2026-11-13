@@ -17,6 +17,8 @@ use crate::tool_cards::{
 const MAX_LISTED: usize = 32;
 /// Ended processes remembered, so a result read before an exit cannot list it again.
 const MAX_REMEMBERED_ENDS: usize = 64;
+/// The longest call id `background_tool_call` accepts.
+const MAX_CALL_ID_BYTES: usize = 256;
 /// `start` calls whose result has not arrived yet, remembered for their command.
 const MAX_PENDING_STARTS: usize = 16;
 /// Characters of a command kept for a notification.
@@ -41,7 +43,12 @@ pub struct BackgroundProcesses {
     running: Vec<BackgroundProcess>,
     /// `cancel_process` commands sent and not finished, so a failure is reported.
     stops: Vec<String>,
-    /// Commands of `start` calls by call id, until their result names the process.
+    /// Foreground `bash` calls running now, oldest first, which the user may move.
+    foreground: Vec<String>,
+    /// `background_tool_call` commands sent and not finished.
+    moves: Vec<String>,
+    /// Commands of `start` and foreground `bash` calls by call id, until their result
+    /// names the process.
     starts: VecDeque<(String, String)>,
     ended: VecDeque<String>,
     exits: u64,
@@ -53,6 +60,11 @@ impl BackgroundProcesses {
     /// The processes still running, oldest first.
     pub fn running(&self) -> &[BackgroundProcess] {
         &self.running
+    }
+
+    /// Whether a foreground shell command is running that the user may move.
+    pub fn foreground_running(&self) -> bool {
+        !self.foreground.is_empty()
     }
 
     /// How many processes have stopped on their own, and what the latest one says.
@@ -96,14 +108,26 @@ impl BackgroundProcesses {
     }
 }
 
-/// Remembers the command of a live `bash` start, for the result that names its process.
+/// Remembers the command of a live `bash` start or foreground run, for the result
+/// that names its process; a foreground run can be moved until its result arrives.
 pub(super) fn observe_tool_call(state: &mut UiState, call: &ToolCallInput) {
-    if call.name != "bash" || call.arguments["operation"] != "start" {
+    if call.name != "bash" {
+        return;
+    }
+    let operation = call.arguments["operation"].as_str().unwrap_or("run");
+    if operation != "start" && operation != "run" {
         return;
     }
     let Some(command) = call.arguments["command"].as_str() else {
         return;
     };
+    if operation == "run" {
+        let foreground = &mut state.background_processes.foreground;
+        if foreground.len() == MAX_PENDING_STARTS {
+            foreground.remove(0);
+        }
+        foreground.push(call.call_id.clone());
+    }
     let starts = &mut state.background_processes.starts;
     if starts.len() == MAX_PENDING_STARTS {
         starts.pop_front();
@@ -113,17 +137,22 @@ pub(super) fn observe_tool_call(state: &mut UiState, call: &ToolCallInput) {
 
 /// Lists or drops the process a live `bash` result reports on.
 pub(super) fn observe_tool_result(state: &mut UiState, result: &ToolResultInput) {
-    // Results carry identities in the transcript's bounded form; the backend's own
-    // events and `get_state` name processes as it does.
-    let Some(process_id) = result.process_id.as_deref().map(identity_for_display) else {
-        return;
-    };
     let processes = &mut state.background_processes;
+    processes
+        .foreground
+        .retain(|call_id| *call_id != result.call_id);
+    // Every result retires its call's remembered command, whether or not it names a
+    // process, so a later call cannot pick up an earlier one's label.
     let start = processes
         .starts
         .iter()
         .position(|(call_id, _)| *call_id == result.call_id)
         .and_then(|index| processes.starts.remove(index));
+    // Results carry identities in the transcript's bounded form; the backend's own
+    // events and `get_state` name processes as it does.
+    let Some(process_id) = result.process_id.as_deref().map(identity_for_display) else {
+        return;
+    };
     match result.process_state.as_deref() {
         Some("running") => {
             let command = start.map_or_else(|| process_id.to_owned(), |(_, command)| command);
@@ -163,6 +192,7 @@ pub(super) fn reload(
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
     state.background_processes.running.clear();
+    state.background_processes.foreground.clear();
     if state.background_processes.read.is_some() || state.exit_requested {
         return Ok(Vec::new());
     }
@@ -170,6 +200,43 @@ pub(super) fn reload(
     let command = WispTypedClientRpcCommands::get_state(&id)?;
     state.background_processes.read = Some(id);
     Ok(vec![UiEffect::SendCommand(command)])
+}
+
+/// The move-to-background key: asks the backend to move the running foreground
+/// `bash` call, which then ends with the id of the process it became.
+///
+/// A batch announces all its calls before running any, and runs `bash` calls one
+/// at a time in order, so the oldest call without a result is the one running.
+pub(super) fn move_running(
+    state: &mut UiState,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    let Some(call_id) = state.background_processes.foreground.first().cloned() else {
+        return Ok(vec![
+            UiEffect::Notice("No shell command is running in the foreground.".into()),
+            UiEffect::RequestRender,
+        ]);
+    };
+    // The transcript's call ids are in bounded form; the backend knows the raw one.
+    let raw_call_id = identity_for_display(&call_id).to_owned();
+    if raw_call_id.len() > MAX_CALL_ID_BYTES || raw_call_id.starts_with("h:") {
+        return Ok(vec![
+            UiEffect::Notice("This command's call id is too long to move it.".into()),
+            UiEffect::RequestRender,
+        ]);
+    }
+    let id = ids.next_id(CommandKind::BackgroundToolCall);
+    let command = WispTypedClientRpcCommands::background_tool_call(&id, &raw_call_id)?;
+    let moves = &mut state.background_processes.moves;
+    if moves.len() == MAX_LISTED {
+        moves.remove(0);
+    }
+    moves.push(id);
+    Ok(vec![
+        UiEffect::SendCommand(command),
+        UiEffect::Notice("Moving the command to the background…".into()),
+        UiEffect::RequestRender,
+    ])
 }
 
 /// `/ps`: the running processes, numbered as `/kill` and the side panel number them.
@@ -269,11 +336,12 @@ pub(super) fn observe(state: &mut UiState, event: &BackendEvent) -> Option<Vec<U
             ok,
             error,
             ..
-        } if state.background_processes.stops.contains(command_id) => {
-            state
-                .background_processes
-                .stops
-                .retain(|stop| stop != command_id);
+        } if state.background_processes.stops.contains(command_id)
+            || state.background_processes.moves.contains(command_id) =>
+        {
+            let processes = &mut state.background_processes;
+            processes.stops.retain(|stop| stop != command_id);
+            processes.moves.retain(|stop| stop != command_id);
             // A stop that worked shows through `process.ended`.
             Some(if *ok {
                 vec![UiEffect::RequestRender]
@@ -400,6 +468,73 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn background_key_moves_running_call() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = Ids::default();
+        assert_eq!(
+            notices(&move_running(&mut state, &mut ids).unwrap()),
+            ["No shell command is running in the foreground."]
+        );
+        // A batch announces both calls; the first runs while the second waits.
+        for (call_id, command) in [("first", "make build"), ("second", "make test")] {
+            apply(
+                &mut state,
+                serde_json::json!({
+                    "type": "tool.call", "call_id": call_id, "name": "bash",
+                    "arguments": {"command": command}
+                }),
+            );
+        }
+        assert!(state.background_processes.foreground_running());
+
+        let [command] = sent(&move_running(&mut state, &mut ids).unwrap())
+            .try_into()
+            .unwrap();
+        assert_eq!(command["type"], "background_tool_call");
+        assert_eq!(command["call_id"], "first");
+
+        // The moved call ends with its process, which the list then shows, and the
+        // next call in the batch is the one running.
+        apply(
+            &mut state,
+            serde_json::json!({
+                "type": "tool.result", "call_id": "first", "name": "bash",
+                "output": "", "is_error": false, "process_id": "moved",
+                "process_state": "running", "process_started_at_ms": 1
+            }),
+        );
+        assert_eq!(listed(&state), [("moved", "make build")]);
+        let [next] = sent(&move_running(&mut state, &mut ids).unwrap())
+            .try_into()
+            .unwrap();
+        assert_eq!(next["call_id"], "second");
+    }
+
+    #[test]
+    fn finished_runs_leave_no_label() {
+        let mut state = UiState::new("fake".into(), None, None);
+        apply(
+            &mut state,
+            serde_json::json!({
+                "type": "tool.call", "call_id": "reused", "name": "bash",
+                "arguments": {"command": "make build"}
+            }),
+        );
+        apply(
+            &mut state,
+            serde_json::json!({
+                "type": "tool.result", "call_id": "reused", "name": "bash",
+                "output": "done", "is_error": false
+            }),
+        );
+
+        // A later call with the same id is labelled by its own command.
+        start(&mut state, "reused", "npm run dev");
+
+        assert_eq!(listed(&state), [("reused", "npm run dev")]);
     }
 
     #[test]

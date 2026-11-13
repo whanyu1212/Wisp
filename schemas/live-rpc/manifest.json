@@ -4,9 +4,9 @@
   "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
   "schema_hashes": {
     "client-handshake.schema.json": "2ba0112f0a8df9451f6a70aeeadb35c613474c66a167f4ff135ca9fabeebebdd",
-    "commands.schema.json": "e4ec977c90611da16a20aae39ac6d7dc22a57ea97d6d315cc9a28318c26cc6b8",
+    "commands.schema.json": "de864baa39784b49108e8b8ada892f13926143818186b6ccce5507a219dfa28a",
     "events.schema.json": "8879e84f1f08202e0c7d0230efb0bd1dbc993841ee62e6835380fd6daf184492",
-    "rust-commands.schema.json": "6eecd007452a2f40ce23001ee25c50b1946719fe2f66e7f91815ca7e7e8e99aa",
+    "rust-commands.schema.json": "fd506909f91370ffe157294ce8fe94d642fffc9fe9824df551c78df6e576d2ae",
     "rust-events.schema.json": "8ea34e99d6f0484844505e994a2bf4e85ff35355f2a5a1154ad6ae430dad7bfa",
     "server-handshake.schema.json": "d2e352d42b90576a4151b42967603ec0d6301d5c81c8c405b531ab665f3e4c4b"
   },
