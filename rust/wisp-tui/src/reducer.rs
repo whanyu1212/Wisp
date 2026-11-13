@@ -1245,6 +1245,13 @@ pub enum BackendEvent {
     },
     /// Servers that were still connecting when the backend started have settled.
     McpStatusUpdated(discovery::McpReport),
+    /// A background process stopped on its own, during a run or between runs.
+    ProcessEnded {
+        process_id: String,
+        state: crate::tool_cards::ProcessDisplayState,
+        exit_code: Option<i32>,
+        duration_ms: u64,
+    },
     McpSnippetPreviewed {
         command_id: String,
         servers: discovery::McpPreviewReport,
@@ -5523,6 +5530,17 @@ fn handle_backend_event(
                 images: follow_up_images,
             },
         )),
+        BackendEvent::ProcessEnded {
+            process_id,
+            state: ended,
+            exit_code,
+            duration_ms,
+        } => {
+            state
+                .transcript
+                .observe_process_ended(&process_id, ended, exit_code, duration_ms);
+            Ok(vec![UiEffect::RequestRender])
+        }
         BackendEvent::QueueMessageInjected {
             kind,
             content,
@@ -7134,6 +7152,67 @@ mod tests {
                 delta: "hello".into(),
                 content_kind: MessageContentKind::Text,
             }
+        );
+    }
+
+    #[test]
+    fn process_end_closes_its_card() {
+        use crate::tool_cards::ProcessDisplayState;
+        let ended = |process_id: &str, state: &str, exit_code: Option<i32>| {
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "process.ended",
+                "timestamp": "2026-11-13T09:00:00Z",
+                "process_id": process_id,
+                "command": "gh pr checks 1 --watch",
+                "state": state,
+                "exit_code": exit_code,
+                "duration_ms": 252_000,
+                "notify": true,
+            }))
+            .unwrap()
+        };
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+
+        for event in [
+            ended("ok", "completed", Some(0)),
+            ended("red", "completed", Some(4)),
+            ended("slow", "timed_out", None),
+        ] {
+            reduce(&mut state, UiAction::BackendEvent(event), &mut ids).unwrap();
+        }
+
+        let cards: Vec<_> = state
+            .transcript
+            .entries()
+            .iter()
+            .filter_map(|entry| entry.process_card())
+            .map(|card| {
+                (
+                    card.process_id.as_str(),
+                    card.display_state,
+                    card.exit_code,
+                    card.elapsed_ms,
+                )
+            })
+            .collect();
+        assert_eq!(
+            cards,
+            [
+                ("ok", ProcessDisplayState::Completed, Some(0), Some(252_000)),
+                ("red", ProcessDisplayState::Failed, Some(4), Some(252_000)),
+                ("slow", ProcessDisplayState::TimedOut, None, Some(252_000)),
+            ]
+        );
+        assert!(
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "process.ended",
+                "process_id": "x",
+                "command": "make",
+                "state": "cancelled",
+                "duration_ms": 1,
+            }))
+            .is_err()
         );
     }
 

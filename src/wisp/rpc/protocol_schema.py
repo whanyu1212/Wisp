@@ -623,6 +623,12 @@ _EVENT_FIXTURE_VALUES: dict[str, dict[str, object]] = {
         "arguments": {"path": "fixture.txt"},
     },
     "tool.result": {"call_id": "call-1", "name": "read", "output": "", "is_error": False},
+    "process.ended": {
+        "process_id": "process-1",
+        "command": "make test",
+        "state": "completed",
+        "duration_ms": 1200,
+    },
     "trust.requested": {"request_id": "trust-1", "project_path": Path("fixture.jsonl")},
     "trust.resolved": {
         "request_id": "trust-1",

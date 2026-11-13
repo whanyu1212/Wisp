@@ -9,7 +9,7 @@ from pydantic import ValidationError
 
 from wisp.agent.context_budget import context_fingerprint
 from wisp.events import ImagePart, ToolCallSnapshot
-from wisp.messages import Message, Role
+from wisp.messages import Message, ProcessNotice, Role
 from wisp.messages.history import normalize_provider_history
 
 
@@ -284,3 +284,47 @@ def test_rejects_misplaced_images(role: Role, images: tuple[ImagePart, ...]) -> 
         Message(role=role, content="look", images=images)
 
     assert Message(role="user", content="look", images=(_IMAGE,)).images == (_IMAGE,)
+
+
+def test_process_notices_lead_prompt() -> None:
+    notice = ProcessNotice(
+        process_id="p1", command="gh pr checks 1\n  --watch", state="completed", exit_code=0
+    )
+    message = Message(role="user", content="what next?").with_process_notices([notice])
+
+    assert message.content.startswith("[Wisp: background processes")
+    assert "- process_id=p1: exit code 0: gh pr checks 1 --watch\n\nwhat next?" in message.content
+    assert message.prompt_content == "what next?"
+    assert message.user_visible_content == "what next?"
+    assert Message.model_validate(message.model_dump()).prompt_content == "what next?"
+
+
+def test_older_notice_wording_stripped() -> None:
+    """A prompt saved with different notice text still strips at its first blank line."""
+
+    notice = ProcessNotice(process_id="p1", command="make", state="failed")
+    message = Message(
+        role="user",
+        content="[Wisp: earlier wording]\n- p1 failed\n\nfirst\n\nsecond",
+        process_notices=(notice,),
+    )
+
+    assert message.prompt_content == "first\n\nsecond"
+
+
+@pytest.mark.parametrize("case", ["assistant", "twice"])
+def test_process_notices_refused(case: str) -> None:
+    notice = ProcessNotice(process_id="p1", command="make", state="timed_out")
+    message = Message(role="assistant" if case == "assistant" else "user", content="x")
+    if case == "twice":
+        message = message.with_process_notices([notice])
+
+    with pytest.raises(ValueError, match="process notices go once onto a user message"):
+        message.with_process_notices([notice])
+
+
+def test_no_notices_unchanged() -> None:
+    message = Message(role="user", content="hi")
+
+    assert message.with_process_notices([]) is message
+    assert "process_notices" not in message.model_dump(exclude_none=True)

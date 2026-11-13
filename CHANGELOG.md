@@ -13,9 +13,11 @@ this policy.
 ## 0.9.2 — Unreleased
 
 0.9.2 is a patch release on 0.9.1. The terminal UI reads a turn as one activity list, and
-compaction keeps more of long tool output in its checkpoint. It changes no command, event,
-handshake, session, settings, credential, or trust format, so 0.9.1 and 0.9.2 read each other's
-sessions. The backend and frontend must come from the same release.
+compaction keeps more of long tool output in its checkpoint. A background process can tell the
+agent when it stops. That adds one event, `process.ended`, and an optional `process_notices` field
+on persisted user messages, which 0.9.1 ignores; no command, handshake, settings, credential, or
+trust format changes, so 0.9.1 and 0.9.2 still read each other's sessions. The backend and
+frontend must come from the same release.
 
 ### TUI
 
@@ -31,6 +33,17 @@ sessions. The backend and frontend must come from the same release.
   waiting through output until the process stops or the wait ends. Before, any output ended the
   wait, so a watcher such as `gh pr checks --watch` made the model poll again every few seconds.
   The default, `until=output`, is unchanged.
+- A process started with `bash operation=start notify_on_exit=true` tells the agent when it stops:
+  the exit is put in front of the next prompt, with the process id, state, exit code, and
+  command, never its output, which the agent reads by polling. A poll that already returned the
+  exit drops the notice, and so does switching session. The start result says whether a notice
+  will come: an embedding that runs the bash tool outside the RPC host gets none.
+- New event `process.ended`, published whenever a started process stops on its own (not when
+  it is cancelled), with or without a run in progress: `process_id`, `command` (at most 500
+  characters), `state` (`completed`, `failed`, or `timed_out`), `exit_code`, `duration_ms`,
+  and `notify`.
+- In the TUI, a background process's card closes when the process stops, with its exit code
+  and time, even when nothing polled it and the agent is idle.
 
 ### Compaction
 

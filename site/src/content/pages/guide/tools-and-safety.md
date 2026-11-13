@@ -47,7 +47,10 @@ the same safety category and approval policy. A one-shot `timeout` is at most 3,
 started process's `lifetime_seconds` at most 86,400 (a day), and `yield_seconds` and `wait_seconds`
 at most 600. A poll that waits returns at the process's next output; with `until=exit` it waits
 through output until the process stops or the wait ends, so a watcher that prints progress, such as
-`gh pr checks --watch`, does not cut the wait short. When every process slot is taken, the error
+`gh pr checks --watch`, does not cut the wait short. A process started with `notify_on_exit=true`
+tells the agent when it stops, in front of the next prompt, so the agent can end its turn instead
+of waiting; the notice names the process and how it ended, and the agent polls once to read its
+output. Every exit also appears in the TUI as it happens. When every process slot is taken, the error
 lists the processes holding them, so the model can poll or cancel one.
 
 ### Watching a command while it runs

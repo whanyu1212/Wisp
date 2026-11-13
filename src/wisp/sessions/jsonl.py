@@ -1164,7 +1164,7 @@ class JsonlSession:
                 active_leaf_id: str | None = entry_id
                 if isinstance(target, MessageSessionEntry) and target.message.role == "user":
                     active_leaf_id = target.parent_id
-                    editor_text = target.message.content
+                    editor_text = target.message.prompt_content
                     editor_images = target.message.images or ()
 
                 if active_leaf_id == previous_active_leaf_id:

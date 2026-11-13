@@ -26,6 +26,7 @@ from typing_extensions import TypeAliasType
 
 from wisp.events._base import (
     CompactionReason,
+    EndedProcessState,
     FinishReason,
     ImageMediaType,
     ImagePart,
@@ -162,11 +163,13 @@ from wisp.events.tools import (
     MAX_TOOL_RESULT_IMAGES,
     NESTED_CALL_ARGUMENTS_MAX_CHARS,
     NESTED_CALL_TEXT_MAX_CHARS,
+    PROCESS_COMMAND_SUMMARY_MAX_CHARS,
     TOOL_PROGRESS_TAIL_MAX_BYTES,
     TOOL_PROGRESS_TAIL_MAX_LINES,
     EditLocation,
     ModelResponseUsage,
     NestedToolCall,
+    ProcessEnded,
     ProjectConfigApplied,
     ToolApprovalRequested,
     ToolApprovalResolved,
@@ -218,6 +221,7 @@ __all__ = [
     "NESTED_CALL_ARGUMENTS_MAX_CHARS",
     "NESTED_CALL_TEXT_MAX_CHARS",
     "NestedToolCall",
+    "PROCESS_COMMAND_SUMMARY_MAX_CHARS",
     "TOOL_PROGRESS_TAIL_MAX_BYTES",
     "TOOL_PROGRESS_TAIL_MAX_LINES",
     "DEFAULT_AGENT_MODE",
@@ -271,6 +275,7 @@ __all__ = [
     "JsonObjectAdapter",
     "KnownWispEvent",
     "KnownWispEventAdapter",
+    "EndedProcessState",
     "ManagedProcessState",
     "McpStatusUpdated",
     "MessageCompleted",
@@ -281,6 +286,7 @@ __all__ = [
     "ModelResponseUsage",
     "PermissionMode",
     "PermissionState",
+    "ProcessEnded",
     "ProjectConfigApplied",
     "ProjectFilesInvalidated",
     "ProviderRetrying",
@@ -414,6 +420,7 @@ KnownWispEvent = TypeAliasType(
         | ToolExecutionProgress
         | ToolExecutionEnded
         | ToolResultReady
+        | ProcessEnded
         | TurnCompleted
         | SessionSaved
         | SessionDirectoryChanged

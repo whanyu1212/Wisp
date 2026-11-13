@@ -18,6 +18,7 @@ from wisp.events import (
     CompactionReason,
     ContextBudget,
     ContextObservation,
+    EndedProcessState,
     FinishReason,
     ImagePart,
     JsonObject,
@@ -31,6 +32,52 @@ from wisp.events import (
 from wisp.skills.models import SkillInvocationEvidence
 
 Role = Literal["system", "user", "assistant", "tool"]
+
+# How much of a command a process notice quotes; the model has the full command.
+_NOTICE_COMMAND_MAX_CHARS = 200
+
+
+class ProcessNotice(BaseModel):
+    """A background process the model asked to hear about, which has stopped.
+
+    Notices ride in front of the next prompt the model receives. They hold only
+    what Wisp knows of the process, never its output, which the model reads by
+    polling: output is untrusted and could imitate the notice text.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    process_id: str = Field(min_length=1)
+    command: str
+    state: EndedProcessState
+    exit_code: int | None = None
+
+
+def process_notices_text(notices: Sequence[ProcessNotice]) -> str:
+    """Render the text that tells the model which background processes stopped.
+
+    Args:
+        notices (Sequence[ProcessNotice]): The processes, in the order they stopped.
+
+    Returns:
+        str: One header line and one line per process.
+    """
+
+    lines = [
+        "[Wisp: background processes you asked to hear about have stopped. "
+        "Poll each process_id (bash operation=poll) to read its output.]"
+    ]
+    for notice in notices:
+        outcome = (
+            f"exit code {notice.exit_code}"
+            if notice.state == "completed"
+            else notice.state.replace("_", " ")
+        )
+        command = " ".join(notice.command.split())
+        if len(command) > _NOTICE_COMMAND_MAX_CHARS:
+            command = command[: _NOTICE_COMMAND_MAX_CHARS - 1] + "…"
+        lines.append(f"- process_id={notice.process_id}: {outcome}: {command}")
+    return "\n".join(lines)
 
 
 class NativeOutput(BaseModel):
@@ -73,6 +120,8 @@ class Message(BaseModel):
     cost: UsageCost | None = None
     context_observation: ContextObservation | None = None
     skill_invocation: SkillInvocationEvidence | None = None
+    # Background processes announced in front of this prompt; see ``with_process_notices``.
+    process_notices: tuple[ProcessNotice, ...] | None = Field(default=None, min_length=1)
     native_output: NativeOutput | None = None
     created_at: datetime = Field(default_factory=utc_now)
 
@@ -93,7 +142,54 @@ class Message(BaseModel):
 
         if self.skill_invocation is not None:
             return self.skill_invocation.original_content
-        return self.content
+        return self.prompt_content
+
+    @property
+    def prompt_content(self) -> str:
+        """Return the content without the process notices put in front of it."""
+
+        if self.process_notices is None:
+            return self.content
+        # The notice block holds no blank line, so the first one ends it. Splitting
+        # there, rather than matching the rendered text, keeps prompts saved by an
+        # earlier release readable if the notice wording changes.
+        return self.content.partition(_NOTICES_SEPARATOR)[2]
+
+    def with_process_notices(self, notices: Sequence[ProcessNotice]) -> Self:
+        """Return this user message with stopped background processes announced first.
+
+        The notices go in front of the content the provider receives;
+        ``prompt_content`` and ``user_visible_content`` leave them out again.
+
+        Args:
+            notices (Sequence[ProcessNotice]): The processes to announce; none
+                returns the message unchanged.
+
+        Returns:
+            Self: The message carrying the notices.
+
+        Raises:
+            ValueError: The message is not a user message, or already has notices.
+        """
+
+        if not notices:
+            return self
+        if self.role != "user" or self.process_notices is not None:
+            raise ValueError("process notices go once onto a user message")
+        announced = tuple(notices)
+        return self.model_copy(
+            update={
+                "content": _notices_prefix(announced) + self.content,
+                "process_notices": announced,
+            }
+        )
+
+
+_NOTICES_SEPARATOR = "\n\n"
+
+
+def _notices_prefix(notices: Sequence[ProcessNotice]) -> str:
+    return process_notices_text(notices) + _NOTICES_SEPARATOR
 
 
 class CompactionRecord(BaseModel):

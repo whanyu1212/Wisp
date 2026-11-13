@@ -1789,6 +1789,77 @@
       "title": "PermissionState",
       "type": "object"
     },
+    "ProcessEnded": {
+      "additionalProperties": false,
+      "description": "A process started with ``bash operation=start`` stopped on its own.\n\nPublished whenever it happens, with or without a run in progress, so a\nfrontend can close the process's card. A cancelled process publishes nothing:\nthe cancel's tool result already reports it.",
+      "properties": {
+        "command": {
+          "maxLength": 500,
+          "title": "Command",
+          "type": "string"
+        },
+        "duration_ms": {
+          "minimum": 0,
+          "title": "Duration Ms",
+          "type": "integer"
+        },
+        "exit_code": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exit Code"
+        },
+        "notify": {
+          "default": false,
+          "title": "Notify",
+          "type": "boolean"
+        },
+        "process_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Process Id",
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "completed",
+            "failed",
+            "timed_out"
+          ],
+          "title": "State",
+          "type": "string"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "process.ended",
+          "default": "process.ended",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "timestamp",
+        "process_id",
+        "command",
+        "state",
+        "exit_code",
+        "duration_ms",
+        "notify"
+      ],
+      "title": "ProcessEnded",
+      "type": "object"
+    },
     "ProjectConfigApplied": {
       "additionalProperties": false,
       "description": "A trusted project's local config was applied mid-session.\n\nEmitted by the RPC process after a first-run trust approval rebuilds the runtime\nfrom the project's ``.wisp/settings.json``. It lets an out-of-process front-end\n(the TUI) refresh the provider/model/auth it displays and mutates, so its header\nand ``/provider`` / ``/model`` / ``/auth`` / ``/connect`` commands match the config\nthe agent is actually running with. It also carries the effective automatic-\ncompaction setting so frontends do not infer policy from their own startup state.\n\n``effort`` carries the RPC agent's already-filtered, authoritative post-rebuild\nvalue (see the trusted-project rebuild in ``wisp.rpc.host``) rather than\nleaving the TUI to re-derive it from its own locally-tracked, already-once-filtered\nvalue -- the TUI's own copy was filtered against the untrusted-startup\nprovider/model, so a tier invalid there but valid for the trusted project's\nprovider/model would already be gone and unrecoverable from it. A single\nauthoritative value avoids the two sides' filtering logic silently diverging.",
@@ -8545,6 +8616,7 @@
       "message.delta": "#/$defs/MessageDelta",
       "message.started": "#/$defs/MessageStarted",
       "model.provider_auto_switched": "#/$defs/ModelProviderAutoSwitched",
+      "process.ended": "#/$defs/ProcessEnded",
       "project.config.applied": "#/$defs/ProjectConfigApplied",
       "project_files.invalidated": "#/$defs/ProjectFilesInvalidated",
       "provider.retrying": "#/$defs/ProviderRetrying",
@@ -8661,6 +8733,9 @@
     },
     {
       "$ref": "#/$defs/ToolResultReady"
+    },
+    {
+      "$ref": "#/$defs/ProcessEnded"
     },
     {
       "$ref": "#/$defs/TurnCompleted"
@@ -8941,6 +9016,16 @@
       "provider": "fixture",
       "timestamp": "2026-01-02T03:04:05Z",
       "type": "model.provider_auto_switched"
+    },
+    "process.ended": {
+      "command": "make test",
+      "duration_ms": 1200,
+      "exit_code": null,
+      "notify": false,
+      "process_id": "process-1",
+      "state": "completed",
+      "timestamp": "2026-01-02T03:04:05Z",
+      "type": "process.ended"
     },
     "project.config.applied": {
       "auth_path": "fixture.jsonl",

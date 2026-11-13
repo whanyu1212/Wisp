@@ -371,6 +371,21 @@ impl BackendEvent {
                 &string_field(value, &event_type, "message")?,
                 super::SESSION_NOTICE_MAX_BYTES,
             )),
+            "process.ended" => {
+                let exit_code = optional_i64_field(value, &event_type, "exit_code")?
+                    .map(i32::try_from)
+                    .transpose()
+                    .map_err(|_| EventProjectionError::InvalidField {
+                        event_type: event_type.clone(),
+                        field: "exit_code",
+                    })?;
+                Self::ProcessEnded {
+                    process_id: exact_string_field(value, &event_type, "process_id", 128)?,
+                    state: ended_process_state(value, &event_type, exit_code)?,
+                    exit_code,
+                    duration_ms: u64_field(value, &event_type, "duration_ms")?,
+                }
+            }
             "rpc.model_catalog"
             | "rpc.project_files"
             | "project_files.invalidated"
@@ -1645,6 +1660,24 @@ fn string_field_ref<'a>(
             event_type: event_type.to_owned(),
             field,
         })
+}
+
+/// How the card of a process that stopped on its own reads: a non-zero exit fails.
+fn ended_process_state(
+    value: &Value,
+    event_type: &str,
+    exit_code: Option<i32>,
+) -> Result<crate::tool_cards::ProcessDisplayState, EventProjectionError> {
+    use crate::tool_cards::ProcessDisplayState;
+    match string_field_ref(value, event_type, "state")? {
+        "completed" if exit_code == Some(0) => Ok(ProcessDisplayState::Completed),
+        "completed" | "failed" => Ok(ProcessDisplayState::Failed),
+        "timed_out" => Ok(ProcessDisplayState::TimedOut),
+        _ => Err(EventProjectionError::InvalidField {
+            event_type: event_type.to_owned(),
+            field: "state",
+        }),
+    }
 }
 
 fn string_field(

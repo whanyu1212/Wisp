@@ -26,9 +26,9 @@ const LIVE_TRANSCRIPT_BYTE_LIMIT: usize = 16 * 1024 * 1024;
 const LIVE_RETENTION_OMISSION_MARKER: &str = "[earlier live transcript entries omitted]";
 
 use crate::tool_cards::{
-    INTERRUPTED_TOOL_RESULT_TEXT, ProcessCallIdentity, ProcessCardSnapshot, ProcessOperation,
-    ToolCallInput, ToolCardSnapshot, ToolProgressInput, ToolResultInput, ToolStatus,
-    identity_for_display, process_call_identity,
+    INTERRUPTED_TOOL_RESULT_TEXT, ProcessCallIdentity, ProcessCardSnapshot, ProcessDisplayState,
+    ProcessOperation, ToolCallInput, ToolCardSnapshot, ToolProgressInput, ToolResultInput,
+    ToolStatus, identity_for_display, process_call_identity,
 };
 use crate::tool_detail::{
     DetailAvailability, DetailUnavailableReason, ToolDetailPresentation, ToolDetailSource,
@@ -1077,6 +1077,31 @@ impl Transcript {
             self.bump_card(binding.entry_id);
         }
         changed
+    }
+
+    /// Close a background process's card when the backend says it stopped on its own.
+    ///
+    /// The card is created when nothing polled the process, so the exit still shows
+    /// as a row, labelled from the call that started it. Returns None when the
+    /// process cannot be tracked.
+    pub fn observe_process_ended(
+        &mut self,
+        process_id: &str,
+        ended: ProcessDisplayState,
+        exit_code: Option<i32>,
+        duration_ms: u64,
+    ) -> Option<TranscriptEntryId> {
+        // A process ends on its own clock, often while the model is replying, so this
+        // leaves the active response open: its next delta must not start a new row.
+        let entry_id = self.process_entry_for(process_id)?;
+        let TranscriptEntryKind::Process(card) = &mut self.entry_mut(entry_id).kind else {
+            unreachable!("process index must target a process card")
+        };
+        card.display_state = ended;
+        card.exit_code = exit_code;
+        card.elapsed_ms = Some(duration_ms);
+        self.bump_card(entry_id);
+        Some(entry_id)
     }
 
     pub fn observe_tool_result(&mut self, input: ToolResultInput) -> TranscriptEntryId {
@@ -2997,6 +3022,76 @@ mod tests {
             edit_locations: Vec::new(),
             images: Vec::new(),
         }
+    }
+
+    #[test]
+    fn process_end_updates_polled_card() {
+        let mut transcript = Transcript::default();
+        transcript.observe_tool_call(call(
+            "start",
+            "bash",
+            serde_json::json!({"operation": "start", "command": "uv run pytest -q"}),
+        ));
+        let mut started = result("start", "");
+        started.name = "bash".into();
+        started.process_id = Some("process-test".into());
+        started.process_state = Some("running".into());
+        transcript.observe_tool_result(started);
+        let poll = transcript.observe_tool_call(call(
+            "poll",
+            "bash",
+            serde_json::json!({"operation": "poll", "process_id": "process-test"}),
+        ));
+        let entries = transcript.entries().len();
+
+        let ended = transcript.observe_process_ended(
+            "process-test",
+            ProcessDisplayState::Completed,
+            Some(0),
+            9_000,
+        );
+
+        assert_eq!(ended, Some(poll));
+        assert_eq!(transcript.entries().len(), entries);
+        let card = transcript.entry(poll).unwrap().process_card().unwrap();
+        assert_eq!(card.display_state, ProcessDisplayState::Completed);
+        assert_eq!(card.task_label.as_deref(), Some("Python tests"));
+        assert_eq!(card.elapsed_ms, Some(9_000));
+    }
+
+    #[test]
+    fn process_end_keeps_reply_whole() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("watch CI".into());
+        let reply = transcript.append_message_delta(1, "CI is ");
+
+        transcript.observe_process_ended("process-ci", ProcessDisplayState::Completed, Some(0), 1);
+
+        assert_eq!(transcript.append_message_delta(1, "green"), reply);
+        assert_eq!(transcript.entry(reply).unwrap().content, "CI is green");
+    }
+
+    #[test]
+    fn stale_running_poll_after_end() {
+        let mut transcript = Transcript::default();
+        transcript.observe_tool_call(call(
+            "poll",
+            "bash",
+            serde_json::json!({"operation": "poll", "process_id": "process-test"}),
+        ));
+        let card = transcript
+            .observe_process_ended("process-test", ProcessDisplayState::Failed, Some(2), 5)
+            .unwrap();
+        let mut polled = result("poll", "");
+        polled.name = "bash".into();
+        polled.process_id = Some("process-test".into());
+        polled.process_state = Some("running".into());
+
+        transcript.observe_tool_result(polled);
+
+        let card = transcript.entry(card).unwrap().process_card().unwrap();
+        assert_eq!(card.display_state, ProcessDisplayState::Failed);
+        assert_eq!(card.exit_code, Some(2));
     }
 
     #[test]

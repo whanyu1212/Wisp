@@ -24,6 +24,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
+from typing import Protocol
 
 import anyio
 
@@ -148,6 +149,7 @@ from wisp.mcp.discovery import (
 from wisp.messages import (
     CompactionRecord,
     Message,
+    ProcessNotice,
     completion_event_has_history,
     message_from_completion_event,
     queued_message_images,
@@ -230,6 +232,23 @@ PERSISTED_SESSION_EVENT_TYPES = frozenset(
         "session.directory_changed",
     }
 )
+
+
+class ProcessNoticeSource(Protocol):
+    """Background-process exits the model asked to hear about, held for its next prompt.
+
+    A run reads the held notices when it builds its prompt and marks them
+    delivered only once that prompt is saved, so a run that stops earlier
+    leaves them for the next one.
+    """
+
+    def pending(self) -> tuple[ProcessNotice, ...]:
+        """Return the held notices, in the order the processes stopped."""
+        ...
+
+    def mark_delivered(self, notices: Sequence[ProcessNotice]) -> None:
+        """Stop holding ``notices``, which a saved prompt now carries."""
+        ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -536,6 +555,7 @@ class CodingSession:
         codemode: bool | None = None,
         subagents: bool = False,
         subagent_model: str | None = None,
+        process_notices: ProcessNoticeSource | None = None,
     ) -> None:
         self.sessions = sessions
         self.events = events
@@ -551,6 +571,9 @@ class CodingSession:
         # The fallback the user was last warned about, so a conversation says it once.
         self._warned_subagent_fallback: tuple[str, str, str, str | None] | None = None
         self._mcp_server_connected = mcp_server_connected
+        # The background-process exits the model asked to hear about; each saved
+        # prompt carries the ones that arrived since the last.
+        self._process_notices = process_notices
         self.tool_policy = tool_policy or ToolPolicy.allow_all_tools()
         self.tool_approval_policy = tool_approval_policy or ToolApprovalPolicy.require_approval()
         self.tools = (
@@ -632,6 +655,7 @@ class CodingSession:
         codemode: bool | None = None,
         subagents: bool = False,
         subagent_model: str | None = None,
+        process_notices: ProcessNoticeSource | None = None,
     ) -> CodingSession:
         """Create a session from one resolved dynamic configuration snapshot."""
 
@@ -661,6 +685,7 @@ class CodingSession:
             codemode=codemode,
             subagents=subagents,
             subagent_model=subagent_model,
+            process_notices=process_notices,
         )
 
     @property
@@ -1536,6 +1561,8 @@ class CodingSession:
         run_entry_start = run_snapshot.entry_count
         run_start_leaf_id = run_snapshot.active_leaf_id
 
+        notices = self._process_notices.pending() if self._process_notices is not None else ()
+        user_message = user_message.with_process_notices(notices)
         # Allocate the prompt's identity before AgentStarted, preserving the
         # existing event order while allowing frontends to identify their echo.
         user_entry = MessageSessionEntry(
@@ -1567,6 +1594,10 @@ class CodingSession:
             user_entry,
             repository_status=session_prompt.repository_status,
         )
+        # Only a saved prompt delivers its notices: a run cancelled or failed
+        # before this point leaves them for the next prompt.
+        if notices and self._process_notices is not None:
+            self._process_notices.mark_delivered(notices)
         # Add the persisted prompt before checking the threshold so provider limits
         # apply to the complete next request, not only the resumed history.
         harness.append_message(with_directory_notes(user_message, directory_notes))

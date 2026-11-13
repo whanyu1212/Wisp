@@ -56,6 +56,7 @@ from wisp.rpc.execution import (
 from wisp.rpc.handlers.inspection import rpc_skill_catalog_snapshot, rpc_workspace_report
 from wisp.rpc.handlers.mcp import RpcMcpServers, RpcToolSelection, rpc_mcp_status_snapshot
 from wisp.rpc.handlers.project_files import RpcProjectFiles
+from wisp.rpc.session.process_exits import ProcessExitNotices
 from wisp.rpc.working_directory import (
     DirectoryMove,
     RpcWorkingDirectory,
@@ -754,6 +755,18 @@ class RpcHost:
             project_root=project_context_root,
             skill_catalog=skill_catalog,
         )
+        host: RpcHost | None = None
+
+        def publish_event(event: WispEvent) -> None:
+            if host is None:
+                write_event(event)
+            else:
+                host._publish_event(event)
+
+        # Background processes report their exits to frontends at once, and to the
+        # model with its next prompt when it asked to hear of them.
+        process_exits = ProcessExitNotices(runtime.process_supervisor, publish_event)
+        runtime.process_supervisor.set_exit_listener(process_exits.record)
         agent = CodingSession.from_configuration(
             initial_configuration,
             sessions=sessions,
@@ -773,14 +786,8 @@ class RpcHost:
             subagents=config.subagents,
             subagent_model=config.subagent_model,
             mcp_server_connected=runtime.mcp_server_connected,
+            process_notices=process_exits,
         )
-        host: RpcHost | None = None
-
-        def publish_event(event: WispEvent) -> None:
-            if host is None:
-                write_event(event)
-            else:
-                host._publish_event(event)
 
         async def rebuild_agent_for_trusted_project() -> None:
             assert host is not None
@@ -841,6 +848,8 @@ class RpcHost:
             # left: an approval or a dev server is not inherited by another one.
             approval_policy.reset_session_grants()
             failed = await runtime.process_supervisor.cancel_all()
+            # After the cancel, so an exit that lands during it is dropped too.
+            process_exits.clear()
             if failed:
                 processes = "process" if len(failed) == 1 else "processes"
                 process_ids = ", ".join(update.process_id for update in failed)

@@ -9,9 +9,11 @@ from .models import (
     CompactionRecord,
     Message,
     NativeOutput,
+    ProcessNotice,
     Role,
     completion_event_has_history,
     message_from_completion_event,
+    process_notices_text,
     queued_message_images,
 )
 
@@ -19,8 +21,10 @@ __all__ = [
     "CompactionRecord",
     "Message",
     "NativeOutput",
+    "ProcessNotice",
     "Role",
     "completion_event_has_history",
     "message_from_completion_event",
+    "process_notices_text",
     "queued_message_images",
 ]
