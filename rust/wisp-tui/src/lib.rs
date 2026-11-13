@@ -3335,6 +3335,25 @@ impl LiveUi {
         self.render_pending = true;
     }
 
+    /// Open the review of a diff card's retained change, as a click on the card's note
+    /// about its hidden changes does. A pending decision keeps the keyboard's focus.
+    fn open_diff_review(&mut self, entry_id: TranscriptEntryId) {
+        if matches!(
+            self.state.view_status,
+            ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
+        ) {
+            return;
+        }
+        let Some(presentation) = retained_detail(&self.state, entry_id)
+            .filter(|detail| crate::diff_review::is_diff(detail))
+        else {
+            return;
+        };
+        self.detail_view.open(entry_id, presentation);
+        self.notice = None;
+        self.render_pending = true;
+    }
+
     async fn request_selected_detail(
         &mut self,
         writer: &mpsc::Sender<WriterMessage>,

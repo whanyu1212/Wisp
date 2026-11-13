@@ -37,7 +37,15 @@ pub(crate) struct DiffCardPreview {
 ///
 /// Rows are filtered before the collapsed row budget is applied, so hunk headers and
 /// notes do not crowd out changed lines.
-pub(crate) fn preview(detail: &ToolDetailPresentation) -> DiffCardPreview {
+/// What opens the row that stands for a diff's hidden changes.
+pub(crate) const MORE_MARKER: &str = "▸ ";
+
+/// The preview of a diff under its card. `click_opens_review` words the note on its
+/// hidden changes for a terminal where a click on that note opens the review.
+pub(crate) fn preview(
+    detail: &ToolDetailPresentation,
+    click_opens_review: bool,
+) -> DiffCardPreview {
     let gutter = detail
         .rows
         .iter()
@@ -45,6 +53,7 @@ pub(crate) fn preview(detail: &ToolDetailPresentation) -> DiffCardPreview {
     let rows = coherent_preview_rows(
         &card_rows(&detail.rows),
         detail.additions.saturating_add(detail.deletions),
+        click_opens_review,
     );
     let emphasis = row_emphasis(&rows);
     let mut preview = DiffCardPreview {
@@ -102,7 +111,11 @@ pub(crate) fn preview(detail: &ToolDetailPresentation) -> DiffCardPreview {
 
 /// Show up to three changed lines with nearby context. End at a hunk boundary
 /// when possible; never splice a hidden tail onto the start of a function.
-fn coherent_preview_rows(rows: &[DetailRow], total_changes: u64) -> Vec<DetailRow> {
+fn coherent_preview_rows(
+    rows: &[DetailRow],
+    total_changes: u64,
+    click_opens_review: bool,
+) -> Vec<DetailRow> {
     const MAX_CHANGED_LINES: usize = 3;
     // A hunk can contribute three context lines on each side.
     const MAX_ROWS: usize = MAX_CHANGED_LINES + 6;
@@ -147,11 +160,18 @@ fn coherent_preview_rows(rows: &[DetailRow], total_changes: u64) -> Vec<DetailRo
     selected.push(DetailRow {
         key: hidden.first().map_or(0, |row| row.key),
         kind: DetailRowKind::Omission,
-        text: if changed > 0 {
-            let unit = if changed == 1 { "line" } else { "lines" };
-            format!("▸ {changed} more changed {unit} · Enter to review")
-        } else {
-            "▸ More detail · Enter to review".into()
+        text: {
+            let way = if click_opens_review {
+                "click to review"
+            } else {
+                "browse, then Enter to review"
+            };
+            if changed > 0 {
+                let unit = if changed == 1 { "line" } else { "lines" };
+                format!("{MORE_MARKER}{changed} more changed {unit} · {way}")
+            } else {
+                format!("{MORE_MARKER}More detail · {way}")
+            }
         },
         old_line: None,
         new_line: None,
@@ -370,13 +390,16 @@ mod tests {
         let short = (0..3)
             .map(|n| row(DetailRowKind::Addition, &format!("line {n}")))
             .collect::<Vec<_>>();
-        assert_eq!(coherent_preview_rows(&short, 3), short);
+        assert_eq!(coherent_preview_rows(&short, 3, false), short);
         let long = (0..30)
             .map(|n| row(DetailRowKind::Addition, &format!("line {n}")))
             .collect::<Vec<_>>();
-        let preview = coherent_preview_rows(&long, 30);
+        let preview = coherent_preview_rows(&long, 30, false);
         assert_eq!(preview[2].text, "line 2");
-        assert_eq!(preview[3].text, "▸ 27 more changed lines · Enter to review");
+        assert_eq!(
+            preview[3].text,
+            "▸ 27 more changed lines · browse, then Enter to review"
+        );
         assert!(!preview.iter().any(|row| row.text == "line 29"));
     }
 
@@ -386,9 +409,12 @@ mod tests {
             .map(|n| row(DetailRowKind::Context, &format!("context {n}")))
             .collect::<Vec<_>>();
         rows.extend((0..8).map(|n| row(DetailRowKind::Addition, &format!("added {n}"))));
-        let preview = coherent_preview_rows(&rows, 8);
+        let preview = coherent_preview_rows(&rows, 8, false);
         assert_eq!(preview[5].text, "added 2");
-        assert_eq!(preview[6].text, "▸ 5 more changed lines · Enter to review");
+        assert_eq!(
+            preview[6].text,
+            "▸ 5 more changed lines · browse, then Enter to review"
+        );
         assert_eq!(preview.len(), 7);
     }
 
@@ -401,9 +427,12 @@ mod tests {
             row(DetailRowKind::Deletion, "old tail"),
             row(DetailRowKind::Addition, "new tail"),
         ];
-        let preview = coherent_preview_rows(&rows, 4);
+        let preview = coherent_preview_rows(&rows, 4, false);
         assert_eq!(&preview[..2], &rows[..2]);
-        assert_eq!(preview[2].text, "▸ 2 more changed lines · Enter to review");
+        assert_eq!(
+            preview[2].text,
+            "▸ 2 more changed lines · browse, then Enter to review"
+        );
         assert_eq!(preview.len(), 3);
     }
 
@@ -411,10 +440,16 @@ mod tests {
     fn hidden_context_does_not_claim_more_changes() {
         let mut rows = vec![row(DetailRowKind::Addition, "added")];
         rows.extend((0..20).map(|n| row(DetailRowKind::Context, &format!("context {n}"))));
-        let preview = coherent_preview_rows(&rows, 1);
+        let preview = coherent_preview_rows(&rows, 1, false);
         assert_eq!(
             preview.last().unwrap().text,
-            "▸ More detail · Enter to review"
+            "▸ More detail · browse, then Enter to review"
+        );
+        // Where a click opens the review, the note names the click.
+        let preview = coherent_preview_rows(&rows, 1, true);
+        assert_eq!(
+            preview.last().unwrap().text,
+            "▸ More detail · click to review"
         );
     }
 
@@ -425,16 +460,19 @@ mod tests {
             row(DetailRowKind::Omission, "retained rows omitted"),
         ];
         assert_eq!(
-            coherent_preview_rows(&retained, 500)[1].text,
-            "▸ 499 more changed lines · Enter to review"
+            coherent_preview_rows(&retained, 500, false)[1].text,
+            "▸ 499 more changed lines · browse, then Enter to review"
         );
         let oversized = [row(
             DetailRowKind::Addition,
             &"x".repeat(DETAIL_COLLAPSED_MAX_BYTES + 1),
         )];
-        let preview = coherent_preview_rows(&oversized, 1);
+        let preview = coherent_preview_rows(&oversized, 1, false);
         assert_eq!(preview.len(), 1);
-        assert_eq!(preview[0].text, "▸ 1 more changed line · Enter to review");
+        assert_eq!(
+            preview[0].text,
+            "▸ 1 more changed line · browse, then Enter to review"
+        );
     }
 
     #[test]
@@ -467,7 +505,7 @@ mod tests {
                 rows,
                 truncated: false,
             };
-            let preview = preview(&detail);
+            let preview = preview(&detail, false);
             assert!(
                 preview.text.contains("497 more changed lines"),
                 "{}",

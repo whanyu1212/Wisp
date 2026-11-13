@@ -176,6 +176,8 @@ pub enum TranscriptRowTone {
 pub(crate) const RESULT_CONNECTOR: &str = "└ ";
 /// What later rows under a card start with, so they align under the connector.
 pub(crate) const RESULT_INDENT: &str = "  ";
+/// How much of a thought's first line its summary reads: more than any row shows.
+const THOUGHT_SUMMARY_MAX_CHARS: usize = 512;
 /// The action columns a card must keep before its row also reserves a fold hint.
 const ACTION_COLUMNS_BESIDE_HINT: usize = 24;
 
@@ -814,6 +816,8 @@ struct CardKey {
     entry_id: TranscriptEntryId,
     layout_epoch: u64,
     expanded_output: bool,
+    /// Whether a diff's note on its hidden changes names a click; see `FoldState`.
+    click_hints: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1186,7 +1190,7 @@ impl TranscriptRowCache {
         markdown_presentation_identity: Option<u64>,
     ) -> Option<CachedRow> {
         let next_entry = || {
-            transcript.entry_after(entry.id).map(|next| RowAnchor {
+            shown_after(transcript, entry.id).map(|next| RowAnchor {
                 entry_id: next.id,
                 position: RowPosition::Header,
             })
@@ -1204,23 +1208,24 @@ impl TranscriptRowCache {
                     self.build_card_row(transcript, entry, anchor, CardSection::Action, 0, width)?
                 }
             }
-            RowPosition::Header => ProjectedRow {
-                row: TranscriptRow::plain(
-                    anchor,
-                    entry.role,
-                    TranscriptRowKind::Header,
-                    match entry.role {
-                        TranscriptRole::User => "you",
-                        TranscriptRole::Assistant => "wisp",
-                        TranscriptRole::Tool => unreachable!("cards use card action rows"),
-                    }
-                    .into(),
-                    0,
-                ),
-                next: Some(RowAnchor {
-                    entry_id: entry.id,
-                    position: self.after_header_position(entry, width),
-                }),
+            RowPosition::Header => match reply_lead(entry) {
+                ReplyLead::Thought => self.build_thought_row(transcript, entry, anchor, width),
+                ReplyLead::Working => self.build_content_row(transcript, entry, anchor, 0, width),
+                ReplyLead::Label | ReplyLead::Hidden => ProjectedRow {
+                    row: TranscriptRow::plain(
+                        anchor,
+                        entry.role,
+                        TranscriptRowKind::Header,
+                        match entry.role {
+                            TranscriptRole::User => "you",
+                            TranscriptRole::Assistant => "wisp",
+                            TranscriptRole::Tool => unreachable!("cards use card action rows"),
+                        }
+                        .into(),
+                        0,
+                    ),
+                    next: self.after_header(transcript, entry, width),
+                },
             },
             RowPosition::Thought if !entry.thinking().is_empty() => {
                 self.build_thought_row(transcript, entry, anchor, width)
@@ -1328,7 +1333,7 @@ impl TranscriptRowCache {
                 }
             }
             RowPosition::UserLeadOut => {
-                let next = transcript.entry_after(entry.id)?;
+                let next = shown_after(transcript, entry.id)?;
                 if user_lead_out(transcript, entry) != Some(anchor) {
                     return None;
                 }
@@ -1372,20 +1377,42 @@ impl TranscriptRowCache {
         }
     }
 
-    fn after_header_position(&mut self, entry: &TranscriptEntry, width: usize) -> RowPosition {
-        if !entry.thinking().is_empty() {
-            RowPosition::Thought
-        } else {
-            self.after_thought_position(entry, width)
+    fn after_header(
+        &mut self,
+        transcript: &Transcript,
+        entry: &TranscriptEntry,
+        width: usize,
+    ) -> Option<RowAnchor> {
+        if entry.thinking().is_empty() {
+            return self.after_thought(transcript, entry, width);
         }
+        Some(RowAnchor {
+            entry_id: entry.id,
+            position: RowPosition::Thought,
+        })
     }
 
-    fn after_thought_position(&mut self, entry: &TranscriptEntry, width: usize) -> RowPosition {
+    /// What follows a reply's thought: its searches, then its text, or the separator when
+    /// a finished reply has neither, so a thought alone does not end on a blank row.
+    fn after_thought(
+        &mut self,
+        transcript: &Transcript,
+        entry: &TranscriptEntry,
+        width: usize,
+    ) -> Option<RowAnchor> {
         if !entry.searches().is_empty() {
-            RowPosition::Evidence(0)
-        } else {
-            self.position_for_offset(entry, 0, width)
+            return Some(RowAnchor {
+                entry_id: entry.id,
+                position: RowPosition::Evidence(0),
+            });
         }
+        if hides_body(entry) {
+            return separator_after(&self.fold, transcript, entry);
+        }
+        Some(RowAnchor {
+            entry_id: entry.id,
+            position: self.position_for_offset(entry, 0, width),
+        })
     }
 
     /// What follows a reply's searches: its text, or the separator when a finished reply
@@ -1445,6 +1472,19 @@ impl TranscriptRowCache {
             .find(|line| !line.is_empty())
         {
             let room = row_width.saturating_sub(heading.width() + LABEL_GAP.len());
+            // Providers title a thought in Markdown, often a bold line; the summary shows
+            // its text. A line that is only markup, such as a rule, stays as written.
+            // Only what can fit a row is parsed, however long the line.
+            let parsed = summary
+                .char_indices()
+                .nth(THOUGHT_SUMMARY_MAX_CHARS)
+                .map_or(summary, |(end, _)| &summary[..end]);
+            let text_only = crate::markdown::inline_text(parsed);
+            let summary = if text_only.trim().is_empty() {
+                summary
+            } else {
+                text_only.trim()
+            };
             let summary = summary
                 .graphemes(true)
                 .map(|grapheme| sanitize_grapheme(grapheme, 0))
@@ -1461,28 +1501,8 @@ impl TranscriptRowCache {
                 position: RowPosition::ThoughtContent(0),
             })
         } else {
-            Some(RowAnchor {
-                entry_id: entry.id,
-                position: self.after_thought_position(entry, width),
-            })
-            .filter(|_| {
-                !entry.display_content().is_empty()
-                    || !entry.searches().is_empty()
-                    || entry.state != TranscriptEntryState::Complete
-                    || separator_after(&self.fold, transcript, entry).is_some()
-            })
-            .or_else(|| separator_after(&self.fold, transcript, entry))
+            self.after_thought(transcript, entry, width)
         };
-        let next = next.or_else(|| {
-            if entry.display_content().is_empty() && entry.searches().is_empty() {
-                separator_after(&self.fold, transcript, entry)
-            } else {
-                Some(RowAnchor {
-                    entry_id: entry.id,
-                    position: self.after_thought_position(entry, width),
-                })
-            }
-        });
         let mut row = TranscriptRow::plain(anchor, entry.role, TranscriptRowKind::Thought, text, 0);
         // The label is bold, apart from its time and summary.
         if let Some(lead) = row.split_lead(label) {
@@ -1511,11 +1531,7 @@ impl TranscriptRowCache {
                     String::new(),
                     start,
                 ),
-                next: Some(RowAnchor {
-                    entry_id: entry.id,
-                    position: self.after_thought_position(entry, width),
-                })
-                .or_else(|| separator_after(&self.fold, transcript, entry)),
+                next: self.after_thought(transcript, entry, width),
             };
         }
         let mut text = String::new();
@@ -1553,10 +1569,7 @@ impl TranscriptRowCache {
                 entry_id: entry.id,
                 position: RowPosition::ThoughtContent(offset),
             }),
-            _ => Some(RowAnchor {
-                entry_id: entry.id,
-                position: self.after_thought_position(entry, width),
-            }),
+            _ => self.after_thought(transcript, entry, width),
         };
         ProjectedRow {
             row: TranscriptRow::plain(anchor, entry.role, TranscriptRowKind::Thought, text, start),
@@ -1655,18 +1668,16 @@ impl TranscriptRowCache {
                 TranscriptRowTone::Warning => ToolStatus::Cancelled,
                 _ => ToolStatus::Running,
             });
-            let (label, unit) = match &kind {
+            let label = match &kind {
                 CardGroupKey::Explore if tone == TranscriptRowTone::Pending => {
-                    ("Exploring".to_owned(), "actions")
+                    "Exploring".to_owned()
                 }
-                CardGroupKey::Explore => ("Explored".to_owned(), "actions"),
-                CardGroupKey::Tool(name) => (
-                    entry.tool_card()?.action_verb(),
-                    if name == "bash" { "commands" } else { "calls" },
-                ),
+                CardGroupKey::Explore => "Explored".to_owned(),
+                CardGroupKey::Tool(_) => entry.tool_card()?.action_verb(),
                 CardGroupKey::Mcp(_) => unreachable!("MCP has its own header"),
             };
-            let mut source = format!("{marker}{label}{ACTION_GAP}{} {unit}", members.len());
+            let counts = group_counts(transcript, &kind, &members);
+            let mut source = format!("{marker}{label}{ACTION_GAP}{counts}");
             let count_end = source.len();
             let (row_width, fold_hint) = if width >= ACTION_COLUMNS_BESIDE_HINT + hint.width() {
                 (width - hint.width(), hint)
@@ -1677,7 +1688,7 @@ impl TranscriptRowCache {
             // An open group lists its members below, so only a closed one previews them.
             if !expanded {
                 let budget = row_width.saturating_sub(self.action_columns(&source));
-                source.push_str(&self.group_preview(transcript, &kind, &members, budget));
+                source.push_str(&self.group_preview(transcript, &members, budget));
             }
             let spans = self.single_action_row_spans(
                 &source,
@@ -1840,6 +1851,7 @@ impl TranscriptRowCache {
             entry_id: entry.id,
             layout_epoch: entry.layout_epoch(),
             expanded_output: self.fold.is_output_expanded(entry.id),
+            click_hints: self.fold.click_hints,
         };
         if let Some(cached) = self.cards.get(&key) {
             let snapshot = Arc::clone(cached);
@@ -1847,7 +1859,11 @@ impl TranscriptRowCache {
             self.card_order.push_back(key);
             return Some(snapshot);
         }
-        let snapshot = Arc::new(card_projection(entry, key.expanded_output)?);
+        let snapshot = Arc::new(card_projection(
+            entry,
+            key.expanded_output,
+            key.click_hints,
+        )?);
         self.card_retained_bytes = self
             .card_retained_bytes
             .saturating_add(snapshot.retained_bytes());
@@ -2238,11 +2254,10 @@ impl TranscriptRowCache {
     fn group_preview(
         &mut self,
         transcript: &Transcript,
-        kind: &CardGroupKey,
         members: &[TranscriptEntryId],
         budget: usize,
     ) -> String {
-        let items = group_preview_items(transcript, kind, members);
+        let items = group_preview_items(transcript, members);
         // Members whose arguments are unknown are still counted in `+N`, so the
         // preview always agrees with the header's count.
         self.preview_list(&items, members.len(), budget)
@@ -3018,7 +3033,7 @@ impl TranscriptRowCache {
         let entry = transcript.entry(anchor.entry_id)?;
         match anchor.position {
             RowPosition::Header => {
-                let previous = transcript.entry_before(entry.id)?;
+                let previous = shown_before(transcript, entry.id)?;
                 if stacks_flush(&self.fold, transcript, previous) {
                     // A flush card follows the previous card's last row directly: walk that
                     // card's rows, from its closed group's line when it has one.
@@ -3241,15 +3256,9 @@ impl TranscriptRowCache {
             };
         }
         if !self.fold.is_expanded(entry.id) {
-            return RowAnchor {
-                entry_id: entry.id,
-                position: RowPosition::Thought,
-            };
+            return thought_anchor(entry);
         }
-        let mut current = RowAnchor {
-            entry_id: entry.id,
-            position: RowPosition::Thought,
-        };
+        let mut current = thought_anchor(entry);
         loop {
             let Some(cached) = self.row_at(transcript, current, width) else {
                 return current;
@@ -3271,10 +3280,7 @@ impl TranscriptRowCache {
         target: RowAnchor,
         width: usize,
     ) -> Option<RowAnchor> {
-        let mut current = RowAnchor {
-            entry_id: entry.id,
-            position: RowPosition::Thought,
-        };
+        let mut current = thought_anchor(entry);
         loop {
             let cached = self.row_at(transcript, current, width)?;
             let next = cached.next?;
@@ -3324,6 +3330,12 @@ impl TranscriptRowCache {
                 }
                 current = next;
             }
+        }
+        if reply_lead(entry) == ReplyLead::Working {
+            return RowAnchor {
+                entry_id: entry.id,
+                position: RowPosition::Header,
+            };
         }
         if hides_body(entry) {
             return self.before_body_anchor(transcript, entry, width);
@@ -3858,7 +3870,11 @@ fn push_image_note(action: &mut String, images: &[String]) -> usize {
     start
 }
 
-fn card_projection(entry: &TranscriptEntry, expanded_output: bool) -> Option<CardProjection> {
+fn card_projection(
+    entry: &TranscriptEntry,
+    expanded_output: bool,
+    click_hints: bool,
+) -> Option<CardProjection> {
     match &entry.kind {
         TranscriptEntryKind::Message => None,
         TranscriptEntryKind::Tool(card) if card.script.is_some() => Some(script_projection(card)),
@@ -3892,7 +3908,7 @@ fn card_projection(entry: &TranscriptEntry, expanded_output: bool) -> Option<Car
                             action.push_str("  ");
                             action.push_str(&detail.summary);
                         }
-                        let preview = crate::diff_card::preview(detail);
+                        let preview = crate::diff_card::preview(detail, click_hints);
                         let tones = preview
                             .tones
                             .into_iter()
@@ -4429,7 +4445,7 @@ impl McpGroupHeader {
                 .count();
             source.push_str(&format!(" · {finished} of {} done", cards.len()));
         } else {
-            source.push_str(&format!(" · {} calls", cards.len()));
+            source.push_str(&format!(" · {} times", cards.len()));
         }
         let count_end = source.len();
         if let Some(note) = shown.status_note() {
@@ -4473,27 +4489,75 @@ impl McpGroupHeader {
 /// Widest a single member may appear in a closed group's preview.
 const GROUP_PREVIEW_ITEM_COLUMNS: usize = 40;
 
-/// Each member's arguments for a closed group's preview, in order. Exploration mixes
-/// tools, so each item there also names its tool.
-fn group_preview_items(
-    transcript: &Transcript,
-    kind: &CardGroupKey,
-    members: &[TranscriptEntryId],
-) -> Vec<String> {
+/// Each member's arguments for a closed group's preview, in order: the same text the
+/// member's own row shows after its verb, so a closed group and its open members read
+/// alike. The group's counts say what kind each is.
+fn group_preview_items(transcript: &Transcript, members: &[TranscriptEntryId]) -> Vec<String> {
     members
         .iter()
         .filter_map(|id| transcript.entry(*id)?.tool_card())
         .filter_map(|card| {
-            // The same text the member's own row shows, so a closed group and its
-            // open members read alike.
             shown_arguments(card)?;
-            let arguments = card.action_line_arguments();
-            Some(match kind {
-                CardGroupKey::Explore => format!("{} {arguments}", card.name),
-                _ => arguments,
-            })
+            Some(card.action_line_arguments())
         })
         .collect()
+}
+
+/// What a group's line says it covers, in the terms of what its calls touched:
+/// `4 files, 1 search` for exploration, `2 files` for edits and writes, `3 commands` for
+/// shell calls, and `3 times` for any other tool. Files and folders count once however
+/// often a call names them.
+fn group_counts(
+    transcript: &Transcript,
+    kind: &CardGroupKey,
+    members: &[TranscriptEntryId],
+) -> String {
+    let cards = || {
+        members
+            .iter()
+            .filter_map(|id| transcript.entry(*id)?.tool_card())
+    };
+    // A call whose target is unknown still counts, as a target of its own.
+    let targets = |names: &[&str]| {
+        let mut distinct = HashSet::new();
+        let mut unknown = 0;
+        for card in cards().filter(|card| names.contains(&card.name.as_str())) {
+            match card.referenced_path() {
+                Some(path) => {
+                    distinct.insert(path);
+                }
+                None if card.action_arguments.is_empty() => unknown += 1,
+                None => {
+                    distinct.insert(card.action_arguments.clone().into());
+                }
+            }
+        }
+        distinct.len() + unknown
+    };
+    let counted = |count: usize, one: &str, many: &str| {
+        (count > 0).then(|| format!("{count} {}", if count == 1 { one } else { many }))
+    };
+    match kind {
+        CardGroupKey::Explore => {
+            let searches = cards()
+                .filter(|card| matches!(card.name.as_str(), "grep" | "find"))
+                .count();
+            [
+                counted(targets(&["read"]), "file", "files"),
+                counted(searches, "search", "searches"),
+                counted(targets(&["ls"]), "folder", "folders"),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(", ")
+        }
+        CardGroupKey::Tool(name) if name == "bash" => format!("{} commands", members.len()),
+        CardGroupKey::Tool(name) if matches!(name.as_str(), "edit" | "write") => {
+            counted(targets(&[name.as_str()]), "file", "files").unwrap_or_default()
+        }
+        CardGroupKey::Tool(_) | CardGroupKey::Mcp(_) => format!("{} times", members.len()),
+    }
 }
 
 /// A card's arguments as its action line shows them, if it shows any.
@@ -4512,11 +4576,11 @@ fn card_group_signature(transcript: &Transcript, entry: &TranscriptEntry) -> Opt
     }
     let header = match card_group_key(entry)? {
         CardGroupKey::Explore | CardGroupKey::Tool(_) => {
-            // A closed group previews its members, so their arguments key the row too.
+            // A closed group counts and previews its members, so both key the row too.
             let key = card_group_key(entry)?;
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            members.len().hash(&mut hasher);
-            group_preview_items(transcript, &key, &members).hash(&mut hasher);
+            group_counts(transcript, &key, &members).hash(&mut hasher);
+            group_preview_items(transcript, &members).hash(&mut hasher);
             Some(hasher.finish())
         }
         CardGroupKey::Mcp(_) => {
@@ -4899,7 +4963,7 @@ impl TranscriptViewport {
                         )
                     });
                     if self.top.is_none() {
-                        self.top = transcript.entries().first().map(|entry| RowAnchor {
+                        self.top = first_shown(transcript).map(|entry| RowAnchor {
                             entry_id: entry.id,
                             position: RowPosition::Header,
                         });
@@ -5025,7 +5089,7 @@ impl TranscriptViewport {
     }
 
     fn jump_home(&mut self, transcript: &Transcript, cache: &mut TranscriptRowCache) {
-        let Some(first) = transcript.entries().first() else {
+        let Some(first) = first_shown(transcript) else {
             return;
         };
         let oldest = RowAnchor {
@@ -5150,7 +5214,7 @@ impl TranscriptViewport {
         transcript: &Transcript,
         cache: &mut TranscriptRowCache,
     ) -> Option<RowAnchor> {
-        let entry = transcript.entries().last()?;
+        let entry = last_shown(transcript)?;
         let mut top = cache.end_anchor(transcript, entry, self.width);
         for _ in 1..self.height {
             let Some(previous) = cache.previous_anchor(transcript, top, self.width) else {
@@ -5211,6 +5275,9 @@ fn cached_row_valid(
     {
         return false;
     }
+    if !leads_where_entry_ends(transcript, fold, cached, entry) {
+        return false;
+    }
     if matches!(
         cached.row.kind,
         TranscriptRowKind::CardAction | TranscriptRowKind::CardGroup
@@ -5252,7 +5319,7 @@ fn cached_row_valid(
         TranscriptRowKind::Spacer if cached.row.anchor.position == RowPosition::UserLeadIn => {
             user_lead_in(transcript, entry) == Some(cached.row.anchor)
                 && cached.next
-                    == transcript.entry_after(entry.id).map(|next| RowAnchor {
+                    == shown_after(transcript, entry.id).map(|next| RowAnchor {
                         entry_id: next.id,
                         position: RowPosition::Header,
                     })
@@ -5260,7 +5327,7 @@ fn cached_row_valid(
         TranscriptRowKind::Spacer if cached.row.anchor.position == RowPosition::UserLeadOut => {
             user_lead_out(transcript, entry) == Some(cached.row.anchor)
                 && cached.next
-                    == transcript.entry_after(entry.id).map(|next| RowAnchor {
+                    == shown_after(transcript, entry.id).map(|next| RowAnchor {
                         entry_id: next.id,
                         position: RowPosition::Header,
                     })
@@ -5307,6 +5374,48 @@ fn cached_row_valid(
     }
 }
 
+/// Whether a cached row that ends its entry still leads to what follows the entry.
+///
+/// That depends on the entries around it as well as on the entry itself: a reply after it
+/// can stop drawing rows, or start stacking with it, without this entry changing. A
+/// closed group's row ends on its last member and is checked with the group.
+fn leads_where_entry_ends(
+    transcript: &Transcript,
+    fold: &FoldState,
+    cached: &CachedRow,
+    entry: &TranscriptEntry,
+) -> bool {
+    let next_header = || {
+        shown_after(transcript, entry.id).map(|next| RowAnchor {
+            entry_id: next.id,
+            position: RowPosition::Header,
+        })
+    };
+    match (cached.row.kind, cached.row.anchor.position) {
+        (TranscriptRowKind::CardGroup, _) => true,
+        (TranscriptRowKind::Spacer, RowPosition::UserLeadIn | RowPosition::UserLeadOut) => {
+            cached.next == next_header()
+        }
+        (TranscriptRowKind::Spacer, _) => cached.next == spacer_next(transcript, entry),
+        (TranscriptRowKind::RunSummary, _) => {
+            cached.next == after_run_summary(fold, transcript, entry)
+        }
+        (TranscriptRowKind::DirectoryChange, _) => cached.next == spacer_after(transcript, entry),
+        _ => {
+            let ends_entry = cached.next.is_none_or(|next| {
+                next.entry_id != entry.id
+                    || matches!(
+                        next.position,
+                        RowPosition::Spacer
+                            | RowPosition::RunSummary
+                            | RowPosition::DirectoryChange
+                    )
+            });
+            !ends_entry || cached.next == separator_after(fold, transcript, entry)
+        }
+    }
+}
+
 fn collect_rows(
     transcript: &Transcript,
     cache: &mut TranscriptRowCache,
@@ -5343,6 +5452,42 @@ fn normalize_anchor(
     normalization: AnchorNormalization,
 ) -> Option<RowAnchor> {
     let entry = transcript.entry(anchor.entry_id)?;
+    let lead_row = Some(RowAnchor {
+        entry_id: entry.id,
+        position: RowPosition::Header,
+    });
+    match (reply_lead(entry), anchor.position) {
+        // A reply that finished with nothing to show draws no rows: resume at the entry
+        // after it, or at the end of the one before.
+        (ReplyLead::Hidden, _) => {
+            return match shown_after(transcript, entry.id) {
+                Some(next) => Some(RowAnchor {
+                    entry_id: collapsed_group_start(&cache.fold, transcript, next.id)
+                        .unwrap_or(next.id),
+                    position: RowPosition::Header,
+                }),
+                None => shown_before(transcript, entry.id)
+                    .map(|previous| cache.end_anchor(transcript, previous, width)),
+            };
+        }
+        // The thought leads a reply with no text from the row its label would take.
+        (ReplyLead::Thought, RowPosition::Thought) => return lead_row,
+        // Its working note is gone once it finishes without text.
+        (ReplyLead::Thought, RowPosition::Content(_) | RowPosition::Markdown(_))
+            if hides_body(entry) =>
+        {
+            return Some(cache.last_anchor(transcript, entry, width));
+        }
+        (
+            ReplyLead::Working,
+            RowPosition::Thought
+            | RowPosition::ThoughtContent(_)
+            | RowPosition::Evidence(_)
+            | RowPosition::Content(_)
+            | RowPosition::Markdown(_),
+        ) => return lead_row,
+        _ => {}
+    }
     match anchor.position {
         RowPosition::Markdown(position) if uses_markdown(entry) => {
             normalize_markdown_anchor(transcript, cache, entry, position, width, normalization)
@@ -5403,9 +5548,13 @@ fn normalize_anchor(
                 None => cache.end_anchor(transcript, entry, width),
             })
         }
+        // A gap with nothing shown after it is gone: resume at the entry's final row.
+        RowPosition::Spacer if spacer_after(transcript, entry).is_none() => {
+            Some(cache.end_anchor(transcript, entry, width))
+        }
         // A gap that cards now stack across resumes at the next card.
         RowPosition::Spacer if stacks_flush(&cache.fold, transcript, entry) => {
-            transcript.entry_after(entry.id).map(|next| RowAnchor {
+            shown_after(transcript, entry.id).map(|next| RowAnchor {
                 entry_id: collapsed_group_start(&cache.fold, transcript, next.id)
                     .unwrap_or(next.id),
                 position: RowPosition::Header,
@@ -5574,11 +5723,102 @@ fn keeps_full_width(
     ) || block.span_in_table(index)
 }
 
-/// Whether a finished reply shows only its searches: it searched but has no text.
+/// Whether a finished reply has no text to show, only its thought, its searches or the
+/// tool calls after it. Its rows then end without a blank text row.
 fn hides_body(entry: &TranscriptEntry) -> bool {
-    !entry.searches().is_empty()
+    entry.role == TranscriptRole::Assistant
         && entry.display_content().is_empty()
         && entry.state == TranscriptEntryState::Complete
+}
+
+/// How a reply opens. It shows the `wisp` label only above text it wrote; until then its
+/// thought, or its working note, leads its rows the way an action line leads a card, so
+/// thoughts and tool calls read as one list.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReplyLead {
+    /// The speaker label, as every prompt and every reply with text has.
+    Label,
+    /// The thought row, drawn at the entry's `Header` position.
+    Thought,
+    /// The `working…` note of a reply that has produced nothing yet, drawn at `Header`.
+    Working,
+    /// No rows: a finished reply that only called tools. Its entry stays in the
+    /// transcript to carry the reply's cost, and the rows around it link past it.
+    Hidden,
+}
+
+pub(crate) fn reply_lead(entry: &TranscriptEntry) -> ReplyLead {
+    if entry.role != TranscriptRole::Assistant
+        || !matches!(entry.kind, TranscriptEntryKind::Message)
+        || !entry.display_content().is_empty()
+    {
+        return ReplyLead::Label;
+    }
+    if !entry.thinking().is_empty() {
+        return ReplyLead::Thought;
+    }
+    // Searches without a thought keep the label above them.
+    if !entry.searches().is_empty() {
+        return ReplyLead::Label;
+    }
+    if entry.state != TranscriptEntryState::Complete {
+        return ReplyLead::Working;
+    }
+    // A summary or move divider still needs a row to hang from.
+    if entry.run_summary().is_some() || entry.moved_to().is_some() {
+        ReplyLead::Label
+    } else {
+        ReplyLead::Hidden
+    }
+}
+
+/// Where a reply's thought row is: at `Header` when the thought leads the reply.
+fn thought_anchor(entry: &TranscriptEntry) -> RowAnchor {
+    RowAnchor {
+        entry_id: entry.id,
+        position: if reply_lead(entry) == ReplyLead::Thought {
+            RowPosition::Header
+        } else {
+            RowPosition::Thought
+        },
+    }
+}
+
+fn is_shown(entry: &TranscriptEntry) -> bool {
+    reply_lead(entry) != ReplyLead::Hidden
+}
+
+/// The next entry that draws rows; see [`ReplyLead::Hidden`].
+pub(crate) fn shown_after(
+    transcript: &Transcript,
+    entry_id: TranscriptEntryId,
+) -> Option<&TranscriptEntry> {
+    let mut next = transcript.entry_after(entry_id)?;
+    while !is_shown(next) {
+        next = transcript.entry_after(next.id)?;
+    }
+    Some(next)
+}
+
+/// The previous entry that draws rows; see [`ReplyLead::Hidden`].
+fn shown_before(transcript: &Transcript, entry_id: TranscriptEntryId) -> Option<&TranscriptEntry> {
+    let mut previous = transcript.entry_before(entry_id)?;
+    while !is_shown(previous) {
+        previous = transcript.entry_before(previous.id)?;
+    }
+    Some(previous)
+}
+
+fn first_shown(transcript: &Transcript) -> Option<&TranscriptEntry> {
+    transcript.entries().iter().find(|entry| is_shown(entry))
+}
+
+fn last_shown(transcript: &Transcript) -> Option<&TranscriptEntry> {
+    transcript
+        .entries()
+        .iter()
+        .rev()
+        .find(|entry| is_shown(entry))
 }
 
 /// Large messages stay fully readable as plain text without building an oversized Markdown tree.
@@ -5655,7 +5895,7 @@ fn after_run_summary(
         });
     }
     if stacks_flush(fold, transcript, entry) {
-        return transcript.entry_after(entry.id).map(|next| RowAnchor {
+        return shown_after(transcript, entry.id).map(|next| RowAnchor {
             entry_id: next.id,
             position: RowPosition::Header,
         });
@@ -5672,9 +5912,7 @@ fn stacks_flush(fold: &FoldState, transcript: &Transcript, entry: &TranscriptEnt
     // A card that closes a turn keeps its summary, any move divider and the gap after them.
     if entry.run_summary().is_some()
         || entry.moved_to().is_some()
-        || !transcript
-            .entry_after(entry.id)
-            .is_some_and(|next| cards_stack(entry, next))
+        || !shown_after(transcript, entry.id).is_some_and(|next| cards_stack(entry, next))
     {
         return false;
     }
@@ -5711,18 +5949,21 @@ fn directory_divider(folder: &str) -> String {
 
 /// The gap before the entry that follows, if any.
 fn spacer_after(transcript: &Transcript, entry: &TranscriptEntry) -> Option<RowAnchor> {
-    transcript.entry_after(entry.id).map(|_| RowAnchor {
+    shown_after(transcript, entry.id).map(|_| RowAnchor {
         entry_id: entry.id,
         position: RowPosition::Spacer,
     })
 }
 
-/// Whether `next` follows `entry` as part of one list of cards: both are tool or process
-/// cards. A card next to a message keeps a blank row; see [`stacks_flush`] for when two cards
-/// keep none.
+/// Whether `next` follows `entry` as part of one list of activity: each is a tool or
+/// process card, or a reply led by its thought or working note. One next to a prompt or to
+/// a reply's text keeps a blank row; see [`stacks_flush`] for when two keep none.
 fn cards_stack(entry: &TranscriptEntry, next: &TranscriptEntry) -> bool {
-    let card = |entry: &TranscriptEntry| !matches!(entry.kind, TranscriptEntryKind::Message);
-    card(entry) && card(next)
+    let activity = |entry: &TranscriptEntry| {
+        !matches!(entry.kind, TranscriptEntryKind::Message)
+            || matches!(reply_lead(entry), ReplyLead::Thought | ReplyLead::Working)
+    };
+    activity(entry) && activity(next)
 }
 
 /// The lead-in row owned by `entry` when a user's prompt follows a non-user entry.
@@ -5730,8 +5971,7 @@ fn cards_stack(entry: &TranscriptEntry, next: &TranscriptEntry) -> bool {
 /// A prompt that follows another prompt continues the same highlighted surface, so it needs no
 /// lead-in: the earlier prompt's spacer already pads it.
 fn user_lead_in(transcript: &Transcript, entry: &TranscriptEntry) -> Option<RowAnchor> {
-    transcript
-        .entry_after(entry.id)
+    shown_after(transcript, entry.id)
         .filter(|next| next.role == TranscriptRole::User && entry.role != TranscriptRole::User)
         .map(|_| RowAnchor {
             entry_id: entry.id,
@@ -5742,8 +5982,7 @@ fn user_lead_in(transcript: &Transcript, entry: &TranscriptEntry) -> Option<RowA
 /// The plain gap owned by a user's prompt when a reply or card follows it, below the prompt's
 /// highlighted surface. A prompt followed by another prompt continues the surface instead.
 fn user_lead_out(transcript: &Transcript, entry: &TranscriptEntry) -> Option<RowAnchor> {
-    transcript
-        .entry_after(entry.id)
+    shown_after(transcript, entry.id)
         .filter(|next| entry.role == TranscriptRole::User && next.role != TranscriptRole::User)
         .map(|_| RowAnchor {
             entry_id: entry.id,
@@ -5757,7 +5996,7 @@ fn spacer_next(transcript: &Transcript, entry: &TranscriptEntry) -> Option<RowAn
     user_lead_in(transcript, entry)
         .or_else(|| user_lead_out(transcript, entry))
         .or_else(|| {
-            transcript.entry_after(entry.id).map(|next| RowAnchor {
+            shown_after(transcript, entry.id).map(|next| RowAnchor {
                 entry_id: next.id,
                 position: RowPosition::Header,
             })
@@ -5793,7 +6032,8 @@ fn card_group_key(entry: &TranscriptEntry) -> Option<CardGroupKey> {
 
 /// Find a collapsible sequence. Specialized exploration/MCP runs retain their live
 /// summaries; other groups contain successful calls to one tool only. A different
-/// tool, assistant message, process card, or unfinished call ends the sequence.
+/// tool, a reply that draws rows, a process card, or an unfinished call ends the
+/// sequence; a reply that draws none (see [`ReplyLead::Hidden`]) does not.
 pub(crate) fn card_run(
     transcript: &Transcript,
     entry_id: TranscriptEntryId,
@@ -5804,7 +6044,8 @@ pub(crate) fn card_run(
     })
 }
 
-/// Collect a maximal adjacent run using one membership rule in both directions.
+/// Collect a maximal run of entries that follow one another on screen, using one
+/// membership rule in both directions.
 fn matching_card_run(
     transcript: &Transcript,
     entry_id: TranscriptEntryId,
@@ -5814,7 +6055,7 @@ fn matching_card_run(
         return None;
     }
     let mut start = entry_id;
-    while let Some(previous) = transcript.entry_before(start) {
+    while let Some(previous) = shown_before(transcript, start) {
         if !joins(previous) {
             break;
         }
@@ -5822,7 +6063,7 @@ fn matching_card_run(
     }
     let mut members = vec![start];
     let mut current = start;
-    while let Some(next) = transcript.entry_after(current) {
+    while let Some(next) = shown_after(transcript, current) {
         if !joins(next) {
             break;
         }
@@ -6566,6 +6807,368 @@ mod tests {
     }
 
     #[test]
+    fn thought_summary_drops_markdown_markup() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("think".into());
+        let answer = transcript.append_thinking_delta(1, "**Refining `the` Design**\n\nbody");
+        transcript.append_message_delta(1, "answer");
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        viewport.set_geometry(&transcript, &mut cache, 80, 20);
+
+        let thought = viewport
+            .visible_rows(&transcript, &mut cache)
+            .into_iter()
+            .find(|row| row.anchor.entry_id == answer && row.kind == TranscriptRowKind::Thought)
+            .unwrap();
+
+        let text = thought.plain_text();
+        assert!(text.ends_with("   Refining the Design"), "{text}");
+    }
+
+    /// A finished read of `path`, with no prompt of its own.
+    fn finished_read(transcript: &mut Transcript, path: &str) -> TranscriptEntryId {
+        let card = transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+            call_id: path.into(),
+            name: "read".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+            arguments: serde_json::json!({"path": path}),
+        });
+        transcript.observe_tool_result(tool_result(path, "contents"));
+        card
+    }
+
+    /// A reply that only called tools: it wrote nothing, and its entry carries its cost.
+    fn tool_only_reply(transcript: &mut Transcript, turn: u64) {
+        let cost = crate::web_search::message_cost(&serde_json::json!({
+            "content": "",
+            "cost": {"estimated_usd": "0.01"},
+        }));
+        transcript.complete_message_with_cost(turn, String::new(), cost);
+    }
+
+    /// The text of every row from the top, after checking that walking back from the last
+    /// row with `previous_anchor` visits the same rows.
+    fn walked_rows(transcript: &Transcript, cache: &mut TranscriptRowCache) -> Vec<String> {
+        walked(transcript, cache).1
+    }
+
+    /// The anchor and text of every row from the top; see [`walked_rows`].
+    fn walked(
+        transcript: &Transcript,
+        cache: &mut TranscriptRowCache,
+    ) -> (Vec<RowAnchor>, Vec<String>) {
+        const WIDTH: usize = 80;
+        let mut forward = Vec::new();
+        let mut texts = Vec::new();
+        let mut anchor = first_shown(transcript).map(|entry| RowAnchor {
+            entry_id: entry.id,
+            position: RowPosition::Header,
+        });
+        while let Some(current) = anchor {
+            let cached = cache.row_at(transcript, current, WIDTH).unwrap();
+            forward.push(current);
+            texts.push(cached.row.plain_text());
+            anchor = cached.next;
+        }
+        let mut backward = vec![*forward.last().unwrap()];
+        while let Some(previous) =
+            cache.previous_anchor(transcript, *backward.last().unwrap(), WIDTH)
+        {
+            backward.push(previous);
+        }
+        backward.reverse();
+        assert_eq!(backward, forward, "{texts:#?}");
+        // Following the tail ends on the same last row.
+        let last = last_shown(transcript).unwrap();
+        assert_eq!(
+            cache.end_anchor(transcript, last, WIDTH),
+            *forward.last().unwrap()
+        );
+        (forward, texts)
+    }
+
+    #[test]
+    fn tool_only_replies_draw_no_rows() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("go".into());
+        tool_only_reply(&mut transcript, 1);
+        finished_read(&mut transcript, "a.rs");
+        tool_only_reply(&mut transcript, 2);
+        tool_only_reply(&mut transcript, 3);
+        finished_read(&mut transcript, "b.rs");
+        tool_only_reply(&mut transcript, 4);
+        let mut cache = TranscriptRowCache::default();
+
+        // The reads fold into one group as if nothing lay between them, and nothing
+        // follows it.
+        let group = "• Explored 2 files · a.rs, b.rs";
+        assert_eq!(
+            walked_rows(&transcript, &mut cache),
+            ["you", "go", "", "", group]
+        );
+        assert_eq!(
+            transcript
+                .entries()
+                .iter()
+                .filter(|entry| entry.cost().is_some())
+                .count(),
+            4
+        );
+
+        // A prompt after a hidden reply is padded by the card before it.
+        transcript.append_prompt("next".into());
+        transcript.complete_message(5, "done".into());
+        assert_eq!(
+            walked_rows(&transcript, &mut cache),
+            [
+                "you", "go", "", "", group, "", "", "you", "next", "", "", "wisp", "done"
+            ]
+        );
+
+        // Open, the group lists its reads with nothing between them.
+        let first_read = transcript.entries()[2].id;
+        cache.fold_mut().expand_group(first_read);
+        let rows = walked_rows(&transcript, &mut cache);
+        assert_eq!(
+            rows[4..8],
+            ["• Explored 2 files", "• Read a.rs", "• Read b.rs", ""]
+        );
+    }
+
+    /// A group's line counts what its calls touched, each file and folder once.
+    #[test]
+    fn group_counts_what_was_touched() {
+        let call = |transcript: &mut Transcript, id: &str, name: &str, arguments| {
+            transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: id.into(),
+                name: name.into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+                arguments,
+            });
+            let mut result = tool_result(id, "ok");
+            result.name = name.into();
+            transcript.observe_tool_result(result);
+        };
+        let line = |transcript: &Transcript| {
+            let mut cache = TranscriptRowCache::default();
+            walked_rows(transcript, &mut cache).last().unwrap().clone()
+        };
+
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("look".into());
+        call(
+            &mut transcript,
+            "1",
+            "read",
+            serde_json::json!({"path": "a.rs"}),
+        );
+        call(
+            &mut transcript,
+            "2",
+            "read",
+            serde_json::json!({"path": "a.rs"}),
+        );
+        call(
+            &mut transcript,
+            "3",
+            "grep",
+            serde_json::json!({"pattern": "x", "path": "src"}),
+        );
+        call(
+            &mut transcript,
+            "4",
+            "ls",
+            serde_json::json!({"path": "src"}),
+        );
+        call(
+            &mut transcript,
+            "5",
+            "read",
+            serde_json::json!({"path": "b.rs"}),
+        );
+        assert!(
+            line(&transcript).starts_with("• Explored 2 files, 1 search, 1 folder · a.rs, a.rs"),
+            "{}",
+            line(&transcript)
+        );
+
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("build".into());
+        call(
+            &mut transcript,
+            "1",
+            "bash",
+            serde_json::json!({"command": "cargo fmt"}),
+        );
+        call(
+            &mut transcript,
+            "2",
+            "bash",
+            serde_json::json!({"command": "cargo test"}),
+        );
+        assert_eq!(
+            line(&transcript),
+            "• Ran 2 commands · cargo fmt, cargo test"
+        );
+
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("fetch".into());
+        call(
+            &mut transcript,
+            "1",
+            "web_fetch",
+            serde_json::json!({"url": "https://a.test"}),
+        );
+        call(
+            &mut transcript,
+            "2",
+            "web_fetch",
+            serde_json::json!({"url": "https://b.test"}),
+        );
+        assert!(
+            line(&transcript).starts_with("• web_fetch 2 times"),
+            "{}",
+            line(&transcript)
+        );
+    }
+
+    #[test]
+    fn thought_leads_textless_reply() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("go".into());
+        transcript.complete_message(1, "I'll look.".into());
+        finished_read(&mut transcript, "a.rs");
+        let thought = transcript.append_thinking_delta(2, "**Plan**\nstep");
+        transcript.complete_message(2, String::new());
+        finished_read(&mut transcript, "b.rs");
+        transcript.append_thinking_delta(3, "wrap up");
+        transcript.complete_message(3, "Done.".into());
+        let mut cache = TranscriptRowCache::default();
+
+        // The label shows only above text; the thought stacks with the cards around it.
+        let rows = walked_rows(&transcript, &mut cache);
+        let unlabelled = rows.iter().position(|row| row.contains("Plan")).unwrap();
+        assert_eq!(rows[unlabelled - 1], "• Read a.rs");
+        assert_eq!(rows[unlabelled + 1], "• Read b.rs");
+        assert_eq!(rows.iter().filter(|row| *row == "wisp").count(), 2);
+        let labelled = rows.iter().position(|row| row.contains("wrap up")).unwrap();
+        assert_eq!(&rows[labelled - 2..labelled], ["", "wisp"]);
+        assert_eq!(rows[labelled + 1], "Done.");
+
+        // Expanded, its text follows it and a gap sets it apart from the next card.
+        cache.fold_mut().expand(thought);
+        let rows = walked_rows(&transcript, &mut cache);
+        let unlabelled = rows.iter().position(|row| row.contains("Plan")).unwrap();
+        assert_eq!(
+            &rows[unlabelled + 1..unlabelled + 5],
+            ["**Plan**", "step", "", "• Read b.rs"]
+        );
+    }
+
+    #[test]
+    fn working_note_gives_way_in_place() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("go".into());
+        finished_read(&mut transcript, "a.rs");
+        transcript.append_thinking_delta(1, "plan");
+        let mut cache = TranscriptRowCache::default();
+
+        // No label while nothing is written: the working note sits where the card will.
+        let streaming = walked_rows(&transcript, &mut cache);
+        assert_eq!(
+            streaming[streaming.len() - 3..],
+            ["• Read a.rs", "◆ Thought   plan", "working…"]
+        );
+
+        transcript.complete_message(1, String::new());
+        finished_read(&mut transcript, "b.rs");
+        let finished = walked_rows(&transcript, &mut cache);
+        assert_eq!(finished.len(), streaming.len());
+        assert_eq!(finished.last().unwrap(), "• Read b.rs");
+        assert!(
+            finished[finished.len() - 2].ends_with("plan"),
+            "{finished:#?}"
+        );
+
+        // A reply that has produced nothing yet is only its note; text brings the label.
+        transcript.append_message_delta(2, "");
+        assert_eq!(
+            walked_rows(&transcript, &mut cache).last().unwrap(),
+            "working…"
+        );
+        transcript.append_message_delta(2, "Found it.");
+        let rows = walked_rows(&transcript, &mut cache);
+        assert_eq!(rows[rows.len() - 3..], ["", "wisp", "Found it."]);
+    }
+
+    /// A top row that stops existing when the reply after it finishes without text moves
+    /// to a row that is still drawn, so the view never goes blank.
+    #[test]
+    fn stale_tops_resume_on_shown_rows() {
+        const WIDTH: usize = 80;
+        let normalize = |transcript: &Transcript, cache: &mut TranscriptRowCache, anchor| {
+            let top = normalize_anchor(
+                transcript,
+                cache,
+                anchor,
+                WIDTH,
+                AnchorNormalization::Content,
+            )
+            .unwrap();
+            assert!(cache.row_at(transcript, top, WIDTH).is_some(), "{top:?}");
+            assert!(walked(transcript, cache).0.contains(&top), "{top:?}");
+            top
+        };
+
+        // The gap under a card, when the working reply after it turns out to be tool-only.
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("go".into());
+        let card = finished_read(&mut transcript, "a.rs");
+        transcript.append_message_delta(1, "");
+        let mut cache = TranscriptRowCache::default();
+        cache.fold_mut().expand(card);
+        let gap = RowAnchor {
+            entry_id: card,
+            position: RowPosition::Spacer,
+        };
+        assert!(walked(&transcript, &mut cache).0.contains(&gap));
+        tool_only_reply(&mut transcript, 1);
+        assert_eq!(normalize(&transcript, &mut cache, gap).entry_id, card);
+
+        // The working note under a thought, when the reply finishes without text.
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("go".into());
+        let reply = transcript.append_thinking_delta(1, "plan");
+        let mut cache = TranscriptRowCache::default();
+        let note = *walked(&transcript, &mut cache).0.last().unwrap();
+        assert!(matches!(note.position, RowPosition::Content(0)), "{note:?}");
+        transcript.complete_message(1, String::new());
+        let top = normalize(&transcript, &mut cache, note);
+        assert_eq!((top.entry_id, top.position), (reply, RowPosition::Header));
+    }
+
+    #[test]
+    fn thought_leads_searches_without_text() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("ask".into());
+        transcript.append_thinking_delta(1, "look it up");
+        transcript.observe_search(1, crate::web_search::search(&docs_search()));
+        transcript.complete_message(1, String::new());
+        finished_read(&mut transcript, "a.rs");
+        let mut cache = TranscriptRowCache::default();
+
+        let rows = walked_rows(&transcript, &mut cache);
+        assert!(!rows.contains(&"wisp".to_owned()), "{rows:#?}");
+        let thought = rows
+            .iter()
+            .position(|row| row.contains("look it up"))
+            .unwrap();
+        assert!(rows[thought + 1].contains("Searched"), "{rows:#?}");
+        assert_eq!(rows[thought + 2], "• Read a.rs");
+    }
+
+    #[test]
     fn follow_tail_backfills_short_current_turn_and_scrolls_contiguously() {
         let mut transcript = Transcript::default();
         transcript.append_prompt("older prompt".into());
@@ -6871,7 +7474,7 @@ mod tests {
         let collapsed = viewport.visible_rows(&transcript, &mut cache);
         assert!(collapsed.iter().any(|row| {
             row.kind == TranscriptRowKind::CardGroup
-                && row.plain_text().contains("Explored 2 actions")
+                && row.plain_text().contains("Explored 2 files")
                 && row.spans.iter().any(|span| {
                     span.text == "Explored"
                         && span.style.inline == crate::markdown::InlineStyle::ToolName
@@ -6972,7 +7575,7 @@ mod tests {
         let grouped = viewport.visible_rows(&transcript, &mut cache);
         assert!(grouped.iter().any(|row| {
             row.kind == TranscriptRowKind::CardGroup
-                && row.plain_text().contains("Explored 2 actions")
+                && row.plain_text().contains("Explored 2 files")
         }));
         assert!(!grouped.iter().any(|row| {
             row.kind == TranscriptRowKind::CardAction && row.plain_text().contains("a.rs")
@@ -7010,7 +7613,7 @@ mod tests {
             .iter()
             .find(|row| {
                 row.kind == TranscriptRowKind::CardGroup
-                    && row.plain_text().contains("Explored 2 actions")
+                    && row.plain_text().contains("Explored 2 files")
             })
             .expect("collapsed explore group");
         assert_eq!(row.tone, TranscriptRowTone::Error);
@@ -7319,7 +7922,7 @@ mod tests {
         });
         transcript.observe_tool_result(tool_result("call-large", &"x".repeat(4_000)));
 
-        let projection = card_projection(transcript.entry(card_id).unwrap(), false).unwrap();
+        let projection = card_projection(transcript.entry(card_id).unwrap(), false, false).unwrap();
         let omission = projection.omission.unwrap();
         assert!(omission.contains("omitted after this preview"));
         assert!(!omission.contains("omitted before this preview"));
@@ -7346,7 +7949,7 @@ mod tests {
         failed.exit_code = Some(1);
         transcript.observe_tool_result(failed);
 
-        let projection = card_projection(transcript.entry(card_id).unwrap(), false).unwrap();
+        let projection = card_projection(transcript.entry(card_id).unwrap(), false, false).unwrap();
         assert!(
             projection
                 .detail
@@ -7391,7 +7994,7 @@ mod tests {
                 .ends_with("BUILD FINISHED SUCCESSFULLY")
         );
         assert!(!card.retained_output.text.contains("EARLY BUILD MARKER"));
-        let projection = card_projection(entry, false).unwrap();
+        let projection = card_projection(entry, false, false).unwrap();
         assert!(projection.detail.contains("BUILD FINISHED SUCCESSFULLY"));
         assert!(!projection.detail.contains("EARLY BUILD MARKER"));
         assert!(projection.omission_before_detail);
@@ -7429,7 +8032,7 @@ mod tests {
         card.status = ToolStatus::Running;
         card.exit_code = None;
 
-        let projection = card_projection(&entry, false).unwrap();
+        let projection = card_projection(&entry, false, false).unwrap();
         assert!(projection.framed);
         assert!(projection.omission_before_detail);
         assert!(projection.detail.ends_with("LATEST LINE"));
@@ -7452,8 +8055,8 @@ mod tests {
             result.name = "bash".into();
             transcript.observe_tool_result(result);
             let entry = transcript.entry(id).unwrap();
-            let tail = card_projection(entry, false).unwrap();
-            let full = card_projection(entry, true).unwrap();
+            let tail = card_projection(entry, false, false).unwrap();
+            let full = card_projection(entry, true, false).unwrap();
             let retained = &entry.tool_card().unwrap().retained_output;
             assert!(tail.output_toggle);
             assert_eq!(full.detail, retained.text);
@@ -7766,7 +8369,7 @@ mod tests {
     #[test]
     fn expanded_card_offers_collapse() {
         let mut transcript = Transcript::default();
-        let card_id = read_card(&mut transcript, "a.rs", "contents");
+        let card_id = finished_read(&mut transcript, "a.rs");
         let mut cache = TranscriptRowCache::default();
         cache.fold_mut().expand(card_id);
         let rows = card_rows(&transcript, &mut cache, card_id, 60);
@@ -8490,7 +9093,7 @@ mod tests {
         let rows = tail_rows(&transcript);
         assert!(
             rows.iter()
-                .any(|row| row.plain_text().starts_with("● Exploring 2 actions")),
+                .any(|row| row.plain_text().starts_with("● Exploring 2 files")),
             "{:?}",
             row_text(&rows)
         );
@@ -8498,7 +9101,7 @@ mod tests {
         let rows = tail_rows(&transcript);
         assert!(
             rows.iter()
-                .any(|row| row.plain_text().starts_with("• Explored 2 actions")),
+                .any(|row| row.plain_text().starts_with("• Explored 2 files")),
             "{:?}",
             row_text(&rows)
         );

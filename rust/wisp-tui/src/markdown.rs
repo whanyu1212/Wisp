@@ -1120,6 +1120,22 @@ fn fenced_code_is_closed(source: &str, block: Range<usize>, segments: &[CodeText
         .is_some_and(|line| is_closing_fence_line(line, delimiter, opening_len))
 }
 
+/// The text of one line of Markdown without its markup, for a one-line summary that
+/// draws in a single style: `**Plan** the \`fix\`` gives `Plan the fix`.
+pub(crate) fn inline_text(line: &str) -> String {
+    let mut text = String::new();
+    for event in Parser::new_ext(line, MARKDOWN_OPTIONS) {
+        match event {
+            Event::Text(part) | Event::Code(part) | Event::Html(part) | Event::InlineHtml(part) => {
+                text.push_str(&part);
+            }
+            Event::SoftBreak | Event::HardBreak => text.push(' '),
+            _ => {}
+        }
+    }
+    text
+}
+
 pub(crate) fn is_closing_fence_line(line: &str, delimiter: u8, opening_len: usize) -> bool {
     let line = line.trim_end_matches('\r');
     let candidate = line.trim_start_matches([' ', '\t', '>']);
