@@ -10,7 +10,20 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## Unreleased
+## 0.9.2 — Unreleased
+
+0.9.2 is a patch release on 0.9.1. The terminal UI reads a turn as one activity list, and
+compaction keeps more of long tool output in its checkpoint. It changes no command, event,
+handshake, session, settings, credential, or trust format, so 0.9.1 and 0.9.2 read each other's
+sessions. The backend and frontend must come from the same release.
+
+### TUI
+
+- A turn reads as one activity list. The `wisp` label appears only above text a reply writes;
+  until then a reply is led by its thought or working note, which stacks with the tool cards
+  around it instead of being set apart by a blank row. A finished reply that only called tools
+  draws no rows of its own, so reopened sessions, which restore no thinking, no longer show a bare
+  label before every tool step.
 
 ### Compaction
 

@@ -142,6 +142,10 @@ so the backend and every frontend must be the same release, and external RPC cli
 The supported Python API only gains methods and fields: `RpcController.get_subagents()`,
 `set_subagents()` and `set_subagent_model()`, and `WispConfig`'s `subagents` and `subagent_model`.
 
+0.9.2 changes no command, event, handshake, session, settings, credential, or trust format, so
+0.9.1 and 0.9.2 read each other's sessions, and the schema bundle is unchanged. The backend and every
+frontend must still be the same release. The supported Python API is unchanged.
+
 0.9.1 changes no command, event, handshake, session, settings, credential, or trust format, so
 0.9.0 and 0.9.1 read each other's sessions, and the schema bundle is unchanged. The backend and every
 frontend must still be the same release. The supported Python API is unchanged.
