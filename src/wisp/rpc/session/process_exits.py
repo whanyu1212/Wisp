@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from wisp.events import (
     PROCESS_COMMAND_SUMMARY_MAX_CHARS,
@@ -19,9 +19,10 @@ class ProcessExitNotices:
 
     The supervisor calls ``record`` when a started process stops on its own. Every
     exit is published as ``process.ended``. One the model started with
-    ``notify_on_exit`` is also held until the session's next prompt, which ``take``
-    hands to the coding session. A poll that already returned the exit makes its
-    notice redundant, so ``take`` drops those.
+    ``notify_on_exit`` is also held until the session saves a prompt carrying it:
+    the coding session reads ``pending`` and calls ``mark_delivered`` once that
+    prompt is saved. A poll that already returned the exit makes its notice
+    redundant, so ``pending`` drops those.
 
     Processes belong to the session that started them: the host cancels them when
     the session changes and calls ``clear``, so no notice reaches another session.
@@ -62,19 +63,34 @@ class ProcessExitNotices:
             )
         )
 
-    def take(self) -> tuple[ProcessNotice, ...]:
-        """Return and forget the held notices whose exit no poll has returned yet.
+    def pending(self) -> tuple[ProcessNotice, ...]:
+        """Return the held notices whose exit no poll has returned yet.
+
+        Notices a poll made redundant are forgotten; the rest stay held until
+        ``mark_delivered``.
 
         Returns:
             tuple[ProcessNotice, ...]: The notices, in the order the processes stopped.
         """
 
-        pending, self._pending = self._pending, []
-        return tuple(
+        self._pending = [
             notice
-            for notice in pending
+            for notice in self._pending
             if not self._supervisor.is_terminal_reported(notice.process_id)
-        )
+        ]
+        return tuple(self._pending)
+
+    def mark_delivered(self, notices: Sequence[ProcessNotice]) -> None:
+        """Forget ``notices``, which a saved prompt now carries.
+
+        Exits recorded since ``pending`` returned them stay held.
+
+        Args:
+            notices (Sequence[ProcessNotice]): Notices ``pending`` returned.
+        """
+
+        delivered = {notice.process_id for notice in notices}
+        self._pending = [notice for notice in self._pending if notice.process_id not in delivered]
 
     def clear(self) -> None:
         """Forget every held notice, as when the session changes."""

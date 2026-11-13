@@ -786,7 +786,7 @@ class RpcHost:
             subagents=config.subagents,
             subagent_model=config.subagent_model,
             mcp_server_connected=runtime.mcp_server_connected,
-            take_process_notices=process_exits.take,
+            process_notices=process_exits,
         )
 
         async def rebuild_agent_for_trusted_project() -> None:

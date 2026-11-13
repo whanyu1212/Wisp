@@ -59,8 +59,21 @@ def test_only_asked_for_held(published: list[WispEvent]) -> None:
     notices.record(_exit("quiet", notify=False))
     notices.record(_exit("loud", notify=True))
 
-    assert [notice.process_id for notice in notices.take()] == ["loud"]
-    assert notices.take() == ()
+    assert [notice.process_id for notice in notices.pending()] == ["loud"]
+
+
+def test_delivered_notices_forgotten(published: list[WispEvent]) -> None:
+    """Delivery forgets only what the saved prompt carried, not later exits."""
+
+    notices = ProcessExitNotices(_Reported(set()), published.append)
+    notices.record(_exit("first", notify=True))
+    carried = notices.pending()
+    notices.record(_exit("second", notify=True))
+
+    assert [notice.process_id for notice in notices.pending()] == ["first", "second"]
+    notices.mark_delivered(carried)
+
+    assert [notice.process_id for notice in notices.pending()] == ["second"]
 
 
 def test_polled_exit_dropped(published: list[WispEvent]) -> None:
@@ -70,7 +83,7 @@ def test_polled_exit_dropped(published: list[WispEvent]) -> None:
     notices.record(_exit("seen", notify=True))
     notices.record(_exit("unseen", notify=True))
 
-    assert [notice.process_id for notice in notices.take()] == ["unseen"]
+    assert [notice.process_id for notice in notices.pending()] == ["unseen"]
 
 
 def test_failed_publish_keeps_notice() -> None:
@@ -82,7 +95,7 @@ def test_failed_publish_keeps_notice() -> None:
     with pytest.raises(BrokenPipeError):
         notices.record(_exit("loud", notify=True))
 
-    assert [notice.process_id for notice in notices.take()] == ["loud"]
+    assert [notice.process_id for notice in notices.pending()] == ["loud"]
 
 
 def test_clear_forgets_notices(published: list[WispEvent]) -> None:
@@ -91,7 +104,7 @@ def test_clear_forgets_notices(published: list[WispEvent]) -> None:
 
     notices.clear()
 
-    assert notices.take() == ()
+    assert notices.pending() == ()
     assert len(published) == 1
 
 
@@ -113,4 +126,4 @@ def test_long_command_summarized(published: list[WispEvent]) -> None:
     assert isinstance(event, ProcessEnded)
     assert len(event.command) == 500
     assert event.command.endswith("…")
-    assert notices.take()[0].command == "x" * 2000
+    assert notices.pending()[0].command == "x" * 2000
