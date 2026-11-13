@@ -35,6 +35,7 @@ from evals.compaction.summaries import SummaryRow, rescore, run_summaries, score
 from evals.tool_use.credentials import Credentials
 from evals.tool_use.runner import REPO_ROOT, Build, ModelSpec, detect_build
 from tests.coding.compaction_support import VALID_COMPACTION_SUMMARY
+from wisp.coding.compaction import serialize_compaction_transcript
 from wisp.events import (
     CompactionCompleted,
     CompactionStarted,
@@ -377,14 +378,20 @@ def test_suite_budget_and_crashes(tmp_path: Path) -> None:
 
 
 def test_compare_pairs_models(tmp_path: Path) -> None:
-    before = _summarized(tmp_path, "## Goal\nonly a goal")
-    after = _summarized(tmp_path, VALID_COMPACTION_SUMMARY + "\nsrc/app.py")
+    before = [dataclasses.asdict(row) for row in _summarized(tmp_path, "## Goal\nonly a goal")]
+    after = [
+        dataclasses.asdict(row)
+        for row in _summarized(tmp_path, VALID_COMPACTION_SUMMARY + "\nsrc/app.py")
+    ]
+    # A second model ran different scenarios on each side, so it has nothing to compare.
+    before.append({**before[0], "model": "other", "scenario": "easy"})
+    after.append({**after[0], "model": "other", "scenario": "hard"})
 
-    table = render_summary_comparison(
-        [dataclasses.asdict(row) for row in before], [dataclasses.asdict(row) for row in after]
-    )
+    table = render_summary_comparison(before, after)
 
-    assert "| scripted::m | 1 → 1 | 0/1 → 1/1 | — → 0.50 |" in table
+    assert "| scripted::m | 1 | 1 → 1 | 0/1 → 1/1 | — → 0.50 |" in table
+    assert "scripted::other |" not in table
+    assert "No scenario run on both sides: scripted::other." in table
 
 
 def test_buried_facts_only_in_long_results() -> None:
@@ -410,3 +417,27 @@ def test_rescore_reclassifies_and_rescores(tmp_path: Path) -> None:
 
     assert valid["score"]["kept"] == ["key-error"]
     assert provider_failure["status"] == "errored"
+
+
+def test_transcript_size_uses_real_cut(tmp_path: Path) -> None:
+    """A 1M-token scenario keeps its 6k-character file read whole, and the size says so."""
+
+    scenario = SCENARIOS[0]
+    provider = ScriptedProvider(
+        [[ProviderResponseStarted(model="m"), ProviderResponseCompleted(content="x")]]
+    )
+    (row,) = anyio.run(
+        lambda: run_summaries(
+            [scenario],
+            [ModelSpec("scripted", "m")],
+            1,
+            providers={"scripted": provider},
+            cost_estimator=None,
+            build=_BUILD,
+            results_dir=tmp_path,
+        )
+    )
+
+    sent = provider.calls[0].messages[-1].content
+    assert row.transcript_chars == len(sent)
+    assert row.transcript_chars > len(serialize_compaction_transcript(scenario.rows))

@@ -190,29 +190,41 @@ def _usd(rows: Iterable[Row]) -> str:
 
 
 def render_summary_comparison(before: Sequence[Row], after: Sequence[Row]) -> str:
-    """Per model, across scenarios run on both sides: checkpoint quality before and after."""
+    """Per model, over the scenarios that model ran on both sides: quality before and after.
 
-    scenarios = {str(row["scenario"]) for row in before} & {str(row["scenario"]) for row in after}
+    Scenarios are matched for each model separately, so a model is never compared
+    on a scenario it ran on one side only. Models with no scenario in common are
+    listed after the table rather than compared.
+    """
+
+    sides = [dict(_grouped(side, ("label",))) for side in (before, after)]
     lines = [
         "## Layer 1: before → after",
         "",
-        f"Scenarios on both sides: {', '.join(sorted(scenarios))}.",
-        "",
-        "| Model | Runs | Valid | Recall | Decisions kept | Buried kept | Input tok/run "
-        "| USD/run |",
-        "|---|---|---|---|---|---|---|---|",
+        "| Model | Scenarios | Runs | Valid | Recall | Decisions kept | Buried kept "
+        "| Input tok/run | USD/run |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
-    sides = [
-        dict(_grouped((row for row in side if row["scenario"] in scenarios), ("label",)))
-        for side in (before, after)
-    ]
-    for (model,) in sorted(set(sides[0]) & set(sides[1])):
-        cells = [_summary_cells(side[(model,)]) for side in sides]
+    unmatched: list[str] = []
+    for model_key in sorted(set(sides[0]) | set(sides[1])):
+        old_rows, new_rows = (side.get(model_key, []) for side in sides)
+        shared = {str(row["scenario"]) for row in old_rows} & {
+            str(row["scenario"]) for row in new_rows
+        }
+        if not shared:
+            unmatched.append(model_key[0])
+            continue
+        cells = [
+            _summary_cells([row for row in rows if row["scenario"] in shared])
+            for rows in (old_rows, new_rows)
+        ]
         lines.append(
-            f"| {model} | "
+            f"| {model_key[0]} | {len(shared)} | "
             + " | ".join(f"{old} → {new}" for old, new in zip(*cells, strict=True))
             + " |"
         )
+    if unmatched:
+        lines += ["", f"No scenario run on both sides: {', '.join(unmatched)}."]
     return "\n".join(lines)
 
 

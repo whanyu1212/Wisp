@@ -28,6 +28,7 @@ from wisp.coding.compaction import (
     CompactionSummary,
     CompactionSummaryError,
     ManualCompactionPlan,
+    compaction_transcript_limits,
     serialize_compaction_transcript,
     summarize_manual_compaction,
 )
@@ -249,7 +250,14 @@ async def _scored_run(
     results_dir: Path,
 ) -> SummaryRow:
     started = time.monotonic()
-    transcript_chars = len(serialize_compaction_transcript(scenario.rows))
+    # Sized with the cut the summarizer applies for this scenario's window, so it
+    # matches what the first request sends before any chunking.
+    _, tool_result_chars = compaction_transcript_limits(
+        scenario.context_window, scenario.reserve_tokens
+    )
+    transcript_chars = len(
+        serialize_compaction_transcript(scenario.rows, max_tool_result_chars=tool_result_chars)
+    )
     status: SummaryStatus
     try:
         result = await summarize_one(scenario, provider, model, cost_estimator)

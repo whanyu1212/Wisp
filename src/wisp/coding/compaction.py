@@ -435,26 +435,40 @@ def _compaction_prompt_messages(*, instructions: str | None) -> tuple[Message, .
 _MAX_COMPACTION_AGGREGATION_DEPTH = 8
 
 
-def _compaction_tool_result_chars(max_transcript_chars: int | None) -> int:
-    """Return how much of each tool result the summarizer sees.
+def compaction_transcript_limits(
+    context_window: int | None, reserve_tokens: int
+) -> tuple[int | None, int]:
+    """Return the summarizer's transcript budget and its cut for each tool result.
 
-    The cut grows with the summarizer's budget, so that a request holds about
-    ``_TOOL_RESULTS_PER_REQUEST`` full-size results, between
-    ``MAX_COMPACTION_TOOL_RESULT_CHARS`` and ``_MAX_SCALED_TOOL_RESULT_CHARS``.
-    Without a known budget it stays at the minimum.
+    The transcript budget is about three characters per usable token. The cut
+    grows with it, so that one request holds about ``_TOOL_RESULTS_PER_REQUEST``
+    full-size results, between ``MAX_COMPACTION_TOOL_RESULT_CHARS`` and
+    ``_MAX_SCALED_TOOL_RESULT_CHARS``.
 
     Args:
-        max_transcript_chars (int | None): The largest transcript one request
-            may send, or None when the context window is unknown.
+        context_window (int | None): The model's context window, if known.
+        reserve_tokens (int): Tokens kept free for the summary itself.
 
     Returns:
-        int: The character limit for one tool result.
+        tuple[int | None, int]: The largest transcript one request may send (None
+        when the window is unknown or fully reserved), and the character limit for
+        one tool result, which stays at the minimum without a budget.
+
+    Examples:
+        >>> compaction_transcript_limits(1_000_000, 16_384)
+        (2950848, 20000)
+        >>> compaction_transcript_limits(None, 16_384)
+        (None, 2000)
     """
 
-    if max_transcript_chars is None:
-        return MAX_COMPACTION_TOOL_RESULT_CHARS
+    usable_tokens = context_window - reserve_tokens if context_window is not None else None
+    if usable_tokens is None or usable_tokens <= 0:
+        return None, MAX_COMPACTION_TOOL_RESULT_CHARS
+    max_transcript_chars = max(4_000, usable_tokens * 3)
     scaled = max_transcript_chars // _TOOL_RESULTS_PER_REQUEST
-    return min(_MAX_SCALED_TOOL_RESULT_CHARS, max(MAX_COMPACTION_TOOL_RESULT_CHARS, scaled))
+    return max_transcript_chars, min(
+        _MAX_SCALED_TOOL_RESULT_CHARS, max(MAX_COMPACTION_TOOL_RESULT_CHARS, scaled)
+    )
 
 
 async def summarize_manual_compaction(
@@ -471,9 +485,8 @@ async def summarize_manual_compaction(
 ) -> CompactionSummary:
     """Generate a bounded checkpoint without exposing internal loop events."""
 
-    usable_tokens = context_window - reserve_tokens if context_window is not None else None
-    max_transcript_chars = (
-        max(4_000, usable_tokens * 3) if usable_tokens is not None and usable_tokens > 0 else None
+    max_transcript_chars, max_tool_result_chars = compaction_transcript_limits(
+        context_window, reserve_tokens
     )
     final, partials = await _summarize_bounded(
         plan,
@@ -484,7 +497,7 @@ async def summarize_manual_compaction(
         instructions=instructions,
         cost_estimator=cost_estimator,
         max_transcript_chars=max_transcript_chars,
-        max_tool_result_chars=_compaction_tool_result_chars(max_transcript_chars),
+        max_tool_result_chars=max_tool_result_chars,
         depth=0,
     )
     summaries = (*partials, final)
@@ -872,6 +885,7 @@ __all__ = [
     "ManualCompactionPlan",
     "NothingToCompactError",
     "build_compaction_checkpoint_prompt",
+    "compaction_transcript_limits",
     "plan_manual_compaction",
     "plan_preflight_compaction",
     "serialize_compaction_transcript",
