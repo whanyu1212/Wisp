@@ -57,8 +57,8 @@ frontend must come from the same release.
   `process_wake`, whose prompt is the notice alone. An exit nobody polled during a run wakes the
   agent once that run ends. At most three wake runs start between the user's prompts. The run
   uses the session's permission mode, and the TUI shows it like a prompt it sent, labelled
-  "Background process stopped", which `Esc` cancels. A prompt the user sends while a wake run
-  is going cancels the wake and carries its notices instead. Message snapshots mark its prompt with
+  "Background process stopped", which `Esc` cancels. A prompt, `/init`, or `/compact` the user
+  sends while a wake run is going cancels the wake; its notices lead the next prompt. Message snapshots mark its prompt with
   `process_wake`, and its notice text never reaches a frontend. The `wake_on_process_exit`
   setting (`WISP_WAKE_ON_PROCESS_EXIT`) is on by default; turned off, notices wait for the next
   prompt as before. In-process SDK hosts wake too. A cancelled prompt, or one the run rolls back,

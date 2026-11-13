@@ -19,6 +19,9 @@ from wisp.sessions.jsonl import JsonlSession
 # A wake run is a prompt run that Wisp starts by itself; it takes queued messages
 # the same way.
 _PROMPT_RUN_COMMAND_TYPES = frozenset({"prompt", "init", "process_wake"})
+# Runs a user starts, which cancel a wake run going when they arrive. A frontend that
+# sent one before seeing the wake start may rely on the wake not running on.
+_PREEMPTS_WAKE_COMMAND_TYPES = frozenset({"prompt", "init", "compact"})
 
 
 _SequentialRpcCommandType = TypeAliasType(
@@ -536,10 +539,11 @@ class RpcCoordinator:
 
         The rules, in order: a duplicate ID is rejected; shutdown cancels discovery;
         discovery is rejected once shutdown is pending; an idle shutdown is queued so
-        buffered control drains first; a user's prompt cancels a running wake run
-        and waits for it to stop; steering and follow-ups wait until a running
-        prompt is ready for them; discovery, and reads a prompt allows, run alongside
-        the active command; other work waits behind it unless it may bypass it.
+        buffered control drains first; a user's prompt, `/init`, or compaction
+        cancels a running wake run and waits for it to stop; steering and follow-ups
+        wait until a running prompt is ready for them; discovery, and reads a prompt
+        allows, run alongside the active command; other work waits behind it unless
+        it may bypass it.
         """
 
         duplicate_id = self._duplicate_outstanding_id(command)
@@ -568,10 +572,10 @@ class RpcCoordinator:
         if (
             running is not None
             and running.command_type == "process_wake"
-            and selected_type in {"prompt", "init"}
+            and selected_type in _PREEMPTS_WAKE_COMMAND_TYPES
         ):
             # The user is back and their own run comes first. Cancelling rolls the
-            # wake's prompt back, so its notices lead the user's prompt instead.
+            # wake's prompt back, so its notices lead the user's next prompt.
             running.cancel_scope.cancel()
         if (
             running is not None

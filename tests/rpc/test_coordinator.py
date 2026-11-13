@@ -487,9 +487,20 @@ def test_wake_waits_for_idle(arrives: str, expected: list[str]) -> None:
     assert anyio.run(scenario) == expected
 
 
-@pytest.mark.parametrize(("running_type", "cancelled"), [("process_wake", True), ("prompt", False)])
-def test_prompt_preempts_wake(running_type: str, cancelled: bool) -> None:
-    """A user's prompt cancels a running wake run, never a user's own run."""
+@pytest.mark.parametrize(
+    ("running_type", "arriving", "cancelled"),
+    [
+        ("process_wake", {"prompt": "hi", "type": "prompt"}, True),
+        ("process_wake", {"type": "compact"}, True),
+        ("process_wake", {"type": "get_session_stats"}, False),
+        ("prompt", {"prompt": "hi", "type": "prompt"}, False),
+    ],
+    ids=["prompt", "compact", "read", "user-run"],
+)
+def test_user_run_preempts_wake(
+    running_type: str, arriving: dict[str, object], cancelled: bool
+) -> None:
+    """A user's own run cancels a running wake run, never another user's run."""
 
     async def scenario() -> tuple[bool, list[str]]:
         scope = anyio.CancelScope()
@@ -506,7 +517,7 @@ def test_prompt_preempts_wake(running_type: str, cancelled: bool) -> None:
             return _RpcDispatchResult(None)
 
         await coordinator.handle_event(
-            input_command({"prompt": "hi", "id": "user", "type": "prompt"}),
+            input_command({**arriving, "id": "user"}),
             dispatch=dispatch,
             reject=ignore_reject,
         )
