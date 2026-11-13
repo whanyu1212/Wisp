@@ -6,12 +6,13 @@ import asyncio
 import math
 import os
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import Final, Literal, cast, overload
 
 import anyio
 
 from wisp.tools.base import ToolArguments, ToolInputSchema, ToolSafety
-from wisp.tools.common import _optional_int, _required_string
+from wisp.tools.common import _optional_bool, _optional_int, _required_string
 from wisp.tools.context import SCRATCH_ENVIRONMENT_VARIABLE, ToolContext
 from wisp.tools.output_store import SavedOutput, SavedStream, SaveStatus, saved_output_notice
 from wisp.tools.result import ToolArgumentError, ToolError, ToolResult
@@ -40,6 +41,15 @@ _HEREDOC_SUBSTITUTION_NOTICE = (
     "file (gh pr create --body-file, git commit -F).]"
 )
 
+# Notices are held for the next prompt; within this turn, only a poll sees the exit.
+_EXIT_NOTICE_PROMISED = (
+    "[You will be told when this process stops, with the next prompt, if it is still "
+    "running when this turn ends. To wait for it now, poll with until=exit.]"
+)
+_EXIT_NOTICE_UNAVAILABLE = (
+    "[Exit notices are not available here; poll this process to see when it stops.]"
+)
+
 BashOperation = Literal["run", "start", "poll", "cancel"]
 _BASH_OPERATIONS: Final = frozenset({"run", "start", "poll", "cancel"})
 
@@ -56,6 +66,9 @@ class BashTool:
         "output by process_id, and operation=cancel to terminate it. "
         "A poll with wait_seconds returns at the next output; pass until=exit to wait for the "
         "process to finish instead, such as for a watcher that prints progress. "
+        "For work whose result you need but need not wait on, such as CI checks or a long "
+        "build, start it with notify_on_exit=true; the start result says whether you will be "
+        "told when it stops. "
         "Pass long text such as commit messages or pull request bodies as a file "
         "(git commit -F, gh pr create --body-file) rather than through $(cat <<EOF ...), "
         "which macOS's bash 3.2 misparses when the text has quotes."
@@ -99,6 +112,7 @@ class BashTool:
                 "enum": ["output", "exit"],
                 "default": "output",
             },
+            "notify_on_exit": {"type": "boolean", "default": False},
         },
         "oneOf": [
             {
@@ -273,6 +287,7 @@ class BashTool:
                 f"bash.yield_seconds must be from 0 to {_MAX_MANAGED_WAIT_SECONDS}"
             )
         until = _poll_until(arguments)
+        notify_on_exit = _optional_bool(arguments, "notify_on_exit", default=False)
 
         process_id = await supervisor.start(
             command,
@@ -281,6 +296,7 @@ class BashTool:
             max_retained_bytes=context.max_output_bytes,
             max_retained_lines=context.max_output_lines,
             env=_command_environment(context),
+            notify_on_exit=notify_on_exit,
         )
         try:
             update = await supervisor.poll(process_id, wait_seconds=yield_seconds, until=until)
@@ -288,7 +304,11 @@ class BashTool:
             with anyio.CancelScope(shield=True):
                 await supervisor.cancel(process_id)
             raise
-        return await _managed_update_result(update, context=context)
+        result = await _managed_update_result(update, context=context)
+        if not notify_on_exit or update.state != "running":
+            return result
+        notice = _EXIT_NOTICE_PROMISED if supervisor.has_exit_listener else _EXIT_NOTICE_UNAVAILABLE
+        return replace(result, text=f"{result.text}\n{notice}")
 
     async def _poll(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
         supervisor = self._require_process_supervisor("poll")

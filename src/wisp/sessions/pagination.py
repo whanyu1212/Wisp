@@ -315,13 +315,14 @@ def _rpc_message_snapshot(
         message.skill_invocation,
         text_budget=text_budget,
     )
+    # Frontends show the prompt; process notices in front of it went to the model only.
     if text_budget is None:
-        content = message.content
+        content = message.prompt_content
         content_original_bytes = len(content.encode("utf-8"))
         content_truncated = False
     else:
         content, content_original_bytes, content_truncated = _clip_text_with_budget(
-            message.content,
+            message.prompt_content,
             limit=MESSAGE_CONTENT_BYTE_LIMIT,
             text_budget=text_budget,
         )
@@ -655,7 +656,7 @@ def session_tree_node_summary(entry: SessionTreeEntry) -> SessionTreeNodeSummary
     role: Role | None = None
     if isinstance(entry, MessageSessionEntry):
         role = entry.message.role
-        preview = entry.message.content
+        preview = entry.message.prompt_content
         if not preview and entry.message.tool_calls:
             names = ", ".join(call.name for call in entry.message.tool_calls)
             preview = f"[tool calls: {names}]"

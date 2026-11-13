@@ -1086,8 +1086,12 @@ impl ProcessCardSnapshot {
                     .stderr_source_bytes
                     .saturating_sub(u64::try_from(stderr.len()).unwrap_or(u64::MAX)),
             );
-        if update_display_state {
-            self.display_state = process_result_state(operation, result);
+        // A process that has ended never runs again, so a result that does not read
+        // it as ended was read before its `process.ended` event arrived.
+        let next_state = process_result_state(operation, result);
+        let stale = self.display_state.terminal() && !next_state.terminal();
+        if update_display_state && !stale {
+            self.display_state = next_state;
             self.exit_code = result
                 .exit_code
                 .and_then(|code| i32::try_from(code).ok())

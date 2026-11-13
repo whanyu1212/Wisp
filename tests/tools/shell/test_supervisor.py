@@ -15,6 +15,7 @@ from tests.tools.shell.supervisor_support import (
 )
 from wisp.tools.result import ToolError
 from wisp.tools.shell.supervisor import (
+    ProcessExit,
     ProcessSupervisor,
     ProcessUpdate,
     _bounded_text_tail,
@@ -597,3 +598,87 @@ def test_closed_and_unknown_process_handles_fail_deterministically(tmp_path: Pat
             )
 
     anyio.run(run)
+
+
+@pytest.mark.process
+@pytest.mark.parametrize(
+    ("source", "lifetime", "state", "exit_code"),
+    [
+        ("import sys; sys.exit(3)", 10, "completed", 3),
+        ("import time; time.sleep(30)", 0.3, "timed_out", None),
+    ],
+    ids=["exit", "lifetime"],
+)
+def test_exit_listener_hears_once(
+    tmp_path: Path, source: str, lifetime: float, state: str, exit_code: int | None
+) -> None:
+    heard: list[ProcessExit] = []
+
+    async def run() -> None:
+        supervisor = ProcessSupervisor()
+        supervisor.set_exit_listener(heard.append)
+        try:
+            process_id = await supervisor.start(
+                python_command(source), cwd=tmp_path, timeout=lifetime, notify_on_exit=True
+            )
+            await supervisor.poll(process_id, wait_seconds=10, until="exit")
+            await supervisor.poll(process_id)
+        finally:
+            await supervisor.aclose()
+
+    anyio.run(run)
+
+    assert [(e.state, e.exit_code, e.notify) for e in heard] == [(state, exit_code, True)]
+    assert heard[0].ended_at >= heard[0].started_at
+
+
+@pytest.mark.process
+@pytest.mark.parametrize("stop", ["cancel", "cancel_all", "aclose"])
+def test_exit_listener_skips_cancelled(tmp_path: Path, stop: str) -> None:
+    heard: list[ProcessExit] = []
+
+    async def run() -> None:
+        supervisor = ProcessSupervisor()
+        supervisor.set_exit_listener(heard.append)
+        try:
+            process_id = await supervisor.start(
+                python_command("import time; time.sleep(30)"), cwd=tmp_path, timeout=30
+            )
+            if stop == "cancel":
+                await supervisor.cancel(process_id)
+            elif stop == "cancel_all":
+                await supervisor.cancel_all()
+        finally:
+            await supervisor.aclose()
+
+    anyio.run(run)
+
+    assert heard == []
+
+
+@pytest.mark.process
+def test_exit_listener_failure_contained(tmp_path: Path) -> None:
+    """A listener that raises cannot keep the process from finishing."""
+
+    def broken(_exit: ProcessExit) -> None:
+        raise RuntimeError("listener broke")
+
+    async def run() -> tuple[ProcessUpdate, bool, bool]:
+        supervisor = ProcessSupervisor()
+        supervisor.set_exit_listener(broken)
+        try:
+            process_id = await supervisor.start(
+                python_command("print('done')"), cwd=tmp_path, timeout=10
+            )
+            update = await supervisor.poll(process_id, wait_seconds=10, until="exit")
+            before = supervisor.is_terminal_reported("unknown-id")
+            return update, before, supervisor.is_terminal_reported(process_id)
+        finally:
+            await supervisor.aclose()
+
+    update, unknown_reported, reported = anyio.run(run)
+
+    assert update.state == "completed"
+    assert update.stdout == "done\n"
+    assert unknown_reported is True
+    assert reported is True

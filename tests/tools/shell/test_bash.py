@@ -234,6 +234,49 @@ def test_bash_until_exit_waits_through_output(tmp_path: Path, operation: str) ->
     assert result.data["stdout"].endswith("3\n4\n")
 
 
+@pytest.mark.process
+@pytest.mark.parametrize(
+    ("listening", "source", "promise"),
+    [
+        (True, "import time; time.sleep(30)", "You will be told when this process stops"),
+        (False, "import time; time.sleep(30)", "Exit notices are not available here"),
+        (True, "pass", None),
+    ],
+    ids=["listening", "no-listener", "already-ended"],
+)
+def test_notify_on_exit_promise(
+    tmp_path: Path, listening: bool, source: str, promise: str | None
+) -> None:
+    """The start result says whether an exit notice will come, only while it runs."""
+
+    supervisor = process_manager_module.ProcessSupervisor()
+    if listening:
+        supervisor.set_exit_listener(lambda _exit: None)
+    bash = BashTool(supervisor)
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(source)}"
+
+    async def run() -> ToolResult:
+        try:
+            arguments = {
+                "operation": "start",
+                "command": command,
+                "notify_on_exit": True,
+                "yield_seconds": 2 if source == "pass" else 0,
+                "until": "exit",
+            }
+            return await bash.run(arguments, ToolContext(cwd=tmp_path))
+        finally:
+            await bash.aclose()
+
+    result = anyio.run(run)
+
+    notices = ("You will be told when this process stops", "Exit notices are not available here")
+    if promise is None:
+        assert not any(notice in result.text for notice in notices)
+    else:
+        assert promise in result.text
+
+
 def test_bash_until_rejects_unknown(tmp_path: Path) -> None:
     with pytest.raises(ToolError, match="bash.until must be one of: output, exit"):
         run_tool(

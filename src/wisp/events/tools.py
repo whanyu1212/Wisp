@@ -9,6 +9,7 @@ from typing import Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from wisp.events._base import (
+    EndedProcessState,
     ImagePart,
     JsonObject,
     ManagedProcessState,
@@ -17,6 +18,9 @@ from wisp.events._base import (
 )
 from wisp.events.usage import TokenUsage, UsageCost
 from wisp.tool_types import ToolFailureCode
+
+# How much of a process's command a process.ended event carries.
+PROCESS_COMMAND_SUMMARY_MAX_CHARS = 500
 
 
 class ToolCallRequested(WispEvent):
@@ -344,6 +348,26 @@ class ToolExecutionEnded(_ToolResultEvent):
     """Durable boundary reached after one tool execution finishes."""
 
     type: Literal["tool.execution.ended"] = "tool.execution.ended"
+
+
+class ProcessEnded(WispEvent):
+    """A process started with ``bash operation=start`` stopped on its own.
+
+    Published whenever it happens, with or without a run in progress, so a
+    frontend can close the process's card. A cancelled process publishes nothing:
+    the cancel's tool result already reports it.
+    """
+
+    type: Literal["process.ended"] = "process.ended"
+    process_id: str = Field(min_length=1, max_length=128)
+    # The command as started, cut to a summary for display.
+    command: str = Field(max_length=PROCESS_COMMAND_SUMMARY_MAX_CHARS)
+    state: EndedProcessState
+    # The exit status, for a completed process.
+    exit_code: int | None = None
+    duration_ms: int = Field(ge=0)
+    # Whether the model asked to be told; its notice arrives with the next prompt.
+    notify: bool = False
 
 
 class ToolResultReady(_ToolResultEvent):

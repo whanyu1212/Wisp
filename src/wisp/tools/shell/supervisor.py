@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
@@ -39,6 +40,8 @@ ProcessState = Literal["running", "completed", "failed", "timed_out", "cancelled
 PollUntil = Literal["output", "exit"]
 _PendingTextBackend = Literal["auto", "python", "native"]
 _T = TypeVar("_T")
+
+_logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_MANAGED_PROCESSES = 8
 DEFAULT_MAX_RETAINED_BYTES = 50_000
@@ -85,6 +88,32 @@ class ProcessUpdate:
     # The full streams, which the caller saves if its result shows only part of them.
     stdout_saved: SavedStream | None = None
     stderr_saved: SavedStream | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessExit:
+    """A started process that stopped without being cancelled.
+
+    Attributes:
+        process_id (str): The handle ``start`` returned.
+        command (str): The command as started.
+        state (ProcessState): ``completed``, ``failed``, or ``timed_out``.
+        exit_code (int | None): The exit status, for a completed process.
+        started_at (datetime): When the process started, in UTC.
+        ended_at (datetime): When it stopped, in UTC.
+        notify (bool): Whether the caller asked to be told of the exit.
+    """
+
+    process_id: str
+    command: str
+    state: ProcessState
+    exit_code: int | None
+    started_at: datetime
+    ended_at: datetime
+    notify: bool
+
+
+ProcessExitListener = Callable[[ProcessExit], None]
 
 
 @dataclass
@@ -367,6 +396,8 @@ class _ManagedProcess:
     stderr_task: asyncio.Task[None] | None = None
     completion_task: asyncio.Task[None] | None = None
     terminal_reported: bool = False
+    notify_on_exit: bool = False
+    exit_announced: bool = False
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     started_monotonic: float = field(default_factory=time.monotonic)
     ended_at: datetime | None = None
@@ -422,6 +453,43 @@ class ProcessSupervisor:
         self._closed = False
         self._lock = asyncio.Lock()
         self._close_task: asyncio.Task[None] | None = None
+        self._exit_listener: ProcessExitListener | None = None
+
+    def set_exit_listener(self, listener: ProcessExitListener | None) -> None:
+        """Call ``listener`` once for each started process that stops on its own.
+
+        The call happens on the event loop, after the process's terminal state is
+        final and any waiting poll has been woken. It is not made for a cancelled
+        process: whoever cancelled it already has the result. The listener must not
+        block; an exception it raises is logged and does not affect the process.
+
+        Args:
+            listener (ProcessExitListener | None): The callback, or None to stop.
+        """
+
+        self._exit_listener = listener
+
+    @property
+    def has_exit_listener(self) -> bool:
+        """Whether a listener will hear about processes that stop on their own."""
+
+        return self._exit_listener is not None
+
+    def is_terminal_reported(self, process_id: str) -> bool:
+        """Whether a poll or cancel has already returned this process's final state.
+
+        A handle the supervisor no longer holds counts as reported: only reported
+        processes are released to make room.
+
+        Args:
+            process_id (str): The handle ``start`` returned.
+
+        Returns:
+            bool: True once the caller has seen the terminal state.
+        """
+
+        managed = self._managed.get(process_id)
+        return managed is None or managed.terminal_reported
 
     @property
     def output_store(self) -> OutputStore:
@@ -599,8 +667,12 @@ class ProcessSupervisor:
         max_retained_bytes: int = DEFAULT_MAX_RETAINED_BYTES,
         max_retained_lines: int = DEFAULT_MAX_RETAINED_LINES,
         env: Mapping[str, str] | None = None,
+        notify_on_exit: bool = False,
     ) -> str:
-        """Start one resumable process and return an opaque runtime-local handle."""
+        """Start one resumable process and return an opaque runtime-local handle.
+
+        ``notify_on_exit`` reaches the exit listener as ``ProcessExit.notify``.
+        """
 
         if timeout <= 0:
             raise ValueError("timeout must be greater than zero")
@@ -628,6 +700,7 @@ class ProcessSupervisor:
                 stderr_saved=self._open_saved_stream(
                     "stderr", command, spill_threshold=max_retained_bytes
                 ),
+                notify_on_exit=notify_on_exit,
             )
             managed.stdout_task = asyncio.create_task(
                 self._read_stream(managed, process.stdout, managed.stdout, managed.stdout_saved)
@@ -1079,6 +1152,36 @@ class ProcessSupervisor:
                 completion.cancel()
                 await asyncio.gather(completion, return_exceptions=True)
             managed.changed.set()
+            self._announce_exit(managed)
+
+    def _announce_exit(self, managed: _ManagedProcess) -> None:
+        """Tell the exit listener, once, about a process that stopped on its own."""
+
+        listener = self._exit_listener
+        if (
+            listener is None
+            or managed.exit_announced
+            or managed.state in ("running", "cancelled")
+            or managed.ended_at is None
+        ):
+            return
+        managed.exit_announced = True
+        try:
+            listener(
+                ProcessExit(
+                    process_id=managed.process_id,
+                    command=managed.command,
+                    state=managed.state,
+                    exit_code=managed.exit_code if managed.state == "completed" else None,
+                    started_at=managed.started_at,
+                    ended_at=managed.ended_at,
+                    notify=managed.notify_on_exit,
+                )
+            )
+        except Exception:
+            # The listener reports to frontends; a failure there must not leave
+            # the process's own completion unfinished.
+            _logger.exception("Process exit listener failed for %s", managed.process_id)
 
     async def _finish_terminated_io(self, managed: _ManagedProcess) -> None:
         """Bound pipe draining after the owned process tree has been terminated."""

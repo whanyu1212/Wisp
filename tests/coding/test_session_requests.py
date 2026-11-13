@@ -17,7 +17,7 @@ from wisp.events import (
     MessageCompleted,
     ToolCallSnapshot,
 )
-from wisp.messages import Message
+from wisp.messages import Message, ProcessNotice
 from wisp.providers.base import (
     ToolSpec,
 )
@@ -225,6 +225,92 @@ def test_unsafe_session_id_runs_without_scratch(tmp_path: Path) -> None:
     assert provider.seen_messages is not None
     assert not any("scratch folder:" in m.content for m in provider.seen_messages)
     assert not (tmp_path / "escape").exists()
+
+
+def test_process_notices_lead_next_prompt(tmp_path: Path) -> None:
+    """Held exits go to the model once, in front of the next prompt only.
+
+    Replay, previews, and forks show the prompt as the user wrote it.
+    """
+
+    provider = CapturingProvider()
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+    held = [
+        ProcessNotice(
+            process_id="ci", command="gh pr checks 1 --watch", state="completed", exit_code=1
+        )
+    ]
+
+    def take() -> tuple[ProcessNotice, ...]:
+        taken = tuple(held)
+        held.clear()
+        return taken
+
+    agent = CodingSession(provider=provider, sessions=store, take_process_notices=take)
+
+    async def run(prompt: str) -> list[str]:
+        _ = [event async for event in agent.run(prompt, session=session)]
+        assert provider.seen_messages is not None
+        return [m.content for m in provider.seen_messages if m.role == "user"]
+
+    first = anyio.run(run, "did CI pass?")
+    second = anyio.run(run, "thanks")
+
+    assert first[-1].startswith("[Wisp: background processes")
+    assert first[-1].endswith(
+        "- process_id=ci: exit code 1: gh pr checks 1 --watch\n\ndid CI pass?"
+    )
+    assert second[-1] == "thanks"
+    page = session.read_message_page()
+    prompts = [m.content for m in page.messages if m.role == "user"]
+    assert prompts == ["did CI pass?", "thanks"]
+    (noticed,) = [m for m in session.read_messages() if m.process_notices]
+    assert noticed.process_notices == (
+        ProcessNotice(
+            process_id="ci", command="gh pr checks 1 --watch", state="completed", exit_code=1
+        ),
+    )
+    entry_id = next(m.entry_id for m in page.messages if m.content == "did CI pass?")
+    revisited = anyio.run(
+        lambda: session.navigate_tree(
+            entry_id, expected_active_leaf_id=session.read_active_leaf_id(), operation_id="nav"
+        )
+    )
+    assert revisited.editor_text == "did CI pass?"
+    fork = anyio.run(
+        lambda: store.fork_from_user_message(
+            session, entry_id, expected_active_leaf_id=session.read_active_leaf_id()
+        )
+    )
+    assert fork.selected_prompt == "did CI pass?"
+
+
+def test_failed_run_keeps_notices(tmp_path: Path) -> None:
+    """A run that stops before saving its prompt leaves the notices held."""
+
+    held = [ProcessNotice(process_id="ci", command="make", state="failed")]
+    taken: list[tuple[ProcessNotice, ...]] = []
+
+    def take() -> tuple[ProcessNotice, ...]:
+        taken.append(tuple(held))
+        return taken[-1]
+
+    agent = CodingSession(
+        provider=CapturingProvider(),
+        sessions=JsonlSessionStore(tmp_path),
+        take_process_notices=take,
+    )
+
+    async def not_ready() -> None:
+        raise RuntimeError("cancelled while preparing")
+
+    async def run() -> None:
+        _ = [event async for event in agent.run("hi", operation_ready=not_ready)]
+
+    with pytest.raises(RuntimeError, match="cancelled while preparing"):
+        anyio.run(run)
+    assert taken == []
 
 
 def test_custom_prompt_replaces_defaults(tmp_path: Path) -> None:

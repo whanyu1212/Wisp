@@ -904,6 +904,68 @@
    "accepted": false
   },
   {
+   "event": "process.ended",
+   "operation": "remove",
+   "path": [
+    "command"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "process.ended",
+   "operation": "remove",
+   "path": [
+    "duration_ms"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "process.ended",
+   "operation": "remove",
+   "path": [
+    "exit_code"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "process.ended",
+   "operation": "remove",
+   "path": [
+    "notify"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "process.ended",
+   "operation": "remove",
+   "path": [
+    "process_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "process.ended",
+   "operation": "remove",
+   "path": [
+    "state"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "process.ended",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "process.ended",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
    "event": "project.config.applied",
    "operation": "remove",
    "path": [
