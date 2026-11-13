@@ -131,6 +131,9 @@ fn catalog_is_ordered_resolvable_and_monochrome_keeps_all_roles_achromatic() {
                 palette.addition_background,
                 palette.deletion,
                 palette.deletion_background,
+                palette.logo_tip,
+                palette.logo_middle,
+                palette.logo_base,
             ]
         };
         for (index, (original, mono)) in channels(color).into_iter().zip(channels(gray)).enumerate()
