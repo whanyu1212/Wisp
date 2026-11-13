@@ -81,24 +81,17 @@ const html = `<!doctype html>
   }
   /* Lighten drops the capture's dark cell background into the gradient. */
   .mascot {
-    position: absolute; left: 44px; top: 40px; height: 220px;
+    position: absolute; left: 76px; top: 40px; height: 220px;
     mix-blend-mode: lighten;
   }
-  .copy { position: absolute; left: 300px; top: 44px; width: 440px; }
+  .copy {
+    position: absolute; left: 342px; top: 0; height: 300px;
+    display: flex; align-items: center;
+  }
   h1 {
-    margin: 0; font: 400 88px/1 Georgia, "Times New Roman", serif;
+    margin: 0 0 6px; font: 400 96px/1 Georgia, "Times New Roman", serif;
     letter-spacing: -0.045em; color: #fab283;
   }
-  p {
-    margin: 18px 0 0; font: 21px/1.45 "Banner Mono", monospace; color: #eeeeee;
-  }
-  code {
-    display: inline-block; margin-top: 20px; padding: 9px 16px;
-    border: 1px solid #fab28366; border-radius: 8px; background: #1c1b1a;
-    font: 17px/1.2 "Banner Mono", monospace; color: #eeeeee;
-  }
-  code span, p em { color: #fab283; }
-  p em { font-style: normal; }
   /* The terminal floats in a gentle perspective tilt, as in the promo video. */
   .stage { position: absolute; left: 758px; top: 0; width: 442px; height: 300px; perspective: 1300px; }
   .orbit {
@@ -138,8 +131,6 @@ const html = `<!doctype html>
 <canvas class="mascot"></canvas>
 <div class="copy">
   <h1>Wisp</h1>
-  <p>your code, your <em>direction</em>.</p>
-  <code><span>$</span> uv tool install --python 3.12 wisp-ai</code>
 </div>
 <div class="stage">
   <div class="orbit"></div>

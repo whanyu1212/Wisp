@@ -1,48 +1,36 @@
+<!--
+Wisp is personal software. GitHub issues are open for reproducible bug reports only;
+feature requests and general enhancements aren't tracked here.
+Please report security vulnerabilities privately via SECURITY.md.
+-->
+
 ## Summary
 
-<!-- What should change, or what is broken? -->
-
-## Type
-
-- [ ] Bug
-- [ ] Enhancement
-- [ ] Refactor / architecture
-- [ ] Tests / tooling
-- [ ] Documentation
-- [ ] Question / design discussion
+<!-- What is broken? -->
 
 ## Current behavior
 
-<!-- For bugs: what happens now? For enhancements: what is missing or awkward today? -->
+<!-- What happens right now, including exact error messages or unexpected output? -->
 
-## Desired behavior
+## Expected behavior
 
-<!-- What should happen when this is done? -->
+<!-- What did you expect to happen instead? -->
 
-## Reproduction / example
+## Reproduction
 
-<!-- For bugs, include exact steps and output. For enhancements, include a sample command or workflow. -->
+<!-- Minimal steps or command to reproduce the bug. -->
 
 ```bash
-uv run wisp -p "hello"
+uv run wisp -p "hello" --provider fake
 ```
-
-## Acceptance criteria
-
-- [ ] 
-- [ ] 
-
-## Constraints / non-goals
-
-<!-- What should not be changed as part of this issue? -->
 
 ## Environment
 
 - OS:
-- Python version: `python --version`
-- uv version: `uv --version`
-- Wisp commit / branch:
+- Wisp version or commit (`wisp --version`):
+- Install method (native wheel, pure wheel, or source checkout):
+- Python version (`python --version`):
 
 ## Notes
 
-<!-- Links, screenshots, logs, or related issues. Do not include secrets or API keys. -->
+<!-- Relevant logs or screenshots. Remove API keys, tokens, and private file contents. -->
