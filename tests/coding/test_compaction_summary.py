@@ -18,6 +18,7 @@ from wisp.coding.compaction import (
     REQUIRED_COMPACTION_HEADINGS,
     CompactionSummary,
     CompactionSummaryError,
+    ManualCompactionPlan,
     _sum_token_usage,
     build_compaction_checkpoint_prompt,
     plan_manual_compaction,
@@ -371,3 +372,44 @@ def test_summary_rejects_invalid_responses(
             )
 
     anyio.run(run)
+
+
+@pytest.mark.parametrize(
+    ("context_window", "kept_whole"),
+    [(1_000_000, True), (30_000, False), (None, False)],
+    ids=["large-window", "small-window", "unknown-window"],
+)
+def test_tool_result_cut_scales_with_budget(context_window: int | None, kept_whole: bool) -> None:
+    """A large summarizer budget keeps the middle of a long tool result."""
+
+    long_result = "HEAD:" + "a" * 4_000 + "MIDDLE-FAILURE" + "b" * 4_000 + ":TAIL"
+    rows = (
+        context_row("user", Message(role="user", content="run the tests")),
+        context_row("tool", Message(role="tool", content=long_result, tool_call_id="c1")),
+    )
+    plan = ManualCompactionPlan(
+        expected_context_entry_ids=("user", "tool"),
+        replaced_entry_ids=("user", "tool"),
+        rows_to_summarize=rows,
+        retained_rows=(),
+    )
+    provider = CacheAwareScriptedProvider(
+        [
+            [
+                ProviderResponseStarted(model="summary-model"),
+                ProviderResponseCompleted(content=VALID_COMPACTION_SUMMARY),
+            ]
+        ]
+    )
+
+    anyio.run(
+        lambda: summarize_manual_compaction(
+            plan, provider=provider, context_window=context_window, reserve_tokens=16_384
+        )
+    )
+
+    (call,) = provider.calls
+    transcript = call.messages[-1].content
+    assert "HEAD:" in transcript and ":TAIL" in transcript
+    assert ("MIDDLE-FAILURE" in transcript) is kept_whole
+    assert ("[...truncated...]" in transcript) is not kept_whole

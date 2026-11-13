@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from evals.tool_use.runner import _prepare, _run_command, command_environment
+from evals.tool_use.runner import _prepare, command_environment, run_task_command
 from evals.tool_use.task_definitions import TASKS_DIR, Task, load_task
 
 # Every task folder, opt-in ones too, which a whole-suite selection leaves out.
@@ -35,7 +35,7 @@ def _verify(task: Task, tmp_path: Path, *, solved: bool, with_home: bool = True)
     home_files = task.folder / "solution-home"
     if solved and with_home and home_files.is_dir():
         shutil.copytree(home_files, home, dirs_exist_ok=True)
-    return _run_command(
+    return run_task_command(
         task.definition.verify,
         work,
         environment,

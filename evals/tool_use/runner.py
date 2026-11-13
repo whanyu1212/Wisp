@@ -384,7 +384,7 @@ def run_one(task: Task, model: ModelSpec, rep: int, context: RunContext) -> RunR
         # Without `agent.started` Wisp failed earlier, and its own error explains why.
         if metrics.setup is not None and runner_error is None:
             runner_error = _mcp_setup_problem(task, metrics, context.mcp_tool_exposure)
-        verify_exit = _run_command(
+        verify_exit = run_task_command(
             task.definition.verify,
             work,
             commands,
@@ -537,7 +537,7 @@ def _prepare(
                 f"fixture {' '.join(command)} failed: {completed.stderr.decode(errors='replace')}"
             )
     if task.definition.setup is not None:
-        exit_code = _run_command(
+        exit_code = run_task_command(
             task.definition.setup, work, environment, python, task.folder, run_dir / "setup.txt"
         )
         if exit_code != 0:
@@ -591,7 +591,7 @@ def _run_wisp(
         (run_dir / "events.jsonl").open("w", encoding="utf-8") as events,
         (run_dir / "stderr.txt").open("w", encoding="utf-8") as stderr,
     ):
-        exit_code = _run_in_own_group(
+        exit_code = run_in_own_group(
             command,
             cwd=work,
             environment=environment,
@@ -635,7 +635,7 @@ def _mcp_setup_problem(task: Task, metrics: RunMetrics, exposure: McpToolExposur
     return None
 
 
-def _run_command(
+def run_task_command(
     command: str,
     work: Path,
     environment: Mapping[str, str],
@@ -653,7 +653,7 @@ def _run_command(
         "{task}", shlex.quote(str(task_dir))
     )
     with log.open("w", encoding="utf-8") as output:
-        return _run_in_own_group(
+        return run_in_own_group(
             ["bash", "-c", script],
             cwd=work,
             environment=environment,
@@ -663,7 +663,7 @@ def _run_command(
         )
 
 
-def _run_in_own_group(
+def run_in_own_group(
     command: Sequence[str],
     *,
     cwd: Path,

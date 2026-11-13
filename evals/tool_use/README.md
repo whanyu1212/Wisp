@@ -48,7 +48,7 @@ before each round, so a stopped suite has the same number of runs for every pair
 The runner follows Wisp's own resolution:
 
 - It always passes `WISP_AUTH_FILE`. Codex signs in with OAuth, which lives only in `auth.json`.
-- For the OpenAI API and Anthropic it passes `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` from the
+- For the OpenAI API, Anthropic and Google it passes `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` and `GOOGLE_API_KEY` from the
   runner's environment or, failing that, from the git-ignored `.env`. Wisp prefers those variables
   over a key stored in `auth.json`.
 

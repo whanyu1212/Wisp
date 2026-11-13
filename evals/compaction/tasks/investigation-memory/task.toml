@@ -1,0 +1,12 @@
+id = "investigation-memory"
+title = "Fix a bug found while reading, after the reads were compacted"
+turns = [
+  """Read every module in plugins/ and tell me, for each, which format it handles and how parse_rows treats the header. Do not edit anything.""",
+  """Run `python -m unittest -q` and summarize the failure in one sentence. Do not edit anything yet.""",
+  """Fix the bug you found. Change only the one module that is wrong.""",
+]
+verify = "{python} {task}/verify.py"
+tools = ["read", "edit", "write", "bash", "grep", "find", "ls"]
+timeout_seconds = 300
+max_tool_iterations = 30
+trigger_tokens = 9000

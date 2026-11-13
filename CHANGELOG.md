@@ -10,6 +10,15 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
+## Unreleased
+
+### Compaction
+
+- A compaction checkpoint now sees more of each long tool result. The cut grows with the
+  summarizer's budget, from 2,000 up to 20,000 characters, so with a typical context window the
+  middle of a long test run or file read reaches the summary instead of being dropped. Small
+  windows and an unknown window keep the 2,000-character cut.
+
 <!-- Keeps links to the pre-release "0.9.1 — Unreleased" heading working. -->
 <a id="091--unreleased"></a>
 
