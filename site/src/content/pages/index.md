@@ -1,6 +1,6 @@
 ---
 title: Wisp
-description: Install and use Wisp, a coding agent you can steer. Find technical reference, learn to build coding agents, explore Wisp's internals, and contribute.
+description: Install and use Wisp, a personal terminal coding agent in Python and Rust built to explore agent runtime design from the loop up.
 route: index.html
 section: using
 order: 0
@@ -11,9 +11,9 @@ searchable: true
 
 # Wisp
 
-![Wisp, a coding agent that stays in sync with you](https://raw.githubusercontent.com/whanyu1212/Wisp/main/assets/wisp-banner-v2.png)
+![Wisp](https://raw.githubusercontent.com/whanyu1212/Wisp/main/assets/wisp-banner-v2.png)
 
-Wisp is a coding agent that stays in sync with you. You can redirect it while it works, approve changes before they happen, and inspect the transcript afterward.
+Wisp is a personal terminal coding agent in Python and Rust, built as a testbed for agent runtime design—exploring agent engineering from the loop up.
 
 Its TUI, print mode, JSONL RPC process, and Python SDK share one typed runtime. Sessions, approvals, cancellation, and event ordering behave consistently across those interfaces, within the controls each input model can support.
 
