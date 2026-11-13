@@ -121,11 +121,10 @@ pub(super) fn observe_tool_call(state: &mut UiState, call: &ToolCallInput) {
     let Some(command) = call.arguments["command"].as_str() else {
         return;
     };
-    if operation == "run" {
-        let foreground = &mut state.background_processes.foreground;
-        if foreground.len() == MAX_PENDING_STARTS {
-            foreground.remove(0);
-        }
+    // A batch runs its calls in order, so the oldest is the one running: past the
+    // bound, later calls go untracked rather than pushing it out.
+    let foreground = &mut state.background_processes.foreground;
+    if operation == "run" && foreground.len() < MAX_PENDING_STARTS {
         foreground.push(call.call_id.clone());
     }
     let starts = &mut state.background_processes.starts;
@@ -511,6 +510,26 @@ mod tests {
             .try_into()
             .unwrap();
         assert_eq!(next["call_id"], "second");
+    }
+
+    #[test]
+    fn long_batch_keeps_running_call() {
+        let mut state = UiState::new("fake".into(), None, None);
+        for index in 0..MAX_PENDING_STARTS + 4 {
+            apply(
+                &mut state,
+                serde_json::json!({
+                    "type": "tool.call", "call_id": format!("call-{index}"), "name": "bash",
+                    "arguments": {"command": "make"}
+                }),
+            );
+        }
+
+        let [command] = sent(&move_running(&mut state, &mut Ids::default()).unwrap())
+            .try_into()
+            .unwrap();
+
+        assert_eq!(command["call_id"], "call-0");
     }
 
     #[test]

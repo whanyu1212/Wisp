@@ -1125,7 +1125,11 @@ class ProcessSupervisor:
         wait: bool = False,
         force: bool = False,
     ) -> bool:
-        cleanup_lock = self._one_shot_locks[process]
+        cleanup_lock = self._one_shot_locks.get(process)
+        if cleanup_lock is None:
+            # Closing the supervisor stopped this tree and then released it, which it
+            # does only once the tree is gone.
+            return True
         async with cleanup_lock:
             if wait:
                 return await _kill_process_tree_and_wait(process)
