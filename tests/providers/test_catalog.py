@@ -303,6 +303,7 @@ def test_builtin_catalog_is_a_complete_checked_in_agent_model_matrix() -> None:
             "deepseek-flash",
         ),
         "google": (
+            "gemini-4-hydrogen",
             "gemini-4-carbon",
             "gemini-4-argon",
             "gemini-3.8-flash",
@@ -457,6 +458,7 @@ def test_builtin_anthropic_and_google_defaults_expose_documented_effort_levels()
             "google", "gemini-4-argon", ("LOW", "MEDIUM", "HIGH"), id="google-uppercase-tiers"
         ),
         ("google", "gemini-4-carbon", ("LOW", "MEDIUM", "HIGH")),
+        ("google", "gemini-4-hydrogen", ("LOW", "MEDIUM", "HIGH", "XHIGH")),
         ("xai", "grok-4.7", ("low", "medium", "high", "xhigh")),
     ],
 )
