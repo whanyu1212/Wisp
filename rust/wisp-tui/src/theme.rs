@@ -51,6 +51,13 @@ pub(crate) struct Palette {
     pub heading_2: Color,
     #[serde(deserialize_with = "color")]
     pub heading_3: Color,
+    /// Wisp Braille's curated gradient, from flame tip to farthest outline.
+    #[serde(deserialize_with = "color")]
+    pub logo_tip: Color,
+    #[serde(deserialize_with = "color")]
+    pub logo_middle: Color,
+    #[serde(deserialize_with = "color")]
+    pub logo_base: Color,
     /// Inline code in replies and the composer.
     #[serde(deserialize_with = "color")]
     pub code: Color,
@@ -526,6 +533,9 @@ impl Palette {
             heading_1: gray(self.heading_1),
             heading_2: gray(self.heading_2),
             heading_3: gray(self.heading_3),
+            logo_tip: gray(self.logo_tip),
+            logo_middle: gray(self.logo_middle),
+            logo_base: gray(self.logo_base),
             code: gray(self.code),
             muted: gray(self.muted),
             addition: gray(self.addition),

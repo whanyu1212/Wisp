@@ -85,6 +85,7 @@ struct LogoArt {
 
 #[derive(Clone, Copy)]
 enum ColorTreatment {
+    WispGradient,
     ThemeForeground,
     AdalForeground,
 }
@@ -279,7 +280,7 @@ fn art(choice: LogoChoice) -> LogoArt {
                 rows: &WISP_BRAILLE_FULL,
                 width: 34,
             },
-            treatment: ColorTreatment::ThemeForeground,
+            treatment: ColorTreatment::WispGradient,
         },
     }
 }
@@ -300,17 +301,21 @@ enum Paint {
     Gradient([Color; 3]),
 }
 
-/// The logo's paint. Where a gradient can show, theme logos run through the heading
-/// colours and the Adal marks through their pink, lighter at the tip and deeper at the
-/// far end; elsewhere they keep one colour.
+/// The logo's paint. Wisp Braille uses its curated theme stops, Classic uses heading
+/// colours, and the Adal marks keep their pink. Without gradients, each stays flat.
 fn paint(art: LogoArt, palette: Palette, no_color: bool) -> Paint {
     let monochrome = no_color || palette.is_monochrome();
     let gradient = !monochrome && palette.shows_gradients();
     match art.treatment {
+        ColorTreatment::WispGradient if gradient => {
+            Paint::Gradient([palette.logo_tip, palette.logo_middle, palette.logo_base])
+        }
         ColorTreatment::ThemeForeground if gradient => {
             Paint::Gradient([palette.heading_1, palette.heading_3, palette.heading_2])
         }
-        ColorTreatment::ThemeForeground => Paint::Flat(palette.primary),
+        ColorTreatment::WispGradient | ColorTreatment::ThemeForeground => {
+            Paint::Flat(palette.primary)
+        }
         ColorTreatment::AdalForeground if monochrome => Paint::Flat(palette.primary),
         ColorTreatment::AdalForeground if gradient => Paint::Gradient([
             mix(ADAL_BACKGROUND, palette.foreground, 0.65),
@@ -614,11 +619,11 @@ mod tests {
         // The flame's tip, the top row's last ink, takes the first stop.
         assert_eq!(
             lines[0].spans.last().unwrap().style.fg,
-            Some(palette.heading_1)
+            Some(palette.logo_tip)
         );
         let colors = ink_colors(&lines);
-        assert!(colors.contains(&palette.heading_3), "{colors:?}");
-        assert!(colors.contains(&palette.heading_2), "{colors:?}");
+        assert!(colors.contains(&palette.logo_middle), "{colors:?}");
+        assert!(colors.contains(&palette.logo_base), "{colors:?}");
         // About a dozen steps, not one per cell.
         let mut distinct = colors.clone();
         distinct.dedup();
@@ -629,19 +634,70 @@ mod tests {
 
     #[test]
     fn gradient_follows_theme() {
-        for theme in [crate::theme::default_theme(), crate::theme::paper_theme()] {
+        for theme in crate::theme::themes() {
             let palette = theme.palette(false);
-            for choice in [LogoChoice::WispBraille, LogoChoice::Classic] {
+            for (choice, tip) in [
+                (LogoChoice::WispBraille, palette.logo_tip),
+                (LogoChoice::Classic, palette.heading_1),
+            ] {
                 let lines = preview_lines(choice, 80, 30, palette, false, Entrance::Finished);
                 assert_eq!(
                     lines[0].spans.last().unwrap().style.fg,
-                    Some(palette.heading_1),
+                    Some(tip),
                     "{} on {}",
                     choice.name(),
                     theme.slug
                 );
-                assert_eq!(name_color(choice, palette, false), palette.heading_1);
+                assert_eq!(name_color(choice, palette, false), tip);
             }
+        }
+    }
+
+    #[test]
+    fn curated_gradients_are_distinct_readable_and_independent_of_headings() {
+        let mut gradients = Vec::new();
+        for theme in crate::theme::themes() {
+            let mut palette = theme.palette(false);
+            let stops = [palette.logo_tip, palette.logo_middle, palette.logo_base];
+            assert!(
+                !gradients.contains(&stops),
+                "{} repeats a logo palette",
+                theme.slug
+            );
+            gradients.push(stops);
+            // Check every rendered gradient step, including interpolated colours.
+            for step in 0..=GRADIENT_STEPS as u8 {
+                let color = ramp(&stops, f64::from(step) / GRADIENT_STEPS);
+                assert!(
+                    crate::theme::contrast_ratio(color, palette.background) >= 4.5,
+                    "{} has a faint logo step: {color:?}",
+                    theme.slug
+                );
+            }
+            let before = preview_lines(
+                LogoChoice::WispBraille,
+                80,
+                30,
+                palette,
+                false,
+                Entrance::Finished,
+            );
+            palette.heading_1 = Color::Rgb(255, 0, 0);
+            palette.heading_2 = Color::Rgb(0, 255, 0);
+            palette.heading_3 = Color::Rgb(0, 0, 255);
+            assert_eq!(
+                preview_lines(
+                    LogoChoice::WispBraille,
+                    80,
+                    30,
+                    palette,
+                    false,
+                    Entrance::Finished,
+                ),
+                before,
+                "{} uses heading colours",
+                theme.slug
+            );
         }
     }
 
