@@ -1603,7 +1603,9 @@ impl Transcript {
     fn process_task_label(&self, process_id: &str) -> Option<String> {
         self.entries.iter().rev().find_map(|entry| {
             let card = entry.tool_card()?;
-            (card.process_id.as_deref() == Some(process_id)).then(|| card.display_arguments())
+            // The card keeps the result's bounded identity; the poll names the raw id.
+            (card.process_id.as_deref().map(identity_for_display) == Some(process_id))
+                .then(|| card.display_arguments())
         })
     }
 
@@ -3130,6 +3132,32 @@ mod tests {
                 .task_label
                 .is_none()
         );
+    }
+
+    #[test]
+    fn process_label_from_projected_start() {
+        // A projected result names its process in bounded form, as the backend's
+        // events and the poll's arguments do not.
+        let mut transcript = Transcript::default();
+        transcript.observe_tool_call(call(
+            "start",
+            "bash",
+            serde_json::json!({"operation": "start", "command": "uv run pytest -q"}),
+        ));
+        let mut started = result("start", "");
+        started.name = "bash".into();
+        started.process_id = Some(crate::tool_cards::bounded_identity("process-test"));
+        started.process_state = Some("running".into());
+        transcript.observe_tool_result(started);
+
+        let poll = transcript.observe_tool_call(call(
+            "poll",
+            "bash",
+            serde_json::json!({"operation": "poll", "process_id": "process-test"}),
+        ));
+
+        let card = transcript.entry(poll).unwrap().process_card().unwrap();
+        assert_eq!(card.task_label.as_deref(), Some("Python tests"));
     }
 
     #[test]
