@@ -8,11 +8,13 @@ from pathlib import Path
 TASK = Path(__file__).resolve().parent
 problems = []
 # Run the fixture's own tests against the result, so added tests are allowed but
-# edited or deleted ones cannot make the run pass.
+# edited or deleted ones cannot make the run pass. `-B` writes no bytecode: a
+# cached module from an earlier run must not stand in for an edited file whose
+# size and timestamp happen to match.
 original = (TASK / "repo" / "tests" / "test_pricing.py").read_text(encoding="utf-8")
 Path("tests/eval_original_pricing.py").write_text(original, encoding="utf-8")
 tests = subprocess.run(
-    [sys.executable, "-m", "unittest", "-q", "tests.eval_original_pricing"],
+    [sys.executable, "-B", "-m", "unittest", "-q", "tests.eval_original_pricing"],
     capture_output=True,
     text=True,
 )

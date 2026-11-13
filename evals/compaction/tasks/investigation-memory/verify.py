@@ -12,11 +12,13 @@ for name in ("csv", "json", "xml", "yaml", "ini"):
     if not filecmp.cmp(TASK / "repo" / module, module, shallow=False):
         problems.append(f"{module} changed")
 # Run the fixture's own tests against the result, so added tests are allowed but
-# edited or deleted ones cannot make the run pass.
+# edited or deleted ones cannot make the run pass. `-B` writes no bytecode: a
+# cached module from an earlier run must not stand in for an edited file whose
+# size and timestamp happen to match.
 original = (TASK / "repo" / "tests" / "test_formats.py").read_text(encoding="utf-8")
 Path("tests/eval_original_formats.py").write_text(original, encoding="utf-8")
 tests = subprocess.run(
-    [sys.executable, "-m", "unittest", "-q", "tests.eval_original_formats"],
+    [sys.executable, "-B", "-m", "unittest", "-q", "tests.eval_original_formats"],
     capture_output=True,
     text=True,
 )
