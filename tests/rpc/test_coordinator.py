@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, cast
 
 import anyio
 import pytest
@@ -16,12 +16,13 @@ from tests.rpc.coordinator_support import (
 )
 from wisp.events import RpcSessionSelected, WispEvent
 from wisp.messages import Message
-from wisp.rpc.commands import ParsedRpcCommand
+from wisp.rpc.commands import ParsedRpcCommand, ProcessWakeCommand
 from wisp.rpc.coordinator import (
     RpcCoordinator,
     _RpcCommandCompleted,
     _RpcDispatchResult,
     _RpcInputClosed,
+    _RpcProcessWake,
     _RpcRunningCommand,
     _RpcSessionState,
 )
@@ -424,3 +425,102 @@ def test_coordinator_accepts_compatibility_event_types() -> None:
         assert coordinator.session_state.entry_count == 1
 
     anyio.run(scenario)
+
+
+@pytest.mark.parametrize(
+    ("arrives", "expected"),
+    [
+        ("nothing", ["one", "wake-1"]),
+        ("input-closed", ["one"]),
+        ("user-prompt", ["one", "two"]),
+    ],
+)
+def test_wake_waits_for_idle(arrives: str, expected: list[str]) -> None:
+    """A wake starts only once nothing runs and no input is already waiting."""
+
+    async def scenario() -> list[str]:
+        events: list[object] = [
+            input_command({"prompt": "", "id": "one", "type": "prompt"}),
+            _RpcProcessWake(),
+            _RpcCommandCompleted("one", "prompt", True, (), 1),
+        ]
+        if arrives == "input-closed":
+            events.append(_RpcInputClosed())
+        if arrives == "user-prompt":
+            events += [
+                input_command({"prompt": "", "id": "two", "type": "prompt"}),
+                _RpcCommandCompleted("two", "prompt", True, (), 2),
+                _RpcInputClosed(),
+            ]
+        receiver = Receiver(events)
+        dispatched: list[str] = []
+
+        def wake() -> ParsedRpcCommand | None:
+            if dispatched != ["one"]:
+                return None
+            return ParsedRpcCommand.from_known(ProcessWakeCommand(id="wake-1"))
+
+        async def dispatch(
+            command: ParsedRpcCommand,
+            _running: _RpcRunningCommand | None,
+        ) -> _RpcDispatchResult:
+            command_id = str(command.command_id)
+            dispatched.append(command_id)
+            if command_id == "wake-1":
+                # The wake's own completion arrives only after it started.
+                receiver.events.extend(
+                    [_RpcCommandCompleted("wake-1", "process_wake", True, (), 2), _RpcInputClosed()]
+                )
+                return _RpcDispatchResult(
+                    _RpcRunningCommand(command_id, "process_wake", anyio.CancelScope())
+                )
+            return _RpcDispatchResult(_RpcRunningCommand(command_id, "prompt", anyio.CancelScope()))
+
+        coordinator = RpcCoordinator(
+            _RpcSessionState(session=None, history=(), entry_count=0),
+            wake=wake,
+            wake_due=lambda: dispatched == ["one"],
+        )
+        await coordinator.run(receiver, dispatch=dispatch, reject=ignore_reject)
+        return dispatched
+
+    assert anyio.run(scenario) == expected
+
+
+@pytest.mark.parametrize(
+    ("running_type", "arriving", "cancelled"),
+    [
+        ("process_wake", {"prompt": "hi", "type": "prompt"}, True),
+        ("process_wake", {"type": "compact"}, True),
+        ("process_wake", {"type": "get_session_stats"}, False),
+        ("prompt", {"prompt": "hi", "type": "prompt"}, False),
+    ],
+    ids=["prompt", "compact", "read", "user-run"],
+)
+def test_user_run_preempts_wake(
+    running_type: str, arriving: dict[str, object], cancelled: bool
+) -> None:
+    """A user's own run cancels a running wake run, never another user's run."""
+
+    async def scenario() -> tuple[bool, list[str]]:
+        scope = anyio.CancelScope()
+        dispatched: list[str] = []
+        state = _RpcSessionState(session=None, history=(), entry_count=0)
+        coordinator = RpcCoordinator(state)
+        coordinator.running_command = _RpcRunningCommand("running", cast(Any, running_type), scope)
+
+        async def dispatch(
+            command: ParsedRpcCommand,
+            _running: _RpcRunningCommand | None,
+        ) -> _RpcDispatchResult:
+            dispatched.append(str(command.command_id))
+            return _RpcDispatchResult(None)
+
+        await coordinator.handle_event(
+            input_command({**arriving, "id": "user"}),
+            dispatch=dispatch,
+            reject=ignore_reject,
+        )
+        return scope.cancel_called, dispatched
+
+    assert anyio.run(scenario) == (cancelled, [])

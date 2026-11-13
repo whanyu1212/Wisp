@@ -36,7 +36,7 @@ from wisp.events import (
     TrustResolved,
     WispEvent,
 )
-from wisp.rpc.commands import ApprovalScope, ParsedRpcCommand
+from wisp.rpc.commands import ApprovalScope, ParsedRpcCommand, ProcessWakeCommand
 from wisp.rpc.configuration import RpcProjectConfiguration, _ConfigOverrides, _RpcConfigureOverrides
 from wisp.rpc.coordinator import (
     _MAX_QUEUED_RPC_COMMANDS,
@@ -46,6 +46,7 @@ from wisp.rpc.coordinator import (
     _RpcControlEvent,
     _RpcDispatchResult,
     _RpcInputClosed,
+    _RpcProcessWake,
     _RpcRunningCommand,
     _RpcSessionState,
 )
@@ -651,8 +652,10 @@ class RpcHost:
         outbound_frame_limit: int | None = None,
         tool_selection: RpcToolSelection | None = None,
         working_directory: RpcWorkingDirectory | None = None,
+        process_exits: ProcessExitNotices | None = None,
     ) -> None:
         self.working_directory = working_directory
+        self._process_exits = process_exits
         self.runtime = runtime
         self.sessions = sessions
         self.agent = agent
@@ -889,8 +892,16 @@ class RpcHost:
             )
             await host._render_event_batch(events)
 
+        def next_wake() -> ParsedRpcCommand | None:
+            # Asked by the coordinator whenever nothing runs or waits.
+            if not config.wake_on_process_exit or not process_exits.take_wake():
+                return None
+            return ParsedRpcCommand.from_known(ProcessWakeCommand(id=f"wake-{uuid4().hex}"))
+
         coordinator = RpcCoordinator(
             session_state,
+            wake=next_wake,
+            wake_due=lambda: config.wake_on_process_exit and process_exits.wake_due,
             session_changed=end_session_scope,
             session_activated=work_from_active_path,
             input_closed_handlers=(
@@ -925,6 +936,7 @@ class RpcHost:
                 allow_read_tools=options.allow_read_tools,
                 allowed_tools=options.allowed_tools,
             ),
+            process_exits=process_exits,
         )
         for event in runtime.startup_events:
             write_event(event)
@@ -948,6 +960,9 @@ class RpcHost:
             command: ParsedRpcCommand,
             running_command: _RpcRunningCommand | None,
         ) -> _RpcDispatchResult:
+            if self._process_exits is not None and command.command_type in {"prompt", "init"}:
+                # The user is back, so exits may wake the agent again.
+                self._process_exits.user_prompted()
             buffered_events: list[WispEvent] = []
             capturing = True
 
@@ -1026,6 +1041,16 @@ class RpcHost:
             if command.command_type == "shutdown" and self._on_shutdown_abandoned is not None:
                 self._on_shutdown_abandoned()
 
+        def post_wake() -> None:
+            try:
+                send.send_nowait(_RpcProcessWake())
+            except (anyio.WouldBlock, anyio.ClosedResourceError, anyio.BrokenResourceError):
+                # A full stream already has the coordinator awake, and it looks for a
+                # wake each time it goes idle; a closed one is shutting down.
+                pass
+
+        if self._process_exits is not None:
+            self._process_exits.set_wake_listener(post_wake)
         previous_event_task_group = self._event_task_group
         self._event_task_group = task_group
         if self.mcp_servers is not None and self.runtime.mcp_connecting:
@@ -1039,6 +1064,8 @@ class RpcHost:
                 reject=reject,
             )
         finally:
+            if self._process_exits is not None:
+                self._process_exits.set_wake_listener(None)
             await self._wait_for_published_events()
             self._event_task_group = previous_event_task_group
 

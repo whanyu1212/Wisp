@@ -103,7 +103,13 @@ pub(crate) fn project_chronological_history<'a>(
             "user" => {
                 let content = user_content(message, index)?;
                 let images = composer_images::reported_image_lines(message.get("images"));
-                if images.is_empty() {
+                if message.get("process_wake").and_then(Value::as_bool) == Some(true) {
+                    // Its content, the notices, went to the model only; the backend
+                    // sends it empty.
+                    transcript.append_prompt(
+                        crate::reducer::background_processes::WAKE_PROMPT_LABEL.to_owned(),
+                    );
+                } else if images.is_empty() {
                     transcript.append_prompt(content);
                 } else {
                     let display = composer_images::with_image_lines(&content, &images);
@@ -794,6 +800,28 @@ mod tests {
             "tool_call_id": null,
             "tool_result": null,
         })
+    }
+
+    #[test]
+    fn wake_prompt_labelled_on_reopen() {
+        let mut wake = message("user", "");
+        wake["process_wake"] = json!(true);
+        let restored = project_rpc_messages(&[message("user", "run CI"), wake]).unwrap();
+
+        let prompts: Vec<_> = restored
+            .entries()
+            .iter()
+            .filter(|entry| entry.role == crate::transcript::TranscriptRole::User)
+            .map(|entry| entry.display_content().to_owned())
+            .collect();
+
+        assert_eq!(
+            prompts,
+            [
+                "run CI",
+                crate::reducer::background_processes::WAKE_PROMPT_LABEL
+            ]
+        );
     }
 
     #[test]

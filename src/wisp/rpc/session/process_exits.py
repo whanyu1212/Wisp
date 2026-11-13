@@ -14,6 +14,9 @@ from wisp.events import (
 from wisp.messages import ProcessNotice
 from wisp.tools.shell.supervisor import ProcessExit, ProcessState, ProcessSupervisor
 
+# Wake runs that may start between the user's prompts.
+MAX_WAKE_RUNS = 3
+
 
 class ProcessExitNotices:
     """Publish each background process's exit and keep the ones the model asked for.
@@ -26,6 +29,11 @@ class ProcessExitNotices:
     poll that already returned the exit makes its notice redundant, so
     ``pending`` drops those.
 
+    Such an exit also makes a wake due: the host asks ``take_wake`` whenever it is
+    idle and, if it may, starts a run that carries the notices. At most
+    ``MAX_WAKE_RUNS`` wake runs start between the user's prompts, so a process that
+    keeps restarting itself cannot keep the agent running unattended.
+
     Processes belong to the session that started them: the host cancels them when
     the session changes and calls ``clear``, so no notice reaches another session.
     """
@@ -34,6 +42,19 @@ class ProcessExitNotices:
         self._supervisor = supervisor
         self._publish = publish
         self._pending: list[ProcessNotice] = []
+        self._wake_due = False
+        self._wake_runs = 0
+        self._wake_listener: Callable[[], None] | None = None
+
+    def set_wake_listener(self, listener: Callable[[], None] | None) -> None:
+        """Call ``listener`` each time an exit makes a wake due.
+
+        Args:
+            listener (Callable[[], None] | None): Tells the host to look for a wake,
+                or None to stop telling it.
+        """
+
+        self._wake_listener = listener
 
     def record(self, exit: ProcessExit) -> None:
         """Publish one exit, and hold its notice if the model asked to hear of it.
@@ -53,6 +74,7 @@ class ProcessExitNotices:
                     exit_code=exit.exit_code,
                 )
             )
+            self._wake_due = True
         duration = exit.ended_at - exit.started_at
         self._publish(
             ProcessEnded(
@@ -64,6 +86,8 @@ class ProcessExitNotices:
                 notify=exit.notify,
             )
         )
+        if exit.notify and self._wake_listener is not None:
+            self._wake_listener()
 
     def pending(self) -> tuple[ProcessNotice, ...]:
         """Return the held notices whose exit no poll has returned yet.
@@ -107,10 +131,43 @@ class ProcessExitNotices:
             *self._pending,
         ]
 
+    @property
+    def wake_due(self) -> bool:
+        """Whether an exit has made a wake due that ``take_wake`` has not claimed."""
+
+        return self._wake_due
+
+    def take_wake(self) -> bool:
+        """Claim the wake an exit made due, if a wake run may start for it.
+
+        A due wake is claimed once, whether or not it is allowed, so a run that
+        fails or is cancelled does not wake the agent again for the same exits.
+        It is allowed while notices are still held and fewer than
+        ``MAX_WAKE_RUNS`` wake runs have started since the user's last prompt.
+
+        Returns:
+            bool: True when the host should start a wake run now.
+        """
+
+        if not self._wake_due:
+            return False
+        self._wake_due = False
+        if self._wake_runs >= MAX_WAKE_RUNS or not self.pending():
+            return False
+        self._wake_runs += 1
+        return True
+
+    def user_prompted(self) -> None:
+        """Allow wake runs again, after the user sent a prompt of their own."""
+
+        self._wake_runs = 0
+
     def clear(self) -> None:
-        """Forget every held notice, as when the session changes."""
+        """Forget every held notice and wake, as when the session changes."""
 
         self._pending.clear()
+        self._wake_due = False
+        self._wake_runs = 0
 
 
 def _ended_state(state: ProcessState) -> EndedProcessState:

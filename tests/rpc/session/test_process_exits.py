@@ -142,3 +142,53 @@ def test_restored_notices_lead(published: list[WispEvent]) -> None:
     notices.restore(carried)
 
     assert [notice.process_id for notice in notices.pending()] == ["first", "second"]
+
+
+def test_wake_due_once(published: list[WispEvent]) -> None:
+    """An exit makes one wake due; a restore or a quiet exit makes none."""
+
+    woken: list[None] = []
+    notices = ProcessExitNotices(_Reported(set()), published.append)
+    notices.set_wake_listener(lambda: woken.append(None))
+
+    notices.record(_exit("quiet", notify=False))
+    assert notices.take_wake() is False
+    notices.record(_exit("loud", notify=True))
+
+    assert len(woken) == 1
+    assert notices.take_wake() is True
+    assert notices.take_wake() is False
+    carried = notices.pending()
+    notices.mark_delivered(carried)
+    notices.restore(carried)
+    assert notices.take_wake() is False
+
+
+def test_wake_guard_resets() -> None:
+    """At most three wakes start between the user's prompts."""
+
+    notices = ProcessExitNotices(_Reported(set()), lambda _event: None)
+
+    def exit_and_wake(process_id: str) -> bool:
+        notices.record(_exit(process_id, notify=True))
+        return notices.take_wake()
+
+    assert [exit_and_wake(f"run-{n}") for n in range(4)] == [True, True, True, False]
+    notices.user_prompted()
+    assert exit_and_wake("after-prompt") is True
+
+
+def test_polled_exit_wakes_nobody(published: list[WispEvent]) -> None:
+    notices = ProcessExitNotices(_Reported({"seen"}), published.append)
+    notices.record(_exit("seen", notify=True))
+
+    assert notices.take_wake() is False
+
+
+def test_clear_drops_wake(published: list[WispEvent]) -> None:
+    notices = ProcessExitNotices(_Reported(set()), published.append)
+    notices.record(_exit("old-session", notify=True))
+
+    notices.clear()
+
+    assert notices.take_wake() is False

@@ -339,6 +339,7 @@ def _rpc_message_snapshot(
         created_at=entry.created_at,
         role=message.role,
         content=content,
+        process_wake=message.is_process_wake,
         content_original_bytes=content_original_bytes,
         content_truncated=content_truncated or tool_result_projection_truncated,
         images=message.images or (),
@@ -657,6 +658,8 @@ def session_tree_node_summary(entry: SessionTreeEntry) -> SessionTreeNodeSummary
     if isinstance(entry, MessageSessionEntry):
         role = entry.message.role
         preview = entry.message.prompt_content
+        if entry.message.is_process_wake:
+            preview = "[background process stopped]"
         if not preview and entry.message.tool_calls:
             names = ", ".join(call.name for call in entry.message.tool_calls)
             preview = f"[tool calls: {names}]"

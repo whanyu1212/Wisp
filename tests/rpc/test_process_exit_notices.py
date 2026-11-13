@@ -8,7 +8,7 @@ import shlex
 import sys
 from contextlib import redirect_stdout
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import anyio
 import pytest
@@ -61,7 +61,8 @@ def _serve(
     """Run the RPC backend over ``commands`` and return every event it wrote.
 
     A command with an ``after`` key is sent only once the command it names has
-    finished; the key itself is not sent.
+    finished; the key itself is not sent. An entry with only an ``await`` key sends
+    nothing and waits until an event has every field it gives.
     """
 
     project = tmp_path / "project"
@@ -81,15 +82,23 @@ def _serve(
 
     output = io.StringIO()
 
-    def finished(command_id: object) -> bool:
+    def seen(fields: dict[str, object]) -> bool:
         return any(
-            record.get("type") == "rpc.command.finished" and record.get("command_id") == command_id
+            all(record.get(key) == value for key, value in fields.items())
             for record in map(json.loads, output.getvalue().splitlines())
         )
+
+    def finished(command_id: object) -> bool:
+        return seen({"type": "rpc.command.finished", "command_id": command_id})
 
     async def send_commands(send: Any, _stop_reader: Any, _write_event: Any) -> None:
         async with send:
             for entry in commands:
+                if "await" in entry:
+                    with anyio.fail_after(30):
+                        while not seen(cast(dict[str, object], entry["await"])):
+                            await anyio.sleep(0.01)
+                    continue
                 payload = {key: value for key, value in entry.items() if key != "after"}
                 if "after" in entry:
                     with anyio.fail_after(30):
@@ -137,6 +146,8 @@ def test_exit_reaches_next_prompt(
     belonged to the session that was left.
     """
 
+    # Without waking, the notice waits for the user's next prompt.
+    monkeypatch.setenv("WISP_WAKE_ON_PROCESS_EXIT", "0")
     provider = ScriptedProvider(
         [
             _reply(
@@ -232,3 +243,64 @@ def test_state_lists_background_processes(
     assert listed == ([] if switch_session else [(sleeper, True)])
     if not switch_session:
         assert state["background_processes"][0]["started_at_ms"] > 0
+
+
+@pytest.mark.process
+@pytest.mark.parametrize("exit_during_run", [False, True], ids=["idle", "mid-run"])
+def test_exit_wakes_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exit_during_run: bool
+) -> None:
+    """An exit nobody polled starts one run that carries only its notice.
+
+    The process ends either after the run that started it, or during a longer
+    foreground command in that run; either way the wake follows the run.
+    """
+
+    lifetime = "time.sleep(0.3); " if not exit_during_run else ""
+    script = [
+        _reply(
+            "",
+            _bash(
+                "start",
+                operation="start",
+                command=_python(f"import sys, time; {lifetime}sys.exit(4)"),
+                notify_on_exit=True,
+                yield_seconds=0,
+            ),
+        ),
+        *(
+            [_reply("", _bash("wait", command=_python("import time; time.sleep(1.5)")))]
+            if exit_during_run
+            else []
+        ),
+        _reply("started"),
+        _reply("CI is red"),
+    ]
+    provider = ScriptedProvider(script)
+
+    records = _serve(
+        tmp_path,
+        monkeypatch,
+        provider,
+        [
+            {"id": "yolo", "type": "set_permissions", "mode": "yolo"},
+            {"id": "p1", "type": "prompt", "prompt": "run CI"},
+            {"await": {"type": "rpc.command.finished", "command_type": "process_wake"}},
+            {"id": "history", "type": "get_messages"},
+        ],
+    )
+
+    runs = [
+        r["command_type"]
+        for r in records
+        if r["type"] == "rpc.command.started" and r["command_type"] in {"prompt", "process_wake"}
+    ]
+    assert runs == ["prompt", "process_wake"]
+    woken = provider.calls[-1].messages[-1]
+    assert woken.role == "user"
+    assert woken.content.startswith("[Wisp: background processes")
+    assert ": exit code 4: " in woken.content
+    assert len(provider.calls) == len(script)
+    (page,) = [r for r in records if r.get("command_id") == "history" and "messages" in r]
+    prompts = [(m["content"], m["process_wake"]) for m in page["messages"] if m["role"] == "user"]
+    assert prompts == [("run CI", False), ("", True)]

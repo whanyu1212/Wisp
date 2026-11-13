@@ -29,6 +29,7 @@ searchable: true
 | `WISP_CODEX_READ_TIMEOUT_SECONDS` | Read-idle timeout for Wisp-owned `openai-codex` connections; defaults to `300`; positive finite seconds, e.g. `600` |
 | `WISP_CONTEXT_RESERVE_TOKENS` | Minimum tokens reserved outside estimated input context; defaults to `16384` |
 | `WISP_AUTO_COMPACTION` | Automatic threshold compaction and overflow recovery; defaults to `true` |
+| `WISP_WAKE_ON_PROCESS_EXIT` | Start a run when a background process started with `notify_on_exit` stops while the session is idle, at most three times between prompts; defaults to `true` |
 | `WISP_WEB_SEARCH` | Offer the provider's built-in [web search](../guide/providers.md#web-search) to the model; defaults to `false` |
 | `WISP_CODEMODE` | Offer the experimental [codemode](../guide/tools-and-safety.md#scripting-tool-calls-with-codemode-experimental) tool in every run (`1`) or never (`0`); unset, it is offered whenever a run finds its MCP tools on demand |
 | `WISP_SUBAGENTS` | Offer the experimental [`spawn_agent`](../guide/tools-and-safety.md#delegating-to-a-subagent-experimental) tool, which hands a read-only task to a subagent; defaults to `false` |

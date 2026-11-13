@@ -118,6 +118,9 @@ class RpcMessageSnapshot(BaseModel):
     moved_to: Path | None = None
     tool_result: RpcMessageToolResultSnapshot | None = None
     skill_invocation: RpcSkillInvocationSnapshot | None = None
+    # A prompt Wisp sent by itself to wake the agent when background processes it
+    # asked to hear about stopped; its content, the notices, went to the model only.
+    process_wake: bool = False
 
     @model_validator(mode="after")
     def _validate_tool_result_role(self) -> Self:

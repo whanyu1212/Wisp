@@ -39,6 +39,7 @@ from wisp.validation import redact_validation_error_inputs
 DEFAULT_PROVIDER = "openai-codex"
 DEFAULT_CONTEXT_RESERVE_TOKENS = 16_384
 DEFAULT_AUTO_COMPACTION_ENABLED = True
+DEFAULT_WAKE_ON_PROCESS_EXIT = True
 DEFAULT_WEB_SEARCH_ENABLED = False
 DEFAULT_SUBAGENTS_ENABLED = False
 OPENAI_COMPATIBLE_CONFIG_ENV = "WISP_OPENAI_COMPATIBLE_CONFIG"
@@ -65,6 +66,9 @@ class WispConfig(BaseModel):
     context_reserve_tokens: int = Field(default=DEFAULT_CONTEXT_RESERVE_TOKENS, ge=0)
     auto_compaction_enabled: bool = DEFAULT_AUTO_COMPACTION_ENABLED
     web_search: bool = DEFAULT_WEB_SEARCH_ENABLED
+    # Start a run by itself when a background process the agent asked to hear about
+    # stops while the session is idle.
+    wake_on_process_exit: bool = DEFAULT_WAKE_ON_PROCESS_EXIT
     # The experimental codemode tool, which needs the `codemode` extra: True or False
     # when set, None to offer it whenever the run finds its MCP tools on demand.
     codemode: bool | None = None
@@ -147,6 +151,7 @@ class WispConfig(BaseModel):
         context_reserve_tokens: int | None = None,
         auto_compaction_enabled: bool | None = None,
         web_search: bool | None = None,
+        wake_on_process_exit: bool | None = None,
         codemode: bool | None = None,
         subagents: bool | None = None,
         subagent_model: str | None = None,
@@ -187,6 +192,12 @@ class WispConfig(BaseModel):
 
         ``web_search`` is user-only too, because each search is billed to the user's
         provider account. It is off unless enabled.
+
+        ``wake_on_process_exit`` (``WISP_WAKE_ON_PROCESS_EXIT``) is user-only, because
+        a run it starts is billed to the user's provider account while they may be
+        away. On by default: a background process started with ``notify_on_exit``
+        that stops while the session is idle starts a run, at most three times
+        between the user's prompts.
 
         ``codemode`` (``WISP_CODEMODE``) is user-only. It offers the experimental
         codemode tool, which runs model-written scripts that call the run's read-only
@@ -297,6 +308,16 @@ class WispConfig(BaseModel):
                     settings.web_search,
                     default=DEFAULT_WEB_SEARCH_ENABLED,
                     name="WISP_WEB_SEARCH",
+                )
+            ),
+            wake_on_process_exit=(
+                wake_on_process_exit
+                if wake_on_process_exit is not None
+                else _resolve_bool(
+                    os.environ.get("WISP_WAKE_ON_PROCESS_EXIT"),
+                    settings.wake_on_process_exit,
+                    default=DEFAULT_WAKE_ON_PROCESS_EXIT,
+                    name="WISP_WAKE_ON_PROCESS_EXIT",
                 )
             ),
             codemode=(

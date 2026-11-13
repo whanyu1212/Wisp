@@ -33,6 +33,7 @@ project may add `./.wisp/settings.json`, applied only after you trust the projec
   "context_reserve_tokens": 16384,
   "auto_compaction_enabled": true,
   "web_search": false,
+  "wake_on_process_exit": true,
   "codex_read_timeout_seconds": 300,
   "retry": { "max_retries": 2, "base_delay_seconds": 0.5, "max_delay_seconds": 30 }
 }
@@ -51,7 +52,8 @@ CLI flag. See [Provider retry behavior](../guide/providers.md#retry-behavior) fo
 Some fields are **user-only** and a project file can never set them:
 
 `protected_paths` · `retry` · `codex_read_timeout_seconds` · `effort` · `context_reserve_tokens` ·
-`auto_compaction_enabled` · `web_search` · `codemode` · `subagents` · `subagent_model` ·
+`auto_compaction_enabled` · `web_search` · `wake_on_process_exit` · `codemode` · `subagents` ·
+`subagent_model` ·
 `mcp_servers` · `mcp_tool_exposure` · `openai_compatible`
 
 A repository cannot increase your API spending, prolong waits, launch an MCP command, configure a

@@ -15,9 +15,10 @@ this policy.
 0.9.2 is a patch release on 0.9.1. The terminal UI reads a turn as one activity list, and
 compaction keeps more of long tool output in its checkpoint. A background process can tell the
 agent when it stops. That adds one event, `process.ended`, an optional `background_processes`
-list in the `get_state` reply, and an optional `process_notices` field on persisted user messages,
-which 0.9.1 ignores; no command, handshake, settings, credential, or trust format changes, so 0.9.1
-and 0.9.2 still read each other's sessions. The backend and
+list in the `get_state` reply, a `process_wake` flag on message snapshots, an optional
+`process_notices` field on persisted user messages, which 0.9.1 ignores, and one user setting,
+`wake_on_process_exit`; no command, handshake, credential, or trust format changes, so 0.9.1 and
+0.9.2 still read each other's sessions. The backend and
 frontend must come from the same release.
 
 ### TUI
@@ -51,6 +52,17 @@ frontend must come from the same release.
 - The TUI side panel lists running background processes with how long each has run, and a
   process that stops on its own sends a desktop notification while the terminal is in the
   background.
+- A background process started with `notify_on_exit` that stops while the session is idle wakes
+  the agent: the backend starts a run by itself, `rpc.command.started` with `command_type`
+  `process_wake`, whose prompt is the notice alone. An exit nobody polled during a run wakes the
+  agent once that run ends. At most three wake runs start between the user's prompts. The run
+  uses the session's permission mode, and the TUI shows it like a prompt it sent, labelled
+  "Background process stopped", which `Esc` cancels. A prompt, `/init`, or `/compact` the user
+  sends while a wake run is going cancels the wake; its notices lead the next prompt. Message snapshots mark its prompt with
+  `process_wake`, and its notice text never reaches a frontend. The `wake_on_process_exit`
+  setting (`WISP_WAKE_ON_PROCESS_EXIT`) is on by default; turned off, notices wait for the next
+  prompt as before. In-process SDK hosts wake too. A cancelled prompt, or one the run rolls back,
+  now leaves its notices for the next prompt instead of dropping them.
 
 ### Compaction
 

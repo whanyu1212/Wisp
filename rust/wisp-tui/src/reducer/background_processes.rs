@@ -21,6 +21,9 @@ const MAX_REMEMBERED_ENDS: usize = 64;
 const MAX_PENDING_STARTS: usize = 16;
 /// Characters of a command kept for a notification.
 const NOTICE_COMMAND_MAX_CHARS: usize = 80;
+/// The prompt row of a run Wisp started because a background process stopped; the
+/// prompt itself, the process notices, went to the model only.
+pub const WAKE_PROMPT_LABEL: &str = "⟳ Background process stopped · Wisp woke the agent";
 
 /// A process started with `bash operation=start` that has not stopped yet.
 #[derive(Clone, Debug, Eq, PartialEq)]

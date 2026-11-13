@@ -531,6 +531,8 @@ impl InteractionStatus {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ActiveCommandType {
     Prompt,
+    /// A prompt run the backend started by itself; it behaves as a prompt does.
+    Wake,
     Init,
     Compact,
 }
@@ -539,6 +541,7 @@ impl ActiveCommandType {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Prompt => "prompt",
+            Self::Wake => "process_wake",
             Self::Init => "init",
             Self::Compact => "compact",
         }
@@ -818,6 +821,9 @@ pub struct UiState {
     pub queue: QueueState,
     /// The session's running background processes and the exits seen so far.
     pub(crate) background_processes: background_processes::BackgroundProcesses,
+    /// A wake run that started while this frontend's own prompt was on its way. The
+    /// backend cancels it for that prompt, so its run events are not shown.
+    ignored_wake: Option<String>,
     pub current_command: Option<ActiveCommand>,
     pub pending_approval: Option<PendingApproval>,
     pub pending_trust_request_id: Option<String>,
@@ -920,6 +926,7 @@ impl UiState {
             connection_catalog_reload_pending: false,
             queue: QueueState::default(),
             background_processes: Default::default(),
+            ignored_wake: None,
             current_command: None,
             pending_approval: None,
             pending_trust_request_id: None,
@@ -988,7 +995,7 @@ impl UiState {
             && match self.current_command.as_ref() {
                 None => self.view_status == ViewStatus::Idle,
                 Some(ActiveCommand {
-                    command_type: ActiveCommandType::Prompt,
+                    command_type: ActiveCommandType::Prompt | ActiveCommandType::Wake,
                     ..
                 }) => {
                     self.view_status == ViewStatus::Running
@@ -1424,6 +1431,11 @@ pub enum BackendEvent {
         command_type: String,
         ok: bool,
         error: Option<String>,
+    },
+    /// A run the backend started by itself, because a background process the agent
+    /// asked to hear about stopped while the session was idle.
+    WakeStarted {
+        command_id: String,
     },
     Other {
         event_type: String,
@@ -2794,7 +2806,7 @@ fn can_request_history(state: &UiState, allow_during_prompt: bool) -> bool {
         && match state.current_command.as_ref() {
             None => true,
             Some(ActiveCommand {
-                command_type: ActiveCommandType::Prompt,
+                command_type: ActiveCommandType::Prompt | ActiveCommandType::Wake,
                 ..
             }) => allow_during_prompt,
             Some(_) => false,
@@ -2810,7 +2822,7 @@ fn begin_history_request(
     let active_leaf_may_advance = matches!(
         state.current_command,
         Some(ActiveCommand {
-            command_type: ActiveCommandType::Prompt,
+            command_type: ActiveCommandType::Prompt | ActiveCommandType::Wake,
             ..
         })
     ) || state.transcript.has_live_entries();
@@ -5349,6 +5361,17 @@ fn handle_backend_event(
     event: BackendEvent,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    if let Some(ignored) = &state.ignored_wake {
+        if matches!(&event, BackendEvent::CommandFinished { command_id, .. } if command_id == ignored)
+        {
+            state.ignored_wake = None;
+            return Ok(Vec::new());
+        }
+        // Nothing else runs until the wake stops, so every run event is the wake's.
+        if is_run_event(&event) {
+            return Ok(Vec::new());
+        }
+    }
     if let Some(effects) = observe_backend_event(state, &event, ids)? {
         return Ok(effects);
     }
@@ -5616,7 +5639,66 @@ fn handle_backend_event(
             ok,
             error,
         } => finish_command(state, command_id, command_type, ok, error, ids),
+        BackendEvent::WakeStarted { command_id } => Ok(adopt_wake_run(state, command_id)),
     }
+}
+
+/// Events a run produces, which belong to whichever run is going.
+fn is_run_event(event: &BackendEvent) -> bool {
+    match event {
+        BackendEvent::MessageOrigin { .. }
+        | BackendEvent::ToolExecutionEnded { .. }
+        | BackendEvent::ToolExecutionProgress { .. }
+        | BackendEvent::ScriptCallStarted { .. }
+        | BackendEvent::ScriptCallEnded { .. }
+        | BackendEvent::MessageStarted { .. }
+        | BackendEvent::MessageDelta { .. }
+        | BackendEvent::WebSearch { .. }
+        | BackendEvent::MessageCompleted { .. }
+        | BackendEvent::RunCompleted(_)
+        | BackendEvent::ToolCall(_)
+        | BackendEvent::ToolTargetResolved(_)
+        | BackendEvent::ToolApprovalRequested(_)
+        | BackendEvent::ToolApprovalResolved { .. }
+        | BackendEvent::ToolResult(_)
+        | BackendEvent::CompactionStarted(_)
+        | BackendEvent::CompactionCompleted(_) => true,
+        BackendEvent::Other { event_type } => {
+            event_type.starts_with("agent.") || event_type.starts_with("turn.")
+        }
+        _ => false,
+    }
+}
+
+/// Shows a run the backend started by itself as if the user had sent it: busy, with
+/// its prompt row, and cancelled by Esc. If this frontend already has a command in
+/// flight, the wake is ignored until it finishes.
+fn adopt_wake_run(state: &mut UiState, command_id: String) -> Vec<UiEffect> {
+    if state.current_command.is_some() {
+        // This frontend's prompt reached the backend after the wake started, and
+        // the backend cancels the wake for it.
+        state.ignored_wake = Some(command_id);
+        return Vec::new();
+    }
+    state.last_command_error = None;
+    state.last_command_failed = false;
+    state.view_status = ViewStatus::Running;
+    state.interaction_status = InteractionStatus::Running;
+    state.current_command = Some(ActiveCommand {
+        id: command_id,
+        command_type: ActiveCommandType::Wake,
+    });
+    state.pending_approval = None;
+    state.cancel_requested = false;
+    state.context.operation_started();
+    // The label is the row's text, not a display over an empty prompt, so it survives
+    // the transcript dropping display overrides from older rows.
+    let prompt = state
+        .transcript
+        .append_prompt(background_processes::WAKE_PROMPT_LABEL.to_owned());
+    state.run_progress = Some(RunProgress { prompt, turn: 0 });
+    state.finished_run_cost = None;
+    vec![UiEffect::RequestRender]
 }
 
 /// Offers the event to each feature that tracks its own requests, in order, and
@@ -7179,6 +7261,108 @@ mod tests {
                 content_kind: MessageContentKind::Text,
             }
         );
+    }
+
+    fn wake_started(command_id: &str) -> BackendEvent {
+        BackendEvent::from_projection_value(&serde_json::json!({
+            "type": "rpc.command.started", "timestamp": "2026-11-13T09:00:00Z",
+            "command_id": command_id, "command_type": "process_wake",
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn wake_run_adopted() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(wake_started("wake-1")),
+            &mut ids,
+        )
+        .unwrap();
+
+        assert_eq!(state.view_status, ViewStatus::Running);
+        assert_eq!(
+            state.current_command,
+            Some(ActiveCommand {
+                id: "wake-1".into(),
+                command_type: ActiveCommandType::Wake,
+            })
+        );
+        let prompt = state.transcript.latest_user_entry().unwrap();
+        assert_eq!(
+            state.transcript.entry(prompt).unwrap().display_content(),
+            background_processes::WAKE_PROMPT_LABEL
+        );
+
+        let cancel = reduce(&mut state, UiAction::Cancel, &mut ids).unwrap();
+        assert_eq!(command_value(&cancel[0]).unwrap()["target_id"], "wake-1");
+
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("wake-1", "process_wake", true)),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(state.current_command, None);
+        assert_eq!(state.view_status, ViewStatus::Idle);
+    }
+
+    #[test]
+    fn preempted_wake_stays_hidden() {
+        // The user's prompt reached the backend after the wake started; the backend
+        // cancels the wake for it, and the wake's output never shows.
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+        let running = ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        };
+        state.current_command = Some(running.clone());
+        state.transcript.append_prompt("hello".into());
+        let delta = |text: &str| {
+            BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "message.delta", "turn": 1, "delta": text,
+            }))
+            .unwrap()
+        };
+        let mut apply = |state: &mut UiState, event: BackendEvent| {
+            reduce(state, UiAction::BackendEvent(event), &mut ids).unwrap();
+        };
+
+        apply(&mut state, wake_started("wake-1"));
+        apply(&mut state, delta("from the wake"));
+        apply(
+            &mut state,
+            BackendEvent::CommandFinished {
+                command_id: "wake-1".into(),
+                command_type: "process_wake".into(),
+                ok: false,
+                error: Some("RPC command cancelled: wake-1".into()),
+            },
+        );
+        apply(&mut state, delta("for hello"));
+
+        assert_eq!(state.current_command, Some(running));
+        let shown: Vec<_> = state
+            .transcript
+            .entries()
+            .iter()
+            .map(|entry| entry.display_content().to_owned())
+            .collect();
+        assert_eq!(shown, ["hello", "for hello"]);
+    }
+
+    #[test]
+    fn other_starts_stay_unknown() {
+        let event = BackendEvent::from_projection_value(&serde_json::json!({
+            "type": "rpc.command.started", "timestamp": "2026-11-13T09:00:00Z",
+            "command_id": "prompt-1", "command_type": "prompt",
+        }))
+        .unwrap();
+        assert!(matches!(event, BackendEvent::Other { .. }));
     }
 
     #[test]
