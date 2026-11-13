@@ -1,4 +1,4 @@
-"""Background-process exits: announced to frontends, held for the model's next prompt."""
+"""Background processes: exits announced to frontends and held for the next prompt."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ from collections.abc import Callable, Sequence
 
 from wisp.events import (
     PROCESS_COMMAND_SUMMARY_MAX_CHARS,
+    BackgroundProcess,
     EndedProcessState,
     ProcessEnded,
     WispEvent,
@@ -20,9 +21,10 @@ class ProcessExitNotices:
     The supervisor calls ``record`` when a started process stops on its own. Every
     exit is published as ``process.ended``. One the model started with
     ``notify_on_exit`` is also held until the session saves a prompt carrying it:
-    the coding session reads ``pending`` and calls ``mark_delivered`` once that
-    prompt is saved. A poll that already returned the exit makes its notice
-    redundant, so ``pending`` drops those.
+    the coding session reads ``pending``, calls ``mark_delivered`` once that
+    prompt is saved, and calls ``restore`` if the run rolls the prompt back. A
+    poll that already returned the exit makes its notice redundant, so
+    ``pending`` drops those.
 
     Processes belong to the session that started them: the host cancels them when
     the session changes and calls ``clear``, so no notice reaches another session.
@@ -55,7 +57,7 @@ class ProcessExitNotices:
         self._publish(
             ProcessEnded(
                 process_id=exit.process_id,
-                command=_command_summary(exit.command),
+                command=command_summary(exit.command),
                 state=_ended_state(exit.state),
                 exit_code=exit.exit_code,
                 duration_ms=max(0, int(duration.total_seconds() * 1000)),
@@ -92,6 +94,19 @@ class ProcessExitNotices:
         delivered = {notice.process_id for notice in notices}
         self._pending = [notice for notice in self._pending if notice.process_id not in delivered]
 
+    def restore(self, notices: Sequence[ProcessNotice]) -> None:
+        """Hold ``notices`` again, ahead of any held since, after their prompt was rolled back.
+
+        Args:
+            notices (Sequence[ProcessNotice]): Notices ``mark_delivered`` had forgotten.
+        """
+
+        held = {notice.process_id for notice in self._pending}
+        self._pending = [
+            *(notice for notice in notices if notice.process_id not in held),
+            *self._pending,
+        ]
+
     def clear(self) -> None:
         """Forget every held notice, as when the session changes."""
 
@@ -105,7 +120,37 @@ def _ended_state(state: ProcessState) -> EndedProcessState:
     return state
 
 
-def _command_summary(command: str) -> str:
+def background_processes(supervisor: ProcessSupervisor) -> tuple[BackgroundProcess, ...]:
+    """Describe the supervisor's running background processes for frontends.
+
+    Args:
+        supervisor (ProcessSupervisor): The supervisor that started them.
+
+    Returns:
+        tuple[BackgroundProcess, ...]: One entry per running process, oldest first.
+    """
+
+    return tuple(
+        BackgroundProcess(
+            process_id=process.process_id,
+            command=command_summary(process.command),
+            started_at_ms=max(0, int(process.started_at.timestamp() * 1000)),
+            notify=process.notify,
+        )
+        for process in supervisor.running_processes()
+    )
+
+
+def command_summary(command: str) -> str:
+    """Cut a command to the length events carry for display.
+
+    Args:
+        command (str): The command as started.
+
+    Returns:
+        str: The command, or its start and an ellipsis.
+    """
+
     if len(command) <= PROCESS_COMMAND_SUMMARY_MAX_CHARS:
         return command
     return command[: PROCESS_COMMAND_SUMMARY_MAX_CHARS - 1] + "…"

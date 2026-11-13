@@ -63,6 +63,7 @@ from wisp.events.rpc import (
     MAX_RPC_OAUTH_EXPIRY_CHARS,
     MAX_RPC_PROVIDER_ID_CHARS,
     AgentMode,
+    BackgroundProcess,
     CodemodeSetting,
     CodemodeState,
     CodingSessionState,
@@ -213,6 +214,7 @@ from wisp.events.usage import (
 )
 
 __all__ = [
+    "BackgroundProcess",
     "MAX_EDIT_LINE",
     "MAX_EDIT_LOCATIONS",
     "MAX_NESTED_CALLS",

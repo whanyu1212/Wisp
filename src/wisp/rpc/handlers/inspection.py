@@ -11,6 +11,7 @@ from wisp.auth.storage import AuthStorageError
 from wisp.coding.prompt import read_current_branch
 from wisp.coding.session import CodingSession
 from wisp.events import (
+    BackgroundProcess,
     CodingSessionState,
     RpcCommandArgument,
     RpcCommandDescriptor,
@@ -296,6 +297,7 @@ def handle_rpc_state_command(
     session_name: str | None,
     running_command: _RpcRunningCommand | None,
     pending_prompt_queue_commands: tuple[ParsedRpcCommand, ...] = (),
+    background_processes: tuple[BackgroundProcess, ...] = (),
     write_event: RpcEventWriter,
 ) -> None:
     """Return one coherent in-memory state snapshot without becoming active."""
@@ -319,6 +321,7 @@ def handle_rpc_state_command(
             cancel_requested=(
                 running_command.cancel_scope.cancel_called if running_command is not None else False
             ),
+            background_processes=background_processes,
         )
     except Exception as exc:
         lifecycle.fail(str(exc))

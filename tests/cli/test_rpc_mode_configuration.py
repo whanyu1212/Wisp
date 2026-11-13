@@ -41,6 +41,7 @@ def test_rpc_mode_reports_idle_and_reconfigured_state(tmp_path: Path) -> None:
         "active_command_id": None,
         "active_command_type": None,
         "cancel_requested": False,
+        "background_processes": [],
     }
     assert reports[1]["state"] == {
         **reports[0]["state"],

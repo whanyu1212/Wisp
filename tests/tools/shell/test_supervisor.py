@@ -682,3 +682,35 @@ def test_exit_listener_failure_contained(tmp_path: Path) -> None:
     assert update.stdout == "done\n"
     assert unknown_reported is True
     assert reported is True
+
+
+@pytest.mark.process
+def test_running_processes_listed(tmp_path: Path) -> None:
+    """Only started processes still running are listed, oldest first."""
+
+    sleeper = python_command("import time; time.sleep(30)")
+
+    async def run() -> tuple[list[list[tuple[str, bool]]], str, str]:
+        supervisor = ProcessSupervisor()
+        snapshots: list[list[tuple[str, bool]]] = []
+
+        def listed() -> None:
+            snapshots.append([(p.process_id, p.notify) for p in supervisor.running_processes()])
+
+        try:
+            first = await supervisor.start(sleeper, cwd=tmp_path, timeout=60, notify_on_exit=True)
+            second = await supervisor.start(sleeper, cwd=tmp_path, timeout=60)
+            quick = await supervisor.start(python_command("pass"), cwd=tmp_path, timeout=60)
+            await supervisor.poll(quick, wait_seconds=10, until="exit")
+            listed()
+            await supervisor.cancel(second)
+            listed()
+            await supervisor.cancel_all()
+            listed()
+            return snapshots, first, second
+        finally:
+            await supervisor.aclose()
+
+    snapshots, first, second = anyio.run(run)
+
+    assert snapshots == [[(first, True), (second, False)], [(first, True)], []]

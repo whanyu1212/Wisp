@@ -11,6 +11,7 @@ from tests.coding.compaction_support import (
     _append_turn,
     build_model_registry,
 )
+from tests.coding.session_support import HeldNotices
 from wisp.agent.context_budget import build_context_budget, estimate_context
 from wisp.coding.compaction import (
     exceeds_provider_auto_compaction_limit,
@@ -32,7 +33,7 @@ from wisp.events import (
     TurnStarted,
     WispEvent,
 )
-from wisp.messages import Message
+from wisp.messages import Message, ProcessNotice
 from wisp.providers.base import ContextOverflowError
 from wisp.providers.events import (
     ProviderResponseCompleted,
@@ -408,6 +409,29 @@ def test_rejects_unfittable_prompt_before_provider(
     assert error.message.startswith("Active prompt exceeds")
     assert isinstance(completed, AgentCompleted)
     assert (completed.outcome, completed.turns) == ("failed", 0)
+
+
+def test_rejected_prompt_keeps_notices(tmp_path: Path) -> None:
+    """A prompt preflight rolls back leaves its process notices for the next one."""
+
+    notice = ProcessNotice(process_id="ci", command="make", state="failed")
+    source = HeldNotices(notice)
+    agent = CodingSession(
+        provider=ScriptedProvider([], default_model="model"),
+        sessions=JsonlSessionStore(tmp_path),
+        model="model",
+        models=build_model_registry(context_window=2_000, auto_compact_token_limit=1_600),
+        prompt_messages=(Message(role="system", content="system"),),
+        context_reserve_tokens=100,
+        process_notices=source,
+    )
+
+    async def run() -> None:
+        _ = [event async for event in agent.run("x" * 8_000)]
+
+    with pytest.raises(ContextOverflowError, match="Active prompt exceeds"):
+        anyio.run(run)
+    assert source.held == [notice]
 
 
 def test_stops_when_prompt_remains_over_provider_limit(

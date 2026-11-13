@@ -347,6 +347,9 @@ _RPC_STATE = {
     "follow_up_mode": "one_at_a_time",
     "pending_steering_count": 0,
     "pending_follow_up_count": 0,
+    "background_processes": [
+        {"process_id": "process-1", "command": "make test", "started_at_ms": 1_700_000_000_000}
+    ],
 }
 _EVENT_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     "agent.completed": {"session_id": "session-1", "turns": 1, "outcome": "completed"},

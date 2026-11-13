@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
 
-from wisp.messages import Message
+from wisp.messages import Message, ProcessNotice
 from wisp.providers.base import (
     ToolCall,
     ToolCallResult,
@@ -114,3 +114,19 @@ class EchoTool:
 
     async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
         return ToolResult(text=f"echo: {arguments['text']}")
+
+
+class HeldNotices:
+    """Notices held for the next saved prompt, as the RPC host keeps them."""
+
+    def __init__(self, *notices: ProcessNotice) -> None:
+        self.held = list(notices)
+
+    def pending(self) -> tuple[ProcessNotice, ...]:
+        return tuple(self.held)
+
+    def mark_delivered(self, notices: Sequence[ProcessNotice]) -> None:
+        self.held = [notice for notice in self.held if notice not in notices]
+
+    def restore(self, notices: Sequence[ProcessNotice]) -> None:
+        self.held = [*notices, *(notice for notice in self.held if notice not in notices)]

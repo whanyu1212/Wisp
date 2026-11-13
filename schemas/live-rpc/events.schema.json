@@ -190,6 +190,41 @@
       "title": "AgentStarted",
       "type": "object"
     },
+    "BackgroundProcess": {
+      "additionalProperties": false,
+      "description": "A process started with ``bash operation=start`` that is still running.",
+      "properties": {
+        "command": {
+          "maxLength": 500,
+          "title": "Command",
+          "type": "string"
+        },
+        "notify": {
+          "default": false,
+          "title": "Notify",
+          "type": "boolean"
+        },
+        "process_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Process Id",
+          "type": "string"
+        },
+        "started_at_ms": {
+          "minimum": 0,
+          "title": "Started At Ms",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "process_id",
+        "command",
+        "started_at_ms",
+        "notify"
+      ],
+      "title": "BackgroundProcess",
+      "type": "object"
+    },
     "BillableTokenUsage": {
       "additionalProperties": false,
       "description": "Provider-normalized token buckets used only for list-price estimates.",
@@ -5870,6 +5905,14 @@
           "title": "Auto Compaction Enabled",
           "type": "boolean"
         },
+        "background_processes": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/BackgroundProcess"
+          },
+          "title": "Background Processes",
+          "type": "array"
+        },
         "cancel_requested": {
           "default": false,
           "title": "Cancel Requested",
@@ -5992,7 +6035,8 @@
         "session_name",
         "active_command_id",
         "active_command_type",
-        "cancel_requested"
+        "cancel_requested",
+        "background_processes"
       ],
       "title": "RpcStateSnapshot",
       "type": "object"
@@ -9396,6 +9440,14 @@
         "active_command_id": null,
         "active_command_type": null,
         "auto_compaction_enabled": false,
+        "background_processes": [
+          {
+            "command": "make test",
+            "notify": false,
+            "process_id": "process-1",
+            "started_at_ms": 1700000000000
+          }
+        ],
         "cancel_requested": false,
         "effort": null,
         "follow_up_mode": "one_at_a_time",

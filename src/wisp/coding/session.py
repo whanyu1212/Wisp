@@ -239,7 +239,8 @@ class ProcessNoticeSource(Protocol):
 
     A run reads the held notices when it builds its prompt and marks them
     delivered only once that prompt is saved, so a run that stops earlier
-    leaves them for the next one.
+    leaves them for the next one. A run that rolls its saved prompt back off
+    the branch restores them.
     """
 
     def pending(self) -> tuple[ProcessNotice, ...]:
@@ -248,6 +249,10 @@ class ProcessNoticeSource(Protocol):
 
     def mark_delivered(self, notices: Sequence[ProcessNotice]) -> None:
         """Stop holding ``notices``, which a saved prompt now carries."""
+        ...
+
+    def restore(self, notices: Sequence[ProcessNotice]) -> None:
+        """Hold ``notices`` again, after the prompt carrying them was rolled back."""
         ...
 
 
@@ -1629,6 +1634,7 @@ class CodingSession:
             provider_auto_compaction=provider_auto_compaction,
             status=auto_compaction_status,
             prompt_entry_id=user_entry.id,
+            process_notices=notices,
         )
         if provider_auto_compaction:
             async for event in self._fit_first_request(
@@ -3876,6 +3882,7 @@ class _RunCompaction:
         provider_auto_compaction: bool,
         status: _AutoCompactionStatus,
         prompt_entry_id: str,
+        process_notices: Sequence[ProcessNotice] = (),
     ) -> None:
         """Bind the policy to one run.
 
@@ -3896,6 +3903,9 @@ class _RunCompaction:
                 the run's preflight and final checks.
             prompt_entry_id (str): Entry of the run's prompt. It starts the
                 active turn until a queued message starts a new one.
+            process_notices (Sequence[ProcessNotice], optional): Notices the
+                prompt carries, held again if the prompt is rolled back.
+                Defaults to ().
         """
         self._owner = owner
         self._session = session
@@ -3909,6 +3919,7 @@ class _RunCompaction:
         self._status = status
         self._prompt_entry_id = prompt_entry_id
         self._active_entry_id = prompt_entry_id
+        self._process_notices = tuple(process_notices)
         self._had_unsafe_tool_round = False
         self._overflow_recovery_attempted = False
         self._recovered_from_overflow = False
@@ -3953,7 +3964,11 @@ class _RunCompaction:
             yield self._events.popleft()
 
     async def rollback_active_prompt(self) -> None:
-        """Restore the active branch to its leaf from before the prompt was persisted."""
+        """Restore the active branch to its leaf from before the prompt was persisted.
+
+        The prompt's process notices are held again, since the branch no longer
+        carries them to the model.
+        """
 
         session = self._session
         if self._operation_id is not None:
@@ -3964,6 +3979,7 @@ class _RunCompaction:
             )
             if restored:
                 self._persistence.expected_active_leaf_id = self._run_start_leaf_id
+                self._restore_process_notices()
             return
         current_leaf_id = await anyio.to_thread.run_sync(session.read_active_leaf_id)
         if current_leaf_id != self._run_start_leaf_id:
@@ -3973,6 +3989,14 @@ class _RunCompaction:
                 operation_id=self._operation_id,
             )
             self._persistence.expected_active_leaf_id = self._run_start_leaf_id
+            self._restore_process_notices()
+
+    def _restore_process_notices(self) -> None:
+        source = self._owner._process_notices
+        if self._process_notices and source is not None:
+            source.restore(self._process_notices)
+            # A second rollback of the same run must not hold them twice.
+            self._process_notices = ()
 
     async def compact_before_first_request(self) -> AsyncIterator[WispEvent]:
         """Compact history before the first request, keeping the prompt's turn active.

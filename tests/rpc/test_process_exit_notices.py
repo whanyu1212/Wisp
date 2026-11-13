@@ -58,7 +58,11 @@ def _serve(
     provider: ScriptedProvider,
     commands: list[dict[str, object]],
 ) -> list[dict[str, Any]]:
-    """Run the RPC backend over ``commands`` and return every event it wrote."""
+    """Run the RPC backend over ``commands`` and return every event it wrote.
+
+    A command with an ``after`` key is sent only once the command it names has
+    finished; the key itself is not sent.
+    """
 
     project = tmp_path / "project"
     project.mkdir(exist_ok=True)
@@ -75,9 +79,22 @@ def _serve(
         runtime.providers.register(provider)
         return runtime
 
+    output = io.StringIO()
+
+    def finished(command_id: object) -> bool:
+        return any(
+            record.get("type") == "rpc.command.finished" and record.get("command_id") == command_id
+            for record in map(json.loads, output.getvalue().splitlines())
+        )
+
     async def send_commands(send: Any, _stop_reader: Any, _write_event: Any) -> None:
         async with send:
-            for payload in commands:
+            for entry in commands:
+                payload = {key: value for key, value in entry.items() if key != "after"}
+                if "after" in entry:
+                    with anyio.fail_after(30):
+                        while not finished(entry["after"]):
+                            await anyio.sleep(0.01)
                 command = RpcCommandAdapter.validate_python(payload)
                 await send.send(
                     rpc._RpcInputCommand(ParsedRpcCommand.from_known(command, payload=payload))
@@ -87,7 +104,6 @@ def _serve(
     monkeypatch.setattr(rpc, "build_session_runtime", build_scripted_runtime)
     monkeypatch.setattr(rpc, "_read_rpc_stdin", send_commands)
     monkeypatch.setattr(rpc._rpc_transport, "read_rpc_stdin_handshake", _read_rpc_test_handshake)
-    output = io.StringIO()
 
     async def scenario() -> None:
         with redirect_stdout(output):
@@ -167,3 +183,52 @@ def test_exit_reaches_next_prompt(
         assert next_prompt.endswith("\n\nanything new?")
     else:
         assert next_prompt == "anything new?"
+
+
+@pytest.mark.process
+@pytest.mark.parametrize("switch_session", [False, True], ids=["same-session", "switched"])
+def test_state_lists_background_processes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, switch_session: bool
+) -> None:
+    """``get_state`` lists the session's running processes; a switch stops them."""
+
+    sleeper = _python("import time; time.sleep(30)")
+    provider = ScriptedProvider(
+        [
+            _reply(
+                "",
+                _bash(
+                    "start",
+                    operation="start",
+                    command=sleeper,
+                    notify_on_exit=True,
+                    yield_seconds=0,
+                ),
+            ),
+            _reply("started"),
+        ]
+    )
+    other = JsonlSessionStore(tmp_path / "sessions").create()
+    anyio.run(other.append_message, Message(role="user", content="earlier work"))
+
+    records = _serve(
+        tmp_path,
+        monkeypatch,
+        provider,
+        [
+            {"id": "yolo", "type": "set_permissions", "mode": "yolo"},
+            {"id": "p1", "type": "prompt", "prompt": "start the server"},
+            *(
+                [{"id": "switch", "type": "select_session", "session_id": other.session_id}]
+                if switch_session
+                else []
+            ),
+            {"id": "state", "type": "get_state", "after": "switch" if switch_session else "p1"},
+        ],
+    )
+
+    (state,) = [r["state"] for r in records if r["type"] == "rpc.state"]
+    listed = [(p["command"], p["notify"]) for p in state["background_processes"]]
+    assert listed == ([] if switch_session else [(sleeper, True)])
+    if not switch_session:
+        assert state["background_processes"][0]["started_at_ms"] > 0

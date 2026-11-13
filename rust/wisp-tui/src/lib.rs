@@ -2221,10 +2221,16 @@ impl LiveUi {
         terminal::draw_frame(terminal, color_depth, render, finish)?;
         // After the frame's synchronized update, so the title and any notification are
         // not held back with it.
-        let attention = self.attention.observe(
+        let mut attention = self.attention.observe(
             RunState::of(&self.state),
             self.state.workspace_cwd.as_deref(),
         );
+        let (exits, latest_exit) = self.state.background_processes.exits();
+        attention.extend(self.attention.observe_exits(
+            exits,
+            latest_exit,
+            self.state.workspace_cwd.as_deref(),
+        ));
         if !attention.is_empty() {
             terminal.backend_mut().write_control(&attention)?;
         }

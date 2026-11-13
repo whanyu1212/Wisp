@@ -18,6 +18,7 @@ use wisp_protocol::commands::{
 };
 
 pub use wisp_protocol::commands::AgentMode;
+pub(crate) mod background_processes;
 mod command_controls;
 mod context;
 mod discovery;
@@ -815,6 +816,8 @@ pub struct UiState {
     connection_operation: Option<ConnectionOperation>,
     connection_catalog_reload_pending: bool,
     pub queue: QueueState,
+    /// The session's running background processes and the exits seen so far.
+    pub(crate) background_processes: background_processes::BackgroundProcesses,
     pub current_command: Option<ActiveCommand>,
     pub pending_approval: Option<PendingApproval>,
     pub pending_trust_request_id: Option<String>,
@@ -916,6 +919,7 @@ impl UiState {
             model_operation: None,
             connection_catalog_reload_pending: false,
             queue: QueueState::default(),
+            background_processes: Default::default(),
             current_command: None,
             pending_approval: None,
             pending_trust_request_id: None,
@@ -1248,6 +1252,7 @@ pub enum BackendEvent {
     /// A background process stopped on its own, during a run or between runs.
     ProcessEnded {
         process_id: String,
+        command: String,
         state: crate::tool_cards::ProcessDisplayState,
         exit_code: Option<i32>,
         duration_ms: u64,
@@ -1331,10 +1336,11 @@ pub enum BackendEvent {
         command_id: String,
         catalog: CommandCatalog,
     },
-    ModeReported {
+    StateReported {
         command_id: String,
         mode: AgentMode,
         web_search: bool,
+        background_processes: Vec<background_processes::BackgroundProcess>,
     },
     Diagnostic(String),
     DeviceCodeReported {
@@ -3189,6 +3195,8 @@ fn commit_session_and_hydrate(
     }
     // Leaving a session ends its grants, a session-only YOLO among them.
     effects.extend(discovery::permissions(state, None, ids)?);
+    // History replays no process events, so the backend lists what still runs.
+    effects.extend(background_processes::reload(state, ids)?);
     effects.push(UiEffect::RequestRender);
     Ok(effects)
 }
@@ -4314,6 +4322,7 @@ fn finish_new_session(
             ];
             // Leaving a session ends its grants, a session-only YOLO among them.
             effects.extend(discovery::permissions(state, None, ids)?);
+            effects.extend(background_processes::reload(state, ids)?);
             effects.push(UiEffect::RequestRender);
             Ok(effects)
         }
@@ -5409,6 +5418,7 @@ fn handle_backend_event(
         BackendEvent::RunCompleted(totals) => Ok(finish_run(state, totals)),
         BackendEvent::ToolCall(input) => {
             let call_id = input.call_id.clone();
+            background_processes::observe_tool_call(state, &input);
             let target = state.transcript.observe_tool_call(input);
             state.transcript.attach_tool_origin(target, &call_id);
             Ok(vec![UiEffect::RequestRender])
@@ -5472,8 +5482,9 @@ fn handle_backend_event(
         }
         BackendEvent::ToolResult(result) => {
             let call_id = result.call_id.clone();
-            let target = state.transcript.observe_tool_result(*result);
+            let target = state.transcript.observe_tool_result(*result.clone());
             state.transcript.resolve_history_call(target, &call_id);
+            background_processes::observe_tool_result(state, &result);
             Ok(vec![UiEffect::RequestRender])
         }
         BackendEvent::TrustRequested {
@@ -5532,6 +5543,7 @@ fn handle_backend_event(
         )),
         BackendEvent::ProcessEnded {
             process_id,
+            command,
             state: ended,
             exit_code,
             duration_ms,
@@ -5539,6 +5551,13 @@ fn handle_backend_event(
             state
                 .transcript
                 .observe_process_ended(&process_id, ended, exit_code, duration_ms);
+            background_processes::observe_process_ended(
+                state,
+                &process_id,
+                &command,
+                ended,
+                exit_code,
+            );
             Ok(vec![UiEffect::RequestRender])
         }
         BackendEvent::QueueMessageInjected {
@@ -5578,7 +5597,7 @@ fn handle_backend_event(
         | BackendEvent::ConnectionCatalogReported { .. }
         | BackendEvent::ModelCatalogReported { .. }
         | BackendEvent::CommandCatalogReported { .. }
-        | BackendEvent::ModeReported { .. }
+        | BackendEvent::StateReported { .. }
         | BackendEvent::DeviceCodeReported { .. }
         | BackendEvent::DeviceCodeProgress { .. }
         | BackendEvent::SessionsReported { .. }
@@ -5635,6 +5654,9 @@ fn observe_backend_event(
         return Ok(Some(effects));
     }
     if let Some(effects) = context::observe(state, event, ids)? {
+        return Ok(Some(effects));
+    }
+    if let Some(effects) = background_processes::observe(state, event) {
         return Ok(Some(effects));
     }
     if let Some(effects) = command_controls::observe(state, event, ids)? {
@@ -5711,6 +5733,7 @@ fn observe_message_origin(
             state
                 .transcript
                 .resolve_history_call(target, &input.call_id);
+            background_processes::observe_tool_result(state, input);
             Some(target)
         }
         BackendEvent::ToolExecutionEnded { call_id } => {
@@ -6652,6 +6675,8 @@ mod tests {
         )
         .unwrap();
         assert!(sent(&effects).contains(&"get_permissions".to_owned()));
+        // The background-process list is read again too.
+        assert!(sent(&effects).contains(&"get_state".to_owned()));
     }
 
     #[test]
@@ -6997,6 +7022,7 @@ mod tests {
         )
         .unwrap();
         assert!(sent(&committed).contains(&"get_permissions".to_owned()));
+        assert!(sent(&committed).contains(&"get_state".to_owned()));
     }
 
     #[test]
