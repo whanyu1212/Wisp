@@ -10,7 +10,10 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.9.0 — Unreleased
+<!-- Keeps links to the pre-release "0.9.0 — Unreleased" heading working. -->
+<a id="090--unreleased"></a>
+
+## 0.9.0 — 2026-11-12
 
 0.9.0 is a minor release on 0.8.1. It adds subagents, which are experimental and off by default:
 with them on, the model can hand read-only tasks to subagents through a new `spawn_agent` tool,
