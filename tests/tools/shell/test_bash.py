@@ -1228,11 +1228,35 @@ def test_bash_syntax_works(tmp_path: Path) -> None:
     assert result.text == "Command exited with code 0: match\ny"
 
 
-def test_command_shell_falls_back_to_sh(monkeypatch: MonkeyPatch) -> None:
-    monkeypatch.setattr(process_tools_module.os, "access", lambda _path, _mode: False)
-    monkeypatch.setattr(process_tools_module.shutil, "which", lambda _name: None)
+@pytest.mark.parametrize(
+    ("installed", "on_path", "expected"),
+    [
+        pytest.param(
+            {"/opt/homebrew/bin/bash", "/usr/local/bin/bash", "/bin/bash"},
+            "/bin/bash",
+            "/opt/homebrew/bin/bash",
+            id="apple-silicon-homebrew",
+        ),
+        pytest.param(
+            {"/usr/local/bin/bash", "/bin/bash"},
+            "/bin/bash",
+            "/usr/local/bin/bash",
+            id="intel-homebrew",
+        ),
+        pytest.param({"/bin/bash"}, "/opt/other/bash", "/bin/bash", id="system-bash"),
+        pytest.param(set(), "/opt/other/bash", "/opt/other/bash", id="bash-on-path"),
+        pytest.param(set(), None, "/bin/sh", id="no-bash"),
+    ],
+)
+def test_command_shell_choice(
+    monkeypatch: MonkeyPatch, installed: set[str], on_path: str | None, expected: str
+) -> None:
+    """A Homebrew bash wins over /bin/bash, which wins over PATH, then /bin/sh."""
+
+    monkeypatch.setattr(process_tools_module.os, "access", lambda path, _mode: path in installed)
+    monkeypatch.setattr(process_tools_module.shutil, "which", lambda _name: on_path)
     process_tools_module._command_shell.cache_clear()  # noqa: SLF001
     try:
-        assert process_tools_module._command_shell() == "/bin/sh"  # noqa: SLF001
+        assert process_tools_module._command_shell() == expected  # noqa: SLF001
     finally:
         process_tools_module._command_shell.cache_clear()  # noqa: SLF001
