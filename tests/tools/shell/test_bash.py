@@ -202,6 +202,48 @@ def test_heredoc_parse_error_hint(tmp_path: Path, command: str, hinted: bool) ->
 
 
 @pytest.mark.process
+@pytest.mark.parametrize("operation", ["start", "poll"])
+def test_bash_until_exit_waits_through_output(tmp_path: Path, operation: str) -> None:
+    code = "import time\nfor i in range(5):\n    print(i, flush=True)\n    time.sleep(0.05)"
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
+    bash = BashTool()
+
+    async def run() -> ToolResult:
+        try:
+            if operation == "start":
+                arguments = {"operation": "start", "command": command, "yield_seconds": 10}
+                return await bash.run({**arguments, "until": "exit"}, ToolContext(cwd=tmp_path))
+            started = await bash.run(
+                {"operation": "start", "command": command, "yield_seconds": 0},
+                ToolContext(cwd=tmp_path),
+            )
+            arguments = {
+                "operation": "poll",
+                "process_id": started.data["process_id"],
+                "wait_seconds": 10,
+                "until": "exit",
+            }
+            return await bash.run(arguments, ToolContext(cwd=tmp_path))
+        finally:
+            await bash.aclose()
+
+    result = anyio.run(run)
+
+    assert result.data["process_state"] == "completed"
+    assert result.data["exit_code"] == 0
+    assert result.data["stdout"].endswith("3\n4\n")
+
+
+def test_bash_until_rejects_unknown(tmp_path: Path) -> None:
+    with pytest.raises(ToolError, match="bash.until must be one of: output, exit"):
+        run_tool(
+            BashTool(),
+            {"operation": "poll", "process_id": "missing", "until": "forever"},
+            ToolContext(cwd=tmp_path),
+        )
+
+
+@pytest.mark.process
 def test_bash_withholds_endpoint_key(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     from wisp.config.runtime import WispConfig
     from wisp.openai_compatible import OpenAICompatibleSettings

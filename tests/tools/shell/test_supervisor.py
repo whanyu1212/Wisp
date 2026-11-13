@@ -472,6 +472,93 @@ def test_managed_timeout_serializes_with_explicit_cancel(
     assert max_active_cleanups == 1
 
 
+_TICKER = python_command(
+    "import time\nfor i in range(10):\n    print(f'tick {i}', flush=True)\n    time.sleep(0.05)"
+)
+
+
+@pytest.mark.process
+@pytest.mark.parametrize(("until", "state"), [("output", "running"), ("exit", "completed")])
+def test_poll_until_exit_ignores_output(tmp_path: Path, until: Any, state: str) -> None:
+    """Output ends an ``output`` wait; an ``exit`` wait gathers it until the process ends."""
+
+    async def run() -> ProcessUpdate:
+        supervisor = ProcessSupervisor()
+        try:
+            process_id = await supervisor.start(_TICKER, cwd=tmp_path, timeout=10)
+            await anyio.sleep(0.02)
+            return await supervisor.poll(process_id, wait_seconds=10, until=until)
+        finally:
+            await supervisor.aclose()
+
+    update = anyio.run(run)
+
+    assert update.state == state
+    if state == "completed":
+        assert update.stdout == "".join(f"tick {i}\n" for i in range(10))
+        assert update.exit_code == 0
+
+
+@pytest.mark.process
+def test_poll_until_exit_honours_wait(tmp_path: Path) -> None:
+    """A process still running at the deadline returns what it printed so far."""
+
+    async def run() -> tuple[ProcessUpdate, float]:
+        supervisor = ProcessSupervisor()
+        try:
+            process_id = await supervisor.start(
+                python_command(
+                    "import time\nwhile True:\n    print('tick', flush=True)\n    time.sleep(0.05)"
+                ),
+                cwd=tmp_path,
+                timeout=10,
+            )
+            started = anyio.current_time()
+            update = await supervisor.poll(process_id, wait_seconds=2, until="exit")
+            return update, anyio.current_time() - started
+        finally:
+            await supervisor.aclose()
+
+    update, elapsed = anyio.run(run)
+
+    assert update.state == "running"
+    assert "tick\n" in update.stdout
+    assert 1.9 <= elapsed < 8
+
+
+@pytest.mark.process
+@pytest.mark.parametrize("ending", ["cancel", "lifetime"])
+def test_poll_until_exit_wakes_on_stop(tmp_path: Path, ending: str) -> None:
+    """A process stopped by a cancel or its lifetime ends an exit wait at once."""
+
+    async def run() -> tuple[ProcessUpdate, float]:
+        supervisor = ProcessSupervisor()
+        try:
+            process_id = await supervisor.start(
+                python_command("import time\ntime.sleep(30)"),
+                cwd=tmp_path,
+                timeout=0.5 if ending == "lifetime" else 30,
+            )
+            started = anyio.current_time()
+            async with anyio.create_task_group() as group:
+                if ending == "cancel":
+
+                    async def cancel_soon() -> None:
+                        await anyio.sleep(0.3)
+                        await supervisor.cancel(process_id)
+
+                    group.start_soon(cancel_soon)
+                update = await supervisor.poll(process_id, wait_seconds=60, until="exit")
+            return update, anyio.current_time() - started
+        finally:
+            await supervisor.aclose()
+
+    update, elapsed = anyio.run(run)
+
+    assert update.state == ("cancelled" if ending == "cancel" else "timed_out")
+    assert elapsed < 20
+
+
 @pytest.mark.process
 def test_polling_terminal_process_does_not_repeat_output(tmp_path: Path) -> None:
     async def run() -> tuple[tuple[ProcessUpdate, ...], ProcessUpdate]:
