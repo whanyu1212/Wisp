@@ -132,6 +132,76 @@ def test_bash_withholds_provider_keys(
 
 
 @pytest.mark.process
+@pytest.mark.parametrize("operation", ["run", "start"])
+@pytest.mark.parametrize("granted", [True, False], ids=["granted", "ungranted"])
+def test_bash_exports_scratch_folder(
+    tmp_path: Path, monkeypatch: MonkeyPatch, operation: str, granted: bool
+) -> None:
+    """The context's folder replaces any inherited one; without one, none is passed on."""
+
+    monkeypatch.setenv("WISP_SCRATCH_DIR", "/inherited/from/another/session")
+    scratch = tmp_path / "scratch"
+    context = ToolContext(cwd=tmp_path, scratch_root=scratch if granted else None)
+    bash = BashTool()
+
+    async def run() -> ToolResult:
+        try:
+            command = _print_environment("WISP_SCRATCH_DIR")
+            arguments = {"operation": operation, "command": command, "yield_seconds": 10}
+            return await bash.run(arguments, context)
+        finally:
+            await bash.aclose()
+
+    result = anyio.run(run)
+
+    assert result.data["stdout"] == (f"{scratch}\n" if granted else "unset\n")
+
+
+_HEREDOC_IN_SUBSTITUTION = "body=\"$(cat <<'EOF'\nthe user's text\nEOF\n)\"\n"
+_BASH_32_PARSE_ERROR = "eval: line 3: unexpected EOF while looking for matching"
+
+
+@pytest.mark.process
+@pytest.mark.parametrize(
+    ("command", "hinted"),
+    [
+        pytest.param(
+            f"{_HEREDOC_IN_SUBSTITUTION}echo {shlex.quote(_BASH_32_PARSE_ERROR)} >&2; exit 2",
+            True,
+            id="heredoc-parse-error",
+        ),
+        pytest.param(
+            f"echo {shlex.quote(_BASH_32_PARSE_ERROR)} >&2; exit 2", False, id="no-heredoc"
+        ),
+        pytest.param(
+            "body=\"$(cat <<'EOF'\nplain text\nEOF\n)\"\nexit 1", False, id="other-failure"
+        ),
+        pytest.param(
+            "body=\"$(cat <<'EOF'\nplain text\nEOF\n)\"\n"
+            f"echo {shlex.quote(_BASH_32_PARSE_ERROR)} >&2",
+            False,
+            id="succeeded",
+        ),
+    ],
+)
+def test_heredoc_parse_error_hint(tmp_path: Path, command: str, hinted: bool) -> None:
+    """A heredoc inside $(...) that bash 3.2 cannot parse names the file workaround.
+
+    The parse error is echoed so the case runs the same on every bash version.
+    """
+
+    scratch = tmp_path / "scratch"
+    bare = run_tool(BashTool(), {"command": command}, ToolContext(cwd=tmp_path))
+    granted = run_tool(
+        BashTool(), {"command": command}, ToolContext(cwd=tmp_path, scratch_root=scratch)
+    )
+
+    assert ("gh pr create --body-file" in bare.text) is hinted
+    assert "$WISP_SCRATCH_DIR" not in bare.text
+    assert ("in $WISP_SCRATCH_DIR" in granted.text) is hinted
+
+
+@pytest.mark.process
 def test_bash_withholds_endpoint_key(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     from wisp.config.runtime import WispConfig
     from wisp.openai_compatible import OpenAICompatibleSettings

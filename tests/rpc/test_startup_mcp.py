@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import sys
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -169,7 +170,12 @@ def test_first_request_matches_an_eager_connect(
     assert [message.name for message in eager.calls[0].tools][-2:] == _FIXTURE_TOOLS
 
     def instructions(provider: ScriptedProvider) -> list[str]:
-        return [m.content for m in provider.calls[0].messages if m.role == "system"]
+        # Each session names its own scratch folder; the rest must match.
+        return [
+            re.sub(r"scratch/[0-9a-f]+", "scratch/<session>", m.content)
+            for m in provider.calls[0].messages
+            if m.role == "system"
+        ]
 
     assert instructions(deferred) == instructions(eager)
 

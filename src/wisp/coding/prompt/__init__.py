@@ -14,6 +14,7 @@ from .instructions import (
     PLAN_MODE_SYSTEM_PROMPT,
     WEB_SEARCH_GUIDANCE,
     WEB_SEARCH_UNAVAILABLE_GUIDANCE,
+    scratch_folder_guidance,
 )
 from .parts import AssembledPrompt, PromptPart
 from .project_context import (
@@ -48,6 +49,7 @@ __all__ = [
     "PLAN_MODE_SYSTEM_PROMPT",
     "WEB_SEARCH_GUIDANCE",
     "WEB_SEARCH_UNAVAILABLE_GUIDANCE",
+    "scratch_folder_guidance",
     "DEFAULT_CONTEXT_FILE_MAX_CHARS",
     "DEFAULT_CONTEXT_MAX_CHARS",
     "GIT_CONTEXT_TIMEOUT_SECONDS",

@@ -89,6 +89,9 @@ from wisp.sessions.replay import (
 )
 from wisp.sessions.summaries import read_session_summary_metadata
 
+# Each session's scratch folder, beside the session files: scratch/<session_id>.
+SCRATCH_DIRECTORY_NAME = "scratch"
+
 
 class _UnconditionalAppend:
     """Sentinel distinguishing no concurrency check from an expected empty leaf."""
@@ -485,6 +488,30 @@ class JsonlSession:
         """
 
         return await anyio.to_thread.run_sync(self.images.read, image)
+
+    async def ensure_scratch_directory(self) -> Path:
+        """Create this session's private scratch folder if missing, and return it.
+
+        The folder sits beside the session files, at ``scratch/<session_id>``, so a
+        resumed session finds the files it wrote before and its prompt names the same
+        folder in every process. Like the session folder, it is owner-only.
+
+        Returns:
+            Path: The resolved folder.
+
+        Raises:
+            SessionError: The folder is not a private directory owned by the
+                current user.
+            OSError: The folder could not be created.
+        """
+
+        directory = self.path.parent / SCRATCH_DIRECTORY_NAME / self.session_id
+
+        def ensure() -> Path:
+            ensure_private_directory(directory)
+            return directory.resolve()
+
+        return await anyio.to_thread.run_sync(ensure)
 
     async def append_message(
         self,

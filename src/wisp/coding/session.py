@@ -80,6 +80,7 @@ from wisp.coding.prompt import (
     assemble_custom_prompt,
     assemble_prompt,
     read_repository_status,
+    scratch_folder_guidance,
 )
 from wisp.coding.stats import RunStats, build_session_stats
 from wisp.coding.subagent import (
@@ -176,7 +177,7 @@ from wisp.sessions.entries import (
     SessionEntry,
     ToolResultPresentationSnapshot,
 )
-from wisp.sessions.errors import StaleSessionWriterError
+from wisp.sessions.errors import SessionError, StaleSessionWriterError
 from wisp.sessions.images import SessionImageError
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 from wisp.sessions.replay import (
@@ -244,6 +245,21 @@ class _SessionPrompt:
     messages: tuple[Message, ...]
     repository_status: RepositoryStatusSnapshot | None = None
     parts: tuple[tuple[PromptPart, ...], ...] = ()
+
+
+async def _session_scratch_root(session: JsonlSession) -> Path | None:
+    """Return the session's scratch folder, or None when it cannot be made private.
+
+    A run without the folder still works; its file tools stay in the workspace.
+    """
+
+    try:
+        return await session.ensure_scratch_directory()
+    except (SessionError, OSError):
+        _logger.warning(
+            "Could not prepare the scratch folder for session %s", session.session_id, exc_info=True
+        )
+        return None
 
 
 def _is_project_context(message: Message) -> bool:
@@ -1437,6 +1453,10 @@ class CodingSession:
         if operation_context.seen_files is not None:
             seen_files = self._seen_files.setdefault(session.session_id, SeenFiles())
             operation_context = replace(operation_context, seen_files=seen_files)
+        if operation_context.session_scratch:
+            operation_context = replace(
+                operation_context, scratch_root=await _session_scratch_root(session)
+            )
         prompt_image_bytes = sum(image.byte_size for image in user_message.images or ())
         resumed = await self._resume_history(
             session, history, reserved_image_bytes=prompt_image_bytes
@@ -3414,6 +3434,14 @@ class CodingSession:
         additional_guidance = (
             PromptPart("skills", "skill index", skill_index),
             PromptPart("project_context", "web search", self._web_search_guidance()),
+            PromptPart(
+                "project_context",
+                "scratch folder",
+                # Without tools the model cannot use the folder, so do not name it.
+                scratch_folder_guidance(operation_context.scratch_root)
+                if effective_tools and operation_context.scratch_root is not None
+                else "",
+            ),
             PromptPart(
                 "mcp_tools",
                 "mcp servers",

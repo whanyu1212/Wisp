@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import stat
 from pathlib import Path
 from typing import Any, cast
 
@@ -135,6 +136,68 @@ def test_passes_tool_specs_to_provider(tmp_path: Path) -> None:
     assert provider.seen_messages[3].content == "hello"
     assert provider.seen_tools == (tool,)
     assert any(isinstance(event, MessageCompleted) and event.content == "done" for event in events)
+
+
+@pytest.mark.parametrize("with_tools", [True, False], ids=["tools", "no-tools"])
+def test_prompt_names_scratch_folder(tmp_path: Path, with_tools: bool) -> None:
+    provider = CapturingProvider()
+    scratch = tmp_path / "scratch"
+    tool = ToolSpec(
+        name="lookup",
+        description="Look something up.",
+        input_schema={"type": "object", "properties": {}},
+    )
+
+    async def run_agent() -> None:
+        agent = CodingSession(
+            provider=provider,
+            sessions=JsonlSessionStore(tmp_path),
+            tools=[tool] if with_tools else [],
+            tool_context=ToolContext(cwd=tmp_path, scratch_root=scratch),
+        )
+        _ = [event async for event in agent.run("hello")]
+
+    anyio.run(run_agent)
+
+    assert provider.seen_messages is not None
+    named = [m for m in provider.seen_messages if f"scratch folder: {scratch}" in m.content]
+    assert [m.role for m in named] == (["system"] if with_tools else [])
+
+
+def test_each_session_keeps_own_scratch(tmp_path: Path) -> None:
+    """A run names its session's private folder, the same one again on resume."""
+
+    provider = CapturingProvider()
+    store = JsonlSessionStore(tmp_path / "sessions")
+    first, second = store.create(), store.create()
+    tool = ToolSpec(
+        name="lookup",
+        description="Look something up.",
+        input_schema={"type": "object", "properties": {}},
+    )
+
+    def named_folder(session: object) -> str:
+        async def run_agent() -> None:
+            agent = CodingSession(
+                provider=provider,
+                sessions=store,
+                tools=[tool],
+                tool_context=ToolContext(cwd=tmp_path, session_scratch=True),
+            )
+            _ = [event async for event in agent.run("hello", session=session)]
+
+        anyio.run(run_agent)
+        assert provider.seen_messages is not None
+        (line,) = [m.content for m in provider.seen_messages if "scratch folder:" in m.content]
+        return line.removeprefix("scratch folder: ").split(" (")[0]
+
+    first_folder = Path(named_folder(first))
+
+    assert first_folder == (tmp_path / "sessions" / "scratch" / first.session_id).resolve()
+    assert first_folder.is_dir()
+    assert stat.S_IMODE(first_folder.stat().st_mode) == 0o700
+    assert Path(named_folder(first)) == first_folder
+    assert Path(named_folder(second)).name == second.session_id
 
 
 def test_custom_prompt_replaces_defaults(tmp_path: Path) -> None:

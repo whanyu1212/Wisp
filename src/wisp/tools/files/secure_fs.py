@@ -73,7 +73,8 @@ def secure_tool_path(
     """Validate a tool path against the workspace boundary and protected paths.
 
     A relative path is taken from the working directory. The path must stay inside
-    ``context.boundary()``: the trusted project's root, or the working directory.
+    ``context.boundary()``: the trusted project's root, or the working directory;
+    or inside the context's scratch folder.
     The path as written is checked first. On POSIX, when ``follow_links`` or
     ``write`` is set and the path goes through a symbolic link, the resolved path
     must pass the same checks. A read then uses the resolved path; a write is
@@ -106,11 +107,11 @@ def secure_tool_path(
         candidate = cwd / candidate
     # abspath/normpath are lexical; unlike Path.resolve they do not dereference links.
     absolute = Path(os.path.abspath(os.path.normpath(candidate)))
-    if not context.allow_outside_cwd and not absolute.is_relative_to(boundary):
+    if not context.allow_outside_cwd and context.boundary_for(absolute) is None:
         raise ToolError(
             f"Path is outside the workspace: {raw}",
             failure_code="path_outside_workspace",
-            recovery_hint=f"Use a path inside {boundary}.",
+            recovery_hint=_outside_workspace_hint(boundary, context),
         )
     if is_protected_path(absolute, context):
         raise ToolError(f"Access to protected path denied: {raw}")
@@ -144,14 +145,23 @@ def secure_tool_path(
 
 def _check_resolved_target(resolved: Path, raw: str, boundary: Path, context: ToolContext) -> None:
     # Errors name only the path the caller gave, never the target it resolves to.
-    if not context.allow_outside_cwd and not resolved.is_relative_to(boundary):
+    if not context.allow_outside_cwd and context.boundary_for(resolved) is None:
         raise ToolError(
             f"Symbolic link points outside the workspace: {raw}",
             failure_code="path_outside_workspace",
-            recovery_hint=f"Use a path inside {boundary}.",
+            recovery_hint=_outside_workspace_hint(boundary, context),
         )
     if is_protected_path(resolved, context):
         raise ToolError(f"Access to protected path denied: {raw}")
+
+
+def _outside_workspace_hint(boundary: Path, context: ToolContext) -> str:
+    if context.scratch_root is None:
+        return f"Use a path inside {boundary}."
+    return (
+        f"Use a path inside {boundary}, or inside the scratch folder {context.scratch_root} "
+        "for files that do not belong to the project."
+    )
 
 
 def _display(path: Path, cwd: Path) -> str:

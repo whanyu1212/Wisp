@@ -1390,7 +1390,8 @@ def _iter_walked_files(
                 context,
                 cancel_event=cancel_event,
             )
-            boundary = context.boundary()
+            # A walk from the scratch folder stays inside it, like one from the workspace.
+            boundary = context.boundary_for(secure_path.path) or context.boundary()
             native = _NATIVE_WALK
             native_walk = (
                 None
@@ -2112,7 +2113,7 @@ def _is_path_within_tool_cwd(path: Path, context: ToolContext) -> bool:
         return False
     if context.allow_outside_cwd:
         return True
-    return path.resolve(strict=False).is_relative_to(context.boundary())
+    return context.boundary_for(path.resolve(strict=False)) is not None
 
 
 def _is_protected_walked_file(path: Path, real_path: Path, context: ToolContext) -> bool:
