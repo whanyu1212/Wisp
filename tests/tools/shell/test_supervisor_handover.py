@@ -16,13 +16,22 @@ from wisp.tools.shell import supervisor as supervisor_module
 from wisp.tools.shell.process import ProcessResult
 from wisp.tools.shell.supervisor import ProcessExit, ProcessSupervisor, ProcessUpdate
 
-# Prints 0..1999, one per line, flushing each so the output arrives in many chunks.
-_TICKER = python_command(
-    "import sys, time\n"
-    "for i in range(2000):\n"
-    "    print(i, flush=True)\n"
-    "    if i % 100 == 99: time.sleep(0.01)\n"
-)
+
+def _ticker(marker: Path) -> str:
+    """Prints 0..1999 one line at a time, holding after 999 until ``marker`` exists.
+
+    The hold keeps the command running however fast the machine is, so the move
+    always lands while it still has output to come.
+    """
+
+    return python_command(
+        "import os, time\n"
+        "for i in range(2000):\n"
+        "    print(i, flush=True)\n"
+        f"    while i == 999 and not os.path.exists({str(marker)!r}): time.sleep(0.01)\n"
+    )
+
+
 _SLEEPER = python_command("import time; time.sleep(30)")
 
 
@@ -69,11 +78,14 @@ def test_move_mid_burst_loses_nothing(tmp_path: Path) -> None:
 
     heard: list[ProcessExit] = []
 
+    marker = tmp_path / "moved"
+
     async def run() -> tuple[ProcessUpdate, str, int]:
         supervisor = ProcessSupervisor()
         supervisor.set_exit_listener(heard.append)
         try:
-            moved = await _move(supervisor, _TICKER, tmp_path, on_output=True)
+            moved = await _move(supervisor, _ticker(marker), tmp_path, on_output=True)
+            marker.touch()
             final = await supervisor.poll(moved.process_id, wait_seconds=20, until="exit")
             saved = supervisor._managed[moved.process_id].stdout_saved  # noqa: SLF001
             saved_bytes = saved._saved_bytes + len(saved._buffer)  # noqa: SLF001
