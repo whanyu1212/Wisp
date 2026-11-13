@@ -1131,6 +1131,7 @@ pub enum CommandKind {
     GetState,
     Configure,
     ChangeDirectory,
+    CancelProcess,
     StoreApiKey,
     DisconnectProvider,
     BeginDeviceCode,
@@ -1177,6 +1178,7 @@ impl CommandKind {
             Self::GetState => "get_state",
             Self::Configure => "configure",
             Self::ChangeDirectory => "change_directory",
+            Self::CancelProcess => "cancel_process",
             Self::StoreApiKey => "store_api_key",
             Self::DisconnectProvider => "disconnect_provider",
             Self::BeginDeviceCode => "begin_device_code",
@@ -1481,6 +1483,10 @@ pub enum UiAction {
     ConfigureAutoCompaction(bool),
     Search(Option<bool>),
     ChangeDirectory(String),
+    /// `/ps`: list the running background processes.
+    ListBackgroundProcesses,
+    /// `/kill`: stop a background process, by its `/ps` number or its id.
+    StopBackgroundProcess(String),
     Compact(Option<String>),
     Steer(String),
     SteerPresented {
@@ -1704,6 +1710,10 @@ pub fn reduce(
         UiAction::LoadContext => Ok(context::request(state)),
         UiAction::Search(enabled) => Ok(command_controls::search(state, enabled, ids)?),
         UiAction::ChangeDirectory(path) => Ok(working_directory::change(state, path, ids)?),
+        UiAction::ListBackgroundProcesses => Ok(background_processes::list(state)),
+        UiAction::StopBackgroundProcess(target) => {
+            Ok(background_processes::stop(state, &target, ids)?)
+        }
         UiAction::ConfigureAutoCompaction(enabled) => {
             Ok(context::configure_auto(state, enabled, ids)?)
         }
@@ -7414,16 +7424,24 @@ mod tests {
                 ("slow", ProcessDisplayState::TimedOut, None, Some(252_000)),
             ]
         );
-        assert!(
+        // A process the user stopped reads as cancelled; a running one is no end.
+        let ended_as = |state: &str| {
             BackendEvent::from_projection_value(&serde_json::json!({
                 "type": "process.ended",
                 "process_id": "x",
                 "command": "make",
-                "state": "cancelled",
+                "state": state,
                 "duration_ms": 1,
             }))
-            .is_err()
-        );
+        };
+        assert!(matches!(
+            ended_as("cancelled"),
+            Ok(BackendEvent::ProcessEnded {
+                state: ProcessDisplayState::Cancelled,
+                ..
+            })
+        ));
+        assert!(ended_as("running").is_err());
     }
 
     #[test]

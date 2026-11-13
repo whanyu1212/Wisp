@@ -645,6 +645,8 @@ def test_build_runtime_activates_builtin_providers_tools_and_commands() -> None:
             "tree",
             "unrevert",
             "cd",
+            "ps",
+            "kill",
             "provider",
             "auth",
             "connect",

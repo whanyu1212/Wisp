@@ -260,8 +260,10 @@ On a terminal at least 148 columns wide, the Reading sidebar shows the session n
 folder and branch, compact context usage, MCP servers, skills, changed files, and up to three
 earlier turns. The latest turn is left out because its prompt stays pinned above its reply, so a
 session with one turn has no turn list. While processes the agent started with
-`bash operation=start` are running, a **Background** section lists them with how long each has
-run; a process leaves the list when it stops or is cancelled. Model, effort, and YOLO remain in the composer,
+`bash operation=start` are running, a **Background** section lists them, numbered, with how long
+each has run; a process leaves the list when it stops or is cancelled. Selecting a row fills in
+`/kill` with that process's id, and Enter stops it; `/ps` lists them too. Stopping one tells the agent
+with its next prompt if it asked to hear when the process stops, and never wakes it. Model, effort, and YOLO remain in the composer,
 and the panel's keys join the main footer. Context's **Breakdown** expands source totals and costs; `/context` opens
 full details.
 

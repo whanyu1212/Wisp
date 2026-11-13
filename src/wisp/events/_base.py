@@ -18,7 +18,8 @@ QueueKind = Literal["steering", "follow_up"]
 ToolPresentationStatus = Literal["done", "error", "denied", "cancelled"]
 ManagedProcessState = Literal["running", "completed", "failed", "timed_out", "cancelled"]
 # How a started process stopped on its own: every terminal state except cancelled.
-EndedProcessState = Literal["completed", "failed", "timed_out"]
+# `cancelled` is a process the user stopped; the agent's own cancels publish no exit.
+EndedProcessState = Literal["completed", "failed", "timed_out", "cancelled"]
 ImageMediaType = Literal["image/png", "image/jpeg", "image/gif", "image/webp"]
 
 

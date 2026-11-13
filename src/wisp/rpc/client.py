@@ -32,6 +32,7 @@ from wisp.rpc.commands import (
     ApprovalScope,
     BeginDeviceCodeCommand,
     CancelCommand,
+    CancelProcessCommand,
     ChangeDirectoryCommand,
     ClearQueueCommand,
     CloneSessionCommand,
@@ -741,6 +742,13 @@ class RpcController:
 
         selected_id = command_id or self._command_id_factory("cancel")
         await self._transport.send(CancelCommand(id=selected_id, target_id=target_id))
+        return selected_id
+
+    async def cancel_process(self, process_id: str, *, command_id: str | None = None) -> str:
+        """Stop a background process the agent started; its exit reads ``cancelled``."""
+
+        selected_id = command_id or self._command_id_factory("cancel_process")
+        await self._transport.send(CancelProcessCommand(id=selected_id, process_id=process_id))
         return selected_id
 
     async def approve(

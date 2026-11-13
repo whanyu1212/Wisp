@@ -192,3 +192,20 @@ def test_clear_drops_wake(published: list[WispEvent]) -> None:
     notices.clear()
 
     assert notices.take_wake() is False
+
+
+def test_user_stop_told_not_woken(published: list[WispEvent]) -> None:
+    """A process the user stopped is published and told, but wakes nobody."""
+
+    woken: list[None] = []
+    notices = ProcessExitNotices(_Reported(set()), published.append)
+    notices.set_wake_listener(lambda: woken.append(None))
+
+    notices.record(_exit("stopped", notify=True, state="cancelled"))
+
+    (event,) = published
+    assert isinstance(event, ProcessEnded)
+    assert event.state == "cancelled"
+    assert [notice.state for notice in notices.pending()] == ["cancelled"]
+    assert notices.take_wake() is False
+    assert woken == []

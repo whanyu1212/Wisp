@@ -3542,6 +3542,16 @@ impl LiveUi {
                 self.dispatch(UiAction::ChangeDirectory(path), writer, limit)
                     .await
             }
+            Command::Processes => {
+                self.editor.clear();
+                self.dispatch(UiAction::ListBackgroundProcesses, writer, limit)
+                    .await
+            }
+            Command::KillProcess(target) => {
+                self.editor.clear();
+                self.dispatch(UiAction::StopBackgroundProcess(target), writer, limit)
+                    .await
+            }
             Command::AutoCompaction(enabled) => {
                 self.notice = None;
                 self.dispatch(UiAction::ConfigureAutoCompaction(enabled), writer, limit)
@@ -4049,6 +4059,28 @@ impl LiveUi {
             side_panel::Target::Context => {
                 self.context_view = Some(context_view::ContextView::default());
                 self.dispatch(UiAction::LoadContext, writer, limit).await
+            }
+            side_panel::Target::Process(number) => {
+                let Some(process) = number
+                    .checked_sub(1)
+                    .and_then(|index| self.state.background_processes.running().get(index))
+                else {
+                    return Ok(LoopControl::Continue);
+                };
+                let command = reducer::background_processes::command_line(&process.command);
+                // Stopping takes the Enter of a typed command, so a click cannot stop a
+                // process by itself; a draft in the composer is left alone. The id, not
+                // the number, names it, so a row that leaves first cannot shift the
+                // command onto another process.
+                let kill = format!("/kill {}", process.process_id);
+                self.notice = Some(if self.editor.text().is_empty() {
+                    self.editor.restore_prompt(&kill);
+                    format!("Press Enter to stop {command}")
+                } else {
+                    format!("Type {kill} to stop {command}")
+                });
+                self.render_pending = true;
+                Ok(LoopControl::Continue)
             }
             side_panel::Target::Tree => {
                 self.dispatch_session_action_with(

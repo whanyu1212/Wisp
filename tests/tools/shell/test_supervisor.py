@@ -13,6 +13,7 @@ from tests.tools.shell.supervisor_support import (
     poll_until_terminal,
     python_command,
 )
+from wisp.rpc.session.process_exits import ProcessExitNotices
 from wisp.tools.result import ToolError
 from wisp.tools.shell.supervisor import (
     ProcessExit,
@@ -714,3 +715,46 @@ def test_running_processes_listed(tmp_path: Path) -> None:
     snapshots, first, second = anyio.run(run)
 
     assert snapshots == [[(first, True), (second, False)], [(first, True)], []]
+
+
+@pytest.mark.process
+def test_user_stop_announced(tmp_path: Path) -> None:
+    """A user's stop is announced once and leaves output and notice for the agent."""
+
+    heard: list[ProcessExit] = []
+
+    async def run() -> tuple[str, ProcessUpdate, tuple[str, ...]]:
+        announced = anyio.Event()
+        supervisor = ProcessSupervisor()
+        notices = ProcessExitNotices(supervisor, lambda _event: None)
+
+        def listener(exit: ProcessExit) -> None:
+            heard.append(exit)
+            notices.record(exit)
+            announced.set()
+
+        supervisor.set_exit_listener(listener)
+        try:
+            process_id = await supervisor.start(
+                python_command("import time; print(1, flush=True); time.sleep(30)"),
+                cwd=tmp_path,
+                timeout=30,
+                notify_on_exit=True,
+            )
+            await supervisor.poll(process_id, wait_seconds=10)
+            state = await supervisor.stop(process_id)
+            with anyio.fail_after(10):
+                await announced.wait()
+            # Nothing was read for the agent, so its notice and next poll remain.
+            assert not supervisor.is_terminal_reported(process_id)
+            held = tuple(notice.process_id for notice in notices.pending())
+            return state, await supervisor.poll(process_id), held
+        finally:
+            await supervisor.aclose()
+
+    state, polled, held = anyio.run(run)
+
+    assert state == "cancelled"
+    assert [(e.state, e.notify) for e in heard] == [("cancelled", True)]
+    assert len(held) == 1
+    assert polled.state == "cancelled"

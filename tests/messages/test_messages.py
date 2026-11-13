@@ -9,7 +9,7 @@ from pydantic import ValidationError
 
 from wisp.agent.context_budget import context_fingerprint
 from wisp.events import ImagePart, ToolCallSnapshot
-from wisp.messages import Message, ProcessNotice, Role
+from wisp.messages import Message, ProcessNotice, Role, process_notices_text
 from wisp.messages.history import normalize_provider_history
 
 
@@ -328,3 +328,9 @@ def test_no_notices_unchanged() -> None:
 
     assert message.with_process_notices([]) is message
     assert "process_notices" not in message.model_dump(exclude_none=True)
+
+
+def test_user_stop_notice() -> None:
+    notice = ProcessNotice(process_id="p1", command="npm run dev", state="cancelled")
+
+    assert "- process_id=p1: stopped by the user: npm run dev" in process_notices_text([notice])

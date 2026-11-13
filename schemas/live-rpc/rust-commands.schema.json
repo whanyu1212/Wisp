@@ -237,6 +237,40 @@
       "title": "CancelCommand",
       "type": "object"
     },
+    "CancelProcessCommand": {
+      "additionalProperties": false,
+      "description": "Stop a background process the agent started, on the user's behalf.\n\nIt runs beside any active command. The process's exit is published as\n``process.ended`` with state ``cancelled``; the command fails when no running\nbackground process has this id.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "CancelProcessCommandId"
+        },
+        "process_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "CancelProcessCommandProcessId",
+          "type": "string"
+        },
+        "type": {
+          "const": "cancel_process",
+          "default": "cancel_process",
+          "title": "CancelProcessCommandType",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "process_id"
+      ],
+      "title": "CancelProcessCommand",
+      "type": "object"
+    },
     "ChangeDirectoryCommand": {
       "additionalProperties": false,
       "description": "Move the session's working directory to another folder in its project.\n\nIt waits for running work and never applies in the middle of a prompt. The\nreply is the saved ``session.directory_changed`` move, when one was saved,\nthen ``rpc.workspace`` for the new folder.",
@@ -2182,6 +2216,7 @@
       "approval": "#/$defs/ApprovalCommand",
       "begin_device_code": "#/$defs/BeginDeviceCodeCommand",
       "cancel": "#/$defs/CancelCommand",
+      "cancel_process": "#/$defs/CancelProcessCommand",
       "change_directory": "#/$defs/ChangeDirectoryCommand",
       "clear_queue": "#/$defs/ClearQueueCommand",
       "clone_session": "#/$defs/CloneSessionCommand",
@@ -2370,6 +2405,9 @@
     },
     {
       "$ref": "#/$defs/CancelCommand"
+    },
+    {
+      "$ref": "#/$defs/CancelProcessCommand"
     },
     {
       "$ref": "#/$defs/ApprovalCommand"

@@ -14,12 +14,12 @@ this policy.
 
 0.9.2 is a patch release on 0.9.1. The terminal UI reads a turn as one activity list, and
 compaction keeps more of long tool output in its checkpoint. A background process can tell the
-agent when it stops. That adds one event, `process.ended`, an optional `background_processes`
-list in the `get_state` reply, a `process_wake` flag on message snapshots, an optional
-`process_notices` field on persisted user messages, which 0.9.1 ignores, and one user setting,
-`wake_on_process_exit`; no command, handshake, credential, or trust format changes, so 0.9.1 and
-0.9.2 still read each other's sessions. The backend and
-frontend must come from the same release.
+agent when it stops, and the user can stop one. That adds one event, `process.ended`, one
+command, `cancel_process`, an optional `background_processes` list in the `get_state` reply, a
+`process_wake` flag on message snapshots, an optional `process_notices` field on persisted user
+messages, which 0.9.1 ignores, and one user setting, `wake_on_process_exit`; no handshake,
+credential, or trust format changes, so 0.9.1 and 0.9.2 still read each other's sessions. The
+backend and frontend must come from the same release.
 
 ### TUI
 
@@ -58,11 +58,18 @@ frontend must come from the same release.
   agent once that run ends. At most three wake runs start between the user's prompts. The run
   uses the session's permission mode, and the TUI shows it like a prompt it sent, labelled
   "Background process stopped", which `Esc` cancels. A prompt, `/init`, or `/compact` the user
-  sends while a wake run is going cancels the wake; its notices lead the next prompt. Message snapshots mark its prompt with
-  `process_wake`, and its notice text never reaches a frontend. The `wake_on_process_exit`
+  sends while a wake run is going cancels the wake; its notices lead the next prompt. Message
+  snapshots mark its prompt with `process_wake`, and its notice text never reaches a frontend. The `wake_on_process_exit`
   setting (`WISP_WAKE_ON_PROCESS_EXIT`) is on by default; turned off, notices wait for the next
   prompt as before. In-process SDK hosts wake too. A cancelled prompt, or one the run rolls back,
   now leaves its notices for the next prompt instead of dropping them.
+- You can stop a background process the agent started without asking the agent: `/kill
+  <number|process-id>`, or select its row in the side panel's **Background** list, which fills
+  in `/kill` with its id for Enter to confirm. `/ps` lists them. New command `cancel_process`
+  (`process_id`), which runs beside an active run; the stop is published as `process.ended` with
+  the new state `cancelled`, and a process the agent asked to hear about is reported to it with
+  the next prompt as stopped by the user, without waking it. The SDK has
+  `RpcController.cancel_process`.
 
 ### Compaction
 

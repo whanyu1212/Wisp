@@ -228,6 +228,24 @@ def builtin_command_descriptors() -> tuple[CommandDescriptor, ...]:
             order=45,
         ),
         CommandDescriptor(
+            name="ps",
+            title="Background processes",
+            description="List the background processes the agent started that are still running",
+            category=CommandCategory.session,
+            order=46,
+        ),
+        CommandDescriptor(
+            name="kill",
+            title="Stop background process",
+            description="Stop a background process the agent started, by /ps number or id",
+            category=CommandCategory.session,
+            arguments=(
+                CommandArgument("process", "Number from /ps, or process id", required=True),
+            ),
+            accepts_arguments=True,
+            order=47,
+        ),
+        CommandDescriptor(
             name="provider",
             title="Provider",
             description="Show or switch the active provider",
