@@ -69,7 +69,7 @@ mark the snapshot partial; unchanged files beyond the scan budget may also be om
 Other tool and process previews stay collapsed to an action line. MCP summaries name the server,
 tool, and primary subject, such as `linear/list_issues · astro`; pagination and other bounded
 arguments remain in expanded detail. Consecutive calls to the same MCP tool show a compact count,
-such as `linear/get_issue · 5 calls`. Expanding the group reveals each call. While a call is open,
+such as `linear/get_issue · 5 times`. Expanding the group reveals each call. While a call is open,
 the group follows its subject with `· 4 of 5 done`; approval, denial, and failure stay visible.
 Consecutive `read` / `grep` / `find` / `ls` cards group as exploration activity. Thinking streams
 as a collapsed `thought` row.

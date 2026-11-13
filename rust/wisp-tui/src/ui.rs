@@ -34,6 +34,8 @@ pub(crate) const EMPTY_TRANSCRIPT_HINT: &str = "Type a prompt or / for commands.
 const EMPTY_TRANSCRIPT_TAGLINE: &str = "A coding agent that stays in sync";
 const EMPTY_TRANSCRIPT_PANEL_WIDTH: usize = 40;
 const PINNED_USER_ROWS: usize = 4;
+/// What ends a pinned prompt with more rows than [`PINNED_USER_ROWS`].
+const PINNED_PROMPT_CLIPPED: &str = "… more · scroll up to read";
 /// Below this surface height the decision panel owns the whole surface, with no
 /// transcript or footer, so its choices stay visible down to the 30x8 minimum.
 const DECISION_PANEL_SHARED_MIN_HEIGHT: u16 = 11;
@@ -693,9 +695,14 @@ fn pinned_user_rows(
         entry_id: user.id,
         position: RowPosition::Header,
     };
-    while rows.len() < PINNED_USER_ROWS {
+    let mut clipped = false;
+    loop {
         let cached = row_cache.row_at(&state.transcript, anchor, width)?;
         if cached.row.kind == TranscriptRowKind::Spacer || cached.row.anchor.entry_id != user.id {
+            break;
+        }
+        if rows.len() == PINNED_USER_ROWS {
+            clipped = true;
             break;
         }
         rows.push(cached.row);
@@ -704,7 +711,32 @@ fn pinned_user_rows(
         };
         anchor = next;
     }
+    if clipped {
+        mark_pinned_prompt_clipped(&mut rows);
+    }
     (!rows.is_empty()).then_some((user.id, rows))
+}
+
+/// End a pinned prompt that does not fit with a muted note instead of its paragraph gap,
+/// so a prompt cut short does not read as the whole prompt.
+fn mark_pinned_prompt_clipped(rows: &mut Vec<TranscriptRow>) {
+    while rows
+        .last()
+        .is_some_and(|row| row.kind == TranscriptRowKind::Content && row.spans.is_empty())
+    {
+        rows.pop();
+    }
+    let Some(mut note) = rows
+        .last()
+        .filter(|row| row.kind == TranscriptRowKind::Content)
+        .cloned()
+    else {
+        return;
+    };
+    note.spans.truncate(1);
+    note.spans[0].text = PINNED_PROMPT_CLIPPED.into();
+    note.tone = TranscriptRowTone::Muted;
+    rows.push(note);
 }
 
 fn clipped_tail_assistant_header(
@@ -717,7 +749,9 @@ fn clipped_tail_assistant_header(
     let assistant = active_reply
         .and_then(|id| state.transcript.entry(id))
         .or_else(|| state.transcript.entries().last())?;
+    // Only a reply with text has a label to keep in view.
     if assistant.role != TranscriptRole::Assistant
+        || crate::transcript_view::reply_lead(assistant) != crate::transcript_view::ReplyLead::Label
         || (active_reply.is_none()
             && !rows.iter().any(|row| {
                 row.anchor.entry_id == assistant.id
@@ -803,7 +837,7 @@ fn render_transcript(
     let mut links = Vec::new();
     let mut pinned = pinned_user_rows(state, viewport, row_cache, content_width);
     if let Some((user_id, rows)) = &mut pinned {
-        let has_reply = state.transcript.entry_after(*user_id).is_some();
+        let has_reply = crate::transcript_view::shown_after(&state.transcript, *user_id).is_some();
         let reply_rows = if has_reply {
             visible_lines.saturating_sub(1).min(2)
         } else {
@@ -951,6 +985,13 @@ fn render_transcript(
                 fold_rows.push(mouse::FoldRow {
                     y: area.y,
                     target: BrowseTarget::for_row(row),
+                    opens_review: false,
+                });
+            } else if is_diff_more_row(state, row) {
+                fold_rows.push(mouse::FoldRow {
+                    y: area.y,
+                    target: BrowseTarget::Entry(row.anchor.entry_id),
+                    opens_review: true,
                 });
             }
             if offset == 0
@@ -1462,9 +1503,7 @@ fn turn_rail(
     if row.kind == TranscriptRowKind::Spacer
         && (entry.run_summary().is_some()
             || entry.moved_to().is_some()
-            || state
-                .transcript
-                .entry_after(entry.id)
+            || crate::transcript_view::shown_after(&state.transcript, entry.id)
                 .is_some_and(|next| next.role == TranscriptRole::User))
     {
         return None;
@@ -1570,7 +1609,7 @@ fn render_transcript_row(
         | TranscriptRowKind::CardGroup
         | TranscriptRowKind::Evidence
         | TranscriptRowKind::Thought => base.fg(palette.muted),
-        _ if user => base,
+        _ if user && row.tone != TranscriptRowTone::Muted => base,
         _ if matches!(
             row.tone,
             TranscriptRowTone::Pending
@@ -1773,6 +1812,28 @@ pub(crate) const SPINNER_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
 
 pub(crate) fn spinner_frame(frame: u8) -> &'static str {
     SPINNER_FRAMES[usize::from(frame) % SPINNER_FRAMES.len()]
+}
+
+/// Whether `row` is the note under a diff card's preview that stands for its hidden
+/// changes, which a click opens as the diff's review.
+fn is_diff_more_row(state: &UiState, row: &TranscriptRow) -> bool {
+    row.kind == TranscriptRowKind::CardDetail
+        && row.tone == TranscriptRowTone::SurfaceNote
+        && row.spans.first().is_some_and(|span| {
+            span.text
+                .trim_start()
+                .starts_with(crate::diff_card::MORE_MARKER)
+        })
+        && state
+            .transcript
+            .entry(row.anchor.entry_id)
+            .and_then(|entry| entry.tool_card())
+            .is_some_and(|card| {
+                matches!(
+                    &card.structured_detail,
+                    DetailAvailability::LiveRetained(detail) if crate::diff_review::is_diff(detail)
+                )
+            })
 }
 
 fn selected_detail<'a>(
@@ -5031,6 +5092,41 @@ mod tests {
     }
 
     #[test]
+    fn clipped_pinned_prompt_says_so() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state
+            .transcript
+            .append_prompt("first line\nsecond line\n\nthird paragraph\nlast line".into());
+        state.transcript.complete_message(
+            1,
+            (0..80)
+                .map(|index| format!("assistant-line-{index}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+
+        let rendered = render_to_string(80, 24, &state, &PromptEditor::default());
+
+        let second = rendered.find("second line").expect("pinned rows");
+        let note = rendered.find(PINNED_PROMPT_CLIPPED).expect("clipped note");
+        // The note follows the last pinned text row directly, not the paragraph gap.
+        assert_eq!(
+            rendered[second..note].matches('\n').count(),
+            1,
+            "{rendered}"
+        );
+        assert!(!rendered.contains("third paragraph"), "{rendered}");
+
+        // A prompt that fits pins whole, with no note.
+        let mut state = UiState::new("fake".into(), None, None);
+        state.transcript.append_prompt("one\ntwo\nthree".into());
+        state.transcript.complete_message(1, "ok".into());
+        let rendered = render_to_string(80, 24, &state, &PromptEditor::default());
+        assert!(rendered.contains("three"), "{rendered}");
+        assert!(!rendered.contains(PINNED_PROMPT_CLIPPED), "{rendered}");
+    }
+
+    #[test]
     fn follow_tail_keeps_the_current_prompt_and_long_assistant_tail_visible() {
         for (width, height) in [(80, 18), (36, 12)] {
             let mut state = UiState::new("fake".into(), None, None);
@@ -6799,11 +6895,11 @@ mod tests {
             "{screen}"
         );
         assert!(
-            screen.contains("• Called linear/get_issue · 3 calls"),
+            screen.contains("• Called linear/get_issue · 3 times"),
             "{screen}"
         );
         assert!(
-            screen.contains("• Called linear/save_issue · 2 calls"),
+            screen.contains("• Called linear/save_issue · 2 times"),
             "{screen}"
         );
         // Expanding the group reveals every command's individual row.
@@ -6860,7 +6956,7 @@ mod tests {
         finish_call(&mut state, "g2", "mcp__linear__get_issue");
         let screen = draw_cards(&state, &mut cache);
         assert!(
-            screen.contains("• Called linear/get_issue · 2 calls"),
+            screen.contains("• Called linear/get_issue · 2 times"),
             "{screen}"
         );
         assert!(!screen.contains("of 2 done"), "{screen}");
@@ -6914,7 +7010,7 @@ mod tests {
             })
             .unwrap();
         let screen = terminal.backend().to_string();
-        assert!(screen.contains("• Called linear/… · 3 calls"), "{screen}");
+        assert!(screen.contains("• Called linear/… · 3 times"), "{screen}");
     }
 
     #[test]
@@ -6983,7 +7079,7 @@ mod tests {
         }
         let screen = draw_cards(&state, &mut TranscriptRowCache::default());
         assert!(
-            screen.contains("Explored 2 actions · read src/a.rs, read src/b.rs"),
+            screen.contains("Explored 2 files · src/a.rs, src/b.rs"),
             "{screen}"
         );
     }
@@ -7006,7 +7102,7 @@ mod tests {
         let mut cache = TranscriptRowCache::default();
         let screen = draw_cards(&state, &mut cache);
         assert!(
-            screen.contains("Explored 2 actions · read src/a.rs +1"),
+            screen.contains("Explored 2 files · src/a.rs +1"),
             "{screen}"
         );
     }
@@ -7423,7 +7519,7 @@ mod tests {
             .observe_approval_resolved("s2", false, None);
         let screen = draw_cards(&state, &mut TranscriptRowCache::default());
         assert!(
-            screen.contains("⊘ Called linear/save_issue · 2 calls · denied"),
+            screen.contains("⊘ Called linear/save_issue · 2 times · denied"),
             "{screen}"
         );
     }
@@ -7439,10 +7535,10 @@ mod tests {
             finish_call(&mut state, call_id, "mcp__linear__get_issue");
         }
         let mut cache = TranscriptRowCache::default();
-        assert!(draw_cards(&state, &mut cache).contains("3 calls"));
+        assert!(draw_cards(&state, &mut cache).contains("3 times"));
         cache.fold_mut().expand_group(first.unwrap());
         let screen = draw_cards(&state, &mut cache);
-        assert!(screen.contains("3 calls"), "{screen}");
+        assert!(screen.contains("3 times"), "{screen}");
         for id in ["HY-1", "HY-2", "HY-3"] {
             assert!(
                 screen.contains(&format!("• Called linear/get_issue · {id}")),

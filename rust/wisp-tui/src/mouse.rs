@@ -294,6 +294,9 @@ impl Editor {
 pub(crate) struct FoldRow {
     pub y: u16,
     pub target: crate::transcript_view::BrowseTarget,
+    /// The row is a diff's note on its hidden changes: a click opens the diff's review
+    /// instead of folding the card.
+    pub opens_review: bool,
 }
 
 /// A painted row of the welcome card's menu, which a click opens.
@@ -652,7 +655,8 @@ impl LiveUi {
     /// A release copies from the last frame painted during the selection, which is what the
     /// user saw, even when the final drag step has not been painted yet. A plain click, or a
     /// release before any frame was painted, copies nothing; a plain click on a card's action
-    /// line, an explored group, or a thought header folds or unfolds it instead. While a response that could not be
+    /// line, an explored group, or a thought header folds or unfolds it instead, and one on a
+    /// diff's note on its hidden changes opens the diff's review. While a response that could not be
     /// sent awaits keyboard recovery, a release only ends the selection: its notice explains
     /// what the next Ctrl+C does and must stay on screen.
     pub(super) fn continue_transcript_selection(&mut self, event: MouseEvent) {
@@ -670,8 +674,12 @@ impl LiveUi {
             return;
         }
         if selection.is_empty() {
-            if let Some(target) = selection.fold_target {
-                self.toggle_clicked_fold(target.target);
+            match selection.fold_target {
+                Some(target) if target.opens_review => {
+                    self.open_diff_review(target.target.entry_id());
+                }
+                Some(target) => self.toggle_clicked_fold(target.target),
+                None => {}
             }
             return;
         }

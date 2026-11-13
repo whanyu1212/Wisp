@@ -773,7 +773,7 @@ fn tool_activity_matches_the_mockup_across_themes_and_resize() {
                 assert!(!buffer[(10, tail)].modifier.contains(Modifier::DIM));
                 if width >= 80 {
                     row_containing(&buffer, "linear/list_issues · astro");
-                    row_containing(&buffer, "linear/get_issue · 5 calls");
+                    row_containing(&buffer, "linear/get_issue · 5 times");
                     row_containing(&buffer, "npm test && npm run check");
                     row_containing(&buffer, "Browser tests · passed");
                 }
@@ -983,6 +983,127 @@ fn diff_previews_match_the_mockup_and_keep_full_review_available() {
             row_containing(&buffer, "await page.keyboard.press('Escape')");
         }
     }
+}
+
+/// The preview's last row names the way to the review; it must open that way.
+#[tokio::test]
+async fn browse_enter_opens_diff_review() {
+    let mut ui = fixture("diff-previews");
+    let (writer, _receiver) = mpsc::channel(4);
+    let buffer = draw(&mut ui, 100, 64);
+    row_containing(&buffer, "browse, then Enter to review");
+
+    press(&mut ui, &writer, KeyCode::F(6)).await;
+    draw(&mut ui, 100, 64);
+    press(&mut ui, &writer, KeyCode::Enter).await;
+
+    assert!(ui.detail_view.is_open());
+    let buffer = draw(&mut ui, 100, 40);
+    row_containing(&buffer, "await menu.click()");
+}
+
+/// With the mouse on, the note under a diff's preview says so and opens the review; the
+/// wheel scrolls the review and a pending approval keeps the click inert.
+#[tokio::test]
+async fn click_opens_diff_review() {
+    async fn mouse(
+        ui: &mut LiveUi,
+        writer: &mpsc::Sender<WriterMessage>,
+        kind: MouseEventKind,
+        (x, y): (u16, u16),
+    ) {
+        ui.handle_input(
+            Input::Mouse(MouseEvent {
+                kind,
+                column: x,
+                row: y,
+                modifiers: KeyModifiers::NONE,
+            }),
+            writer,
+            8192,
+        )
+        .await
+        .unwrap();
+    }
+    async fn click(ui: &mut LiveUi, writer: &mpsc::Sender<WriterMessage>, y: u16) {
+        let at = (8, y);
+        mouse(ui, writer, MouseEventKind::Down(MouseButton::Left), at).await;
+        mouse(ui, writer, MouseEventKind::Up(MouseButton::Left), at).await;
+    }
+    let mut ui = fixture("diff-previews");
+    ui.mouse_enabled = true;
+    let (writer, _receiver) = mpsc::channel(4);
+    let buffer = draw(&mut ui, 100, 64);
+    let note = row_containing(&buffer, "5 more changed lines · click to review");
+    let added = row_containing(&buffer, "await page.goto");
+
+    // A changed line of the preview stays inert, so a press there can select its text.
+    click(&mut ui, &writer, added).await;
+    assert!(!ui.detail_view.is_open());
+
+    ui.state.view_status = ViewStatus::WaitingForApproval;
+    click(&mut ui, &writer, note).await;
+    assert!(!ui.detail_view.is_open());
+    ui.state.view_status = ViewStatus::Idle;
+
+    click(&mut ui, &writer, note).await;
+    assert!(ui.detail_view.is_open());
+    assert_eq!(ui.browse_selected, None);
+    let opened = screen_rows(&draw(&mut ui, 100, 12));
+    assert!(opened.contains("review · this tool edit"), "{opened}");
+
+    // Inside the review the wheel scrolls it; a click outside closes it.
+    mouse(&mut ui, &writer, MouseEventKind::ScrollDown, (50, 6)).await;
+    let scrolled = screen_rows(&draw(&mut ui, 100, 12));
+    assert_ne!(scrolled, opened);
+    mouse(
+        &mut ui,
+        &writer,
+        MouseEventKind::Down(MouseButton::Left),
+        (2, 6),
+    )
+    .await;
+    assert!(!ui.detail_view.is_open());
+}
+
+/// A pinned prompt cut short ends on a muted note inside its band, and scrolling up
+/// shows the whole prompt in place.
+#[test]
+fn clipped_pinned_prompt_reads_in_place() {
+    let mut ui = fixture("diff-previews");
+    ui.state
+        .transcript
+        .append_prompt("first line\nsecond line\n\nthird paragraph\nlast line".into());
+    let reply = (0..40)
+        .map(|index| format!("reply {index}"))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    ui.state.transcript.append_message_delta(9, &reply);
+    let palette = ui.palette();
+
+    for width in [110, 40] {
+        let buffer = draw(&mut ui, width, 30);
+        let text = row_containing(&buffer, "second line");
+        let note = row_containing(&buffer, "scroll up to read");
+        assert_eq!(note, text + 1);
+        assert_eq!(buffer[(10, note)].bg, buffer[(10, text)].bg);
+        assert_eq!(buffer[(4, note)].fg, palette.muted);
+        assert!(!screen_rows(&buffer).contains("third paragraph"));
+    }
+
+    // Scrolling back through the reply reaches the prompt, shown whole and unmarked.
+    let whole = (0..200).find_map(|_| {
+        ui.transcript_viewport.reduce(
+            TranscriptViewAction::ScrollLines(-1),
+            &ui.state.transcript,
+            &mut ui.transcript_row_cache,
+        );
+        let screen = screen_rows(&draw(&mut ui, 110, 30));
+        screen.contains("third paragraph").then_some(screen)
+    });
+    let whole = whole.expect("scrolling up reaches the prompt");
+    assert!(whole.contains("last line"), "{whole}");
+    assert!(!whole.contains("scroll up to read"), "{whole}");
 }
 
 #[test]
