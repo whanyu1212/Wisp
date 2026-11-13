@@ -109,6 +109,31 @@ class _TuiProcess:
             failure=failure,
         )
 
+    def wait_for_repaint(self, marker: bytes, *, failure: str, timeout: float = 15) -> None:
+        """Resize until a full repaint shows ``marker``.
+
+        Input reaches the TUI in order but is drawn in small diff frames that can
+        split text, so only a full repaint proves what the screen shows. A resize
+        that lands before the TUI has read every key repaints an earlier state, so
+        this resizes again, alternating widths, until a repaint shows the marker.
+        """
+
+        deadline = time.monotonic() + timeout
+        width = 102
+        while True:
+            offset = len(self.output)
+            width = 103 if width == 102 else 102
+            self.resize(width=width)
+            output = self.wait_until(
+                lambda output, start=offset: full_repaint_after(output, start) is not None,
+                failure="TUI did not repaint after resize",
+            )
+            frame = full_repaint_after(output, offset) or b""
+            if marker in frame:
+                return
+            if time.monotonic() >= deadline:
+                pytest.fail(f"{failure}; last full repaint={frame!r}")
+
     def wait_ready(self) -> None:
         self.wait_for(b"ctx", b"~", failure="Rust TUI context status did not render")
         self.resize(width=101)
@@ -645,15 +670,10 @@ def test_launcher_applies_custom_submit_and_removes_old_enter_binding(tmp_path: 
     tui, session_dir = _launch(tmp_path, home=home)
     try:
         tui.wait_ready()
-        tui.send(b"launch binding\r")
-        time.sleep(0.2)
-        tui.resize(width=102)
-        offset = len(tui.output)
-        tui.wait_for(
-            b"launch binding",
-            since=offset,
-            failure="unbound Enter changed or lost the draft",
-        )
+        # The key after Enter is read only once Enter has been handled, so a repaint
+        # showing it right after the draft proves Enter neither submitted nor edited it.
+        tui.send(b"launch binding\r!")
+        tui.wait_for_repaint(b"launch binding!", failure="unbound Enter changed or lost the draft")
         assert not list(session_dir.glob("*.jsonl")), "unbound Enter dispatched a prompt"
 
         offset = len(tui.output)
@@ -667,8 +687,8 @@ def test_launcher_applies_custom_submit_and_removes_old_enter_binding(tmp_path: 
         tui.close()
 
     assert _conversation_messages(session_dir) == [
-        ("user", "launch binding"),
-        ("assistant", "fake response to: launch binding"),
+        ("user", "launch binding!"),
+        ("assistant", "fake response to: launch binding!"),
     ]
 
 
