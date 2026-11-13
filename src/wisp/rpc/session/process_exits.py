@@ -21,9 +21,10 @@ class ProcessExitNotices:
     The supervisor calls ``record`` when a started process stops on its own. Every
     exit is published as ``process.ended``. One the model started with
     ``notify_on_exit`` is also held until the session saves a prompt carrying it:
-    the coding session reads ``pending`` and calls ``mark_delivered`` once that
-    prompt is saved. A poll that already returned the exit makes its notice
-    redundant, so ``pending`` drops those.
+    the coding session reads ``pending``, calls ``mark_delivered`` once that
+    prompt is saved, and calls ``restore`` if the run rolls the prompt back. A
+    poll that already returned the exit makes its notice redundant, so
+    ``pending`` drops those.
 
     Processes belong to the session that started them: the host cancels them when
     the session changes and calls ``clear``, so no notice reaches another session.
@@ -92,6 +93,19 @@ class ProcessExitNotices:
 
         delivered = {notice.process_id for notice in notices}
         self._pending = [notice for notice in self._pending if notice.process_id not in delivered]
+
+    def restore(self, notices: Sequence[ProcessNotice]) -> None:
+        """Hold ``notices`` again, ahead of any held since, after their prompt was rolled back.
+
+        Args:
+            notices (Sequence[ProcessNotice]): Notices ``mark_delivered`` had forgotten.
+        """
+
+        held = {notice.process_id for notice in self._pending}
+        self._pending = [
+            *(notice for notice in notices if notice.process_id not in held),
+            *self._pending,
+        ]
 
     def clear(self) -> None:
         """Forget every held notice, as when the session changes."""

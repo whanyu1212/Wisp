@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import stat
-from collections.abc import Sequence
 from contextlib import aclosing
 from pathlib import Path
 from typing import Any, cast
@@ -12,6 +11,7 @@ import pytest
 
 from tests.coding.session_support import (
     CapturingProvider,
+    HeldNotices,
 )
 from wisp.coding.prompt import PLAN_MODE_SYSTEM_PROMPT, WEB_SEARCH_UNAVAILABLE_GUIDANCE
 from wisp.coding.session import CodingSession, _prompt_cache_key
@@ -230,19 +230,6 @@ def test_unsafe_session_id_runs_without_scratch(tmp_path: Path) -> None:
     assert not (tmp_path / "escape").exists()
 
 
-class _HeldNotices:
-    """Notices held for the next saved prompt, as the RPC host keeps them."""
-
-    def __init__(self, *notices: ProcessNotice) -> None:
-        self.held = list(notices)
-
-    def pending(self) -> tuple[ProcessNotice, ...]:
-        return tuple(self.held)
-
-    def mark_delivered(self, notices: Sequence[ProcessNotice]) -> None:
-        self.held = [notice for notice in self.held if notice not in notices]
-
-
 def test_process_notices_lead_next_prompt(tmp_path: Path) -> None:
     """Held exits go to the model once, in front of the next prompt only.
 
@@ -252,7 +239,7 @@ def test_process_notices_lead_next_prompt(tmp_path: Path) -> None:
     provider = CapturingProvider()
     store = JsonlSessionStore(tmp_path)
     session = store.create()
-    source = _HeldNotices(
+    source = HeldNotices(
         ProcessNotice(
             process_id="ci", command="gh pr checks 1 --watch", state="completed", exit_code=1
         )
@@ -306,7 +293,7 @@ def test_unsaved_prompt_keeps_notices(tmp_path: Path, stop: str) -> None:
     """
 
     notice = ProcessNotice(process_id="ci", command="make", state="failed")
-    source = _HeldNotices(notice)
+    source = HeldNotices(notice)
     agent = CodingSession(
         provider=CapturingProvider(),
         sessions=JsonlSessionStore(tmp_path),

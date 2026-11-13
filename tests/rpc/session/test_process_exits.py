@@ -127,3 +127,18 @@ def test_long_command_summarized(published: list[WispEvent]) -> None:
     assert len(event.command) == 500
     assert event.command.endswith("…")
     assert notices.pending()[0].command == "x" * 2000
+
+
+def test_restored_notices_lead(published: list[WispEvent]) -> None:
+    """A rolled-back prompt's notices come back ahead of exits held since."""
+
+    notices = ProcessExitNotices(_Reported(set()), published.append)
+    notices.record(_exit("first", notify=True))
+    carried = notices.pending()
+    notices.mark_delivered(carried)
+    notices.record(_exit("second", notify=True))
+
+    notices.restore(carried)
+    notices.restore(carried)
+
+    assert [notice.process_id for notice in notices.pending()] == ["first", "second"]
