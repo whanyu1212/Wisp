@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import stat
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
@@ -88,6 +89,12 @@ from wisp.sessions.replay import (
     resolve_session_tree,
 )
 from wisp.sessions.summaries import read_session_summary_metadata
+
+# Each session's scratch folder, beside the session files: scratch/<session_id>.
+SCRATCH_DIRECTORY_NAME = "scratch"
+# A session id names its scratch folder only when it is one plain path component.
+# Wisp's own ids are hex; an id read from a session file is otherwise unchecked.
+_SCRATCH_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 
 
 class _UnconditionalAppend:
@@ -485,6 +492,38 @@ class JsonlSession:
         """
 
         return await anyio.to_thread.run_sync(self.images.read, image)
+
+    async def ensure_scratch_directory(self) -> Path:
+        """Create this session's private scratch folder if missing, and return it.
+
+        The folder sits beside the session files, at ``scratch/<session_id>``, so a
+        resumed session finds the files it wrote before and its prompt names the same
+        folder in every process. Like the session folder, it is owner-only.
+
+        Returns:
+            Path: The resolved folder.
+
+        Raises:
+            SessionError: The session id is not a plain folder name, or the folder
+                or ``scratch`` above it is not a private directory owned by the
+                current user.
+            OSError: The folder could not be created.
+        """
+
+        # An id from a session file could otherwise be absolute or climb out with
+        # "..", and the folder would open somewhere else to the file tools.
+        if _SCRATCH_NAME_PATTERN.fullmatch(self.session_id) is None:
+            raise SessionError(f"Session id cannot name a scratch folder: {self.session_id!r}")
+        scratch = self.path.parent / SCRATCH_DIRECTORY_NAME
+        directory = scratch / self.session_id
+
+        def ensure() -> Path:
+            # Checking `scratch` too keeps a link planted there from moving the folder.
+            ensure_private_directory(scratch)
+            ensure_private_directory(directory)
+            return directory.resolve()
+
+        return await anyio.to_thread.run_sync(ensure)
 
     async def append_message(
         self,

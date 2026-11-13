@@ -18,6 +18,9 @@ if TYPE_CHECKING:
     from wisp.tools.files.operations import CreateOnlyWriteReceipt
     from wisp.tools.progress import ToolProgress
 
+# Commands find the context's scratch folder under this name.
+SCRATCH_ENVIRONMENT_VARIABLE = "WISP_SCRATCH_DIR"
+
 
 @dataclass(frozen=True, slots=True)
 class WriteConstraint:
@@ -50,6 +53,15 @@ class ToolContext:
     # home folder or a filesystem root, is dropped when the context is built, so a
     # caller-supplied root can never open the whole machine. See ``boundary``.
     workspace_root: Path | None = None
+    # A private folder the file and search tools may also reach, beside the
+    # workspace, for files that belong to no project (PR bodies, commit messages,
+    # logs). None grants nothing; a broad folder is dropped like ``workspace_root``.
+    # It must already be resolved, or a write into it would be refused for going
+    # through a symbolic link.
+    scratch_root: Path | None = None
+    # Whether a coding session sets ``scratch_root`` to the running session's own
+    # folder at the start of each run. Contexts built from config turn it on.
+    session_scratch: bool = False
     max_output_bytes: int = 50_000
     max_output_lines: int = 2_000
     allow_outside_cwd: bool = False
@@ -75,6 +87,8 @@ class ToolContext:
         # the broad-folder check reads the filesystem.
         if self.workspace_root is not None and is_broad_root(self.workspace_root):
             object.__setattr__(self, "workspace_root", None)
+        if self.scratch_root is not None and is_broad_root(self.scratch_root):
+            object.__setattr__(self, "scratch_root", None)
 
     def boundary(self) -> Path:
         """Return the resolved folder the file and search tools must stay inside.
@@ -93,6 +107,28 @@ class ToolContext:
             return cwd
         root = self.workspace_root.resolve(strict=False)
         return root if cwd.is_relative_to(root) else cwd
+
+    def boundary_for(self, path: Path) -> Path | None:
+        """Return the allowed folder that contains ``path``, if any.
+
+        A walk or open that starts inside the scratch folder stays inside it, and
+        one that starts in the workspace stays inside ``boundary()``.
+        ``allow_outside_cwd`` lifts the boundary separately.
+
+        Args:
+            path (Path): An absolute path, lexical or resolved.
+
+        Returns:
+            Path | None: ``boundary()`` or ``scratch_root`` when either contains
+            ``path``; otherwise None.
+        """
+
+        boundary = self.boundary()
+        if path.is_relative_to(boundary):
+            return boundary
+        if self.scratch_root is not None and path.is_relative_to(self.scratch_root):
+            return self.scratch_root
+        return None
 
     @classmethod
     def default(cls) -> ToolContext:
@@ -113,7 +149,8 @@ class ToolContext:
         ``cwd`` defaults to the current working directory, and ``workspace_root``
         to none, which keeps the file tools inside ``cwd``. The protected-path
         globs come from the resolved config so file tools deny reads of secrets
-        (``.env`` and friends) unless the policy is relaxed.
+        (``.env`` and friends) unless the policy is relaxed. A coding session gives
+        each run of such a context its session's scratch folder.
 
         The active credential, MCP credential, user settings, and provider CA bundle files
         are guaranteed to be in the returned context's ``protected_paths``. ``WispConfig`` already
@@ -144,6 +181,7 @@ class ToolContext:
         return cls(
             cwd=cwd if cwd is not None else Path.cwd(),
             workspace_root=workspace_root,
+            session_scratch=True,
             protected_paths=protected_paths,
             seen_files=SeenFiles(),
             withheld_environment=(

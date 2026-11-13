@@ -1,5 +1,9 @@
 """Built-in system instructions, kept separate from prompt assembly."""
 
+from pathlib import Path
+
+from wisp.tools.context import SCRATCH_ENVIRONMENT_VARIABLE
+
 DEFAULT_SYSTEM_PROMPT = """You are Wisp, an autonomous software engineering agent in a terminal.
 
 Complete the user's request using the tools available in this turn. For requests to inspect,
@@ -107,3 +111,22 @@ Do not modify files or execute shell commands. Identify the files inspected, dis
 facts from assumptions, and produce a concrete implementation plan covering relevant files,
 implementation steps, tests, risks, and unresolved decisions. Do not claim that changes were
 made."""
+
+
+def scratch_folder_guidance(scratch_root: Path) -> str:
+    """Return the prompt text that names a run's scratch folder.
+
+    Args:
+        scratch_root (Path): The session's scratch folder.
+
+    Returns:
+        str: Guidance for the model.
+    """
+
+    return (
+        f"scratch folder: {scratch_root} (also ${SCRATCH_ENVIRONMENT_VARIABLE} in bash). "
+        "Put files that do not belong to the project here, such as pull request bodies, "
+        "commit messages, and logs, instead of /tmp, which the file tools cannot reach. "
+        "Pass long text to commands as a file (gh pr create --body-file, git commit -F) "
+        "rather than through $(cat <<EOF ...)."
+    )

@@ -12,7 +12,7 @@ import anyio
 
 from wisp.tools.base import ToolArguments, ToolInputSchema, ToolSafety
 from wisp.tools.common import _optional_int, _required_string
-from wisp.tools.context import ToolContext
+from wisp.tools.context import SCRATCH_ENVIRONMENT_VARIABLE, ToolContext
 from wisp.tools.output_store import SavedOutput, SavedStream, SaveStatus, saved_output_notice
 from wisp.tools.result import ToolArgumentError, ToolError, ToolResult
 from wisp.tools.shell.process import _format_process_output_preview, _run_shell
@@ -34,6 +34,12 @@ _BACKGROUND_STOPPED_NOTICE = (
     "To keep a process running, use operation=start and run it in the foreground.]"
 )
 
+_HEREDOC_SUBSTITUTION_NOTICE = (
+    "[The shell could not parse a heredoc inside $(...): bash 3.2, the macOS /bin/bash, "
+    "misreads quotes in its text. Write the text to a file instead{where}, and pass the "
+    "file (gh pr create --body-file, git commit -F).]"
+)
+
 BashOperation = Literal["run", "start", "poll", "cancel"]
 _BASH_OPERATIONS: Final = frozenset({"run", "start", "poll", "cancel"})
 
@@ -47,7 +53,10 @@ class BashTool:
         "Run a command in bash (or /bin/sh where bash is not installed) and capture stdout, "
         "stderr, and an explicit completion exit code. "
         "Use operation=start to launch a resumable command, operation=poll to read incremental "
-        "output by process_id, and operation=cancel to terminate it."
+        "output by process_id, and operation=cancel to terminate it. "
+        "Pass long text such as commit messages or pull request bodies as a file "
+        "(git commit -F, gh pr create --body-file) rather than through $(cat <<EOF ...), "
+        "which macOS's bash 3.2 misparses when the text has quotes."
     )
     input_schema: ToolInputSchema = {
         "type": "object",
@@ -177,7 +186,13 @@ class BashTool:
             max_lines=context.max_output_lines,
             input_truncated=result.stderr_truncated,
         )
-        background_notice = _BACKGROUND_STOPPED_NOTICE if result.background_stopped else None
+        result_notice = (
+            _join_notices(
+                _heredoc_substitution_notice(command, result.exit_code, result.stderr, context),
+                _BACKGROUND_STOPPED_NOTICE if result.background_stopped else None,
+            )
+            or None
+        )
 
         def format_output(notice: str | None) -> TruncatedText:
             # Format from the captured streams rather than the per-stream bounded copies
@@ -189,7 +204,7 @@ class BashTool:
                 notice=notice,
             )
 
-        output = format_output(background_notice)
+        output = format_output(result_notice)
         stdout_truncated = result.stdout_truncated or stdout.truncated
         stderr_truncated = result.stderr_truncated or stderr.truncated
         saved_streams: tuple[tuple[str, SaveStatus | None], ...] = ()
@@ -198,7 +213,7 @@ class BashTool:
                 stdout=result.stdout_saved, stderr=result.stderr_saved
             )
             if saved_notice := saved_output_notice(saved_streams):
-                output = format_output(_join_notices(saved_notice, background_notice))
+                output = format_output(_join_notices(saved_notice, result_notice))
         stdout_dropped_bytes = result.stdout_dropped_bytes + _additional_dropped_bytes(
             result.stdout,
             stdout,
@@ -297,11 +312,16 @@ class BashTool:
 def _command_environment(context: ToolContext) -> dict[str, str]:
     # A command's output goes to the provider and the transcript, so one `env`
     # would publish the keys Wisp itself authenticates with.
-    return {
+    environment = {
         name: value
         for name, value in os.environ.items()
         if name not in context.withheld_environment
     }
+    # An inherited value (Wisp run from a Wisp command) names another session's folder.
+    environment.pop(SCRATCH_ENVIRONMENT_VARIABLE, None)
+    if context.scratch_root is not None:
+        environment[SCRATCH_ENVIRONMENT_VARIABLE] = str(context.scratch_root)
+    return environment
 
 
 def _bash_operation(arguments: ToolArguments) -> BashOperation:
@@ -358,6 +378,25 @@ def _saved_output_ids(
 
 def _join_notices(*notices: str | None) -> str:
     return " ".join(notice for notice in notices if notice)
+
+
+def _heredoc_substitution_notice(
+    command: str, exit_code: int | None, stderr: str, context: ToolContext
+) -> str | None:
+    # macOS's /bin/bash is 3.2, which ends a heredoc's quoting early inside $(...):
+    # an apostrophe in the text opens a quote that never closes, so the whole
+    # command fails to parse. Models write $(cat <<'EOF' ...) for commit messages
+    # and pull request bodies, so name the cause and the way around it.
+    if exit_code == 0 or "<<" not in command or "$(" not in command:
+        return None
+    if "unexpected EOF while looking for matching" not in stderr:
+        return None
+    where = (
+        ""
+        if context.scratch_root is None
+        else f", in ${SCRATCH_ENVIRONMENT_VARIABLE} when it does not belong to the project"
+    )
+    return _HEREDOC_SUBSTITUTION_NOTICE.format(where=where)
 
 
 async def _managed_update_result(update: ProcessUpdate, *, context: ToolContext) -> ToolResult:
