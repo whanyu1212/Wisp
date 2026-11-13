@@ -799,6 +799,19 @@ RpcCommand = TypeAliasType(
 RpcCommandAdapter: TypeAdapter[RpcCommand] = TypeAdapter(RpcCommand)
 
 
+class ProcessWakeCommand(RpcCommandModel):
+    """Run the agent on the background-process exits it asked to hear about.
+
+    The host creates it when such a process stops while the session is idle. It is
+    not part of ``RpcCommand``, so a client cannot send it.
+    """
+
+    type: Literal["process_wake"] = "process_wake"
+
+
+HostRpcCommand = TypeAliasType("HostRpcCommand", RpcCommand | ProcessWakeCommand)
+
+
 def rpc_command_type(command: Mapping[str, object]) -> str:
     """Return a bounded command discriminator for lifecycle reporting."""
 
@@ -821,14 +834,14 @@ class UnknownCommandEnvelope:
 class ParsedRpcCommand:
     """Validated command and retained ingress metadata for scheduling and rejection."""
 
-    value: RpcCommand | UnknownCommandEnvelope = dataclass_field(repr=False)
+    value: HostRpcCommand | UnknownCommandEnvelope = dataclass_field(repr=False)
     _payload: Mapping[str, object] = dataclass_field(repr=False)
     payload_size: int
 
     @classmethod
     def from_known(
         cls,
-        command: RpcCommand,
+        command: HostRpcCommand,
         *,
         payload: Mapping[str, object] | None = None,
     ) -> ParsedRpcCommand:
@@ -846,7 +859,7 @@ class ParsedRpcCommand:
     @classmethod
     def _from_parts(
         cls,
-        value: RpcCommand | UnknownCommandEnvelope,
+        value: HostRpcCommand | UnknownCommandEnvelope,
         payload: dict[str, object],
     ) -> ParsedRpcCommand:
         detached = detach_secret_fields(payload)
@@ -880,7 +893,7 @@ class ParsedRpcCommand:
         return "RPC command id must be a non-empty string"
 
     @property
-    def known(self) -> RpcCommand | None:
+    def known(self) -> HostRpcCommand | None:
         return None if isinstance(self.value, UnknownCommandEnvelope) else self.value
 
     @property

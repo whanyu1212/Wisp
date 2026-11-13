@@ -4502,10 +4502,12 @@ impl LiveUi {
     }
 
     fn prompt_running(&self) -> bool {
-        self.state
-            .current_command
-            .as_ref()
-            .is_some_and(|command| command.command_type == reducer::ActiveCommandType::Prompt)
+        self.state.current_command.as_ref().is_some_and(|command| {
+            matches!(
+                command.command_type,
+                reducer::ActiveCommandType::Prompt | reducer::ActiveCommandType::Wake
+            )
+        })
     }
 
     async fn navigate_transcript_action(

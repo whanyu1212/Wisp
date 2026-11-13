@@ -468,8 +468,14 @@ are ordered but do not all have command IDs.
 | `context_reserve_tokens` | `int` | `16384` |
 | `auto_compaction_enabled` | `bool` | `True` |
 | `web_search` | `bool` | `False` |
+| `wake_on_process_exit` | `bool` | `True` |
 | `mcp_servers` | `tuple[McpServerConfig, ...]` | `()` |
 | `openai_compatible` | `OpenAICompatibleSettings \| None` | `None` |
+
+With `wake_on_process_exit` on, an in-process host starts runs by itself when a background process
+started with `notify_on_exit` stops while it is idle. Its events carry a backend-chosen command id
+(`wake-…`) and `command_type` `process_wake`; a prompt you send meanwhile cancels the wake and
+carries its notices instead. Pass `wake_on_process_exit=False` to `WispConfig` to turn this off.
 
 `WispConfig.from_env(...)` applies explicit arguments over environment, trusted project settings,
 user settings, and defaults. For SDK startup, prefer `InProcessWisp.from_environment()` when the

@@ -3417,6 +3417,11 @@
           "default": null,
           "title": "RpcMessageSnapshotParentId"
         },
+        "process_wake": {
+          "default": false,
+          "title": "RpcMessageSnapshotProcessWake",
+          "type": "boolean"
+        },
         "response_id": {
           "anyOf": [
             {
@@ -3563,7 +3568,8 @@
         "run_completed",
         "moved_to",
         "tool_result",
-        "skill_invocation"
+        "skill_invocation",
+        "process_wake"
       ],
       "title": "RpcMessageSnapshot",
       "type": "object"

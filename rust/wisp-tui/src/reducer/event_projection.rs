@@ -982,6 +982,13 @@ impl BackendEvent {
                     attempt: bounded_device_attempt(value, &event_type)?,
                 },
             },
+            "rpc.command.started"
+                if value.get("command_type").and_then(Value::as_str) == Some("process_wake") =>
+            {
+                Self::WakeStarted {
+                    command_id: exact_string_field(value, &event_type, "command_id", 256)?,
+                }
+            }
             "rpc.command.finished" => Self::CommandFinished {
                 command_id: exact_string_field(value, &event_type, "command_id", 256)?,
                 command_type: bounded_display_string_field(

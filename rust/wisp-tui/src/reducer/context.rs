@@ -239,7 +239,7 @@ fn compaction_matches(state: &UiState, session_id: &str, reason: CompactionReaso
                 CompactionReason::Manual => command.command_type == ActiveCommandType::Compact,
                 _ => matches!(
                     command.command_type,
-                    ActiveCommandType::Prompt | ActiveCommandType::Init
+                    ActiveCommandType::Prompt | ActiveCommandType::Wake | ActiveCommandType::Init
                 ),
             })
 }
@@ -269,7 +269,7 @@ pub(super) fn observe(
             if state.current_command.as_ref().is_some_and(|command| {
                 matches!(
                     command.command_type,
-                    ActiveCommandType::Prompt | ActiveCommandType::Init
+                    ActiveCommandType::Prompt | ActiveCommandType::Wake | ActiveCommandType::Init
                 )
             }) && (state.model_selection_stale
                 || state

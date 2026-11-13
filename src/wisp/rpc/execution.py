@@ -50,6 +50,7 @@ from wisp.rpc.commands import (
     ParsedRpcCommand,
     PopQueueCommand,
     PreviewMcpSnippetCommand,
+    ProcessWakeCommand,
     PromptCommand,
     ReconnectMcpCommand,
     RemoveMcpServerCommand,
@@ -332,7 +333,7 @@ class RpcCommandExecutor:
         if isinstance(known, (CancelCommand, ApprovalCommand, TrustCommand, ShutdownCommand)):
             self.coordinator.running_command = running_command
             return self._dispatch_control(known, running_command)
-        if isinstance(known, PromptCommand):
+        if isinstance(known, (PromptCommand, ProcessWakeCommand)):
             self.coordinator.running_command = running_command
             return self._dispatch_prompt(known)
         if isinstance(known, InitCommand):
@@ -362,7 +363,7 @@ class RpcCommandExecutor:
         )
         lifecycle.fail(id_error or message)
 
-    def _dispatch_prompt(self, command: PromptCommand) -> _RpcDispatchResult:
+    def _dispatch_prompt(self, command: PromptCommand | ProcessWakeCommand) -> _RpcDispatchResult:
         new_running_command, new_session = start_rpc_prompt_command(
             command,
             agent=self.agent,

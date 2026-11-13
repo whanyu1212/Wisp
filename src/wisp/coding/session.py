@@ -579,6 +579,9 @@ class CodingSession:
         # The background-process exits the model asked to hear about; each saved
         # prompt carries the ones that arrived since the last.
         self._process_notices = process_notices
+        # The operation whose saved prompt last delivered notices, and those notices,
+        # so a cancelled run that rolls the prompt back can hold them again.
+        self._delivered_notices: tuple[str | None, tuple[ProcessNotice, ...]] | None = None
         self.tool_policy = tool_policy or ToolPolicy.allow_all_tools()
         self.tool_approval_policy = tool_approval_policy or ToolApprovalPolicy.require_approval()
         self.tools = (
@@ -878,6 +881,20 @@ class CodingSession:
         if session_id is None:
             return QueueUpdated()
         return self._queue_updated_from_snapshot(self._retained_queues.get(session_id))
+
+    def restore_process_notices(self, operation_id: str) -> None:
+        """Hold again the notices a run delivered, after its prompt was rolled back.
+
+        Args:
+            operation_id (str): The operation whose prompt left the active branch.
+                Notices delivered by any other run stay delivered.
+        """
+
+        delivered = self._delivered_notices
+        if delivered is None or delivered[0] != operation_id or self._process_notices is None:
+            return
+        self._delivered_notices = None
+        self._process_notices.restore(delivered[1])
 
     def state_snapshot(self, session: JsonlSession | None = None) -> CodingSessionState:
         """Return an immediate configuration and queue summary without I/O."""
@@ -1360,6 +1377,7 @@ class CodingSession:
         operation_tool_names: frozenset[str] | None = None,
         operation_ready: Callable[[], Awaitable[None]] | None = None,
         live_event_sink: LiveEventSink | None = None,
+        process_wake: bool = False,
     ) -> AsyncIterator[WispEvent]:
         """Run one prompt to completion and stream its events.
 
@@ -1402,6 +1420,9 @@ class CodingSession:
                 while its frontend catches up: a tool keeps running and newer
                 progress replaces what was not delivered, but a script's next
                 call waits for its nested-call events. Defaults to None.
+            process_wake (bool, optional): Whether this is a wake run, whose
+                prompt is the held process notices alone; with none held it fails
+                before anything is saved. Defaults to False.
 
         Yields:
             WispEvent: The run's events in publication order. A `QueueUpdated`
@@ -1432,6 +1453,7 @@ class CodingSession:
                 operation_tool_names=operation_tool_names,
                 operation_ready=operation_ready,
                 live_event_sink=live_event_sink,
+                process_wake=process_wake,
             )
             try:
                 async for event in events:
@@ -1466,7 +1488,10 @@ class CodingSession:
         operation_tool_names: frozenset[str] | None = None,
         operation_ready: Callable[[], Awaitable[None]] | None = None,
         live_event_sink: LiveEventSink | None = None,
+        process_wake: bool = False,
     ) -> AsyncGenerator[WispEvent, None]:
+        # A cancelled run restores only the notices its own prompt delivered.
+        self._delivered_notices = None
         operation_context = tool_context or self.tool_context
         if images:
             self._require_image_input(images)
@@ -1567,6 +1592,10 @@ class CodingSession:
         run_start_leaf_id = run_snapshot.active_leaf_id
 
         notices = self._process_notices.pending() if self._process_notices is not None else ()
+        if process_wake and not notices:
+            # A poll reported the exits after the wake was claimed; there is nothing
+            # left to tell the agent, and an empty prompt must not be sent.
+            raise RuntimeError("No background-process exits are left to wake the agent for")
         user_message = user_message.with_process_notices(notices)
         # Allocate the prompt's identity before AgentStarted, preserving the
         # existing event order while allowing frontends to identify their echo.
@@ -1603,6 +1632,7 @@ class CodingSession:
         # before this point leaves them for the next prompt.
         if notices and self._process_notices is not None:
             self._process_notices.mark_delivered(notices)
+            self._delivered_notices = (operation_id, notices)
         # Add the persisted prompt before checking the threshold so provider limits
         # apply to the complete next request, not only the resumed history.
         harness.append_message(with_directory_notes(user_message, directory_notes))

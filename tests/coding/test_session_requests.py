@@ -318,6 +318,46 @@ def test_unsaved_prompt_keeps_notices(tmp_path: Path, stop: str) -> None:
     assert source.held == [notice]
 
 
+def test_rolled_back_run_restores_notices(tmp_path: Path) -> None:
+    """Only the run whose prompt was rolled back gets its notices held again, once."""
+
+    notice = ProcessNotice(process_id="ci", command="make", state="failed")
+    source = HeldNotices(notice)
+    agent = CodingSession(
+        provider=CapturingProvider(), sessions=JsonlSessionStore(tmp_path), process_notices=source
+    )
+
+    async def run() -> None:
+        _ = [event async for event in agent.run("hi", operation_id="op")]
+
+    anyio.run(run)
+    assert source.held == []
+
+    agent.restore_process_notices("another-op")
+    assert source.held == []
+    agent.restore_process_notices("op")
+    agent.restore_process_notices("op")
+    assert source.held == [notice]
+
+
+def test_empty_wake_refused(tmp_path: Path) -> None:
+    """A wake run with no notices left fails before saving or sending anything."""
+
+    provider = CapturingProvider()
+    session = JsonlSessionStore(tmp_path).create()
+    agent = CodingSession(
+        provider=provider, sessions=JsonlSessionStore(tmp_path), process_notices=HeldNotices()
+    )
+
+    async def run() -> None:
+        _ = [event async for event in agent.run("", session=session, process_wake=True)]
+
+    with pytest.raises(RuntimeError, match="No background-process exits are left"):
+        anyio.run(run)
+    assert provider.seen_messages is None
+    assert not session.path.exists()
+
+
 def test_custom_prompt_replaces_defaults(tmp_path: Path) -> None:
     # With no skills, web search, or plan mode, nothing is added to a custom prompt.
     provider = CapturingProvider()

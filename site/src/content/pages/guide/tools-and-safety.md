@@ -48,9 +48,16 @@ started process's `lifetime_seconds` at most 86,400 (a day), and `yield_seconds`
 at most 600. A poll that waits returns at the process's next output; with `until=exit` it waits
 through output until the process stops or the wait ends, so a watcher that prints progress, such as
 `gh pr checks --watch`, does not cut the wait short. A process started with `notify_on_exit=true`
-tells the agent when it stops, in front of the next prompt, so the agent can end its turn instead
-of waiting; the notice names the process and how it ended, and the agent polls once to read its
-output. Every exit also appears in the TUI as it happens. When every process slot is taken, the error
+tells the agent when it stops, so the agent can end its turn instead of waiting; the notice names
+the process and how it ended, and the agent polls once to read its output. If the session is idle
+when such a process stops, or becomes idle with the exit still unreported, Wisp starts a run by
+itself that carries only the notice, and the TUI shows it as a run like any other, which `Esc`
+cancels. At most three such wake runs start between your prompts, so a process that keeps
+restarting itself cannot keep the agent working unattended; after that, exits wait for your next
+prompt. A wake run uses the session's permission mode and asks for approvals as usual. Set
+`wake_on_process_exit` to `false` in `~/.wisp/settings.json`, or `WISP_WAKE_ON_PROCESS_EXIT=0`,
+to have every notice wait for your next prompt instead. Every exit also appears in the TUI as it
+happens. When every process slot is taken, the error
 lists the processes holding them, so the model can poll or cancel one.
 
 ### Watching a command while it runs

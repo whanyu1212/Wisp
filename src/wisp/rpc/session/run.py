@@ -33,6 +33,7 @@ from wisp.rpc.commands import (
     GetSessionStatsCommand,
     InitCommand,
     NewSessionCommand,
+    ProcessWakeCommand,
     PromptCommand,
 )
 from wisp.rpc.coordinator import (
@@ -210,7 +211,7 @@ class _ProjectInitCompletion:
 
 
 def start_rpc_prompt_command(
-    command: PromptCommand | InitCommand,
+    command: PromptCommand | InitCommand | ProcessWakeCommand,
     *,
     agent: CodingSession,
     sessions: JsonlSessionStore,
@@ -234,7 +235,13 @@ def start_rpc_prompt_command(
     lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
     command_type = command.type
     command_id = lifecycle.command_id
-    prompt = command.prompt if isinstance(command, PromptCommand) else "/init"
+    # A wake run's prompt is the process notices alone, which the session adds.
+    if isinstance(command, PromptCommand):
+        prompt = command.prompt
+    elif isinstance(command, InitCommand):
+        prompt = "/init"
+    else:
+        prompt = ""
     encoded_images = (command.images or ()) if isinstance(command, PromptCommand) else ()
 
     selected_session = session_state.session or sessions.create()
@@ -555,6 +562,7 @@ async def run_rpc_prompt_command(
                     operation_tool_names=operation_tool_names,
                     operation_ready=mark_prompt_ready,
                     live_event_sink=publish_live,
+                    process_wake=command_type == "process_wake",
                 )
                 if operation_context is None
                 else agent.run(
@@ -568,6 +576,7 @@ async def run_rpc_prompt_command(
                     operation_tool_names=operation_tool_names,
                     operation_ready=mark_prompt_ready,
                     live_event_sink=publish_live,
+                    process_wake=command_type == "process_wake",
                 )
             )
             await render_events(track_run_start(agent_events))
@@ -596,6 +605,10 @@ async def run_rpc_prompt_command(
                 run_active_leaf_id,
                 operation_id=command_id,
             )
+            if rolled_back:
+                # The prompt left the branch, so its process notices never reached
+                # the model for good; the next prompt carries them instead.
+                agent.restore_process_notices(command_id)
             if not rolled_back and session.path.is_file():
                 entries = await _run_abandonable_session_read(session.read_entries)
                 if any(entry.operation_id == command_id for entry in entries[run_entry_start:]):

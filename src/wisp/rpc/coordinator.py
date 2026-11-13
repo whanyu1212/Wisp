@@ -16,13 +16,16 @@ from wisp.rpc.commands import QUEUE_RPC_COMMAND_TYPES, ParsedRpcCommand
 from wisp.rpc.protocol import MAX_LIVE_RPC_FRAME_BYTES
 from wisp.sessions.jsonl import JsonlSession
 
-_PROMPT_RUN_COMMAND_TYPES = frozenset({"prompt", "init"})
+# A wake run is a prompt run that Wisp starts by itself; it takes queued messages
+# the same way.
+_PROMPT_RUN_COMMAND_TYPES = frozenset({"prompt", "init", "process_wake"})
 
 
 _SequentialRpcCommandType = TypeAliasType(
     "_SequentialRpcCommandType",
     Literal[
         "prompt",
+        "process_wake",
         "compact",
         "begin_device_code",
         "get_session_stats",
@@ -88,6 +91,11 @@ class _RpcPromptReady:
     command_id: str
 
 
+@dataclass(frozen=True)
+class _RpcProcessWake:
+    """A background process the agent asked to hear about has stopped."""
+
+
 @dataclass
 class _RpcSessionState:
     session: JsonlSession | None
@@ -118,7 +126,8 @@ class _RpcCancelResult:
 
 
 _RpcControlEvent = TypeAliasType(
-    "_RpcControlEvent", _RpcInputCommand | _RpcInputClosed | _RpcCommandCompleted | _RpcPromptReady
+    "_RpcControlEvent",
+    _RpcInputCommand | _RpcInputClosed | _RpcCommandCompleted | _RpcPromptReady | _RpcProcessWake,
 )
 RpcDispatch = TypeAliasType(
     "RpcDispatch",
@@ -185,6 +194,8 @@ class RpcCoordinator:
         completion_event_writer: RpcCompletionEventWriter | None = None,
         completion_event_renderer: RpcCompletionEventRenderer | None = None,
         queued_message_rejection: RpcQueuedMessageRejection | None = None,
+        wake: Callable[[], ParsedRpcCommand | None] | None = None,
+        wake_due: Callable[[], bool] | None = None,
     ) -> None:
         if max_queued_commands < 0:
             raise ValueError("max_queued_commands must be non-negative")
@@ -215,6 +226,10 @@ class RpcCoordinator:
         self._completion_event_writer = completion_event_writer
         self._completion_event_renderer = completion_event_renderer
         self._queued_message_rejection = queued_message_rejection
+        # Asked, whenever the host is idle and `wake_due` says a background process
+        # is waiting to wake the agent, for the wake run to start (or None).
+        self._wake = wake
+        self._wake_due = wake_due
 
     def _ordered_auxiliary_pending(self) -> bool:
         return any(
@@ -302,6 +317,23 @@ class RpcCoordinator:
                 and not self.queued_commands
             ):
                 return False
+            # Checked on every pass, not only on the wake event, so an exit during a
+            # run that nobody polled wakes the agent once that run ends. When a wake
+            # is due, input that already arrived, such as the user's prompt or the
+            # client leaving, is handled first.
+            if self._wake_possible():
+                try:
+                    buffered = receive.receive_nowait()
+                except anyio.WouldBlock:
+                    wake = self._next_wake()
+                    if wake is not None:
+                        if await self._dispatch(wake, dispatch=dispatch):
+                            return True
+                        continue
+                else:
+                    if await self.handle_event(buffered, dispatch=dispatch, reject=reject):
+                        return True
+                    continue
             event = await receive.receive()
             if await self.handle_event(
                 event,
@@ -309,6 +341,27 @@ class RpcCoordinator:
                 reject=reject,
             ):
                 return True
+
+    def _wake_possible(self) -> bool:
+        """Whether a wake run could start: nothing runs, waits, or is closing."""
+
+        return not (
+            self._wake is None
+            or self._wake_due is None
+            or not self._wake_due()
+            or self.input_closed
+            or self.running_command is not None
+            or self.auxiliary_commands
+            or self.pending_prompt_queue_commands
+            or self.queued_commands
+        )
+
+    def _next_wake(self) -> ParsedRpcCommand | None:
+        """Return a wake run to start, if one is due and nothing else is going on."""
+
+        if self._wake is None or not self._wake_possible():
+            return None
+        return self._wake()
 
     async def _drain_buffered_events_before_shutdown(
         self,
@@ -369,6 +422,9 @@ class RpcCoordinator:
             return False
         if isinstance(event, self._prompt_ready_type):
             return await self._mark_prompt_ready(cast(_RpcPromptReady, event), dispatch=dispatch)
+        if isinstance(event, _RpcProcessWake):
+            # It only ends the wait for input; the loop decides whether to wake.
+            return False
         return await self._accept_command(
             cast(_RpcInputCommand, event).command, dispatch=dispatch, reject=reject
         )
@@ -480,7 +536,8 @@ class RpcCoordinator:
 
         The rules, in order: a duplicate ID is rejected; shutdown cancels discovery;
         discovery is rejected once shutdown is pending; an idle shutdown is queued so
-        buffered control drains first; steering and follow-ups wait until a running
+        buffered control drains first; a user's prompt cancels a running wake run
+        and waits for it to stop; steering and follow-ups wait until a running
         prompt is ready for them; discovery, and reads a prompt allows, run alongside
         the active command; other work waits behind it unless it may bypass it.
         """
@@ -508,6 +565,14 @@ class RpcCoordinator:
                 reject=reject,
             )
             return False
+        if (
+            running is not None
+            and running.command_type == "process_wake"
+            and selected_type in {"prompt", "init"}
+        ):
+            # The user is back and their own run comes first. Cancelling rolls the
+            # wake's prompt back, so its notices lead the user's prompt instead.
+            running.cancel_scope.cancel()
         if (
             running is not None
             and running.command_type in _PROMPT_RUN_COMMAND_TYPES

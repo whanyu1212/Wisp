@@ -155,11 +155,18 @@ class Message(BaseModel):
         # earlier release readable if the notice wording changes.
         return self.content.partition(_NOTICES_SEPARATOR)[2]
 
+    @property
+    def is_process_wake(self) -> bool:
+        """Whether this is a prompt Wisp sent with notices only, to wake the agent."""
+
+        return self.process_notices is not None and not self.prompt_content and not self.images
+
     def with_process_notices(self, notices: Sequence[ProcessNotice]) -> Self:
         """Return this user message with stopped background processes announced first.
 
         The notices go in front of the content the provider receives;
-        ``prompt_content`` and ``user_visible_content`` leave them out again.
+        ``prompt_content`` and ``user_visible_content`` leave them out again. An empty
+        message, such as a wake run's, becomes the notices alone.
 
         Args:
             notices (Sequence[ProcessNotice]): The processes to announce; none
@@ -179,7 +186,11 @@ class Message(BaseModel):
         announced = tuple(notices)
         return self.model_copy(
             update={
-                "content": _notices_prefix(announced) + self.content,
+                "content": (
+                    _notices_prefix(announced) + self.content
+                    if self.content
+                    else process_notices_text(announced)
+                ),
                 "process_notices": announced,
             }
         )

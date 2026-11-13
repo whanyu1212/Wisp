@@ -60,6 +60,7 @@ _USER_ONLY_SETTINGS_FIELDS = frozenset(
         "context_reserve_tokens",
         "auto_compaction_enabled",
         "web_search",
+        "wake_on_process_exit",
         "codemode",
         "subagents",
         "subagent_model",
@@ -137,6 +138,7 @@ class WispSettings(BaseModel):
     context_reserve_tokens: int | None = Field(default=None, ge=0)
     auto_compaction_enabled: bool | None = None
     web_search: bool | None = None
+    wake_on_process_exit: bool | None = None
     codemode: bool | None = None
     subagents: bool | None = None
     subagent_model: str | None = None
@@ -238,6 +240,7 @@ class ResolvedSettings(BaseModel):
     context_reserve_tokens: int | None = Field(default=None, ge=0)
     auto_compaction_enabled: bool | None = None
     web_search: bool | None = None
+    wake_on_process_exit: bool | None = None
     codemode: bool | None = None
     subagents: bool | None = None
     subagent_model: str | None = None
@@ -334,6 +337,7 @@ def resolve_settings(
         context_reserve_tokens=user_settings.context_reserve_tokens,
         auto_compaction_enabled=user_settings.auto_compaction_enabled,
         web_search=user_settings.web_search,
+        wake_on_process_exit=user_settings.wake_on_process_exit,
         codemode=user_settings.codemode,
         subagents=user_settings.subagents,
         subagent_model=user_settings.subagent_model,
