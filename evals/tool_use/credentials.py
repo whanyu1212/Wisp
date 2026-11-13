@@ -26,6 +26,7 @@ DEFAULT_AUTH_FILE = Path.home() / ".wisp" / "auth.json"
 PROVIDER_KEY_VARIABLES: Mapping[str, str] = {
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
+    "google": "GOOGLE_API_KEY",
 }
 # Providers that need no credential; the runner's own tests use `fake`.
 CREDENTIAL_FREE_PROVIDERS = frozenset({"fake"})

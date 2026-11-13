@@ -14,6 +14,7 @@ build/
 dist/
 /profiles/
 /evals/tool_use/results/
+/evals/compaction/results/
 /test-results/
 
 # Rust

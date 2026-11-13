@@ -1,0 +1,13 @@
+id = "chat-constraints"
+title = "Fix a bug later, following constraints given only in the first message"
+turns = [
+  """I'm going to ask you to fix a bug in this repo later, not now. Note my constraints for that fix: (1) add a module-level constant named ROUNDING_QUANTUM set to Decimal("0.01") in src/inventory/pricing.py and use it for the rounding; (2) add a line under "## Unreleased" in CHANGELOG.md that starts with "- fix(pricing):". For now, only read src/inventory/pricing.py and src/inventory/report.py and explain in two sentences how totals are computed. Do not edit anything yet.""",
+  """Now read src/inventory/catalog.py, src/inventory/stock.py and src/inventory/orders.py, and list the public functions each defines. Do not edit anything.""",
+  """Run `python -m unittest -q` and tell me which test fails and why. Do not edit anything yet.""",
+  """Fix it now, following every constraint I gave you in my first message.""",
+]
+verify = "{python} {task}/verify.py"
+tools = ["read", "edit", "write", "bash", "grep", "find", "ls"]
+timeout_seconds = 300
+max_tool_iterations = 30
+trigger_tokens = 9000

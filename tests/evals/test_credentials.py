@@ -20,14 +20,16 @@ def test_env_file_passes_only_provider_keys(tmp_path: Path) -> None:
         "# comment\n"
         "export OPENAI_API_KEY='sk-file'\n"
         "WISP_MODEL=gpt-other\n"
-        "GOOGLE_API_KEY=sk-other\n"
-        "ANTHROPIC_API_KEY=sk-ant\n",
+        "GITHUB_TOKEN=ghp-other\n"
+        "ANTHROPIC_API_KEY=sk-ant\n"
+        "GOOGLE_API_KEY=g-key\n",
         encoding="utf-8",
     )
 
     assert read_provider_keys(env_file) == {
         "OPENAI_API_KEY": "sk-file",
         "ANTHROPIC_API_KEY": "sk-ant",
+        "GOOGLE_API_KEY": "g-key",
     }
     assert read_provider_keys(tmp_path / "missing") == {}
 
