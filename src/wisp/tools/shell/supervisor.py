@@ -35,6 +35,8 @@ from wisp.tools.truncation import truncate_text_tail
 from wisp.tools.utf8 import DecodedTextUnit, decode_utf8_units, decode_utf8_with_source_byte_lengths
 
 ProcessState = Literal["running", "completed", "failed", "timed_out", "cancelled"]
+# What a poll with a wait returns for: the next output, or the process stopping.
+PollUntil = Literal["output", "exit"]
 _PendingTextBackend = Literal["auto", "python", "native"]
 _T = TypeVar("_T")
 
@@ -389,6 +391,13 @@ class _ManagedProcess:
         )
 
 
+def _completion_ended(managed: _ManagedProcess) -> bool:
+    # A completion task that failed before recording a terminal state leaves the
+    # process "running"; an exit wait would otherwise sit out its whole deadline.
+    task = managed.completion_task
+    return task is not None and task.done()
+
+
 class ProcessSupervisor:
     """Own bounded shell-process handles and terminate them on shutdown."""
 
@@ -632,25 +641,62 @@ class ProcessSupervisor:
             self._managed[process_id] = managed
             return process_id
 
-    async def poll(self, process_id: str, *, wait_seconds: float = 0) -> ProcessUpdate:
-        """Return output not delivered by earlier polls and the current state."""
+    async def poll(
+        self, process_id: str, *, wait_seconds: float = 0, until: PollUntil = "output"
+    ) -> ProcessUpdate:
+        """Return output not delivered by earlier polls and the current state.
+
+        Args:
+            process_id (str): The handle ``start`` returned.
+            wait_seconds (float): The longest to wait while the process runs; 0
+                returns at once.
+            until (PollUntil): ``"output"`` returns as soon as there is output not
+                yet delivered. ``"exit"`` keeps waiting through output until the
+                process stops running, so a command that prints regularly cannot
+                cut the wait short; the output gathered meanwhile is returned
+                together, bounded like any other.
+
+        Returns:
+            ProcessUpdate: Output since the last poll and the process's state.
+
+        Raises:
+            ValueError: ``wait_seconds`` is negative.
+        """
 
         if wait_seconds < 0:
             raise ValueError("wait_seconds must be non-negative")
         managed = await self._get(process_id)
         if wait_seconds > 0:
-            should_wait = False
-            async with managed.operation_lock:
-                if managed.state == "running" and not managed.has_pending_output():
-                    managed.changed.clear()
-                    should_wait = managed.state == "running" and not managed.has_pending_output()
-            if should_wait:
-                try:
-                    await asyncio.wait_for(managed.changed.wait(), timeout=wait_seconds)
-                except TimeoutError:
-                    pass
+            await self._wait_for_poll(managed, wait_seconds, until)
         async with managed.operation_lock:
             return self._snapshot(managed)
+
+    async def _wait_for_poll(
+        self, managed: _ManagedProcess, wait_seconds: float, until: PollUntil
+    ) -> None:
+        deadline = asyncio.get_running_loop().time() + wait_seconds
+        while True:
+            async with managed.operation_lock:
+                # Nothing awaits between these checks and the clear, so a chunk or a
+                # state change lands either before the checks, which see it, or after
+                # the clear, which wakes the wait below. Readers and the completion
+                # task do not take this lock; that ordering is what makes it safe.
+                if managed.state != "running" or _completion_ended(managed):
+                    return
+                if until == "output" and managed.has_pending_output():
+                    return
+                managed.changed.clear()
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return
+            try:
+                await asyncio.wait_for(managed.changed.wait(), timeout=remaining)
+            except TimeoutError:
+                return
+            # An output wait returns on any wake, as it always has, even one that
+            # brought no text (a closed stream, part of a UTF-8 character).
+            if until == "output":
+                return
 
     async def cancel(self, process_id: str) -> ProcessUpdate:
         """Terminate one managed process tree and return its final snapshot."""

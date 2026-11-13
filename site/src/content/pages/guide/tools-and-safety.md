@@ -45,8 +45,10 @@ It also accepts `operation=start|poll|cancel` for commands needing a retained pr
 return a `process_id`, process state, incremental output, and per-stream truncation metadata under
 the same safety category and approval policy. A one-shot `timeout` is at most 3,600 seconds, a
 started process's `lifetime_seconds` at most 86,400 (a day), and `yield_seconds` and `wait_seconds`
-at most 600. When every process slot is taken, the error lists the processes holding them, so the
-model can poll or cancel one.
+at most 600. A poll that waits returns at the process's next output; with `until=exit` it waits
+through output until the process stops or the wait ends, so a watcher that prints progress, such as
+`gh pr checks --watch`, does not cut the wait short. When every process slot is taken, the error
+lists the processes holding them, so the model can poll or cancel one.
 
 ### Watching a command while it runs
 

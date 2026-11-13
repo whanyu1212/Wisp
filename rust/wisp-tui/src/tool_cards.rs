@@ -1355,6 +1355,7 @@ pub fn bounded_tool_arguments(name: &str, arguments: &Value) -> Value {
             "command",
             "process_id",
             "wait_seconds",
+            "until",
             "lifetime_seconds",
             "yield_seconds",
         ],

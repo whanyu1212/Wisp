@@ -25,6 +25,13 @@ sessions. The backend and frontend must come from the same release.
   draws no rows of its own, so reopened sessions, which restore no thinking, no longer show a bare
   label before every tool step.
 
+### Tools
+
+- A `bash` poll can wait for a started process to finish: `until=exit`, on `poll` or `start`, keeps
+  waiting through output until the process stops or the wait ends. Before, any output ended the
+  wait, so a watcher such as `gh pr checks --watch` made the model poll again every few seconds.
+  The default, `until=output`, is unchanged.
+
 ### Compaction
 
 - A compaction checkpoint now sees more of each long tool result. The cut grows with the

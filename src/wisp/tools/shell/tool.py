@@ -16,7 +16,7 @@ from wisp.tools.context import SCRATCH_ENVIRONMENT_VARIABLE, ToolContext
 from wisp.tools.output_store import SavedOutput, SavedStream, SaveStatus, saved_output_notice
 from wisp.tools.result import ToolArgumentError, ToolError, ToolResult
 from wisp.tools.shell.process import _format_process_output_preview, _run_shell
-from wisp.tools.shell.supervisor import ProcessSupervisor, ProcessUpdate
+from wisp.tools.shell.supervisor import PollUntil, ProcessSupervisor, ProcessUpdate
 from wisp.tools.truncation import TruncatedText, truncate_text_tail
 
 _DEFAULT_PROCESS_SUPERVISOR: Final = object()
@@ -54,6 +54,8 @@ class BashTool:
         "stderr, and an explicit completion exit code. "
         "Use operation=start to launch a resumable command, operation=poll to read incremental "
         "output by process_id, and operation=cancel to terminate it. "
+        "A poll with wait_seconds returns at the next output; pass until=exit to wait for the "
+        "process to finish instead, such as for a watcher that prints progress. "
         "Pass long text such as commit messages or pull request bodies as a file "
         "(git commit -F, gh pr create --body-file) rather than through $(cat <<EOF ...), "
         "which macOS's bash 3.2 misparses when the text has quotes."
@@ -91,6 +93,11 @@ class BashTool:
                 "minimum": 0,
                 "maximum": _MAX_MANAGED_WAIT_SECONDS,
                 "default": 0,
+            },
+            "until": {
+                "type": "string",
+                "enum": ["output", "exit"],
+                "default": "output",
             },
         },
         "oneOf": [
@@ -265,6 +272,7 @@ class BashTool:
             raise ToolArgumentError(
                 f"bash.yield_seconds must be from 0 to {_MAX_MANAGED_WAIT_SECONDS}"
             )
+        until = _poll_until(arguments)
 
         process_id = await supervisor.start(
             command,
@@ -275,7 +283,7 @@ class BashTool:
             env=_command_environment(context),
         )
         try:
-            update = await supervisor.poll(process_id, wait_seconds=yield_seconds)
+            update = await supervisor.poll(process_id, wait_seconds=yield_seconds, until=until)
         except asyncio.CancelledError:
             with anyio.CancelScope(shield=True):
                 await supervisor.cancel(process_id)
@@ -294,7 +302,9 @@ class BashTool:
             raise ToolArgumentError(
                 f"bash.wait_seconds must be from 0 to {_MAX_MANAGED_WAIT_SECONDS}"
             )
-        update = await supervisor.poll(process_id, wait_seconds=wait_seconds)
+        update = await supervisor.poll(
+            process_id, wait_seconds=wait_seconds, until=_poll_until(arguments)
+        )
         return await _managed_update_result(update, context=context)
 
     async def _cancel(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
@@ -322,6 +332,15 @@ def _command_environment(context: ToolContext) -> dict[str, str]:
     if context.scratch_root is not None:
         environment[SCRATCH_ENVIRONMENT_VARIABLE] = str(context.scratch_root)
     return environment
+
+
+def _poll_until(arguments: ToolArguments) -> PollUntil:
+    value = arguments.get("until")
+    if value is None:
+        return "output"
+    if value not in ("output", "exit"):
+        raise ToolArgumentError("bash.until must be one of: output, exit")
+    return value
 
 
 def _bash_operation(arguments: ToolArguments) -> BashOperation:
