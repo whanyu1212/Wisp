@@ -75,7 +75,8 @@ These settings belong in `~/.wisp/settings.json`, not the project file:
 | Field | Format and example |
 |---|---|
 | `tui_keybindings` | Object mapping action IDs to arrays of key chords. See [Keybinding preferences](../guide/tui/keybindings.md#keybinding-preferences) for an example, available actions, and restart requirements. |
-| `mcp_servers` | Object keyed by server name, with either a stdio `command` or an HTTP `url` per entry. See [MCP servers](../guide/tools-and-safety.md#mcp-tools) for complete JSON examples and authentication options. |
+| `mcp_servers` | Object keyed by server name, with either a stdio `command` or an HTTP `url` per entry. See [MCP servers](../guide/mcp.md#add-a-server) for complete JSON examples and authentication options. |
+| `mcp_tool_exposure` · `codemode` | Discovery mode (`"auto"`, `"direct"`, or `"on_demand"`) and script availability (`true`, `false`, or automatic when omitted/`null`). See [MCP with codemode](../guide/mcp.md#mcp-with-codemode) for their interaction and prerequisites. |
 | `openai_compatible` | Object with `provider_name`, `base_url`, and `default_model`, plus optional `requires_api_key` and `ca_bundle`. See [OpenAI-compatible endpoints](../guide/providers.md#openai-compatible-endpoints) for hosted and local examples. |
 | `protected_paths` | Array of path-pattern strings, replacing the default list rather than extending it. See the example below and [Protected paths](../guide/tools-and-safety.md#protected-paths) for limits. |
 

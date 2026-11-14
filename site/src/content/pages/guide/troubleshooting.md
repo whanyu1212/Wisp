@@ -3,7 +3,7 @@ title: Troubleshooting & FAQ
 description: Recover from installation, provider, MCP, trust, and terminal problems, and find session diagnostics safely.
 route: guide/troubleshooting.html
 section: using
-order: 12
+order: 13
 layout: docs
 listed: true
 searchable: true
@@ -96,9 +96,10 @@ Then check the relevant cause:
 - **Changed settings:** press `c` in `/mcp` to reload settings and reconnect. `r` refreshes status
   only. CLI `wisp mcp` changes apply at the next launch or reconnect.
 
-See [MCP tools](tools-and-safety.md#mcp-tools) for supported transports, configuration examples,
-authentication, and limits, and [Managing MCP servers](tui/commands.md#managing-mcp-servers) for
-panel controls. Do not share settings containing literal tokens or authentication headers.
+See [MCP servers & codemode](mcp.md) for supported transports, configuration examples,
+authentication, and limits, and [Managing MCP servers](mcp.md#managing-mcp-servers) for panel controls.
+For a connected tool that a script cannot call, see [Codemode troubleshooting](mcp.md#why-a-script-cannot-call-a-tool).
+Do not share settings containing literal tokens or authentication headers.
 
 ## Why will trust or YOLO not stay enabled in my home folder?
 

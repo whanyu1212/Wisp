@@ -87,6 +87,10 @@ test("the real collections expose the same section order, course sequence, and n
       "guide/tui/sessions.md",
     ],
   );
+  const mcpIndex = using.findIndex((page) => page.source === "guide/mcp.md");
+  assert.ok(mcpIndex > 0);
+  assert.equal(using[mcpIndex - 1]!.source, "guide/tools-and-safety.md");
+  assert.equal(using[mcpIndex + 1]!.source, "guide/sessions.md");
   assert.deepEqual(
     using.slice(-3).map((page) => page.source),
     [
