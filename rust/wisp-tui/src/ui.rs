@@ -3298,6 +3298,10 @@ fn footer_hint_parts(
     {
         // The composer's top border names the keys that follow up or steer.
         let mut parts = vec!["Esc interrupt".into()];
+        let background = primary_label(bindings, KeyAction::BackgroundCommand);
+        if state.background_processes.foreground_running() && background != "Unbound" {
+            parts.push(format!("{background} background"));
+        }
         parts.extend(std::mem::take(&mut panel));
         parts.push(browse_hint(state, bindings));
         parts
@@ -8930,7 +8934,7 @@ mod tests {
             assert!(!hints.is_empty(), "{footer}");
             for hint in hints {
                 assert!(
-                    ["Ctrl+G help", "F6 browse", "Ctrl+B panel"].contains(&hint),
+                    ["Ctrl+G help", "F6 browse", "Ctrl+P panel"].contains(&hint),
                     "{width}: {hint:?} in {footer}"
                 );
             }
@@ -8956,13 +8960,53 @@ mod tests {
         };
         let wide = footer(140);
         assert!(
-            wide.contains("Esc interrupt │ Ctrl+B panel │ F6 browse"),
+            wide.contains("Esc interrupt │ Ctrl+P panel │ F6 browse"),
             "{wide}"
         );
         // A narrow row drops the panel hint before the others.
         let narrow = footer(40);
         assert!(narrow.contains("Esc interrupt │ F6 browse"), "{narrow}");
         assert!(!narrow.contains("panel"), "{narrow}");
+    }
+
+    #[test]
+    fn running_command_offers_background_key() {
+        struct Ids;
+        impl crate::reducer::CommandIdSource for Ids {
+            fn next_id(&mut self, kind: crate::reducer::CommandKind) -> String {
+                format!("{}-1", kind.prefix())
+            }
+        }
+        let mut state = UiState::new("fake".into(), None, None);
+        state.view_status = ViewStatus::Running;
+        state.interaction_status = InteractionStatus::Running;
+        state.transcript.append_prompt("run the tests".into());
+        let footer = |state: &UiState| {
+            render_to_string(160, 18, state, &PromptEditor::default())
+                .lines()
+                .last()
+                .unwrap()
+                .to_owned()
+        };
+        assert!(!footer(&state).contains("background"));
+
+        let call = crate::reducer::BackendEvent::from_projection_value(&serde_json::json!({
+            "type": "tool.call", "call_id": "suite", "name": "bash",
+            "arguments": {"command": "make test"}
+        }))
+        .unwrap();
+        crate::reducer::reduce(
+            &mut state,
+            crate::reducer::UiAction::BackendEvent(call),
+            &mut Ids,
+        )
+        .unwrap();
+
+        let shown = footer(&state);
+        assert!(
+            shown.contains("Esc interrupt │ Ctrl+B background"),
+            "{shown}"
+        );
     }
 
     #[test]

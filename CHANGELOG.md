@@ -14,12 +14,13 @@ this policy.
 
 0.9.2 is a patch release on 0.9.1. The terminal UI reads a turn as one activity list, and
 compaction keeps more of long tool output in its checkpoint. A background process can tell the
-agent when it stops, and the user can stop one. That adds one event, `process.ended`, one
-command, `cancel_process`, an optional `background_processes` list in the `get_state` reply, a
-`process_wake` flag on message snapshots, an optional `process_notices` field on persisted user
-messages, which 0.9.1 ignores, and one user setting, `wake_on_process_exit`; no handshake,
-credential, or trust format changes, so 0.9.1 and 0.9.2 still read each other's sessions. The
-backend and frontend must come from the same release.
+agent when it stops, and the user can stop one or move a running command there. That adds one
+event, `process.ended`, two commands, `cancel_process` and `background_tool_call`, an optional
+`background_processes` list in the `get_state` reply, a `process_wake` flag on message snapshots,
+an optional `process_notices` field on persisted user messages, which 0.9.1 ignores, and one user
+setting, `wake_on_process_exit`; no handshake, credential, or trust format changes, so 0.9.1 and
+0.9.2 still read each other's sessions. The backend and frontend must come from the same release.
+The TUI's side panel key moves from `Ctrl+B` to `Ctrl+P`.
 
 ### TUI
 
@@ -70,6 +71,14 @@ backend and frontend must come from the same release.
   the new state `cancelled`, and a process the agent asked to hear about is reported to it with
   the next prompt as stopped by the user, without waking it. The SDK has
   `RpcController.cancel_process`.
+- Press `Ctrl+B` in the TUI to move the shell command the agent is waiting on to the background.
+  The command keeps running, with no output lost, as a background process that tells the agent
+  when it stops; the agent's call ends at once with its `process_id` and the output so far, and
+  the turn goes on. A moved command may run for up to an hour from then. New command
+  `background_tool_call` (`call_id`), which runs beside the active run; the SDK has
+  `RpcController.background_tool_call`. **The side panel moves from `Ctrl+B` to `Ctrl+P`.** A
+  `tui_keybindings` setting that already used `Ctrl+P` or `Ctrl+B` for another action keeps it,
+  and the panel or the background key is left without its default instead.
 
 ### Compaction
 

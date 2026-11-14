@@ -30,6 +30,7 @@ from wisp.rpc.commands import (
     AddMcpServerCommand,
     ApprovalCommand,
     ApprovalScope,
+    BackgroundToolCallCommand,
     BeginDeviceCodeCommand,
     CancelCommand,
     CancelProcessCommand,
@@ -742,6 +743,13 @@ class RpcController:
 
         selected_id = command_id or self._command_id_factory("cancel")
         await self._transport.send(CancelCommand(id=selected_id, target_id=target_id))
+        return selected_id
+
+    async def background_tool_call(self, call_id: str, *, command_id: str | None = None) -> str:
+        """Move a running foreground ``bash`` call to the background; it ends with its id."""
+
+        selected_id = command_id or self._command_id_factory("background_tool_call")
+        await self._transport.send(BackgroundToolCallCommand(id=selected_id, call_id=call_id))
         return selected_id
 
     async def cancel_process(self, process_id: str, *, command_id: str | None = None) -> str:

@@ -229,6 +229,9 @@ class _StreamTail:
         self._head = bytearray()
         self._dropped_bytes = 0
         self.saved = saved
+        # Also receives each chunk the reader takes from now on, and ``final=True`` at
+        # end of file: set when a foreground command moves to the background.
+        self.sink: Callable[[bytes, bool], None] | None = None
 
     def append(self, chunk: bytes) -> None:
         if room := STREAM_HEAD_BYTES - len(self._head):
@@ -1784,10 +1787,27 @@ def _windows_process_handle(process: asyncio.subprocess.Process) -> object | Non
     return cast(object | None, getattr(subprocess_handle, "_handle", None))
 
 
+def _start_tail_readers(
+    process: asyncio.subprocess.Process,
+    stdout_tail: _StreamTail,
+    stderr_tail: _StreamTail,
+) -> tuple[asyncio.Task[None], asyncio.Task[None]]:
+    """Start reading stdout and stderr into their tails; the caller owns the tasks."""
+
+    assert process.stdout is not None
+    assert process.stderr is not None
+    return (
+        asyncio.create_task(_read_stream_tail(process.stdout, stdout_tail)),
+        asyncio.create_task(_read_stream_tail(process.stderr, stderr_tail)),
+    )
+
+
 async def _collect_limited_output(
     process: asyncio.subprocess.Process,
     stdout_tail: _StreamTail,
     stderr_tail: _StreamTail,
+    *,
+    readers: tuple[asyncio.Task[None], asyncio.Task[None]] | None = None,
 ) -> _CapturedOutput:
     """Capture the tail of stdout and stderr until the shell exits.
 
@@ -1796,15 +1816,15 @@ async def _collect_limited_output(
     after the shell exits if a background job still holds a pipe; the caller's
     process-tree cleanup then terminates that job. The tails belong to the caller,
     so what they hold is still available if capture times out or is cancelled.
+
+    Capture starts its own readers and stops them when it ends. A caller that
+    passes ``readers`` owns them instead: capture only waits on them, so they keep
+    reading if capture is cancelled, as when the command moves to the background.
     """
 
-    assert process.stdout is not None
-    assert process.stderr is not None
-
-    readers = (
-        asyncio.create_task(_read_stream_tail(process.stdout, stdout_tail)),
-        asyncio.create_task(_read_stream_tail(process.stderr, stderr_tail)),
-    )
+    owns_readers = readers is None
+    if readers is None:
+        readers = _start_tail_readers(process, stdout_tail, stderr_tail)
     try:
         # asyncio's ``Process.wait()`` also waits for every pipe to close, so poll the
         # exit status instead to notice a shell that exited while a pipe stays open.
@@ -1826,18 +1846,31 @@ async def _collect_limited_output(
             pipes_held_after_exit=bool(still_open),
         )
     finally:
-        for reader in readers:
-            if not reader.done():
-                reader.cancel()
-        await asyncio.gather(*readers, return_exceptions=True)
+        if owns_readers:
+            await _stop_readers(readers)
+
+
+async def _stop_readers(readers: tuple[asyncio.Task[None], ...]) -> None:
+    """Cancel readers still going and wait for them to finish."""
+
+    for reader in readers:
+        if not reader.done():
+            reader.cancel()
+    await asyncio.gather(*readers, return_exceptions=True)
 
 
 async def _read_stream_tail(stream: asyncio.StreamReader, tail: _StreamTail) -> None:
     try:
         while chunk := await stream.read(8192):
+            # No await between the tail and the sink, so a move to the background
+            # sees each chunk on exactly one side of it.
             tail.append(chunk)
+            if tail.sink is not None:
+                tail.sink(chunk, False)
             if tail.saved is not None:
                 await tail.saved.append(chunk)
+        if tail.sink is not None:
+            tail.sink(b"", True)
     finally:
         # Capture ends here however it stops: end of file, timeout, or cancellation.
         if tail.saved is not None:

@@ -947,20 +947,20 @@ async fn api_key_entry_docks_above_the_composer_and_shows_its_cursor() {
     assert!(rows[top + 1].contains("› ••••••••"), "{}", rows.join("\n"));
 }
 
-fn ctrl_b() -> Input {
-    Input::Key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL))
+fn panel_key() -> Input {
+    Input::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
 }
 
 #[tokio::test]
-async fn ctrl_b_follows_width() {
+async fn panel_key_follows_width() {
     let (writer, _receiver) = mpsc::channel(16);
-    // Too narrow to dock: Ctrl+B lays the panel over the transcript, above the
+    // Too narrow to dock: Ctrl+P lays the panel over the transcript, above the
     // composer and its draft, and Esc closes it.
     let mut ui = base();
     let mut terminal = Terminal::new(TestBackend::new(100, 32)).unwrap();
     draw(&mut ui, &mut terminal);
     assert!(!text(terminal.backend().buffer()).contains("Context"));
-    ui.handle_input(ctrl_b(), &writer, 8192).await.unwrap();
+    ui.handle_input(panel_key(), &writer, 8192).await.unwrap();
     assert_eq!(ui.active_overlay(), Some(OverlayKind::SidePanel));
     draw(&mut ui, &mut terminal);
     let screen = text(terminal.backend().buffer());
@@ -975,22 +975,22 @@ async fn ctrl_b_follows_width() {
         .unwrap();
     assert_eq!(ui.active_overlay(), None);
 
-    // Wide enough: the panel docks unasked, Ctrl+B hides it, and an overlay left
+    // Wide enough: the panel docks unasked, Ctrl+P hides it, and an overlay left
     // open by a narrow terminal docks when the terminal widens.
     let mut ui = base();
     let mut wide = Terminal::new(TestBackend::new(200, 32)).unwrap();
     draw(&mut ui, &mut wide);
-    assert!(text(wide.backend().buffer()).contains("Ctrl+B panel"));
-    ui.handle_input(ctrl_b(), &writer, 8192).await.unwrap();
+    assert!(text(wide.backend().buffer()).contains("Ctrl+P panel"));
+    ui.handle_input(panel_key(), &writer, 8192).await.unwrap();
     draw(&mut ui, &mut wide);
     assert!(!text(wide.backend().buffer()).contains("Context"));
 
     let mut ui = base();
     draw(&mut ui, &mut terminal);
-    ui.handle_input(ctrl_b(), &writer, 8192).await.unwrap();
+    ui.handle_input(panel_key(), &writer, 8192).await.unwrap();
     draw(&mut ui, &mut wide);
     assert_eq!(ui.active_overlay(), None);
-    assert!(text(wide.backend().buffer()).contains("Ctrl+B panel"));
+    assert!(text(wide.backend().buffer()).contains("Ctrl+P panel"));
 }
 
 #[tokio::test]
@@ -1012,7 +1012,7 @@ async fn panel_enter_opens_diff() {
         }],
     }));
     draw(&mut ui, &mut terminal);
-    ui.handle_input(ctrl_b(), &writer, 8192).await.unwrap();
+    ui.handle_input(panel_key(), &writer, 8192).await.unwrap();
     draw(&mut ui, &mut terminal);
     // Typed keys go to the panel, not the composer.
     ui.handle_input(key(KeyCode::Char('x')), &writer, 8192)
@@ -1053,14 +1053,14 @@ async fn panel_overlay_yields_to_ctrl_c_decisions_and_overlays() {
     // Ctrl+C closes the overlay rather than quitting an idle session.
     let mut ui = base();
     draw(&mut ui, &mut terminal);
-    ui.handle_input(ctrl_b(), &writer, 8192).await.unwrap();
+    ui.handle_input(panel_key(), &writer, 8192).await.unwrap();
     assert_eq!(
         ui.handle_input(ctrl_c(), &writer, 8192).await.unwrap(),
         LoopControl::Continue
     );
     assert_eq!(ui.active_overlay(), None);
 
-    // An approval closes the overlay, and Ctrl+B cannot lay it over the decision.
+    // An approval closes the overlay, and Ctrl+P cannot lay it over the decision.
     let mut ui = base();
     ui.state.current_command = Some(ActiveCommand {
         id: "prompt-1".into(),
@@ -1068,7 +1068,7 @@ async fn panel_overlay_yields_to_ctrl_c_decisions_and_overlays() {
     });
     ui.state.view_status = ViewStatus::Running;
     draw(&mut ui, &mut terminal);
-    ui.handle_input(ctrl_b(), &writer, 8192).await.unwrap();
+    ui.handle_input(panel_key(), &writer, 8192).await.unwrap();
     ui.dispatch(
         UiAction::BackendEvent(BackendEvent::ToolApprovalRequested(PendingApproval {
             call_id: "call-1".into(),
@@ -1085,15 +1085,15 @@ async fn panel_overlay_yields_to_ctrl_c_decisions_and_overlays() {
     .await
     .unwrap();
     assert!(!ui.side_panel.overlay_open());
-    ui.handle_input(ctrl_b(), &writer, 8192).await.unwrap();
+    ui.handle_input(panel_key(), &writer, 8192).await.unwrap();
     assert!(!ui.side_panel.overlay_open());
     while receiver.try_recv().is_ok() {}
 
-    // Under another overlay, Ctrl+B does not open a hidden panel.
+    // Under another overlay, Ctrl+P does not open a hidden panel.
     let mut ui = base();
     open(&mut ui, OverlayKind::Context);
     draw(&mut ui, &mut terminal);
-    ui.handle_input(ctrl_b(), &writer, 8192).await.unwrap();
+    ui.handle_input(panel_key(), &writer, 8192).await.unwrap();
     assert!(!ui.side_panel.overlay_open());
 }
 

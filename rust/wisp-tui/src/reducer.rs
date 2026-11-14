@@ -1132,6 +1132,7 @@ pub enum CommandKind {
     Configure,
     ChangeDirectory,
     CancelProcess,
+    BackgroundToolCall,
     StoreApiKey,
     DisconnectProvider,
     BeginDeviceCode,
@@ -1179,6 +1180,7 @@ impl CommandKind {
             Self::Configure => "configure",
             Self::ChangeDirectory => "change_directory",
             Self::CancelProcess => "cancel_process",
+            Self::BackgroundToolCall => "background_tool_call",
             Self::StoreApiKey => "store_api_key",
             Self::DisconnectProvider => "disconnect_provider",
             Self::BeginDeviceCode => "begin_device_code",
@@ -1487,6 +1489,8 @@ pub enum UiAction {
     ListBackgroundProcesses,
     /// `/kill`: stop a background process, by its `/ps` number or its id.
     StopBackgroundProcess(String),
+    /// Move the newest running foreground shell command to the background.
+    BackgroundRunningCommand,
     Compact(Option<String>),
     Steer(String),
     SteerPresented {
@@ -1714,6 +1718,7 @@ pub fn reduce(
         UiAction::StopBackgroundProcess(target) => {
             Ok(background_processes::stop(state, &target, ids)?)
         }
+        UiAction::BackgroundRunningCommand => Ok(background_processes::move_running(state, ids)?),
         UiAction::ConfigureAutoCompaction(enabled) => {
             Ok(context::configure_auto(state, enabled, ids)?)
         }

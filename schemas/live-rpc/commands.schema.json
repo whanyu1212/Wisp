@@ -190,6 +190,40 @@
       ],
       "type": "string"
     },
+    "BackgroundToolCallCommand": {
+      "additionalProperties": false,
+      "description": "Move a running foreground ``bash`` call to the background, for the user.\n\nIt runs beside the active run. The call ends with the id of the background\nprocess it became, which tells the agent when it stops; the command fails when\nno foreground ``bash`` call with this id is running.",
+      "properties": {
+        "call_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Call Id",
+          "type": "string"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "type": {
+          "const": "background_tool_call",
+          "default": "background_tool_call",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "call_id"
+      ],
+      "title": "BackgroundToolCallCommand",
+      "type": "object"
+    },
     "BeginDeviceCodeCommand": {
       "additionalProperties": false,
       "description": "Start a backend-owned device-code connection flow.",
@@ -2387,6 +2421,7 @@
     "mapping": {
       "add_mcp_server": "#/$defs/AddMcpServerCommand",
       "approval": "#/$defs/ApprovalCommand",
+      "background_tool_call": "#/$defs/BackgroundToolCallCommand",
       "begin_device_code": "#/$defs/BeginDeviceCodeCommand",
       "cancel": "#/$defs/CancelCommand",
       "cancel_process": "#/$defs/CancelProcessCommand",
@@ -2583,6 +2618,9 @@
       "$ref": "#/$defs/CancelProcessCommand"
     },
     {
+      "$ref": "#/$defs/BackgroundToolCallCommand"
+    },
+    {
       "$ref": "#/$defs/ApprovalCommand"
     },
     {
@@ -2621,6 +2659,10 @@
       "approved": true,
       "call_id": "call-1",
       "type": "approval"
+    },
+    "background_tool_call": {
+      "call_id": "call-1",
+      "type": "background_tool_call"
     },
     "begin_device_code": {
       "provider": "openai-codex",

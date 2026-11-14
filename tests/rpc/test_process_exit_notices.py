@@ -304,3 +304,51 @@ def test_exit_wakes_agent(
     (page,) = [r for r in records if r.get("command_id") == "history" and "messages" in r]
     prompts = [(m["content"], m["process_wake"]) for m in page["messages"] if m["role"] == "user"]
     assert prompts == [("run CI", False), ("", True)]
+
+
+@pytest.mark.process
+def test_background_foreground_call(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A user moves a running foreground command to the background; the run goes on.
+
+    The call ends with the new process id, the turn continues, and when the
+    command finishes its exit wakes the agent.
+    """
+
+    command = _python("import time; print('first', flush=True); time.sleep(1); print('second')")
+    provider = ScriptedProvider(
+        [
+            _reply("", _bash("long", command=command)),
+            _reply("moved on"),
+            _reply("it finished"),
+        ]
+    )
+
+    records = _serve(
+        tmp_path,
+        monkeypatch,
+        provider,
+        [
+            {"id": "yolo", "type": "set_permissions", "mode": "yolo"},
+            {"id": "p1", "type": "prompt", "prompt": "run the suite"},
+            {"await": {"type": "tool.execution.started", "call_id": "long"}},
+            {"id": "move", "type": "background_tool_call", "call_id": "long"},
+            {"await": {"type": "rpc.command.finished", "command_type": "process_wake"}},
+        ],
+    )
+
+    (moved,) = [
+        r for r in records if r["type"] == "rpc.command.finished" and r["command_id"] == "move"
+    ]
+    assert moved["ok"] is True
+    (result,) = [r for r in records if r["type"] == "tool.result" and r["call_id"] == "long"]
+    assert result["process_id"]
+    assert result["process_state"] == "running"
+    assert "moved this command to the background" in result["output"]
+    runs = [
+        r["command_type"]
+        for r in records
+        if r["type"] == "rpc.command.started" and r["command_type"] in {"prompt", "process_wake"}
+    ]
+    assert runs == ["prompt", "process_wake"]
+    woken = provider.calls[-1].messages[-1].content
+    assert f"process_id={result['process_id']}: exit code 0:" in woken

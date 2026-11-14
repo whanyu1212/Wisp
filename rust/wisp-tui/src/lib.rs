@@ -5092,9 +5092,13 @@ impl LiveUi {
                 self.render_pending = true;
                 Ok(Some(LoopControl::Continue))
             }
+            Some(KeyAction::BackgroundCommand) if !decision_pending => self
+                .dispatch(UiAction::BackgroundRunningCommand, writer, limit)
+                .await
+                .map(Some),
             Some(KeyAction::TogglePanel) => {
                 // The overlay would open hidden under another overlay or over a decision,
-                // so there Ctrl+B only hides or shows a docked panel.
+                // so there the panel key only hides or shows a docked panel.
                 let covered = decision_pending
                     || !matches!(self.active_overlay(), None | Some(OverlayKind::SidePanel));
                 if !(covered && self.side_panel.toggles_overlay()) {

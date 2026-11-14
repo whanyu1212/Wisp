@@ -280,8 +280,8 @@ unavailable inventories are distinguished. Click a member row to expand its deta
 
 The panel starts at 44 columns and grows to at most 52 automatically. Drag its left border to resize
 it while leaving at least 104 columns for the conversation; double-click the border to restore the
-automatic width. The chosen width lasts until Wisp exits. `Ctrl+B` hides or shows it. On narrower
-terminals, `Ctrl+B` opens a 44-column overlay above the composer.
+automatic width. The chosen width lasts until Wisp exits. `Ctrl+P` hides or shows it. On narrower
+terminals, `Ctrl+P` opens a 44-column overlay above the composer.
 
 `F8` focuses the sidebar at either width. `Tab` and `Shift+Tab` move between sections, arrow keys
 move among actionable rows, and `Enter` or `Space` expands details or opens the selected view.

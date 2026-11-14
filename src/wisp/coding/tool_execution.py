@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -288,6 +289,52 @@ class _MalformedToolResultError(TypeError):
     """Raised when copied extension result fields violate the ToolResult contract."""
 
 
+class BackgroundRequests:
+    """The running foreground ``bash`` calls a user may move to the background, by call id.
+
+    The executor registers a call while it runs and releases it when it ends; a
+    request for any other call is refused.
+    """
+
+    def __init__(self) -> None:
+        self._running: dict[str, asyncio.Event] = {}
+
+    def register(self, call_id: str) -> asyncio.Event:
+        """Track a foreground call; return the event that moves it."""
+
+        event = asyncio.Event()
+        self._running[call_id] = event
+        return event
+
+    def release(self, call_id: str) -> None:
+        """Stop tracking a call that has ended."""
+
+        self._running.pop(call_id, None)
+
+    def request(self, call_id: str) -> bool:
+        """Ask to move a running foreground call to the background.
+
+        Args:
+            call_id (str): The call to move.
+
+        Returns:
+            bool: Whether such a call is running; the call itself then ends with its
+            process id, unless the command finishes first.
+        """
+
+        event = self._running.get(call_id)
+        if event is None:
+            return False
+        event.set()
+        return True
+
+
+def _runs_in_foreground(tool_name: str, arguments: dict[str, object]) -> bool:
+    """Whether this call runs a ``bash`` command to completion in the foreground."""
+
+    return tool_name == "bash" and arguments.get("operation", "run") == "run"
+
+
 class ConfiguredToolExecutor:
     """Adapt Wisp's registry and approval policies to the pure loop contract."""
 
@@ -301,8 +348,11 @@ class ConfiguredToolExecutor:
         progress_sink: LiveEventSink | None = None,
         mcp_catalog: McpCatalog | None = None,
         image_store: ImageStore | None = None,
+        background_requests: BackgroundRequests | None = None,
     ) -> None:
         self._registry = registry
+        # Where a running foreground `bash` call can be asked to move to the background.
+        self._background_requests = background_requests
         self._context = context
         self._policy = policy
         self._approval_policy = approval_policy
@@ -918,16 +968,29 @@ class ConfiguredToolExecutor:
         call_id: str,
         tool_name: str,
     ) -> ToolResult:
-        """Run a tool, giving it a progress handle when a frontend is listening."""
+        """Run a tool, giving it a progress handle when a frontend is listening.
 
-        sink = self._progress_sink
-        if sink is None:
-            return await tool.run(arguments, self._context)
+        A foreground ``bash`` call also gets the event that moves it to the
+        background, while it runs.
+        """
 
-        async def run(progress: ToolProgress) -> ToolResult:
-            return await tool.run(arguments, replace(self._context, progress=progress))
+        context = self._context
+        requests = self._background_requests
+        movable = requests is not None and _runs_in_foreground(tool_name, arguments)
+        if requests is not None and movable:
+            context = replace(context, background_request=requests.register(call_id))
+        try:
+            sink = self._progress_sink
+            if sink is None:
+                return await tool.run(arguments, context)
 
-        return await run_with_progress(sink, call_id=call_id, name=tool_name, run=run)
+            async def run(progress: ToolProgress) -> ToolResult:
+                return await tool.run(arguments, replace(context, progress=progress))
+
+            return await run_with_progress(sink, call_id=call_id, name=tool_name, run=run)
+        finally:
+            if requests is not None and movable:
+                requests.release(call_id)
 
 
 @dataclass(frozen=True, slots=True)

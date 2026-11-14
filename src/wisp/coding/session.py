@@ -95,7 +95,7 @@ from wisp.coding.subagent import (
     fork_transcript,
     run_subagent,
 )
-from wisp.coding.tool_execution import ConfiguredToolExecutor, ImageStore
+from wisp.coding.tool_execution import BackgroundRequests, ConfiguredToolExecutor, ImageStore
 from wisp.coding.tool_progress import LiveEventSink
 from wisp.events import (
     DEFAULT_AGENT_MODE,
@@ -579,6 +579,8 @@ class CodingSession:
         # The background-process exits the model asked to hear about; each saved
         # prompt carries the ones that arrived since the last.
         self._process_notices = process_notices
+        # Foreground `bash` calls the user may move to the background while they run.
+        self._background_requests = BackgroundRequests()
         # The operation whose saved prompt last delivered notices, and those notices,
         # so a cancelled run that rolls the prompt back can hold them again.
         self._delivered_notices: tuple[str | None, tuple[ProcessNotice, ...]] | None = None
@@ -881,6 +883,19 @@ class CodingSession:
         if session_id is None:
             return QueueUpdated()
         return self._queue_updated_from_snapshot(self._retained_queues.get(session_id))
+
+    def background_tool_call(self, call_id: str) -> bool:
+        """Ask to move a running foreground ``bash`` call to the background.
+
+        Args:
+            call_id (str): The running call.
+
+        Returns:
+            bool: Whether such a call is running. It then ends with the id of the
+            background process it became, unless it finishes first.
+        """
+
+        return self._background_requests.request(call_id)
 
     def restore_process_notices(self, operation_id: str) -> None:
         """Hold again the notices a run delivered, after its prompt was rolled back.
@@ -2279,6 +2294,7 @@ class CodingSession:
             progress_sink=progress_sink,
             mcp_catalog=catalog,
             image_store=image_store,
+            background_requests=self._background_requests,
         )
         return offered_tools, executor
 

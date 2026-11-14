@@ -1261,6 +1261,16 @@ pub mod commands {
             deserialize(serde_json::json!({"type": "cancel", "id": id, "target_id": target_id}))
         }
 
+        /// Move a running foreground `bash` call to the background, for the user.
+        pub fn background_tool_call(
+            id: &str,
+            call_id: &str,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(
+                serde_json::json!({"type": "background_tool_call", "id": id, "call_id": call_id}),
+            )
+        }
+
         /// Stop a background process the agent started, on the user's behalf.
         pub fn cancel_process(
             id: &str,

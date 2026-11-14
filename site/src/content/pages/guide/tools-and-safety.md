@@ -57,8 +57,15 @@ restarting itself cannot keep the agent working unattended; after that, exits wa
 prompt. A wake run uses the session's permission mode and asks for approvals as usual. Set
 `wake_on_process_exit` to `false` in `~/.wisp/settings.json`, or `WISP_WAKE_ON_PROCESS_EXIT=0`,
 to have every notice wait for your next prompt instead. Every exit also appears in the TUI as it
-happens. When every process slot is taken, the error
-lists the processes holding them, so the model can poll or cancel one.
+happens. When every process slot is taken, the error lists the processes holding them, so the model
+can poll or cancel one.
+
+While the agent waits on a shell command in the foreground, such as a test suite or a dev server,
+press `Ctrl+B` in the TUI to move it to the background. The command keeps running with all its
+output, the agent's call ends at once with the command's new `process_id` and its output so far,
+and the turn goes on; the agent is told when the command stops, as if it had started it with
+`notify_on_exit=true`. A moved command may run for up to an hour from then, and keeps its process
+slot. Embedders send `background_tool_call` with the call's id.
 
 ### Watching a command while it runs
 

@@ -152,6 +152,7 @@ _ACTIVE_COMMAND_BYPASS_COMMANDS = QUEUE_RPC_COMMAND_TYPES | {
     "approval",
     "cancel",
     "cancel_process",
+    "background_tool_call",
     "get_commands",
     "get_mcp_status",
     "preview_mcp_snippet",

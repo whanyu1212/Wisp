@@ -255,6 +255,7 @@ _COMMAND_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     "change_directory": {"path": "src"},
     "cancel": {"target_id": "command-1"},
     "cancel_process": {"process_id": "process-1"},
+    "background_tool_call": {"call_id": "call-1"},
     "clear_queue": {},
     "clone_session": {},
     "compact": {},
