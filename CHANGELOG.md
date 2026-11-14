@@ -10,7 +10,10 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.10.0 — Unreleased
+<!-- Keeps links to the pre-release "0.10.0 — Unreleased" heading working. -->
+<a id="0100--unreleased"></a>
+
+## 0.10.0 — 2026-11-14
 
 0.10.0 is a minor release on 0.9.2 about background processes. A process the agent starts in the
 background can tell it when it stops, and wake it when the session is idle; in the terminal UI the
