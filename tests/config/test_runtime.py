@@ -346,6 +346,24 @@ def test_config_leaves_codemode_automatic_unless_set(
     assert WispConfig.from_env(session_dir=tmp_path, codemode=True).codemode is True
 
 
+def test_wake_left_to_frontend(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    """Unset, waking is None so the frontend picks; settings, env and overrides decide."""
+
+    home = Path.home()
+    (home / ".wisp").mkdir(parents=True)
+    assert WispConfig.from_env(session_dir=tmp_path).wake_on_process_exit is None
+
+    (home / ".wisp" / "settings.json").write_text(
+        '{"wake_on_process_exit": false}', encoding="utf-8"
+    )
+    assert WispConfig.from_env(session_dir=tmp_path).wake_on_process_exit is False
+
+    monkeypatch.setenv("WISP_WAKE_ON_PROCESS_EXIT", "1")
+    assert WispConfig.from_env(session_dir=tmp_path).wake_on_process_exit is True
+    config = WispConfig.from_env(session_dir=tmp_path, wake_on_process_exit=False)
+    assert config.wake_on_process_exit is False
+
+
 def test_config_keeps_subagents_off_unless_set(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     home = Path.home()
     (home / ".wisp").mkdir(parents=True)

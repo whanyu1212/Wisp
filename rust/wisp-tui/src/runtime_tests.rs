@@ -373,6 +373,8 @@ async fn run_shutdown(send_completion: bool) -> Result<(), Error> {
         kinds,
         [
             "get_messages",
+            // The background process list, read with the history.
+            "get_state",
             "get_connection_catalog",
             "get_model_catalog",
             "get_commands",

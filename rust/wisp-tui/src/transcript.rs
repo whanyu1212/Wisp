@@ -28,7 +28,7 @@ const LIVE_RETENTION_OMISSION_MARKER: &str = "[earlier live transcript entries o
 use crate::tool_cards::{
     INTERRUPTED_TOOL_RESULT_TEXT, ProcessCallIdentity, ProcessCardSnapshot, ProcessDisplayState,
     ProcessOperation, ToolCallInput, ToolCardSnapshot, ToolProgressInput, ToolResultInput,
-    ToolStatus, identity_for_display, process_call_identity,
+    ToolStatus, bounded_identity, identity_for_display, process_call_identity,
 };
 use crate::tool_detail::{
     DetailAvailability, DetailUnavailableReason, ToolDetailPresentation, ToolDetailSource,
@@ -1093,15 +1093,53 @@ impl Transcript {
     ) -> Option<TranscriptEntryId> {
         // A process ends on its own clock, often while the model is replying, so this
         // leaves the active response open: its next delta must not start a new row.
-        let entry_id = self.process_entry_for(process_id)?;
-        let TranscriptEntryKind::Process(card) = &mut self.entry_mut(entry_id).kind else {
-            unreachable!("process index must target a process card")
+        //
+        // History keys a card by the identity its result carried and a live call by
+        // the raw id, so a session reopened while the process ran may hold either.
+        let historical = self
+            .process_entries
+            .get(&bounded_identity(process_id))
+            .copied();
+        let live = if historical.is_none() || self.process_entries.contains_key(process_id) {
+            self.process_entry_for(process_id)
+        } else {
+            None
         };
-        card.display_state = ended;
-        card.exit_code = exit_code;
-        card.elapsed_ms = Some(duration_ms);
-        self.bump_card(entry_id);
-        Some(entry_id)
+        for entry_id in [live, historical].into_iter().flatten() {
+            let TranscriptEntryKind::Process(card) = &mut self.entry_mut(entry_id).kind else {
+                unreachable!("process index must target a process card")
+            };
+            card.display_state = ended;
+            card.exit_code = exit_code;
+            card.elapsed_ms = Some(duration_ms);
+            self.bump_card(entry_id);
+        }
+        live.or(historical)
+    }
+
+    /// Close every process card still reading running whose process `is_running`
+    /// says the backend no longer runs, as after a restart.
+    pub fn close_stopped_process_cards(&mut self, is_running: impl Fn(&str) -> bool) {
+        let stopped: Vec<TranscriptEntryId> = self
+            .entries
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                TranscriptEntryKind::Process(card)
+                    if card.display_state == ProcessDisplayState::Running
+                        && !is_running(&card.process_id) =>
+                {
+                    Some(entry.id)
+                }
+                _ => None,
+            })
+            .collect();
+        for entry_id in stopped {
+            let TranscriptEntryKind::Process(card) = &mut self.entry_mut(entry_id).kind else {
+                unreachable!("the entry was just read as a process card")
+            };
+            card.display_state = ProcessDisplayState::Gone;
+            self.bump_card(entry_id);
+        }
     }
 
     pub fn observe_tool_result(&mut self, input: ToolResultInput) -> TranscriptEntryId {

@@ -6,8 +6,8 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from wisp.events import ProcessEnded, WispEvent
-from wisp.rpc.session.process_exits import ProcessExitNotices
+from wisp.events import ProcessEnded, WarningEvent, WispEvent
+from wisp.rpc.session.process_exits import MAX_WAKE_RUNS, ProcessExitNotices
 from wisp.tools.shell.supervisor import ProcessExit, ProcessSupervisor
 
 _STARTED = datetime(2026, 11, 13, 9, 0, tzinfo=UTC)
@@ -209,3 +209,56 @@ def test_user_stop_told_not_woken(published: list[WispEvent]) -> None:
     assert [notice.state for notice in notices.pending()] == ["cancelled"]
     assert notices.take_wake() is False
     assert woken == []
+
+
+def _use_up_wakes(notices: ProcessExitNotices) -> None:
+    for n in range(MAX_WAKE_RUNS):
+        notices.record(_exit(f"woke-{n}", notify=True))
+        assert notices.take_wake() is True
+        notices.mark_delivered(notices.pending())
+
+
+def test_pause_warns_once(published: list[WispEvent]) -> None:
+    """Once the limit stops a wake, the user is warned once and the waiting notices marked."""
+
+    notices = ProcessExitNotices(_Reported(set()), published.append)
+    _use_up_wakes(notices)
+
+    for process_id in ("waited-1", "waited-2"):
+        notices.record(_exit(process_id, notify=True))
+        assert notices.take_wake() is False
+
+    (warning,) = [event for event in published if isinstance(event, WarningEvent)]
+    assert warning.message.startswith("Auto-wake paused")
+    carried = notices.pending()
+    assert [(n.process_id, n.wake_paused) for n in carried] == [
+        ("waited-1", True),
+        ("waited-2", True),
+    ]
+    notices.mark_delivered(carried)
+    notices.restore(carried)
+    assert [n.wake_paused for n in notices.pending()] == [True, True]
+
+    notices.mark_delivered(notices.pending())
+    notices.user_prompted()
+    notices.record(_exit("after-prompt", notify=True))
+    assert notices.take_wake() is True
+    assert [n.wake_paused for n in notices.pending()] == [False]
+    notices.mark_delivered(notices.pending())
+    notices.user_prompted()
+    _use_up_wakes(notices)
+    notices.record(_exit("paused-again", notify=True))
+    assert notices.take_wake() is False
+    assert len([event for event in published if isinstance(event, WarningEvent)]) == 2
+
+
+def test_pause_needs_held_notice(published: list[WispEvent]) -> None:
+    """At the limit, an exit a poll already reported pauses nothing and warns nobody."""
+
+    notices = ProcessExitNotices(_Reported({"seen"}), published.append)
+    _use_up_wakes(notices)
+
+    notices.record(_exit("seen", notify=True))
+
+    assert notices.take_wake() is False
+    assert not any(isinstance(event, WarningEvent) for event in published)

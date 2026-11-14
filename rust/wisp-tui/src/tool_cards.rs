@@ -89,13 +89,16 @@ pub enum ProcessDisplayState {
     PollFailed,
     CancelFailed,
     Observed,
+    /// The backend no longer runs the process and never said how it ended: history
+    /// replays no `process.ended`, and processes stop with the backend.
+    Gone,
 }
 
 impl ProcessDisplayState {
     pub fn terminal(self) -> bool {
         matches!(
             self,
-            Self::Completed | Self::Failed | Self::TimedOut | Self::Cancelled
+            Self::Completed | Self::Failed | Self::TimedOut | Self::Cancelled | Self::Gone
         )
     }
 
@@ -125,6 +128,7 @@ impl ProcessDisplayState {
             }
             Self::Completed => ToolStatus::Done,
             Self::Cancelled
+            | Self::Gone
             | Self::PollDenied
             | Self::CancelDenied
             | Self::PollInterrupted
@@ -1256,6 +1260,7 @@ impl ProcessCardSnapshot {
             ProcessDisplayState::PollFailed => Some("poll failed"),
             ProcessDisplayState::CancelFailed => Some("cancellation failed"),
             ProcessDisplayState::Observed => Some("observed"),
+            ProcessDisplayState::Gone => Some("no longer running"),
         }
     }
 

@@ -9,6 +9,7 @@ from wisp.events import (
     BackgroundProcess,
     EndedProcessState,
     ProcessEnded,
+    WarningEvent,
     WispEvent,
 )
 from wisp.messages import ProcessNotice
@@ -32,7 +33,10 @@ class ProcessExitNotices:
     Such an exit also makes a wake due: the host asks ``take_wake`` whenever it is
     idle and, if it may, starts a run that carries the notices. At most
     ``MAX_WAKE_RUNS`` wake runs start between the user's prompts, so a process that
-    keeps restarting itself cannot keep the agent running unattended.
+    keeps restarting itself cannot keep the agent running unattended. Once that
+    limit stops a wake, auto-wake is paused until the user's next prompt: a warning
+    tells the user, and each notice held then is marked so its prompt tells the
+    model.
 
     Processes belong to the session that started them: the host cancels them when
     the session changes and calls ``clear``, so no notice reaches another session.
@@ -44,6 +48,7 @@ class ProcessExitNotices:
         self._pending: list[ProcessNotice] = []
         self._wake_due = False
         self._wake_runs = 0
+        self._wake_paused = False
         self._wake_listener: Callable[[], None] | None = None
 
     def set_wake_listener(self, listener: Callable[[], None] | None) -> None:
@@ -147,6 +152,10 @@ class ProcessExitNotices:
         It is allowed while notices are still held and fewer than
         ``MAX_WAKE_RUNS`` wake runs have started since the user's last prompt.
 
+        When the limit refuses a wake, the held notices are marked as having
+        waited, and the first refusal since the user's last prompt publishes a
+        warning that auto-wake has paused.
+
         Returns:
             bool: True when the host should start a wake run now.
         """
@@ -154,15 +163,34 @@ class ProcessExitNotices:
         if not self._wake_due:
             return False
         self._wake_due = False
-        if self._wake_runs >= MAX_WAKE_RUNS or not self.pending():
+        if not self.pending():
             return False
-        self._wake_runs += 1
-        return True
+        if self._wake_runs < MAX_WAKE_RUNS:
+            self._wake_runs += 1
+            return True
+        # Marked before publishing, so a frontend that fails to take the warning
+        # cannot cost the model the note.
+        self._pending = [
+            notice.model_copy(update={"wake_paused": True}) for notice in self._pending
+        ]
+        if not self._wake_paused:
+            self._wake_paused = True
+            self._publish(
+                WarningEvent(
+                    message=(
+                        f"Auto-wake paused: Wisp already started {MAX_WAKE_RUNS} runs for "
+                        "background process exits since your last prompt. Later exits "
+                        "wait for your next prompt."
+                    )
+                )
+            )
+        return False
 
     def user_prompted(self) -> None:
         """Allow wake runs again, after the user sent a prompt of their own."""
 
         self._wake_runs = 0
+        self._wake_paused = False
 
     def clear(self) -> None:
         """Forget every held notice and wake, as when the session changes."""
@@ -170,6 +198,7 @@ class ProcessExitNotices:
         self._pending.clear()
         self._wake_due = False
         self._wake_runs = 0
+        self._wake_paused = False
 
 
 def _ended_state(state: ProcessState) -> EndedProcessState:

@@ -53,10 +53,11 @@ the process and how it ended, and the agent polls once to read its output. If th
 when such a process stops, or becomes idle with the exit still unreported, Wisp starts a run by
 itself that carries only the notice, and the TUI shows it as a run like any other, which `Esc`
 cancels. At most three such wake runs start between your prompts, so a process that keeps
-restarting itself cannot keep the agent working unattended; after that, exits wait for your next
-prompt. A wake run uses the session's permission mode and asks for approvals as usual. Set
+restarting itself cannot keep the agent working unattended; after that, Wisp says auto-wake has
+paused, and exits wait for your next prompt, which tells the agent they waited. A wake run uses the session's permission mode and asks for approvals as usual. Set
 `wake_on_process_exit` to `false` in `~/.wisp/settings.json`, or `WISP_WAKE_ON_PROCESS_EXIT=0`,
-to have every notice wait for your next prompt instead. Every exit also appears in the TUI as it
+to have every notice wait for your next prompt instead. Waking is on by default in the CLI and TUI,
+and off by default for applications that embed Wisp through the in-process SDK. Every exit also appears in the TUI as it
 happens. When every process slot is taken, the error lists the processes holding them, so the model
 can poll or cancel one.
 

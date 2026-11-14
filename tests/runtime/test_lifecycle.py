@@ -337,6 +337,7 @@ def test_rpc_host_rebuilds_with_session_runtime_by_default(
                 options=InProcessOptions(cwd=tmp_path, project_context_root=tmp_path),
                 write_event=lambda _event: None,
                 render_events=lambda _events: anyio.sleep(0),
+                wake_by_default=True,
             )
         )
 

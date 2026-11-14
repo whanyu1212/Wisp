@@ -51,6 +51,9 @@ class ProcessNotice(BaseModel):
     command: str
     state: EndedProcessState
     exit_code: int | None = None
+    # The exit could not wake the agent because the wake runs allowed since the
+    # user's last prompt were used up, so it waited for a later prompt.
+    wake_paused: bool = False
 
 
 def process_notices_text(notices: Sequence[ProcessNotice]) -> str:
@@ -60,13 +63,19 @@ def process_notices_text(notices: Sequence[ProcessNotice]) -> str:
         notices (Sequence[ProcessNotice]): The processes, in the order they stopped.
 
     Returns:
-        str: One header line and one line per process.
+        str: One header line, a second when auto-wake had paused, and one line per
+        process.
     """
 
     lines = [
         "[Wisp: background processes you asked to hear about have stopped. "
         "Poll each process_id (bash operation=poll) to read its output.]"
     ]
+    if any(notice.wake_paused for notice in notices):
+        lines.append(
+            "[Wisp: auto-wake had paused after its limit of runs since the user's last "
+            "prompt, so some of these exits were not reported when they happened.]"
+        )
     for notice in notices:
         outcome = (
             f"exit code {notice.exit_code}"

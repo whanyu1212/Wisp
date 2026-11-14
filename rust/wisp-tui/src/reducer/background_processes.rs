@@ -5,12 +5,14 @@
 //! it, and `process.ended` or a result with a final state removes it. Every
 //! `get_state` reply replaces it with the backend's own list, and one is asked for
 //! whenever the transcript is rebuilt, since history replays no process events.
+//! Once that list arrives, a history card still reading running for a process it
+//! leaves out is closed, and so is any such card a later history page brings.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 use super::*;
 use crate::tool_cards::{
-    ProcessDisplayState, ToolCallInput, ToolResultInput, identity_for_display,
+    ProcessDisplayState, ToolCallInput, ToolResultInput, bounded_identity, identity_for_display,
 };
 
 /// More processes than the backend runs at once; the rest are dropped.
@@ -54,6 +56,9 @@ pub struct BackgroundProcesses {
     exits: u64,
     last_exit: Option<String>,
     read: Option<String>,
+    /// Whether `running` holds the backend's list since the transcript was last
+    /// rebuilt, so a card it leaves out can be closed.
+    listed: bool,
 }
 
 impl BackgroundProcesses {
@@ -192,6 +197,7 @@ pub(super) fn reload(
 ) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
     state.background_processes.running.clear();
     state.background_processes.foreground.clear();
+    state.background_processes.listed = false;
     if state.background_processes.read.is_some() || state.exit_requested {
         return Ok(Vec::new());
     }
@@ -199,6 +205,32 @@ pub(super) fn reload(
     let command = WispTypedClientRpcCommands::get_state(&id)?;
     state.background_processes.read = Some(id);
     Ok(vec![UiEffect::SendCommand(command)])
+}
+
+/// Closes the process cards still reading running whose process the backend no
+/// longer runs, once its list has arrived since the transcript was rebuilt.
+///
+/// Live events keep the list current after that, so this also serves history
+/// pages projected later.
+pub(super) fn close_stopped_cards(state: &mut UiState) {
+    let processes = &state.background_processes;
+    if !processes.listed {
+        return;
+    }
+    // A card names its process as the call or result did: raw, or as an identity.
+    let running: HashSet<String> = processes
+        .running
+        .iter()
+        .flat_map(|process| {
+            [
+                process.process_id.clone(),
+                bounded_identity(&process.process_id),
+            ]
+        })
+        .collect();
+    state.transcript.close_stopped_process_cards(|process_id| {
+        running.contains(process_id) || running.contains(identity_for_display(process_id))
+    });
 }
 
 /// The move-to-background key: asks the backend to move the running foreground
@@ -318,10 +350,15 @@ pub(crate) fn command_line(command: &str) -> String {
 pub(super) fn observe(state: &mut UiState, event: &BackendEvent) -> Option<Vec<UiEffect>> {
     match event {
         BackendEvent::StateReported {
+            command_id,
             background_processes,
             ..
         } => {
             state.background_processes.replace(background_processes);
+            if state.background_processes.read.as_deref() == Some(command_id.as_str()) {
+                state.background_processes.listed = true;
+                close_stopped_cards(state);
+            }
             None
         }
         BackendEvent::CommandFinished { command_id, .. }
@@ -467,6 +504,167 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// A history page whose `bash` polls each read a process as running.
+    fn running_history(prefix: &str, process_ids: &[&str]) -> crate::transcript::SharedTranscript {
+        let messages: Vec<serde_json::Value> = process_ids
+            .iter()
+            .flat_map(|process_id| {
+                let call_id = format!("{prefix}-{process_id}");
+                let entry = |role: &str, suffix: &str, content: String| {
+                    serde_json::json!({
+                        "entry_id": format!("{call_id}-{suffix}"), "role": role,
+                        "content": content, "content_truncated": false, "tool_calls": [],
+                        "is_error": null, "tool_name": null, "tool_call_id": null,
+                        "tool_result": null,
+                    })
+                };
+                let mut poll = entry("assistant", "call", String::new());
+                poll["tool_calls"] = serde_json::json!([{
+                    "call_id": call_id, "name": "bash",
+                    "arguments": {"operation": "poll", "process_id": process_id}
+                }]);
+                // History reads the state from the result's first line.
+                let mut polled = entry(
+                    "tool",
+                    "result",
+                    format!("Process {process_id} is still running"),
+                );
+                polled["tool_call_id"] = serde_json::json!(call_id);
+                polled["tool_name"] = serde_json::json!("bash");
+                polled["tool_result"] = serde_json::json!({"status": "running"});
+                [poll, polled]
+            })
+            .collect();
+        crate::history::project_rpc_messages(&messages).unwrap()
+    }
+
+    fn card_states(state: &UiState) -> Vec<(&str, ProcessDisplayState)> {
+        state
+            .transcript
+            .entries()
+            .iter()
+            .filter_map(|entry| entry.process_card())
+            .map(|card| (identity_for_display(&card.process_id), card.display_state))
+            .collect()
+    }
+
+    #[test]
+    fn unlisted_history_cards_close() {
+        use ProcessDisplayState::{Gone, Running};
+
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = Ids::default();
+        reload(&mut state, &mut ids).unwrap();
+        state.transcript = running_history("old", &["alive", "dead"]);
+        // Nothing is known before the backend's list arrives.
+        close_stopped_cards(&mut state);
+        assert_eq!(card_states(&state), [("alive", Running), ("dead", Running)]);
+
+        apply(
+            &mut state,
+            state_reply(serde_json::json!([{
+                "process_id": "alive", "command": "make dev",
+                "started_at_ms": 1_700_000_000_000_i64, "notify": false
+            }])),
+        );
+        assert_eq!(card_states(&state), [("alive", Running), ("dead", Gone)]);
+
+        // A process started live is listed, so its card stays running; an older page
+        // brought in afterwards is checked against the same list.
+        start(&mut state, "fresh", "make watch");
+        let older = running_history("older", &["fresh", "older-dead"]);
+        assert!(state.transcript.prepend_history_page(&older));
+        close_stopped_cards(&mut state);
+        assert_eq!(
+            card_states(&state),
+            [
+                ("fresh", Running),
+                ("older-dead", Gone),
+                ("alive", Running),
+                ("dead", Gone)
+            ]
+        );
+    }
+
+    #[test]
+    fn startup_history_cards_close() {
+        // A session opened at launch asks for the list along with its history, and
+        // the cards close whichever reply arrives first.
+        for list_first in [false, true] {
+            let mut state = UiState::new("fake".into(), None, None);
+            let mut ids = Ids::default();
+            let commands = sent(&reduce(&mut state, UiAction::StartupHydration, &mut ids).unwrap());
+            assert_eq!(commands[0]["type"], "get_messages");
+            let history_id = commands[0]["id"].as_str().unwrap().to_owned();
+            let state_id = commands[1]["id"].as_str().unwrap().to_owned();
+            assert_eq!(commands[1]["type"], "get_state");
+            let mut reply = state_reply(serde_json::json!([]));
+            reply["command_id"] = serde_json::json!(state_id);
+            let history = BackendEvent::MessagesReported {
+                command_id: history_id.clone(),
+                messages: SessionMessages {
+                    source_messages: Default::default(),
+                    session: None,
+                    active_leaf_id: None,
+                    truncated: false,
+                    next_before_entry_id: None,
+                    next_after_entry_id: None,
+                    durable_entry_ids: Vec::new(),
+                    exact_tool_result: None,
+                    transcript: running_history("old", &["dead"]),
+                },
+            };
+            let finished = BackendEvent::CommandFinished {
+                command_id: history_id,
+                command_type: "get_messages".into(),
+                ok: true,
+                error: None,
+            };
+            if list_first {
+                apply(&mut state, reply.clone());
+            }
+            for event in [history, finished] {
+                reduce(&mut state, UiAction::BackendEvent(event), &mut ids).unwrap();
+            }
+            if !list_first {
+                assert_eq!(
+                    card_states(&state),
+                    [("dead", ProcessDisplayState::Running)]
+                );
+                apply(&mut state, reply);
+            }
+            assert_eq!(card_states(&state), [("dead", ProcessDisplayState::Gone)]);
+        }
+    }
+
+    #[test]
+    fn history_card_takes_exit() {
+        // Reopened while its process runs, the session's card stays running until the
+        // process ends, and then that same card says how.
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = Ids::default();
+        reload(&mut state, &mut ids).unwrap();
+        state.transcript = running_history("old", &["alive"]);
+        apply(
+            &mut state,
+            state_reply(serde_json::json!([{
+                "process_id": "alive", "command": "make test",
+                "started_at_ms": 1_700_000_000_000_i64, "notify": false
+            }])),
+        );
+        assert_eq!(
+            card_states(&state),
+            [("alive", ProcessDisplayState::Running)]
+        );
+
+        ended(&mut state, "alive", 2);
+
+        assert_eq!(
+            card_states(&state),
+            [("alive", ProcessDisplayState::Failed)]
+        );
     }
 
     #[test]

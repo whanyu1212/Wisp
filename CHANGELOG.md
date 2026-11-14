@@ -46,7 +46,11 @@ The TUI's side panel key moves from `Ctrl+B` to `Ctrl+P`.
   characters), `state` (`completed`, `failed`, or `timed_out`), `exit_code`, `duration_ms`,
   and `notify`.
 - In the TUI, a background process's card closes when the process stops, with its exit code
-  and time, even when nothing polled it and the agent is idle.
+  and time, even when nothing polled it and the agent is idle. A reopened session's card for a
+  process that is still running closes the same way when the process ends.
+- A reopened session no longer shows cards stuck on running for background processes that
+  stopped with an earlier backend: once the backend lists what still runs, those cards read
+  "no longer running".
 - The `get_state` reply lists the session's running background processes in
   `background_processes`: `process_id`, `command` (at most 500 characters), `started_at_ms`, and
   `notify`. A session change stops them, so the list is empty after one.
@@ -61,9 +65,14 @@ The TUI's side panel key moves from `Ctrl+B` to `Ctrl+P`.
   "Background process stopped", which `Esc` cancels. A prompt, `/init`, or `/compact` the user
   sends while a wake run is going cancels the wake; its notices lead the next prompt. Message
   snapshots mark its prompt with `process_wake`, and its notice text never reaches a frontend. The `wake_on_process_exit`
-  setting (`WISP_WAKE_ON_PROCESS_EXIT`) is on by default; turned off, notices wait for the next
-  prompt as before. In-process SDK hosts wake too. A cancelled prompt, or one the run rolls back,
-  now leaves its notices for the next prompt instead of dropping them.
+  setting (`WISP_WAKE_ON_PROCESS_EXIT`) is on by default in the CLI, the TUI and the JSONL RPC
+  backend, and off by default for in-process SDK hosts, so an embedding application is not
+  billed for runs it did not start; set either way, it applies to both. Turned off, notices wait
+  for the next prompt as before. `WispConfig.wake_on_process_exit` is `None` when unset. A
+  cancelled prompt, or one the run rolls back, now leaves its notices for the next prompt instead
+  of dropping them.
+- Once the three wake runs are used up, a `warning` event says auto-wake has paused until the
+  user's next prompt, and the notices that waited tell the agent so when they reach it.
 - You can stop a background process the agent started without asking the agent: `/kill
   <number|process-id>`, or select its row in the side panel's **Background** list, which fills
   in `/kill` with its id for Enter to confirm. `/ps` lists them. New command `cancel_process`
