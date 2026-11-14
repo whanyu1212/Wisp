@@ -36,6 +36,7 @@ def test_rust_tui_retains_complete_live_history_over_pty(tmp_path: Path) -> None
         + """
 import json
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from wisp.events import (
@@ -93,6 +94,9 @@ for line in sys.stdin:
                 if before and indices and indices[0] else None))
         finish(command)
     else:
+        if kind == "shutdown":
+            # Leave time for the Ctrl+C presses sent after the terminal is restored.
+            time.sleep(0.3)
         finish(command)
         if kind == "shutdown":
             break
@@ -200,10 +204,16 @@ for line in sys.stdin:
                     redraw_width = 104 if redraw_width == 103 else 103
                     next_input = time.monotonic() + 0.2
             if phase == "quitting":
-                # Terminal settings return before backend shutdown finishes.
-                # Repeated Ctrl+C can then become SIGINT instead of TUI input.
                 os.write(terminal_fd, b"\x03")
                 phase = "waiting for exit"
+            elif phase == "waiting for exit" and b"\x1b[?1049l" in output:
+                # One press quit the TUI, which leaves raw mode before backend shutdown
+                # finishes. Further presses must not reach the backend as SIGINT.
+                try:
+                    os.write(terminal_fd, b"\x03")
+                except OSError as exc:
+                    if exc.errno != errno.EIO:
+                        raise
             waited_pid, waited_status = os.waitpid(child_pid, os.WNOHANG)
             if waited_pid == child_pid:
                 status = waited_status

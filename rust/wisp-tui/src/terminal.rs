@@ -7,13 +7,15 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode,
 };
 use crossterm::{ExecutableCommand, QueueableCommand, execute};
+use nix::sys::termios::{self, LocalFlags, SetArg, Termios};
 use ratatui::Terminal;
 use ratatui::backend::{Backend, CrosstermBackend};
 use std::convert::Infallible;
 use std::io::{self, Stdout, Write};
+use std::os::fd::AsFd;
 use std::panic::{self, PanicHookInfo};
 use std::sync::{
-    Arc,
+    Arc, Mutex, PoisonError,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -228,6 +230,8 @@ pub(crate) type LiveBackend = CrosstermBackend<BasicColorWriter<Stdout>>;
 
 pub struct TerminalGuard {
     terminal: Terminal<LiveBackend>,
+    /// The terminal's attributes from before raw mode, when stdin is a terminal.
+    cooked: Option<Termios>,
 }
 
 impl TerminalGuard {
@@ -236,6 +240,7 @@ impl TerminalGuard {
         // Crossterm's own suppression would erase those grayscale colors too.
         crossterm::style::force_color_output(true);
         let mut stdout = io::stdout();
+        let cooked = termios::tcgetattr(io::stdin()).ok();
         if let Err(error) =
             enter_screen(&mut stdout, mouse_enabled).and_then(|()| TITLE_STACK.enable(&mut stdout))
         {
@@ -246,7 +251,7 @@ impl TerminalGuard {
             stdout,
             color_depth,
         ))) {
-            Ok(terminal) => Ok(Self { terminal }),
+            Ok(terminal) => Ok(Self { terminal, cooked }),
             Err(error) => {
                 restore_terminal();
                 Err(Error::Io(error))
@@ -261,8 +266,56 @@ impl TerminalGuard {
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        restore_terminal();
+        // The backend is still shutting down and shares this process group. Leaving raw
+        // mode would let a second Ctrl+C reach it as SIGINT and end it mid-cleanup, so
+        // go from raw mode to the earlier attributes without the signal keys in one
+        // step. `disable_raw_mode` would turn the keys back on, so it is skipped.
+        let silenced = self
+            .cooked
+            .as_ref()
+            .is_some_and(|cooked| silence_signal_keys(io::stdin(), cooked).is_ok());
+        if silenced {
+            *signal_key_attributes() = self.cooked.take();
+            leave_input_modes();
+        } else {
+            leave_screen();
+        }
+        let _ = TITLE_STACK.restore(&mut io::stdout());
     }
+}
+
+/// The attributes [`SignalKeyGuard`] puts back, saved when [`TerminalGuard`] drops.
+static SIGNAL_KEY_ATTRIBUTES: Mutex<Option<Termios>> = Mutex::new(None);
+
+fn signal_key_attributes() -> std::sync::MutexGuard<'static, Option<Termios>> {
+    SIGNAL_KEY_ATTRIBUTES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Lets Ctrl+C, Ctrl+Z and Ctrl+\ signal the process group again once the backend has
+/// exited. Hold it across the run; [`TerminalGuard`] silences the keys when it drops.
+pub struct SignalKeyGuard;
+
+impl Drop for SignalKeyGuard {
+    fn drop(&mut self) {
+        if let Some(cooked) = signal_key_attributes().take() {
+            let _ = restore_signal_keys(io::stdin(), &cooked);
+        }
+    }
+}
+
+/// Applies `cooked` except that the terminal does not turn its signal keys into signals.
+fn silence_signal_keys(tty: impl AsFd, cooked: &Termios) -> nix::Result<()> {
+    let mut silenced = cooked.clone();
+    silenced.local_flags.remove(LocalFlags::ISIG);
+    termios::tcsetattr(&tty, SetArg::TCSANOW, &silenced)
+}
+
+/// Undoes [`silence_signal_keys`]. Discards all input typed while the keys were silent,
+/// so the shell does not read a stray Ctrl+C.
+fn restore_signal_keys(tty: impl AsFd, cooked: &Termios) -> nix::Result<()> {
+    termios::tcsetattr(&tty, SetArg::TCSAFLUSH, cooked)
 }
 
 pub struct PanicHookGuard {
@@ -310,6 +363,11 @@ fn enter_screen(stdout: &mut Stdout, mouse_capture: bool) -> io::Result<()> {
 /// Undoes [`enter_screen`]. Best effort: every step runs even if an earlier one fails.
 fn leave_screen() {
     let _ = disable_raw_mode();
+    leave_input_modes();
+}
+
+/// The part of [`leave_screen`] after raw mode: the alternate screen and input modes.
+fn leave_input_modes() {
     let _ = MOUSE_CAPTURE.restore(&mut io::stdout());
     let _ = KEYBOARD_PROTOCOL.restore(&mut io::stdout());
     let _ = execute!(
@@ -330,6 +388,23 @@ fn restore_terminal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signal_keys_silent_until_restored() {
+        let pty = nix::pty::openpty(None, None).unwrap();
+        let local_flags = || termios::tcgetattr(&pty.slave).unwrap().local_flags;
+        let cooked = termios::tcgetattr(&pty.slave).unwrap();
+        let mut raw = cooked.clone();
+        termios::cfmakeraw(&mut raw);
+        termios::tcsetattr(&pty.slave, SetArg::TCSANOW, &raw).unwrap();
+
+        silence_signal_keys(&pty.slave, &cooked).unwrap();
+        assert!(local_flags().contains(LocalFlags::ICANON));
+        assert!(!local_flags().contains(LocalFlags::ISIG));
+
+        restore_signal_keys(&pty.slave, &cooked).unwrap();
+        assert!(local_flags().contains(LocalFlags::ISIG));
+    }
 
     struct Broken;
     impl Write for Broken {

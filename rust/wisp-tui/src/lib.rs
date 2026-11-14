@@ -129,7 +129,7 @@ use std::future::pending;
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
-use terminal::{FrameBackend, PanicHookGuard, TerminalGuard};
+use terminal::{FrameBackend, PanicHookGuard, SignalKeyGuard, TerminalGuard};
 use theme::{MotionMode, Palette};
 use theme_picker::{ThemePicker, ThemePickerAction};
 use theme_preferences::{ThemePreferences, ThemeSelection};
@@ -6096,6 +6096,7 @@ async fn run(cli: Cli) -> Result<(), Error> {
         },
     };
     let _panic_hook = PanicHookGuard::install();
+    let _signal_keys = SignalKeyGuard;
     let (process, stdin, stdout, stderr) = BackendProcess::spawn(&cli.backend)?;
     run_with_io(
         cli,
