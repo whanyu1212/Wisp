@@ -77,3 +77,5 @@ Run `wisp update --check` or `wisp update` outside the TUI; `/update` displays t
 - [Quickstart](quickstart.md) — connect a provider and run your first prompt.
 - [Python SDK](sdk.md) — embed Wisp and consume typed events.
 - [Providers & auth](providers.md) — credentials, custom endpoints, and the model catalog.
+- [Troubleshooting & FAQ](troubleshooting.md) — provider failures, MCP connections, terminal controls,
+  and session diagnostics.

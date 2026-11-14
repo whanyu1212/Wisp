@@ -3,7 +3,7 @@ title: Upgrading from Wisp 0.2 to 0.3
 description: Upgrade Wisp from 0.2 to 0.3 with matching Python and Rust versions, session backups, and rollback steps.
 route: guide/upgrading-to-0.3.html
 section: using
-order: 12
+order: 13
 layout: docs
 listed: true
 searchable: true
