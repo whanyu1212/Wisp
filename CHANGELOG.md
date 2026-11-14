@@ -10,6 +10,22 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
+## 0.10.1 — Unreleased
+
+0.10.1 is a patch release on 0.10.0 with one fix in the terminal UI: pressing `Ctrl+C` again
+while Wisp is quitting no longer ends the backend. It changes no command, event, handshake,
+session, settings, credential, or trust format, so 0.10.0 and 0.10.1 read each other's sessions.
+The backend and frontend must come from the same release.
+
+### TUI
+
+- Pressing `Ctrl+C` again while Wisp is quitting no longer prints
+  `backend exited unsuccessfully with signal: 2 (SIGINT)` and exits with status 1. The terminal UI
+  restored the terminal before the backend had finished shutting down, so the second press reached
+  the backend as an interrupt and ended it before it had cleaned up. `Ctrl+C`, `Ctrl+Z` and
+  `Ctrl+\` now do nothing from the moment the terminal UI leaves the screen until the backend has
+  exited, and what is typed in that time is discarded instead of reaching the shell.
+
 <!-- Keeps links to the pre-release "0.10.0 — Unreleased" heading working. -->
 <a id="0100--unreleased"></a>
 

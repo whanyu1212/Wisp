@@ -144,6 +144,10 @@ The supported Python API gains `RpcController.cancel_process()` and `background_
 the frontend: on in the CLI, the terminal UI and the JSONL RPC backend, off for an
 `InProcessWisp` host.
 
+0.10.1 changes no command, event, handshake, session, settings, credential, or trust format, so
+0.10.0 and 0.10.1 read each other's sessions, and the schema bundle is unchanged. The backend and
+every frontend must still be the same release. The supported Python API is unchanged.
+
 ## Wisp 0.9 compatibility
 
 0.9.0 reads every session 0.8.x wrote. The session `schema_version` stays 6, because each new
