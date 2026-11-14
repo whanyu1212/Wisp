@@ -34,7 +34,11 @@ _EVENT_BUFFER_CAPACITY = 1_024
 _CONTROL_BUFFER_CAPACITY = 100
 _SYNC_EVENT_RESERVE = _CONTROL_BUFFER_CAPACITY * 3 + 16
 _STREAM_EVENT_BUFFER_CAPACITY = _EVENT_BUFFER_CAPACITY - _SYNC_EVENT_RESERVE
+# Bounds sending input-closed, then waiting for the owner to stop on its own.
 _CLOSE_TIMEOUT_SECONDS = 2
+# How long close then waits for the owner to stop after cancelling it; an owner
+# still running after this is reported as an error.
+_OWNER_CANCEL_TIMEOUT_SECONDS = 2
 
 
 class InProcessWisp(RpcController):
@@ -445,7 +449,7 @@ class _InProcessTransport(RpcTransport):
                             owner_cancel_scope = self._owner_cancel_scope
                             if owner_cancel_scope is not None:
                                 owner_cancel_scope.cancel()
-                            with anyio.move_on_after(_CLOSE_TIMEOUT_SECONDS) as cancel_wait:
+                            with anyio.move_on_after(_OWNER_CANCEL_TIMEOUT_SECONDS) as cancel_wait:
                                 await self._finished.wait()
                             if cancel_wait.cancel_called:
                                 raise RuntimeError(
