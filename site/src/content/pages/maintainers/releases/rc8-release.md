@@ -23,6 +23,9 @@ RC8 is a feature candidate on top of RC7. It keeps RC7's platforms (native wheel
 Linux glibc 2.28+ x86_64, plus a pure wheel). The version pair is Python `0.2.0rc8` / Cargo
 `0.2.0-rc.8` and must match exactly.
 
+For current server setup, authentication, and panel controls, use the
+[MCP guide](../../guide/mcp.md). The notes below describe this historical release.
+
 It completes the MCP management work (HY-256) and adds web search:
 
 - **MCP servers without editing `settings.json`** (HY-257, HY-258, HY-260; #695–#698): `wisp mcp`

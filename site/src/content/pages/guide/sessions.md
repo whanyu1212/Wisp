@@ -3,7 +3,7 @@ title: Sessions
 description: Persist, resume, branch, and inspect append-only JSONL session transcripts across CLI, TUI, and SDK workflows.
 route: guide/sessions.html
 section: using
-order: 8
+order: 9
 layout: docs
 listed: true
 searchable: true

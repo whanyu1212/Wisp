@@ -3,7 +3,7 @@ title: Context & compaction
 description: How Wisp assembles system instructions, loads trusted project context, estimates token budgets, and compacts history.
 route: guide/context-and-compaction.html
 section: using
-order: 9
+order: 10
 layout: docs
 listed: true
 searchable: true

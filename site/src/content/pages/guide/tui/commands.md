@@ -69,7 +69,7 @@ switching to another session. Changing the default clears temporary grants. Star
 is not saved. These choices do not change project trust or protected paths. In the home folder or a
 folder above it, YOLO applies for the session only and the panel says so; Ask is still saved.
 
-Use `/codemode` to choose when runs offer the [codemode](.././tools-and-safety#scripting-tool-calls-with-codemode-experimental)
+Use `/codemode` to choose when runs offer the [codemode](../mcp.md#mcp-with-codemode)
 tool: automatic (when a run finds its MCP tools on demand), always, or never. `/codemode always`
 and the other settings apply one directly. The panel docks above the composer like
 `/permissions`, marks the current setting, and says whether the next prompt offers the tool.
@@ -102,43 +102,10 @@ offers the `spawn_agent` tool, and flags a saved model the current provider does
 
 ## Managing MCP servers
 
-`/mcp` lists the configured MCP servers with their status. `↑`/`↓` select a server; below the list
-you see what it runs (or the URL it connects to), the environment variables it sets or forwards, the
-headers it sends (naming each variable a header sends and the host that receives it), any startup
-error, and its tools. `PgUp`/`PgDn` scroll those details.
-
-| Key | Action |
-|---|---|
-| `a` | Add a server by pasting its config snippet |
-| `e` | Disable the selected server, or enable it after confirming what it runs |
-| `d` | Remove the selected server, after confirming |
-| `l` | Sign in to the selected HTTP server with OAuth, in your browser |
-| `o` | Sign out of the selected server |
-| `c` | Reconnect: reload servers from your settings file and restart them |
-| `r` | Refresh the status without reconnecting |
-| `Esc` | Close, step back out of a panel, or cancel a sign-in in progress |
-
-To add a server, press `a` and paste the `{"mcpServers": {...}}` block from the server's README, one
-server at a time (use `wisp mcp import` for several). Wisp reads the snippet without saving it. For
-each environment variable the server needs, choose whether to forward it from Wisp's environment or
-enter a value; then enter each HTTP header value the snippet sets. Entered values are masked, never
-shown again, and saved to `~/.wisp/settings.json`. The snippet's own values are ignored, since
-published snippets usually hold placeholders; a header written as `"Bearer ${VAR}"` forwards that
-variable instead and needs no value.
-
-A server that needs you to sign in shows "sign in required". Press `l`: Wisp opens the server's
-sign-in page in your browser and waits up to five minutes. The list shows the page's address in case
-no browser opens; open it in a browser on the same machine as Wisp, because the page returns to a
-local address. `Esc` cancels. Once you finish, the server reconnects
-with its tools; the list shows "signed in", and `o` signs out. See
-[Signing in with OAuth](.././tools-and-safety#signing-in-with-oauth).
-
-Adding, enabling, and removing end in a confirmation docked above the composer that shows exactly
-what will run. Like an approval, it has no default: choose with `1`/`2`, or highlight with `↑`/`↓`
-and press `Enter`; a key pressed before the panel was drawn does nothing. Confirming saves the change
-and reconnects, and the list then shows the server's new status and tools. Changes wait until the
-current prompt finishes. "Allow for this session" answers for MCP tools are cleared on every
-reconnect.
+Open `/mcp` to inspect server status and tools, add or remove a server, or sign in. The
+[MCP guide's panel walkthrough](../mcp.md#managing-mcp-servers) lists all keys, explains snippet
+import and masked credentials, and distinguishes reconnect (`c`) from status refresh (`r`).
+Adding or enabling a server needs confirmation; reconnecting clears per-tool session grants.
 
 ## Slash commands
 

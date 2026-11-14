@@ -3,7 +3,7 @@ title: Agent Skills
 description: Discover, validate, and invoke project and user skills that follow the Agent Skills specification.
 route: guide/skills.html
 section: using
-order: 10
+order: 11
 layout: docs
 listed: true
 searchable: true

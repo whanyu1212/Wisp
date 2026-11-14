@@ -32,7 +32,8 @@ searchable: true
 | `WISP_AUTO_COMPACTION` | Automatic threshold compaction and overflow recovery; defaults to `true` |
 | `WISP_WAKE_ON_PROCESS_EXIT` | Start a run when a background process started with `notify_on_exit` stops while the session is idle, at most three times between prompts; defaults to `true` |
 | `WISP_WEB_SEARCH` | Offer the provider's built-in [web search](../guide/providers.md#web-search) to the model; defaults to `false` |
-| `WISP_CODEMODE` | Offer the experimental [codemode](../guide/tools-and-safety.md#scripting-tool-calls-with-codemode-experimental) tool in every run (`1`) or never (`0`); unset, it is offered whenever a run finds its MCP tools on demand |
+| `WISP_MCP_TOOL_EXPOSURE` | MCP discovery mode: `auto` (default), `direct`, or `on_demand`; see [MCP discovery](../guide/mcp.md#finding-mcp-tools-on-demand) |
+| `WISP_CODEMODE` | Offer experimental [codemode](../guide/mcp.md#mcp-with-codemode) whenever eligible (`1`) or never (`0`); unset, automatic mode follows on-demand MCP discovery. Requires the extra and eligible read-only tools |
 | `WISP_SUBAGENTS` | Offer the experimental [`spawn_agent`](../guide/tools-and-safety.md#delegating-to-a-subagent-experimental) tool, which hands a read-only task to a subagent; defaults to `false` |
 | `WISP_SUBAGENT_MODEL` | Model a [subagent](../guide/tools-and-safety.md#delegating-to-a-subagent-experimental) that starts fresh uses, on the session's provider; unset, subagents use the session's model |
 

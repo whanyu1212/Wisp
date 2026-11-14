@@ -44,6 +44,10 @@ ordering are shared. Input capabilities depend on the transport:
   approval response after the run starts; pass `--yes` only when unattended unsafe execution is
   intentional.
 
+MCP connections and tool safety are shared too. The [MCP servers & codemode guide](mcp.md) covers
+setup, authentication, discovery, and read-only scripts. TUI users manage servers in `/mcp` and
+script availability in `/codemode`; RPC and SDK hosts use the corresponding shared commands.
+
 Use [Staying in sync](staying-in-sync.md) for queue and cancellation behavior, the
 [Python SDK guide](sdk.md) for embedding lifecycle and examples, [CLI](../reference/cli.md) for flags
 and stream contracts, and [Architecture](../architecture/index.md) for the shared runtime boundaries.

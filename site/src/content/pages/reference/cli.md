@@ -141,7 +141,8 @@ wisp mcp logout NAME
 ```
 
 These commands edit `mcp_servers` in `~/.wisp/settings.json` and keep every other setting.
-Changes apply the next time Wisp starts.
+Changes apply the next time Wisp starts. See the [MCP guide](../guide/mcp.md) for setup examples,
+TUI controls, authentication, and codemode.
 
 - Everything after `--` is the server's command, passed unchanged, so its own flags (such as
   `npx -y`) are never read as Wisp options.
@@ -158,7 +159,7 @@ Changes apply the next time Wisp starts.
   `"enabled": false` are not kept.
 - `login` signs in to an HTTP server with OAuth in your browser and saves the tokens in
   `~/.wisp/mcp-auth.json`; `logout` forgets them. See
-  [Signing in with OAuth](../guide/tools-and-safety.md#signing-in-with-oauth).
+  [Signing in with OAuth](../guide/mcp.md#signing-in-with-oauth).
 - `list` never prints environment or header values.
 - If the settings file is already invalid, the commands refuse to change it and name the field to
   fix.

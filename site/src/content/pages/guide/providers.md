@@ -142,7 +142,7 @@ rejects the request; turn the setting off if that happens.
 
 **Safety.** Search results are untrusted web content. Wisp tells the model to treat them as data, not
 instructions, and nothing found through search bypasses a confirmation: an MCP server found this way
-is still added only through a [proposal you confirm](tools-and-safety.md#asking-wisp-to-set-up-a-server).
+is still added only through a [proposal you confirm](mcp.md#asking-wisp-to-set-up-a-server).
 
 Each search is reported as a `WebSearchPerformed` event (`web.search`) with its query and the pages
 it returned or opened, and is kept in the session file for audit. Titles and URLs come from the web
