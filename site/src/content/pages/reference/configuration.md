@@ -57,7 +57,7 @@ Some fields are **user-only** and a project file can never set them:
 `protected_paths` · `retry` · `codex_read_timeout_seconds` · `effort` · `context_reserve_tokens` ·
 `auto_compaction_enabled` · `web_search` · `wake_on_process_exit` · `codemode` · `subagents` ·
 `subagent_model` ·
-`mcp_servers` · `mcp_tool_exposure` · `openai_compatible`
+`mcp_servers` · `mcp_tool_exposure` · `openai_compatible` · `tui_keybindings`
 
 A repository cannot increase your API spending, prolong waits, launch an MCP command, configure a
 credential-receiving provider endpoint, or weaken the secret guard.
@@ -67,6 +67,30 @@ project. In particular, `auth_path` can redirect credentials entered through `/c
 inside the working tree. Inspect trusted project settings before authenticating, pass `--auth-file`
 or set `WISP_AUTH_FILE` for a deliberate higher-precedence override, and never commit the selected
 auth file.
+
+## Structured user settings
+
+These settings belong in `~/.wisp/settings.json`, not the project file:
+
+| Field | Format and example |
+|---|---|
+| `tui_keybindings` | Object mapping action IDs to arrays of key chords. See [Keybinding preferences](../guide/tui/keybindings.md#keybinding-preferences) for an example, available actions, and restart requirements. |
+| `mcp_servers` | Object keyed by server name, with either a stdio `command` or an HTTP `url` per entry. See [MCP servers](../guide/tools-and-safety.md#mcp-tools) for complete JSON examples and authentication options. |
+| `openai_compatible` | Object with `provider_name`, `base_url`, and `default_model`, plus optional `requires_api_key` and `ca_bundle`. See [OpenAI-compatible endpoints](../guide/providers.md#openai-compatible-endpoints) for hosted and local examples. |
+| `protected_paths` | Array of path-pattern strings, replacing the default list rather than extending it. See the example below and [Protected paths](../guide/tools-and-safety.md#protected-paths) for limits. |
+
+For example, this replaces the default protected-path patterns with a custom list:
+
+```json
+{
+  "protected_paths": [".env", "*.pem", "*.key", "private/credentials.json"]
+}
+```
+
+Bare patterns match a basename at any depth; patterns containing `/` match a path suffix. Replacing
+this list drops defaults you do not repeat. `[]` disables the configurable patterns, but Wisp's
+credential, settings, and permission files remain protected. These rules apply to file tools, not
+`bash` or MCP tools; they are not a sandbox.
 
 ## Remembered preferences
 

@@ -17,6 +17,7 @@ searchable: true
 | `WISP_MODEL` | Model override; blank uses the provider default |
 | `WISP_MODE` | Default mode for invocations without `--prompt`; prompt runs require explicit `--mode` |
 | `WISP_RUST_TUI_BINARY` | Absolute executable path to a source-built `wisp-tui`; used when launching the TUI |
+| `WISP_TUI_MOUSE` | TUI mouse navigation and selection; enabled when unset or set to `1`, `true`, or `on` (case-insensitive, surrounding whitespace ignored); any other value disables it |
 | `WISP_SESSION_DIR` | Session storage directory; defaults to `~/.wisp/sessions` |
 | `WISP_AUTH_FILE` | Auth file path; defaults to `~/.wisp/auth.json` |
 | `WISP_OPENAI_COMPATIBLE_CONFIG` | JSON object configuring one OpenAI-compatible endpoint; overrides the user-settings `openai_compatible` object |
@@ -34,6 +35,16 @@ searchable: true
 | `WISP_CODEMODE` | Offer the experimental [codemode](../guide/tools-and-safety.md#scripting-tool-calls-with-codemode-experimental) tool in every run (`1`) or never (`0`); unset, it is offered whenever a run finds its MCP tools on demand |
 | `WISP_SUBAGENTS` | Offer the experimental [`spawn_agent`](../guide/tools-and-safety.md#delegating-to-a-subagent-experimental) tool, which hands a read-only task to a subagent; defaults to `false` |
 | `WISP_SUBAGENT_MODEL` | Model a [subagent](../guide/tools-and-safety.md#delegating-to-a-subagent-experimental) that starts fresh uses, on the session's provider; unset, subagents use the session's model |
+
+For terminal-native selection instead of Wisp's mouse handling, launch with:
+
+```bash
+WISP_TUI_MOUSE=0 wisp tui
+```
+
+See [Mouse navigation and scrollback](../guide/tui/sessions.md#mouse-navigation-and-scrollback)
+for supported interactions and terminal-specific overrides. To customize keyboard controls, use
+[`tui_keybindings`](configuration.md#structured-user-settings), not an environment variable.
 
 ## Provider credentials
 
@@ -73,3 +84,20 @@ must name an existing, executable absolute path and is removed from the environm
 Python RPC backend. Without an override, native-wheel installations resolve `wisp-tui` only
 from the active Python environment's scripts directory; Wisp never searches `PATH`. See
 [Development setup](../contributing/development.md#rust-tui-scaffold).
+
+## Internal development controls
+
+The following names are implementation details for Wisp's launcher, tests, or benchmarks, not
+supported user configuration. They may change without compatibility guarantees; leave them unset
+for normal use.
+
+| Name | Internal purpose |
+|---|---|
+| `WISP_RUST_TUI_BINDINGS_JSON` | Launcher-to-frontend handoff of resolved keybindings. The Python launcher overwrites it from user settings; configure `tui_keybindings` instead. |
+| `WISP_VISUAL_OUTPUT` | Output directory for the explicitly requested, ignored Rust visual-capture test; not a runtime rendering option. |
+| `WISP_HYDRATION_PROFILE_DIR` | Opt-in Python/Rust saved-history benchmark timings, appended as per-process JSONL files in an existing directory. |
+| `WISP_FAKE_*` | Fake-provider test controls: `WISP_FAKE_STREAM_INTERVAL_MS`, `WISP_FAKE_RESPONSE_WORDS`, `WISP_FAKE_RESPONSE_PREFIX`, and `WISP_FAKE_RESPONSE_SUFFIX`. These tune synthetic responses, not real providers. |
+
+The historical `WISP_BRAILLE_*` controls are no longer read from the environment. The current
+`WISP_BRAILLE_MINI`, `WISP_BRAILLE_NORMAL`, and `WISP_BRAILLE_FULL` names are Rust logo constants,
+not environment variables.
