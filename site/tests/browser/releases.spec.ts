@@ -51,6 +51,7 @@ for (const [id, heading] of [
   ["081--unreleased", "0.8.1 — 2026-11-11"],
   ["090--unreleased", "0.9.0 — 2026-11-12"],
   ["091--unreleased", "0.9.1 — 2026-11-13"],
+  ["092--unreleased", "0.9.2 — 2026-11-13"],
 ]) {
   test(`dated changelog heading keeps its old anchor ${id}`, async ({
     page,
@@ -101,7 +102,8 @@ test("old release URLs retain fragment redirects and an explicit no-JavaScript d
   page,
   browser,
 }) => {
-  const record = records[0]!;
+  // Release docs moved from contributing/ keep their old URLs; newer ones never had one.
+  const record = records.find((page) => page.legacySource)!;
   await page.goto(href(record.route));
   const id = await page.locator("article h1").getAttribute("id");
   expect(record.legacySource).toMatch(/^contributing\//);
