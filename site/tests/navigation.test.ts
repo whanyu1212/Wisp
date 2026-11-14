@@ -88,8 +88,12 @@ test("the real collections expose the same section order, course sequence, and n
     ],
   );
   assert.deepEqual(
-    using.slice(-2).map((page) => page.source),
-    ["guide/upgrading-to-0.3.md", "guide/upgrading.md"],
+    using.slice(-3).map((page) => page.source),
+    [
+      "guide/troubleshooting.md",
+      "guide/upgrading-to-0.3.md",
+      "guide/upgrading.md",
+    ],
   );
   for (const entry of metadata) {
     assert.ok(

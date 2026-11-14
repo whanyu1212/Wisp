@@ -93,4 +93,5 @@ wisp --resume <session-id-prefix>
 ```
 
 Next, learn how to [steer, cancel, and approve while Wisp works](staying-in-sync.md), or browse the
-[TUI guide](tui.md) and [CLI reference](../reference/cli.md).
+[TUI guide](tui.md) and [CLI reference](../reference/cli.md). If something goes wrong, start with
+[Troubleshooting & FAQ](troubleshooting.md).
