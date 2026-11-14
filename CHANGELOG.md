@@ -10,28 +10,37 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.9.2 — Unreleased
+## 0.10.0 — Unreleased
 
-0.9.2 is a patch release on 0.9.1. The terminal UI reads a turn as one activity list, and
-compaction keeps more of long tool output in its checkpoint. A background process can tell the
-agent when it stops, and the user can stop one or move a running command there. That adds one
-event, `process.ended`, two commands, `cancel_process` and `background_tool_call`, an optional
-`background_processes` list in the `get_state` reply, a `process_wake` flag on message snapshots,
-an optional `process_notices` field on persisted user messages, which 0.9.1 ignores, and one user
-setting, `wake_on_process_exit`; no handshake, credential, or trust format changes, so 0.9.1 and
-0.9.2 still read each other's sessions. The backend and frontend must come from the same release.
-The TUI's side panel key moves from `Ctrl+B` to `Ctrl+P`.
+0.10.0 is a minor release on 0.9.2 about background processes. A process the agent starts in the
+background can tell it when it stops, and wake it when the session is idle; in the terminal UI the
+user can see the running processes, stop one, or move a running command to the background. Each
+session also gets a private scratch folder, and on macOS commands run in Homebrew's bash when it is
+installed. That adds one event, `process.ended`, two commands, `cancel_process` and
+`background_tool_call`, an optional `background_processes` list in the `get_state` reply, a
+`process_wake` flag on message snapshots, an optional `process_notices` field on persisted user
+messages, which 0.9.2 ignores, and one user setting, `wake_on_process_exit`. Sessions keep
+`schema_version` 6, so 0.9.2 opens sessions 0.10.0 wrote; no handshake, credential, or trust format
+changes. The backend and frontend must come from the same release. **The TUI's side panel key moves
+from `Ctrl+B` to `Ctrl+P`.**
 
 ### TUI
 
-- A turn reads as one activity list. The `wisp` label appears only above text a reply writes;
-  until then a reply is led by its thought or working note, which stacks with the tool cards
-  around it instead of being set apart by a blank row. A finished reply that only called tools
-  draws no rows of its own, so reopened sessions, which restore no thinking, no longer show a bare
-  label before every tool step.
+- Wisp Braille, the startup logo, has a three-color gradient chosen for each of the nine themes.
+  It used to reuse the theme's heading colors, which made several themes' logos look the same.
 
 ### Tools
 
+- Each session has a private scratch folder, `scratch/<session id>` beside the session files,
+  created readable only by its owner. The file and search tools reach it as well as the workspace,
+  `bash` gets its path as `WISP_SCRATCH_DIR`, and the prompt names it, so the agent can write a
+  pull request body or commit message there instead of `/tmp`, which the file tools refuse. A
+  resumed session keeps its folder, and protected-path checks apply inside it.
+- On macOS, `bash` runs commands with Homebrew's bash when it is installed (`/opt/homebrew/bin/bash`,
+  then `/usr/local/bin/bash`), before `/bin/bash`, which is bash 3.2. bash 3.2 misreads an
+  apostrophe in a heredoc inside `$(...)`, which broke `gh pr create --body "$(cat <<'EOF' ...)"`,
+  and lacks `declare -A`, `mapfile` and `${var,,}`. When that parse error still happens, the result
+  suggests passing the text as a file, such as `--body-file` or `git commit -F`.
 - A `bash` poll can wait for a started process to finish: `until=exit`, on `poll` or `start`, keeps
   waiting through output until the process stops or the wait ends. Before, any output ended the
   wait, so a watcher such as `gh pr checks --watch` made the model poll again every few seconds.
@@ -88,6 +97,24 @@ The TUI's side panel key moves from `Ctrl+B` to `Ctrl+P`.
   `RpcController.background_tool_call`. **The side panel moves from `Ctrl+B` to `Ctrl+P`.** A
   `tui_keybindings` setting that already used `Ctrl+P` or `Ctrl+B` for another action keeps it,
   and the panel or the background key is left without its default instead.
+
+<!-- Keeps links to the pre-release "0.9.2 — Unreleased" heading working. -->
+<a id="092--unreleased"></a>
+
+## 0.9.2 — 2026-11-13
+
+0.9.2 is a patch release on 0.9.1. The terminal UI reads a turn as one activity list, and
+compaction keeps more of long tool output in its checkpoint. It changes no command, event,
+handshake, session, settings, credential, or trust format, so 0.9.1 and 0.9.2 read each other's
+sessions. The backend and frontend must come from the same release.
+
+### TUI
+
+- A turn reads as one activity list. The `wisp` label appears only above text a reply writes;
+  until then a reply is led by its thought or working note, which stacks with the tool cards
+  around it instead of being set apart by a blank row. A finished reply that only called tools
+  draws no rows of its own, so reopened sessions, which restore no thinking, no longer show a bare
+  label before every tool step.
 
 ### Compaction
 

@@ -116,6 +116,34 @@ with `write_constraint`, under the exception below. Tool behavior changes are li
 `bash` runs commands in bash rather than `/bin/sh`, and that the read-only file tools follow
 symbolic links whose targets stay inside the workspace.
 
+## Wisp 0.10 compatibility
+
+0.10.0 reads every session 0.9.x wrote, and 0.9.2 opens sessions 0.10.0 wrote. The session
+`schema_version` stays 6. A user message that carried background-process notices records them in
+an optional `process_notices` field, which 0.9.2 ignores; its `content` already holds the notice
+text in front of the prompt, so 0.9.2 shows that text as part of the prompt, and a prompt Wisp
+sent by itself to wake the agent as a prompt holding only the notices.
+
+Each session's scratch folder lives beside the session files, at `scratch/<session id>`. 0.9.2
+leaves it alone.
+
+Settings, credential, and trust formats are unchanged. `wake_on_process_exit` is a new user
+setting; 0.9.2 ignores it. The terminal UI's side panel moves from `Ctrl+B` to `Ctrl+P`, and
+`Ctrl+B` now moves a running shell command to the background. A `tui_keybindings` setting that
+already used either key for another action keeps it.
+
+Commands and events gain members and fields: the `cancel_process` and `background_tool_call`
+commands, the `process.ended` event, `background_processes` in the `rpc.state` reply, and
+`process_wake` on message snapshots, all listed in the
+[changelog](https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md). A 0.9 reader rejects them,
+so the backend and every frontend must be the same release, and external RPC clients should use the
+0.10.0 schema bundle.
+
+The supported Python API gains `RpcController.cancel_process()` and `background_tool_call()`.
+`WispConfig.wake_on_process_exit` is `bool | None` and defaults to `None`, which leaves waking to
+the frontend: on in the CLI, the terminal UI and the JSONL RPC backend, off for an
+`InProcessWisp` host.
+
 ## Wisp 0.9 compatibility
 
 0.9.0 reads every session 0.8.x wrote. The session `schema_version` stays 6, because each new
