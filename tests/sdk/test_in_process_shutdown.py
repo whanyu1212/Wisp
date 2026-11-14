@@ -31,7 +31,12 @@ def test_in_process_sdk_close_reports_owner_that_resists_cancellation(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(sdk_module, "_CLOSE_TIMEOUT_SECONDS", 0.01)
+    timeouts = {
+        name: getattr(sdk_module, name)
+        for name in ("_CLOSE_TIMEOUT_SECONDS", "_OWNER_CANCEL_TIMEOUT_SECONDS")
+    }
+    for name in timeouts:
+        monkeypatch.setattr(sdk_module, name, 0.01)
 
     async def scenario() -> None:
         controller = await InProcessWisp.start(
@@ -59,6 +64,9 @@ def test_in_process_sdk_close_reports_owner_that_resists_cancellation(
             await controller.aclose()
         transport._owner_cancel_scope = real_cancel_scope
         transport._control_send = real_control_send
+        # The real owner gets the real timeouts, so a slow machine can't fail this close.
+        for name, default in timeouts.items():
+            monkeypatch.setattr(sdk_module, name, default)
         await controller.aclose()
 
     anyio.run(scenario)
