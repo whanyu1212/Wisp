@@ -195,6 +195,8 @@ async def _run_rpc_with_runtime(
                 ),
                 write_event=event_writer,
                 render_events=render_events,
+                # The CLI and TUI wake the agent: someone started this session to watch it.
+                wake_by_default=True,
                 config_overrides=config_overrides,
                 runtime_builder=build_session_runtime,
                 outbound_frame_limit=_RPC_TRANSPORT_LIMITS.max_server_frame_bytes,

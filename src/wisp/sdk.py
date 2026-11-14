@@ -312,6 +312,9 @@ class _InProcessTransport(RpcTransport):
                 options=options,
                 write_event=event_output.write_event,
                 render_events=event_output.render_events,
+                # An embedding application starts runs itself; a run Wisp started
+                # unasked would be billed to it.
+                wake_by_default=False,
                 config_overrides=config_overrides,
                 on_shutdown_dispatched=close_command_admission,
                 on_shutdown_abandoned=reopen_command_admission,

@@ -2324,10 +2324,11 @@ fn start_startup_hydration(
         loaded: None,
         completion: None,
     });
-    Ok(vec![
-        UiEffect::SendCommand(command),
-        UiEffect::RequestRender,
-    ])
+    let mut effects = vec![UiEffect::SendCommand(command)];
+    // History replays no process events, so the backend lists what still runs.
+    effects.extend(background_processes::reload(state, ids)?);
+    effects.push(UiEffect::RequestRender);
+    Ok(effects)
 }
 
 fn connection_busy() -> Vec<UiEffect> {
@@ -4486,6 +4487,8 @@ fn install_history_snapshot(state: &mut UiState, report: SessionMessages) {
         tail_evicted: false,
         active_exact_detail: None,
     };
+    // History replays no process events, so its cards may still read running.
+    background_processes::close_stopped_cards(state);
     crate::hydration_profile::record("rust.history_install", started.elapsed(), message_count);
 }
 
@@ -4816,6 +4819,7 @@ fn apply_older_page(state: &mut UiState, report: SessionMessages) -> Vec<UiEffec
         .splice(0..0, report.durable_entry_ids);
     state.history.oldest_cursor = report.next_before_entry_id;
     sync_represented_history(state);
+    background_processes::close_stopped_cards(state);
 
     clear_evicted_exact_detail(state);
     vec![
@@ -4836,6 +4840,7 @@ fn apply_newer_page(state: &mut UiState, report: SessionMessages) -> Vec<UiEffec
     state.history.newest_cursor = report.next_after_entry_id;
     state.history.tail_evicted = state.history.newest_cursor.is_some();
     sync_represented_history(state);
+    background_processes::close_stopped_cards(state);
 
     clear_evicted_exact_detail(state);
     vec![

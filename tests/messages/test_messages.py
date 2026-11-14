@@ -334,3 +334,19 @@ def test_user_stop_notice() -> None:
     notice = ProcessNotice(process_id="p1", command="npm run dev", state="cancelled")
 
     assert "- process_id=p1: stopped by the user: npm run dev" in process_notices_text([notice])
+
+
+@pytest.mark.parametrize("content", ["what next?", ""], ids=["prompt", "wake"])
+def test_paused_wake_noted(content: str) -> None:
+    """A notice that waited while auto-wake was paused says so, and still strips cleanly."""
+
+    waited = ProcessNotice(process_id="p1", command="make", state="failed", wake_paused=True)
+    prompt = ProcessNotice(process_id="p2", command="make test", state="completed", exit_code=0)
+    message = Message(role="user", content=content).with_process_notices([waited, prompt])
+
+    header = process_notices_text([waited, prompt]).splitlines()
+    assert header[1].startswith("[Wisp: auto-wake had paused")
+    assert len(header) == 4
+    assert message.prompt_content == content
+    assert message.is_process_wake is (not content)
+    assert "auto-wake" not in process_notices_text([prompt])

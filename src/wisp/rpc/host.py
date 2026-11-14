@@ -697,6 +697,7 @@ class RpcHost:
         options: InProcessOptions,
         write_event: RpcEventWriter,
         render_events: RpcEventRenderer,
+        wake_by_default: bool,
         config_overrides: _ConfigOverrides | None = None,
         runtime_builder: RuntimeBuilder | None = None,
         max_queued_commands: int | None = None,
@@ -704,7 +705,12 @@ class RpcHost:
         on_shutdown_abandoned: Callable[[], None] | None = None,
         outbound_frame_limit: int | None = None,
     ) -> RpcHost:
-        """Build a host without starting a transport or event loop."""
+        """Build a host without starting a transport or event loop.
+
+        ``wake_by_default`` is the frontend's choice of whether a background process
+        exit may start a run while the session is idle, used when
+        ``config.wake_on_process_exit`` is unset.
+        """
 
         sessions = JsonlSessionStore(config.session_dir)
 
@@ -892,16 +898,20 @@ class RpcHost:
             )
             await host._render_event_batch(events)
 
+        wake_on_process_exit = (
+            wake_by_default if config.wake_on_process_exit is None else config.wake_on_process_exit
+        )
+
         def next_wake() -> ParsedRpcCommand | None:
             # Asked by the coordinator whenever nothing runs or waits.
-            if not config.wake_on_process_exit or not process_exits.take_wake():
+            if not wake_on_process_exit or not process_exits.take_wake():
                 return None
             return ParsedRpcCommand.from_known(ProcessWakeCommand(id=f"wake-{uuid4().hex}"))
 
         coordinator = RpcCoordinator(
             session_state,
             wake=next_wake,
-            wake_due=lambda: config.wake_on_process_exit and process_exits.wake_due,
+            wake_due=lambda: wake_on_process_exit and process_exits.wake_due,
             session_changed=end_session_scope,
             session_activated=work_from_active_path,
             input_closed_handlers=(

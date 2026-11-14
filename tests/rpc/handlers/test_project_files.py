@@ -350,6 +350,7 @@ def test_host_trust_transition_invalidates_even_when_configuration_is_equal(tmp_
                 options=InProcessOptions(cwd=tmp_path, startup_trusted=False),
                 write_event=writer,
                 render_events=writer.render_events,
+                wake_by_default=True,
             )
             assert await host.trust_gate._finish(True)
             invalidations = [e for e in writer.events if isinstance(e, ProjectFilesInvalidated)]

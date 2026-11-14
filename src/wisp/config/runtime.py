@@ -39,7 +39,6 @@ from wisp.validation import redact_validation_error_inputs
 DEFAULT_PROVIDER = "openai-codex"
 DEFAULT_CONTEXT_RESERVE_TOKENS = 16_384
 DEFAULT_AUTO_COMPACTION_ENABLED = True
-DEFAULT_WAKE_ON_PROCESS_EXIT = True
 DEFAULT_WEB_SEARCH_ENABLED = False
 DEFAULT_SUBAGENTS_ENABLED = False
 OPENAI_COMPATIBLE_CONFIG_ENV = "WISP_OPENAI_COMPATIBLE_CONFIG"
@@ -67,8 +66,9 @@ class WispConfig(BaseModel):
     auto_compaction_enabled: bool = DEFAULT_AUTO_COMPACTION_ENABLED
     web_search: bool = DEFAULT_WEB_SEARCH_ENABLED
     # Start a run by itself when a background process the agent asked to hear about
-    # stops while the session is idle.
-    wake_on_process_exit: bool = DEFAULT_WAKE_ON_PROCESS_EXIT
+    # stops while the session is idle: True or False when set, None to leave it to
+    # the frontend, which waking is on for in the CLI and TUI and off in-process.
+    wake_on_process_exit: bool | None = None
     # The experimental codemode tool, which needs the `codemode` extra: True or False
     # when set, None to offer it whenever the run finds its MCP tools on demand.
     codemode: bool | None = None
@@ -195,9 +195,10 @@ class WispConfig(BaseModel):
 
         ``wake_on_process_exit`` (``WISP_WAKE_ON_PROCESS_EXIT``) is user-only, because
         a run it starts is billed to the user's provider account while they may be
-        away. On by default: a background process started with ``notify_on_exit``
-        that stops while the session is idle starts a run, at most three times
-        between the user's prompts.
+        away. When on, a background process started with ``notify_on_exit`` that
+        stops while the session is idle starts a run, at most three times between the
+        user's prompts. Unset, it resolves to None and the frontend decides: on for
+        the CLI and TUI, off for the in-process SDK.
 
         ``codemode`` (``WISP_CODEMODE``) is user-only. It offers the experimental
         codemode tool, which runs model-written scripts that call the run's read-only
@@ -313,10 +314,9 @@ class WispConfig(BaseModel):
             wake_on_process_exit=(
                 wake_on_process_exit
                 if wake_on_process_exit is not None
-                else _resolve_bool(
+                else _resolve_optional_bool(
                     os.environ.get("WISP_WAKE_ON_PROCESS_EXIT"),
                     settings.wake_on_process_exit,
-                    default=DEFAULT_WAKE_ON_PROCESS_EXIT,
                     name="WISP_WAKE_ON_PROCESS_EXIT",
                 )
             ),

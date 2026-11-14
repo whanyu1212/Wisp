@@ -10959,9 +10959,13 @@ mod tests {
             )
             .await
             .unwrap();
-        let WriterMessage::Frame { .. } = writer_rx.recv().await.unwrap() else {
-            panic!("startup hydration must queue one frame");
-        };
+        for expected in ["get_messages", "get_state"] {
+            let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
+                panic!("startup hydration must queue {expected}");
+            };
+            let command: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+            assert_eq!(command["type"], expected);
+        }
         live_ui
             .dispatch(
                 UiAction::BackendEvent(BackendEvent::MessagesReported {

@@ -8199,6 +8199,39 @@ mod tests {
     }
 
     #[test]
+    fn gone_process_card_row() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("poll".into());
+        let card_id = transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+            call_id: "poll-1".into(),
+            name: "bash".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+            arguments: serde_json::json!({"operation": "poll", "process_id": "process-1"}),
+        });
+        let mut polled = tool_result("poll-1", "");
+        polled.name = "bash".into();
+        polled.process_id = Some("process-1".into());
+        polled.process_state = Some("running".into());
+        transcript.observe_tool_result(polled);
+
+        transcript.close_stopped_process_cards(|_| false);
+
+        let mut viewport = TranscriptViewport::default();
+        let mut cache = TranscriptRowCache::default();
+        viewport.set_geometry(&transcript, &mut cache, 100, 20);
+        let rows = viewport.visible_rows(&transcript, &mut cache);
+        let action = rows
+            .iter()
+            .find(|row| row.anchor.entry_id == card_id && row.kind == TranscriptRowKind::CardAction)
+            .unwrap();
+        assert_eq!(
+            action.plain_text(),
+            "⊘ Background command · no longer running"
+        );
+        assert_eq!(action.tone, TranscriptRowTone::Warning);
+    }
+
+    #[test]
     fn process_card_coalesces_calls_and_bounds_terminal_safe_tail_rows() {
         let mut transcript = Transcript::default();
         transcript.append_prompt("poll".into());

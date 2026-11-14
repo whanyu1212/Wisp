@@ -10,7 +10,13 @@ import pytest
 from pytest import MonkeyPatch
 
 from wisp.config.runtime import WispConfig
-from wisp.events import ErrorEvent, KnownWispEvent, RpcCommandFinished
+from wisp.events import (
+    ErrorEvent,
+    KnownWispEvent,
+    ProcessEnded,
+    RpcCommandFinished,
+    RpcCommandStarted,
+)
 from wisp.messages import Message
 from wisp.sdk import InProcessOptions, InProcessWisp
 from wisp.tools.shell import supervisor as supervisor_module
@@ -93,6 +99,47 @@ def test_reports_process_it_cannot_stop(tmp_path: Path, monkeypatch: MonkeyPatch
     assert len(errors) == 1
     assert "Could not stop 1 background process from the previous session" in errors[0]
     assert process_id in errors[0]
+
+
+@pytest.mark.process
+@pytest.mark.parametrize(("setting", "wakes"), [(None, False), (True, True)], ids=["unset", "on"])
+def test_wake_off_by_default(tmp_path: Path, setting: bool | None, wakes: bool) -> None:
+    """An in-process host starts no run for an exit unless waking is turned on."""
+
+    async def scenario() -> tuple[list[str], bool]:
+        controller = await InProcessWisp.start(
+            WispConfig(provider="fake", session_dir=tmp_path, wake_on_process_exit=setting),
+            options=InProcessOptions(startup_trusted=True),
+        )
+        host = controller._in_process_transport._host
+        events = aiter(controller.events())
+        started: list[str] = []
+        state_id: str | None = None
+        try:
+            await host.runtime.process_supervisor.start(
+                "exit 0", cwd=tmp_path, timeout=60, notify_on_exit=True
+            )
+            with anyio.fail_after(10):
+                async for event in events:
+                    if isinstance(event, RpcCommandStarted):
+                        started.append(event.command_type)
+                    if isinstance(event, ProcessEnded) and not wakes:
+                        # Commands run one at a time, so a wake the exit made due
+                        # would start before this read finishes.
+                        state_id = await controller.get_state()
+                    if isinstance(event, RpcCommandFinished) and (
+                        event.command_id == state_id or event.command_type == "process_wake"
+                    ):
+                        break
+            return started, host._process_exits.wake_due
+        finally:
+            await controller.aclose()
+
+    started, wake_due = anyio.run(scenario)
+
+    assert ("process_wake" in started) is wakes
+    # Unset, the exit's wake stays unclaimed rather than refused.
+    assert wake_due is not wakes
 
 
 async def _finished(

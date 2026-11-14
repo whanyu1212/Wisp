@@ -41,6 +41,9 @@ project may add `./.wisp/settings.json`, applied only after you trust the projec
 
 Malformed settings files are skipped with a warning, never fatal.
 
+`wake_on_process_exit` lets a background process that stops while the session is idle start a run
+by itself. Left unset, it is on in the CLI and TUI and off for in-process SDK hosts.
+
 `codex_read_timeout_seconds` bounds read inactivity on Wisp-owned `openai-codex` connections,
 not the total response duration. It defaults to `300`; use `600` for longer waits. Values must be
 positive and finite. `WISP_CODEX_READ_TIMEOUT_SECONDS` overrides the user setting; an explicit SDK
