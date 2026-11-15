@@ -282,7 +282,10 @@ commands and may be submitted while a prompt is paused.
 
 `CodemodeSetting` is `"automatic" | "always" | "never"`. `CodemodeState` reports the `setting`,
 whether the `codemode` extra is `available`, whether a run started now would be `offered` the tool,
-and `env_setting`, the setting `WISP_CODEMODE` gives at startup. `set_codemode` waits for the
+`env_setting`, the setting `WISP_CODEMODE` gives at startup, and `mcp_tools` with
+`scriptable_mcp_tools`: the MCP tools such a run may use, and how many of them a script may call.
+Those are the tools their server's `tool_safety` marks `"read"`; when the run sends its MCP tools
+directly, one whose name or parameters are not Python identifiers is left out. `set_codemode` waits for the
 current operation; when saving fails, the setting still applies to the session and an `error`
 event comes first.
 

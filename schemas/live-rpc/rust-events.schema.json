@@ -289,9 +289,19 @@
           "default": null,
           "title": "CodemodeStateEnvSetting"
         },
+        "mcp_tools": {
+          "minimum": 0,
+          "title": "CodemodeStateMcpTools",
+          "type": "integer"
+        },
         "offered": {
           "title": "CodemodeStateOffered",
           "type": "boolean"
+        },
+        "scriptable_mcp_tools": {
+          "minimum": 0,
+          "title": "CodemodeStateScriptableMcpTools",
+          "type": "integer"
         },
         "setting": {
           "$ref": "#/$defs/CodemodeSetting",
@@ -302,7 +312,9 @@
         "setting",
         "available",
         "offered",
-        "env_setting"
+        "env_setting",
+        "mcp_tools",
+        "scriptable_mcp_tools"
       ],
       "title": "CodemodeState",
       "type": "object"

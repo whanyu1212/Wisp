@@ -425,6 +425,11 @@ class CodemodeState(BaseModel):
     offered: bool
     # The setting `WISP_CODEMODE` gives, which outranks the saved one at startup.
     env_setting: CodemodeSetting | None = None
+    # The MCP tools a run started now may use, and how many of them a script may
+    # call: those their server's `tool_safety` marks read-only, less any that a run
+    # sending its MCP tools directly cannot call by name.
+    mcp_tools: int = Field(ge=0)
+    scriptable_mcp_tools: int = Field(ge=0)
 
 
 class RpcCodemodeReported(WispEvent):

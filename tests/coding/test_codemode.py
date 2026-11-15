@@ -325,6 +325,10 @@ def test_offered_matches_the_run(
     )
 
     predicted = session.codemode_offered()
+    scriptable, _ = session.scriptable_mcp_tools()
+    if codemode is None and exposure == "on_demand":
+        # The count a frontend shows must agree with why automatic mode is on or off.
+        assert (scriptable > 0) is offered
 
     async def run() -> None:
         async for _ in session.run("go"):
@@ -333,6 +337,84 @@ def test_offered_matches_the_run(
     anyio.run(run)
     assert predicted is offered
     assert (CODEMODE in [tool.name for tool in provider.calls[0].tools]) is offered
+
+
+@pytest.mark.parametrize(
+    ("mcp_safety", "mode", "exposure", "counts"),
+    [
+        ("read", "build", "direct", (1, 2)),
+        ("read", "build", "on_demand", (1, 2)),
+        ("command", "build", "on_demand", (0, 2)),
+        # Plan mode offers no command tool, so only the read-only MCP tool is left.
+        ("read", "plan", "direct", (1, 1)),
+    ],
+    ids=["direct", "on-demand", "none-scriptable", "plan-mode"],
+)
+def test_counts_scriptable_mcp_tools(
+    tmp_path: Path,
+    mcp_safety: ToolSafety,
+    mode: AgentMode,
+    exposure: McpToolExposure,
+    counts: tuple[int, int],
+) -> None:
+    """The session counts the MCP tools its next run may use, and those marked read-only."""
+
+    tools = _Tools()
+    tools.query.safety = mcp_safety
+    session = CodingSession(
+        provider=ScriptedProvider([]),
+        sessions=JsonlSessionStore(tmp_path / "sessions"),
+        tool_registry=tools.registry(),
+        tool_context=ToolContext(cwd=tmp_path),
+        mcp_tool_exposure=exposure,
+        mode=mode,
+    )
+
+    assert session.scriptable_mcp_tools() == counts
+
+
+@pytest.mark.parametrize(("exposure", "scriptable"), [("direct", 1), ("on_demand", 2)])
+def test_direct_counts_callable_names(
+    tmp_path: Path, exposure: McpToolExposure, scriptable: int
+) -> None:
+    """Sent directly, a script reaches a tool only by a name Python accepts.
+
+    Found on demand, `mcp_call` reaches the read-only tool of server `docs-site` too.
+    """
+
+    registry = _Tools().registry()
+    registry.register(_McpTool("mcp__docs-site__search"))
+    session = CodingSession(
+        provider=ScriptedProvider([]),
+        sessions=JsonlSessionStore(tmp_path / "sessions"),
+        tool_registry=registry,
+        tool_context=ToolContext(cwd=tmp_path),
+        mcp_tool_exposure=exposure,
+    )
+
+    assert session.scriptable_mcp_tools() == (scriptable, 3)
+
+
+def test_policy_limits_counted_tools(tmp_path: Path) -> None:
+    """A tool the policy keeps from the run is not one of its MCP tools."""
+
+    session = CodingSession(
+        provider=ScriptedProvider([]),
+        sessions=JsonlSessionStore(tmp_path / "sessions"),
+        tool_registry=_Tools().registry(),
+        tool_context=ToolContext(cwd=tmp_path),
+        tool_policy=ToolPolicy.allow_tool_names({"lookup", "mcp__db__drop"}),
+    )
+
+    assert session.scriptable_mcp_tools() == (0, 1)
+
+
+def test_no_registry_counts_no_mcp_tools(tmp_path: Path) -> None:
+    session = CodingSession(
+        provider=ScriptedProvider([]), sessions=JsonlSessionStore(tmp_path / "sessions")
+    )
+
+    assert session.scriptable_mcp_tools() == (0, 0)
 
 
 def test_script_is_safe_to_replay(tmp_path: Path) -> None:
