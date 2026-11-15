@@ -45,6 +45,9 @@ const MCP_HEADER_VALUE_MAX_BYTES: usize = 8_192;
 pub(crate) const MCP_SNIPPET_MAX_BYTES: usize = 65_536;
 /// Shown instead of a confirmation's details when they do not all fit.
 const ENLARGE_HINT: &str = "Make the terminal larger to see everything before confirming.";
+/// Most hinted tools one confirmation marks, so its list fits a docked panel and
+/// can be confirmed; `h` again offers the rest.
+const MARK_READ_ONLY_BATCH: usize = 8;
 
 #[derive(Default)]
 pub(crate) struct McpView {
@@ -201,6 +204,12 @@ enum ConfirmKind {
     Remove {
         name: String,
     },
+    MarkReadOnly {
+        name: String,
+        tool_names: Vec<String>,
+        /// Hinted tools left for a later confirmation.
+        remaining: usize,
+    },
 }
 
 impl ConfirmKind {
@@ -210,6 +219,7 @@ impl ConfirmKind {
             Self::Add { name, .. } => format!("Add MCP server {name}"),
             Self::Enable { name, .. } => format!("Enable MCP server {name}"),
             Self::Remove { name } => format!("Remove MCP server {name}"),
+            Self::MarkReadOnly { name, .. } => format!("Mark {name} tools read-only"),
         }
     }
 
@@ -218,6 +228,7 @@ impl ConfirmKind {
             Self::Add { .. } => ["Save and connect", "Cancel"],
             Self::Enable { .. } => ["Enable and connect", "Cancel"],
             Self::Remove { .. } => ["Remove", "Keep"],
+            Self::MarkReadOnly { .. } => ["Mark read-only", "Cancel"],
         }
     }
 
@@ -234,7 +245,7 @@ impl ConfirmKind {
     fn launch(&self) -> Option<&McpServerLaunch> {
         match self {
             Self::Add { launch, .. } | Self::Enable { launch, .. } => Some(launch),
-            Self::Remove { .. } => None,
+            Self::Remove { .. } | Self::MarkReadOnly { .. } => None,
         }
     }
 
@@ -260,6 +271,9 @@ impl ConfirmKind {
                 expected: Some(launch),
             },
             Self::Remove { name } => McpChange::Remove(name),
+            Self::MarkReadOnly {
+                name, tool_names, ..
+            } => McpChange::MarkReadOnly { name, tool_names },
         }
     }
 }
@@ -278,7 +292,7 @@ impl McpView {
             Some(Flow::Env(_) | Flow::Confirm(_)) => {
                 matches!(key.code, KeyCode::Enter | KeyCode::Char('1' | '2'))
             }
-            _ => matches!(key.code, KeyCode::Char('d' | 'e' | 'l' | 'o')),
+            _ => matches!(key.code, KeyCode::Char('d' | 'e' | 'h' | 'l' | 'o')),
         }
     }
 
@@ -456,6 +470,34 @@ impl McpView {
                 }
                 self.notice = None;
                 DiscoveryAction::Refresh(UiAction::ChangeMcpServers(change))
+            }
+            KeyCode::Char('h') => {
+                let Some(server) = self
+                    .rendered
+                    .as_deref()
+                    .and_then(|name| servers.iter().find(|server| server.name == name))
+                else {
+                    return DiscoveryAction::None;
+                };
+                let hinted = &server.read_only_hint_tool_names;
+                if hinted.is_empty() {
+                    self.notice = Some(format!(
+                        "{} does not say any other tool is read-only.",
+                        server.name
+                    ));
+                    return DiscoveryAction::None;
+                }
+                if !self.ready_for_change(state) {
+                    return DiscoveryAction::None;
+                }
+                let tool_names: Vec<String> =
+                    hinted.iter().take(MARK_READ_ONLY_BATCH).cloned().collect();
+                self.open_confirm(ConfirmKind::MarkReadOnly {
+                    name: server.name.clone(),
+                    remaining: hinted.len() - tool_names.len(),
+                    tool_names,
+                });
+                DiscoveryAction::None
             }
             KeyCode::Char(key @ ('d' | 'e')) => {
                 let Some(server) = self
@@ -944,9 +986,14 @@ fn server_detail(server: &McpServerSnapshot) -> Vec<String> {
         // Only read-only tools can be called from a codemode script, a subagent or
         // plan mode. The mark leads, so a long name wraps after it.
         rows.push("tools (read = read-only, set by tool_safety; c reconnects):".into());
+        if !server.read_only_hint_tool_names.is_empty() {
+            rows.push("(hint = the server says read-only; press h to mark it so)".into());
+        }
         rows.extend(server.tool_names.iter().map(|name| {
             let mark = if server.read_only_tool_names.contains(name) {
                 "read "
+            } else if server.read_only_hint_tool_names.contains(name) {
+                "hint "
             } else {
                 "     "
             };
@@ -1057,6 +1104,29 @@ fn confirm_details(kind: &ConfirmKind, width: usize) -> Vec<String> {
         .collect();
     if matches!(kind, ConfirmKind::Add { replace: true, .. }) {
         rows.extend(wrapped("Replaces the server saved under this name.", width));
+    }
+    if let ConfirmKind::MarkReadOnly {
+        tool_names,
+        remaining,
+        ..
+    } = kind
+    {
+        rows.extend(wrapped(
+            "The server says these tools only read. Marked read-only in tool_safety, \
+             they run without asking, and scripts, subagents and plan mode can call them:",
+            width,
+        ));
+        rows.extend(
+            tool_names
+                .iter()
+                .flat_map(|name| wrapped(&format!("  {name}"), width)),
+        );
+        if *remaining > 0 {
+            rows.extend(wrapped(
+                &format!("{remaining} more after these: press h again."),
+                width,
+            ));
+        }
     }
     rows
 }
@@ -1327,6 +1397,7 @@ mod tests {
             status,
             tool_names: tools,
             read_only_tool_names: Vec::new(),
+            read_only_hint_tool_names: Vec::new(),
             error: (status == McpServerStatus::Unavailable).then(|| "startup failed".into()),
             launch: Some(launch),
             sign_in: None,
@@ -1471,6 +1542,60 @@ mod tests {
         assert!(rendered.contains("       mcp__docs__delete"), "{rendered}");
         // The mark follows the name, not its place in the list.
         assert!(!rendered.contains("read mcp__docs__delete"), "{rendered}");
+    }
+
+    #[test]
+    fn hinted_tools_are_marked_only_after_confirming() {
+        let mut docs = server(
+            "docs",
+            McpServerStatus::Connected,
+            launch("docs-server", &[]),
+        );
+        docs.tool_names = (0..10)
+            .map(|index| format!("mcp__docs__t{index}"))
+            .collect();
+        docs.read_only_tool_names = vec!["mcp__docs__t0".into()];
+        docs.read_only_hint_tool_names = docs.tool_names[1..].to_vec();
+        let state = state(vec![docs]);
+        let mut view = McpView::default();
+
+        let browse = draw(&mut view, &state, 100, 40);
+        assert!(browse.contains("  read mcp__docs__t0"), "{browse}");
+        assert!(browse.contains("  hint mcp__docs__t1"), "{browse}");
+        assert!(browse.contains("press h to mark it so"), "{browse}");
+
+        // `h` only asks; the first batch is listed in full before it can be confirmed.
+        assert!(change(press(&mut view, &state, KeyCode::Char('h'))).is_none());
+        let height = view.panel_height(100);
+        let confirm = draw(&mut view, &state, 100, height);
+        assert!(confirm.contains("Mark docs tools read-only"), "{confirm}");
+        assert!(confirm.contains("run without asking"), "{confirm}");
+        assert!(confirm.contains("mcp__docs__t8"), "{confirm}");
+        assert!(!confirm.contains("mcp__docs__t9"), "{confirm}");
+        assert!(confirm.contains("1 more after these"), "{confirm}");
+        assert_eq!(
+            change(press(&mut view, &state, KeyCode::Char('1'))),
+            Some(McpChange::MarkReadOnly {
+                name: "docs".into(),
+                tool_names: (1..9).map(|index| format!("mcp__docs__t{index}")).collect(),
+            })
+        );
+    }
+
+    #[test]
+    fn no_hints_means_nothing_to_mark() {
+        let state = sample_state();
+        let mut view = McpView::default();
+        draw(&mut view, &state, 100, 30);
+
+        assert!(change(press(&mut view, &state, KeyCode::Char('h'))).is_none());
+
+        assert!(!view.docked());
+        let rendered = draw(&mut view, &state, 100, 30);
+        assert!(
+            rendered.contains("github does not say any other tool is read-only."),
+            "{rendered}"
+        );
     }
 
     #[test]

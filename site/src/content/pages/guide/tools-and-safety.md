@@ -233,7 +233,8 @@ every folder beneath it.
 Connect external tools using the [MCP servers & codemode guide](mcp.md). It covers CLI setup,
 TUI management, authentication, settings examples, limits, and tool safety. MCP tools default to
 `command` safety: only your explicit `tool_safety` settings can mark one read-only. Server
-annotations do not grant permissions, and local file-tool protections do not sandbox an MCP server.
+annotations do not grant permissions (`/mcp` can copy a server's read-only hint into `tool_safety`
+once you confirm it), and local file-tool protections do not sandbox an MCP server.
 
 #### Signing in with OAuth
 

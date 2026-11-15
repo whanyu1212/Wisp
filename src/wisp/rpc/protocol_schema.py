@@ -288,6 +288,7 @@ _COMMAND_FIXTURE_VALUES: dict[str, dict[str, object]] = {
             "env_from": ["FIXTURE_HOME"],
         },
     },
+    "mark_mcp_tools_read_only": {"name": "fixture", "tool_names": ["mcp__fixture__search"]},
     "preview_mcp_snippet": {"snippet": "<redacted>"},
     "reconnect_mcp": {},
     "login_mcp_server": {"name": "fixture"},
@@ -445,8 +446,13 @@ _EVENT_FIXTURE_VALUES: dict[str, dict[str, object]] = {
                 {
                     "name": "fixture",
                     "status": "connected",
-                    "tool_names": ("mcp__fixture__search", "mcp__fixture__delete"),
+                    "tool_names": (
+                        "mcp__fixture__search",
+                        "mcp__fixture__list",
+                        "mcp__fixture__delete",
+                    ),
                     "read_only_tool_names": ("mcp__fixture__search",),
+                    "read_only_hint_tool_names": ("mcp__fixture__list",),
                 },
             )
         },

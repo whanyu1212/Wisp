@@ -112,6 +112,7 @@
           "tool_names": [
             "mcp__search__query"
           ],
+          "read_only_hint_tool_names": [],
           "read_only_tool_names": [
             "mcp__search__query"
           ],
@@ -138,6 +139,7 @@
           "tool_names": [
             "mcp__files__read"
           ],
+          "read_only_hint_tool_names": [],
           "read_only_tool_names": [],
           "error": null,
           "launch": {
@@ -163,6 +165,7 @@
           "name": "offline",
           "status": "unavailable",
           "tool_names": [],
+          "read_only_hint_tool_names": [],
           "read_only_tool_names": [],
           "error": "Server startup failed",
           "launch": {
@@ -180,6 +183,7 @@
           "name": "archived",
           "status": "disabled",
           "tool_names": [],
+          "read_only_hint_tool_names": [],
           "read_only_tool_names": [],
           "error": null,
           "launch": {
@@ -211,6 +215,7 @@
           "tool_names": [
             "mcp__search__query"
           ],
+          "read_only_hint_tool_names": [],
           "read_only_tool_names": [
             "mcp__search__query"
           ],

@@ -9,7 +9,7 @@ from pydantic import ValidationError
 
 from wisp.config.runtime import WispConfig
 from wisp.mcp import config as mcp_config_module
-from wisp.mcp.config import McpServerConfig
+from wisp.mcp.config import McpServerConfig, is_tool_safety_name
 
 
 def test_mcp_server_config_normalizes_nested_mappings() -> None:
@@ -302,3 +302,26 @@ def test_invalid_http_headers_are_rejected_without_echoing_values(
 def test_stdio_servers_take_no_headers() -> None:
     with pytest.raises(ValidationError, match="stdio MCP servers do not accept headers"):
         McpServerConfig(name="x", command="npx", headers_from=(("Authorization", "${TOKEN}"),))
+
+
+@pytest.mark.parametrize(
+    ("name", "valid"),
+    [
+        ("x", True),
+        ("x" * 128, True),
+        ("x" * 129, False),
+        ("", False),
+        ("  ", False),
+        ("a\x00b", False),
+    ],
+    ids=["shortest", "longest", "too-long", "empty", "blank", "nul"],
+)
+def test_tool_safety_name_limits(name: str, valid: bool) -> None:
+    """Hints are offered only for names a `tool_safety` entry can hold."""
+
+    assert is_tool_safety_name(name) is valid
+    if valid:
+        McpServerConfig(name="s", command="x", tool_safety={name: "read"})
+    else:
+        with pytest.raises(ValidationError):
+            McpServerConfig(name="s", command="x", tool_safety={name: "read"})

@@ -2055,6 +2055,17 @@
     "status",
     "servers",
     0,
+    "read_only_hint_tool_names"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.mcp",
+   "operation": "remove",
+   "path": [
+    "status",
+    "servers",
+    0,
     "read_only_tool_names"
    ],
    "accepted": true

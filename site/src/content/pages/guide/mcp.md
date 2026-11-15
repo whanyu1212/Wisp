@@ -134,6 +134,14 @@ shows Wisp's full names, `mcp__<server>__<tool>`; `tool_safety` takes the part a
 next run, after tool selection, policy and plan mode, and a run that sends its MCP tools directly
 can call from a script only tools whose names and parameters are Python identifiers.
 
+A server can describe a tool as read-only with the MCP `readOnlyHint` annotation. Wisp does not
+trust it: the server describes itself, and a wrong or hostile hint would let a tool that changes
+things run without approval. `/mcp` marks such tools with `hint` when `tool_safety` has no entry
+for them, and `h` offers to mark them read-only, up to 8 at a time, after listing each one.
+Confirming writes them into the server's `tool_safety` as `"read"` and reconnects it. Check what
+each tool does before you confirm. A tool the server adds or hints later starts unmarked, and an
+entry you wrote, `"command"` included, is never replaced.
+
 ## Connection limits
 
 Startup is failure-isolated: an unavailable or malformed server produces a sanitized error event
@@ -371,7 +379,8 @@ those task-specific results are not a promise that every workload will be cheape
 ### Make only verified read tools scriptable
 
 MCP tools default to `command` safety, even if their names sound read-only or the server advertises
-read-only annotations. Codemode does not infer safety. Inspect the server's implementation and
+read-only annotations. Codemode does not infer safety; `h` in `/mcp` only copies a hint into
+`tool_safety` once you confirm it. Inspect the server's implementation and
 contract before setting `tool_safety` for individual remote tool names; do not mark an entire
 write-capable catalog read-only just to enable scripts. A `read` classification also permits calls
 without the ordinary command approval, so it is a security decision, not a performance switch.

@@ -1421,6 +1421,50 @@
       "title": "LogoutMcpServerCommand",
       "type": "object"
     },
+    "MarkMcpToolsReadOnlyCommand": {
+      "additionalProperties": false,
+      "description": "Mark tools read-only in an MCP server's user settings, then restart MCP servers.\n\nMarking a tool read-only lets codemode scripts, subagents and plan mode call it,\nand lets it run without approval, so it is the user's decision. ``tool_names``\nare the tools the user was shown and confirmed, from the server's\n``read_only_hint_tool_names`` in the ``rpc.mcp`` status. Nothing is saved unless\nevery one is still hinted by the running server, none already has a\n`tool_safety` entry, and the server's saved settings are still the ones it was\nstarted with.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "MarkMcpToolsReadOnlyCommandId"
+        },
+        "name": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "MarkMcpToolsReadOnlyCommandName",
+          "type": "string"
+        },
+        "tool_names": {
+          "items": {
+            "$ref": "#/$defs/RpcMcpToolName"
+          },
+          "maxItems": 256,
+          "minItems": 1,
+          "title": "MarkMcpToolsReadOnlyCommandToolNames",
+          "type": "array"
+        },
+        "type": {
+          "const": "mark_mcp_tools_read_only",
+          "default": "mark_mcp_tools_read_only",
+          "title": "MarkMcpToolsReadOnlyCommandType",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "name",
+        "tool_names"
+      ],
+      "title": "MarkMcpToolsReadOnlyCommand",
+      "type": "object"
+    },
     "NavigateSessionTreeCommand": {
       "additionalProperties": false,
       "description": "Navigate the selected session to one persisted tree entry.",
@@ -1787,6 +1831,11 @@
       ],
       "title": "RpcMcpServerLaunch",
       "type": "object"
+    },
+    "RpcMcpToolName": {
+      "maxLength": 64,
+      "minLength": 1,
+      "type": "string"
     },
     "SelectSessionCommand": {
       "additionalProperties": false,
@@ -2342,6 +2391,7 @@
       "init": "#/$defs/InitCommand",
       "login_mcp_server": "#/$defs/LoginMcpServerCommand",
       "logout_mcp_server": "#/$defs/LogoutMcpServerCommand",
+      "mark_mcp_tools_read_only": "#/$defs/MarkMcpToolsReadOnlyCommand",
       "navigate_session_tree": "#/$defs/NavigateSessionTreeCommand",
       "new_session": "#/$defs/NewSessionCommand",
       "pop_queue": "#/$defs/PopQueueCommand",
@@ -2440,6 +2490,9 @@
     },
     {
       "$ref": "#/$defs/SetMcpServerEnabledCommand"
+    },
+    {
+      "$ref": "#/$defs/MarkMcpToolsReadOnlyCommand"
     },
     {
       "$ref": "#/$defs/ReconnectMcpCommand"

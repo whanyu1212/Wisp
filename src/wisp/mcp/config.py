@@ -54,7 +54,8 @@ EnvironmentName = Annotated[
     StringConstraints(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$"),
 ]
 EnvironmentValue = Annotated[SecretStr, Field(max_length=16_384)]
-ToolName = Annotated[str, StringConstraints(min_length=1, max_length=128)]
+MAX_MCP_TOOL_NAME_CHARS = 128
+ToolName = Annotated[str, StringConstraints(min_length=1, max_length=MAX_MCP_TOOL_NAME_CHARS)]
 # An HTTP header field name (RFC 9110 token).
 HeaderName = Annotated[
     str,
@@ -90,6 +91,12 @@ RESERVED_HEADER_NAMES = frozenset(
         "upgrade",
     }
 )
+
+
+def is_tool_safety_name(name: str) -> bool:
+    """Return whether ``name`` can be a key of a server's `tool_safety`."""
+
+    return len(name) <= MAX_MCP_TOOL_NAME_CHARS and bool(name.strip()) and "\x00" not in name
 
 
 class McpServerConfig(BaseModel):
@@ -287,7 +294,7 @@ class McpServerConfig(BaseModel):
         names = [name for name, _ in values]
         if len(names) != len(set(names)):
             raise ValueError("tool safety names must be unique")
-        if any(not name.strip() or "\x00" in name for name in names):
+        if not all(is_tool_safety_name(name) for name in names):
             raise ValueError("tool safety names must not be blank or contain NUL")
         return tuple(sorted(values))
 

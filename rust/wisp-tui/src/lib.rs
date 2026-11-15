@@ -1111,6 +1111,7 @@ impl LiveUi {
                     | "get_mcp_status"
                     | "remove_mcp_server"
                     | "set_mcp_server_enabled"
+                    | "mark_mcp_tools_read_only"
                     | "reconnect_mcp"
                     | "get_project_files"
                     | "get_git_diff"

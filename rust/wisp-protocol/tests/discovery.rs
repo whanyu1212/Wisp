@@ -207,6 +207,10 @@ fn mcp_management_builders_validate_and_redact_secrets() {
     assert!(WispTypedClientRpcCommands::remove_mcp_server("r-1", "github").is_ok());
     assert!(WispTypedClientRpcCommands::reconnect_mcp("c-1").is_ok());
     assert!(WispTypedClientRpcCommands::remove_mcp_server("r-2", "").is_err());
+    let tools = ["mcp__github__search".to_owned()];
+    assert!(WispTypedClientRpcCommands::mark_mcp_tools_read_only("m-1", "github", &tools).is_ok());
+    // The schema refuses an empty list, so nothing is marked by accident.
+    assert!(WispTypedClientRpcCommands::mark_mcp_tools_read_only("m-2", "github", &[]).is_err());
 }
 
 #[test]

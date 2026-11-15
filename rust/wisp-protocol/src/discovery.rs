@@ -158,6 +158,10 @@ pub struct McpServerSnapshot {
     /// The tools among `tool_names` that `tool_safety` marks read-only, in the same
     /// order: the only ones a codemode script, a subagent or plan mode can call.
     pub read_only_tool_names: Vec<String>,
+    /// The tools among `tool_names` the server itself says are read-only and
+    /// `tool_safety` leaves unset. They stay unscriptable until the user marks them
+    /// with `mark_mcp_tools_read_only`.
+    pub read_only_hint_tool_names: Vec<String>,
     pub error: Option<String>,
     pub launch: Option<McpServerLaunch>,
     /// OAuth sign-in for an HTTP server; None when the server cannot sign in.

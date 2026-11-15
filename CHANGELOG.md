@@ -56,6 +56,12 @@ this policy.
   `connected · 12 tools, 3 read-only`, and its details mark each read-only tool. Only those can be
   called from a codemode script, by a subagent or in plan mode, and `tool_safety` is what marks
   them, so a server with no entries now shows `0 read-only` instead of looking ready. (HY-510)
+- `/mcp` marks with `hint` the tools a server says are read-only (its `readOnlyHint`) that
+  `tool_safety` leaves unset, and `h` offers to mark them read-only, up to 8 at a time. The
+  confirmation lists each tool and says what marking allows; confirming adds them to the server's
+  `tool_safety` in your user settings and reconnects it. The hint alone changes nothing: a hinted
+  tool still needs approval and stays out of scripts, subagents and plan mode until it is marked,
+  and a tool the server adds or re-hints later starts unmarked. (HY-510)
 - `/codemode` says how many of the next prompt's MCP tools a script can call, such as
   `Scripts can call 0 of 12 MCP tools (tool_safety "read").`, and flags it when the answer is
   none. With none, automatic mode leaves codemode off even when the tools are found on demand,
@@ -96,7 +102,12 @@ this policy.
   not listed. (HY-543)
 - `RpcMcpServerSnapshot`, in `rpc.mcp` and `mcp.status.updated`, gains `read_only_tool_names`: the tools
   among `tool_names`, in the same order, that the server's `tool_safety` marked `"read"` when it
-  last started.
+  last started, and `read_only_hint_tool_names`: those the server itself said were read-only and
+  `tool_safety` left unset.
+- `mark_mcp_tools_read_only` (`RpcClient.mark_mcp_tools_read_only`) adds a server's hinted tools
+  to its user-level `tool_safety` as `"read"`, then restarts MCP servers. It saves nothing unless
+  every named tool is still hinted by the running server, none has a `tool_safety` entry, and the
+  saved server is still the one that started.
 
 <!-- Keeps links to the pre-release "0.10.1 — Unreleased" heading working. -->
 <a id="0101--unreleased"></a>
