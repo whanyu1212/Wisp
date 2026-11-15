@@ -62,6 +62,9 @@ pub(crate) struct SidePanel {
     hidden: bool,
     /// Opened with Ctrl+P on a terminal too narrow to dock it.
     overlay: bool,
+    /// Whether closing the overlay hides the panel again, because the background
+    /// strip opened a panel the user had hidden.
+    rehide: bool,
     /// The width of the last frame, which decides whether the panel docks.
     width: u16,
     /// The visibility last reported to the reducer.
@@ -185,10 +188,15 @@ impl SidePanel {
     /// overlay opens with focus on the first row it can act on.
     pub(crate) fn toggle(&mut self) {
         if docks(self.width) {
+            self.rehide = false;
             self.hidden = !self.hidden;
             self.overlay = false;
         } else {
-            self.overlay = !self.overlay;
+            if self.overlay {
+                self.close_overlay();
+            } else {
+                self.overlay = true;
+            }
             self.cursor = None;
             *self.painted.borrow_mut() = Painted::default();
         }
@@ -197,7 +205,21 @@ impl SidePanel {
     pub(crate) fn focus(&mut self) {
         self.hidden = false;
         self.overlay = true;
+        self.rehide = false;
         self.cursor = None;
+    }
+
+    /// Focuses the panel on its first background process, as the strip under the
+    /// composer does. While nothing is listed there, focus falls back to the first
+    /// row the panel can act on. A panel the user hid hides again when focus leaves.
+    pub(crate) fn focus_background(&mut self) {
+        let hidden = self.hidden;
+        self.focus();
+        self.rehide = hidden;
+        self.cursor = Some(Cursor {
+            section: Section::Background,
+            row: 0,
+        });
     }
 
     /// Keyboard navigation follows the same rows and disclosure controls as clicks.
@@ -385,6 +407,9 @@ impl SidePanel {
 
     pub(crate) fn close_overlay(&mut self) {
         self.overlay = false;
+        if std::mem::take(&mut self.rehide) {
+            self.hidden = true;
+        }
     }
 
     /// Follow the terminal's width. An overlay open when the terminal grows wide
@@ -392,7 +417,8 @@ impl SidePanel {
     pub(crate) fn observe_width(&mut self, width: u16) {
         if self.overlay && !docks(self.width) && docks(width) {
             self.overlay = false;
-            self.hidden = false;
+            // A panel the background strip opened over a hidden one stays hidden.
+            self.hidden = std::mem::take(&mut self.rehide);
         }
         self.width = width;
     }
@@ -2796,6 +2822,40 @@ mod tests {
         );
         assert_eq!(panel.key(KeyCode::Char('x'), &state), OverlayKey::Ignored);
         assert_eq!(panel.key(KeyCode::Esc, &state), OverlayKey::Close);
+    }
+
+    #[test]
+    fn background_focus_skips_queue() {
+        let mut state = running();
+        queue(&mut state, &["steer"], &[]);
+        backend(
+            &mut state,
+            crate::reducer::BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "rpc.state", "command_id": "get_state-1",
+                "timestamp": "2026-11-15T09:00:00Z",
+                "state": {
+                    "provider": "fake", "auto_compaction_enabled": true,
+                    "steering_mode": "one_at_a_time", "follow_up_mode": "one_at_a_time",
+                    "pending_steering_count": 1, "pending_follow_up_count": 0,
+                    "background_processes": [
+                        {"process_id": "server", "command": "npm run dev", "started_at_ms": 0}
+                    ]
+                }
+            }))
+            .unwrap(),
+        );
+        let mut panel = SidePanel::default();
+        panel.observe_width(140);
+        panel.focus_background();
+        paint_overlay(&state, &panel);
+
+        // The queue is listed first, but focus starts on the process.
+        assert_eq!(panel.sections(&state)[0], Section::Queue);
+        assert_eq!(panel.focused(&state).unwrap().section, Section::Background);
+        assert_eq!(
+            panel.key(KeyCode::Enter, &state),
+            OverlayKey::Open(Target::Process(1))
+        );
     }
 
     #[test]

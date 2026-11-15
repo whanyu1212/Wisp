@@ -230,7 +230,7 @@ def builtin_command_descriptors() -> tuple[CommandDescriptor, ...]:
         CommandDescriptor(
             name="ps",
             title="Background processes",
-            description="List the background processes the agent started that are still running",
+            description="Show the background processes the agent started that are still running",
             category=CommandCategory.session,
             order=46,
         ),

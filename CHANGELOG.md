@@ -21,6 +21,15 @@ this policy.
   on-demand catalog has a `"read"` tool are offered codemode as before, and `"codemode": true`
   still offers it for the built-in read tools alone. (HY-510)
 
+### TUI
+
+- While background processes run, a strip under the composer shows how many and their commands,
+  even when the side panel is hidden or the terminal is too narrow to dock it. Down from an empty
+  composer, a click on the strip, or `/ps` focuses the side panel on the first process, where
+  Enter prepares `/kill` for it and Esc returns to the composer with the draft kept. `/ps` no
+  longer prints the list as a notice. A new `panel.background` key action, unbound by default,
+  does the same with a draft in the composer. (HY-544)
+
 <!-- Keeps links to the pre-release "0.10.1 — Unreleased" heading working. -->
 <a id="0101--unreleased"></a>
 

@@ -1485,8 +1485,6 @@ pub enum UiAction {
     ConfigureAutoCompaction(bool),
     Search(Option<bool>),
     ChangeDirectory(String),
-    /// `/ps`: list the running background processes.
-    ListBackgroundProcesses,
     /// `/kill`: stop a background process, by its `/ps` number or its id.
     StopBackgroundProcess(String),
     /// Move the newest running foreground shell command to the background.
@@ -1714,7 +1712,6 @@ pub fn reduce(
         UiAction::LoadContext => Ok(context::request(state)),
         UiAction::Search(enabled) => Ok(command_controls::search(state, enabled, ids)?),
         UiAction::ChangeDirectory(path) => Ok(working_directory::change(state, path, ids)?),
-        UiAction::ListBackgroundProcesses => Ok(background_processes::list(state)),
         UiAction::StopBackgroundProcess(target) => {
             Ok(background_processes::stop(state, &target, ids)?)
         }
