@@ -562,7 +562,13 @@ _EVENT_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     "rpc.permissions": {"command_id": "command-1", "permissions": {"mode": "ask"}},
     "rpc.codemode": {
         "command_id": "command-1",
-        "codemode": {"setting": "automatic", "available": True, "offered": False},
+        "codemode": {
+            "setting": "automatic",
+            "available": True,
+            "offered": False,
+            "mcp_tools": 12,
+            "scriptable_mcp_tools": 0,
+        },
     },
     "rpc.subagents": {
         "command_id": "command-1",

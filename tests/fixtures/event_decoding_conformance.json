@@ -1366,7 +1366,25 @@
    "operation": "remove",
    "path": [
     "codemode",
+    "mcp_tools"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.codemode",
+   "operation": "remove",
+   "path": [
+    "codemode",
     "offered"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.codemode",
+   "operation": "remove",
+   "path": [
+    "codemode",
+    "scriptable_mcp_tools"
    ],
    "accepted": false
   },

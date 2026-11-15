@@ -51,9 +51,12 @@ def handle_rpc_codemode_command(
 
 def _snapshot(agent: CodingSession) -> CodemodeState:
     env_codemode = codemode_from_env()
+    scriptable_mcp_tools, mcp_tools = agent.scriptable_mcp_tools()
     return CodemodeState(
         setting=_SETTING_FOR_CODEMODE[agent.codemode],
         available=codemode_available(),
         offered=agent.codemode_offered(),
         env_setting=None if env_codemode is None else _SETTING_FOR_CODEMODE[env_codemode],
+        mcp_tools=mcp_tools,
+        scriptable_mcp_tools=scriptable_mcp_tools,
     )

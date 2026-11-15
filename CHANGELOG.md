@@ -21,6 +21,21 @@ this policy.
   on-demand catalog has a `"read"` tool are offered codemode as before, and `"codemode": true`
   still offers it for the built-in read tools alone. (HY-510)
 
+### TUI
+
+- `/codemode` says how many of the next prompt's MCP tools a script can call, such as
+  `Scripts can call 0 of 12 MCP tools (tool_safety "read").`, and flags it when the answer is
+  none. With none, automatic mode leaves codemode off even when the tools are found on demand,
+  and scripts fail against those servers under `always`. The automatic choice now reads "with
+  on-demand MCP tools marked read", since it needs both. (HY-510)
+
+### Event contract
+
+- `CodemodeState`, in `rpc.codemode`, gains `mcp_tools`, the MCP tools a run started now may use,
+  and `scriptable_mcp_tools`, how many of them a script may call: those marked `"read"`, less
+  any a run that sends its MCP tools directly cannot call by name. Both are required, so the
+  backend and every frontend must come from the same release.
+
 <!-- Keeps links to the pre-release "0.10.1 — Unreleased" heading working. -->
 <a id="0101--unreleased"></a>
 
