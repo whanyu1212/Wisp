@@ -209,6 +209,8 @@ class RunRow:
     scripts: int = 0
     failed_scripts: int = 0
     nested_calls: int = 0
+    cache_write_tokens: int = 0
+    script_failures: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -762,4 +764,6 @@ def _row(
         scripts=measured.scripts,
         failed_scripts=measured.failed_scripts,
         nested_calls=measured.nested_calls,
+        cache_write_tokens=measured.cache_write_tokens,
+        script_failures=dict(measured.script_failures),
     )

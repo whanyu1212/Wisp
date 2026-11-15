@@ -38,7 +38,7 @@ uv run python -m evals.tool_use report evals/tool_use/results/<timestamp>
 | `--env-file`, `--auth-file` | Credential sources (default: the repo's `.env` and `~/.wisp/auth.json`) |
 | `--results` | Output folder (default: a new timestamped folder under `results/`) |
 | `--mcp-tool-exposure` | `direct` (default) sends every MCP tool's definition; `on_demand` gives the model `mcp_search`, `mcp_describe` and `mcp_call` instead; `auto`, Wisp's own default, picks one by catalog size |
-| `--codemode` | `off` (default), or `python` to offer the experimental `codemode` tool; rows then also count `scripts`, `failed_scripts` and `nested_calls` |
+| `--codemode` | `off` (default), or `python` to offer the experimental `codemode` tool; rows then also count `scripts`, `failed_scripts`, `nested_calls` and why scripts failed (`script_failures`) |
 
 Runs happen in rounds: one repetition of every task and model per round. The budget is checked
 before each round, so a stopped suite has the same number of runs for every pairing.
@@ -95,15 +95,37 @@ rejected for their arguments.
 
 Current models pass most tasks, so `report` leads with how much work a run took: per task and
 model, mean tool calls, mean tool errors and mean tokens, then passes, pass^1, pass^k, errored and
-timed-out runs and known cost. Per model it prints mean calls and tokens across tasks, and the mean
+timed-out runs and cost. Per model it prints mean calls and tokens across tasks, and the mean
 pass^1 with a 95% bootstrap interval over tasks. Compare calls and tokens only over the same
 tasks. pass^k (from tau-bench) is the chance that k runs of a task all pass, so it shows
 reliability that a plain pass rate hides.
 
+Tokens are counted the same way for every provider. `Mean input` is every input token, `Cached` is
+the part of it read from the provider's cache, and `Mean output` is the output tokens. Providers
+report these differently: OpenAI's input count includes cached tokens, while Anthropic's leaves
+out both the tokens read from its cache and those written to it, so a cached Anthropic run reports
+a few hundred input tokens for a request of tens of thousands. The per-model `Mean tokens` is input
+plus output.
+
+`Known USD` is the cost of runs that had a price when they ran. `Est. USD` covers the runs that
+had none, such as Codex subscription runs: their tokens at today's API list price for the same
+model (`openai-codex` at `openai`'s prices), at the base price band. It is an estimate for
+comparing setups, not what was charged, and it changes when the catalog's prices do.
+
+For runs that offered codemode, a last table lists each model's scripts, how many failed, and why:
+the failure kind, with the type checker's diagnostic code or the exception's class, such as
+`type: unresolved-reference` or `runtime: KeyError`. It never quotes the error text, which can
+hold local paths, so baselines keep it.
+
 It also warns when one task and model's runs offered different tools (`tools_sha256`, from
 `agent.started`), for example because an MCP server failed to connect in some runs. Compare
-results only when there are no warnings. The instructions hash is recorded but not compared: it
+results only when it gives no such warning. The instructions hash is recorded but not compared: it
 covers project context, which names each run's own temporary folder.
+
+Baselines dated 2026-11-11 or earlier did not count cache writes. For Anthropic, whose cache writes are
+not part of its input count, their input tokens are too low: by 13% to 28% of all tokens, going by
+what those runs cost. The report warns with how many such
+runs it read.
 
 With about a dozen tasks and three repetitions, only large differences stand out from noise. Read
 small differences as no difference.
@@ -124,7 +146,10 @@ bootstrap over two or three runs is far too narrow; the t distribution widens th
 the few runs it rests on. A side needs at least two scored runs for an interval; with fewer the
 cell shows `â€”`. Errored runs are left out of the metrics and counted in the passes column.
 `(tools differ)` after a task says the two sides offered different tools, which is expected when
-the tools are what changed.
+the tools are what changed. Tokens are input plus output, counted as in `report`, so a baseline
+recorded earlier compares with a new run on the same count. `(cache writes uncounted on one side)`
+says one side was recorded before cache writes were counted and the other has some: that side's
+tokens are too low, so read the tokens change as overstated.
 
 Each interval is 95% on its own, so across one comparison's many cells about one in twenty is
 marked by chance; the output says how many to expect. Trust a change that is marked on several
@@ -134,8 +159,8 @@ changes smaller than that are within noise. With three runs a side it is about Â
 detects large effects only; use more repetitions for smaller ones.
 
 `baseline` saves a results folder as `baselines/<date>-<label>.json`: the suite's settings and,
-for each run, its task, model, status, tool calls and errors, tokens, cost and setup hash. It
-leaves out folders, error text and credential sources, takes only a finished results folder (one
+for each run, its task, model, status, tool calls and errors, tokens, cost, setup hash and why
+its scripts failed. It leaves out folders, error text and credential sources, takes only a finished results folder (one
 with `suite.json`), and never overwrites an existing baseline. Baselines are
 committed so later changes to Wisp's tools are compared against the same numbers. Record one on
 the commit the change starts from, with the models the change will be measured on.

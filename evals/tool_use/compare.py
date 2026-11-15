@@ -21,7 +21,7 @@ from statistics import fmean, median, variance
 
 from typing_extensions import TypeAliasType
 
-from evals.tool_use.report import count_sum
+from evals.tool_use.report import count_sum, token_split
 
 # The fields a baseline keeps from each run, and from the suite's settings.
 # Folders, error text and credential sources stay out of the repository.
@@ -41,6 +41,7 @@ BASELINE_FIELDS = (
     "input_tokens",
     "output_tokens",
     "cache_read_tokens",
+    "cache_write_tokens",
     "known_usd",
     "tools_sha256",
     "wisp_version",
@@ -52,6 +53,7 @@ BASELINE_FIELDS = (
     "codemode",
     "scripts",
     "failed_scripts",
+    "script_failures",
     "nested_calls",
 )
 SUITE_FIELDS = (
@@ -87,7 +89,8 @@ def _tool_errors(row: Row) -> float:
 
 
 def _tokens(row: Row) -> float:
-    return float(int(str(row["input_tokens"])) + int(str(row["output_tokens"])))
+    # Input, cached tokens included, plus output: the same count for every provider.
+    return float(token_split(row).total)
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +159,9 @@ class PairComparison:
         changes (tuple[MetricChange, ...]): One per metric in `METRICS`.
         tools_differ (bool): Whether the two sides offered different tool sets,
             as expected when the change under test is the tools themselves.
+        cache_writes_uncounted (bool): Whether one side was recorded before cache
+            writes were counted while the other side has some, so that side's
+            tokens are too low and the tokens change is overstated.
     """
 
     task: str
@@ -165,6 +171,7 @@ class PairComparison:
     errored: tuple[int, int]
     changes: tuple[MetricChange, ...]
     tools_differ: bool
+    cache_writes_uncounted: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,6 +237,7 @@ def compare_runs(before: Sequence[Row], after: Sequence[Row]) -> Comparison:
                     for metric in METRICS
                 ),
                 tools_differ=_tool_sets(old) != _tool_sets(new),
+                cache_writes_uncounted=_cache_writes_uncounted(old, new),
             )
         )
     return Comparison(
@@ -255,7 +263,11 @@ def render_comparison(comparison: Comparison) -> str:
             _change_cell(change, metric.digits)
             for change, metric in zip(pair.changes, METRICS, strict=True)
         ]
-        task = f"{pair.task} (tools differ)" if pair.tools_differ else pair.task
+        task = pair.task
+        if pair.tools_differ:
+            task += " (tools differ)"
+        if pair.cache_writes_uncounted:
+            task += " (cache writes uncounted on one side)"
         lines.append(
             f"| {task} | {pair.model} | {_passed_cell(pair)} | " + " | ".join(cells) + " |"
         )
@@ -342,6 +354,18 @@ def _passed(rows: Sequence[Row]) -> int:
 
 def _tool_sets(rows: Sequence[Row]) -> set[object]:
     return {row["tools_sha256"] for row in rows if row["tools_sha256"] is not None}
+
+
+def _cache_writes_uncounted(before: Sequence[Row], after: Sequence[Row]) -> bool:
+    """Whether one side has no cache-write count while the other side counted some."""
+
+    def lacks(rows: Sequence[Row]) -> bool:
+        return any("cache_write_tokens" not in row for row in rows)
+
+    def has(rows: Sequence[Row]) -> bool:
+        return any(int(str(row.get("cache_write_tokens", 0))) > 0 for row in rows)
+
+    return (lacks(before) and has(after)) or (lacks(after) and has(before))
 
 
 def _change(name: str, before: Sequence[float], after: Sequence[float]) -> MetricChange:

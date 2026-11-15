@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from pathlib import Path
+from typing import ClassVar
 
+import anyio
 import pytest
 
-from evals.tool_use.metrics import measure, parse_events
+from evals.tool_use.metrics import measure, parse_events, script_failure_reason
+from tests.agent.loop.support import tool_call_stream
+from wisp.coding.session import CodingSession
 from wisp.events import (
     AgentCompleted,
     AgentStarted,
@@ -24,6 +29,16 @@ from wisp.events import (
     UsageCostRates,
     WispEvent,
 )
+from wisp.providers.events import ProviderResponseCompleted, ProviderResponseStarted, ToolCall
+from wisp.providers.fake import ScriptedProvider
+from wisp.runtime.registry import ToolRegistry
+from wisp.sessions.jsonl import JsonlSessionStore
+from wisp.tool_types import ToolFailureCode
+from wisp.tools.base import ToolArguments, ToolInputSchema
+from wisp.tools.codemode.calls import CODEMODE
+from wisp.tools.context import ToolContext
+from wisp.tools.policy import ToolPolicy
+from wisp.tools.result import ToolError, ToolResult
 
 _SETUP = RunSetup(tool_names=("bash",), tools_sha256="a" * 64, instructions_sha256="b" * 64)
 
@@ -127,6 +142,17 @@ def test_counts_compaction_usage() -> None:
     assert (metrics.known_usd, metrics.unpriced_responses) == (Decimal("0.5"), 1)
 
 
+def test_counts_cache_writes() -> None:
+    usage = TokenUsage(
+        input_tokens=10, output_tokens=5, total_tokens=15, cache_write_input_tokens=300
+    )
+    reply = MessageCompleted(turn=1, content="", finish_reason="stop", usage=usage)
+
+    metrics = measure([reply, _reply(100, None)])
+
+    assert (metrics.cache_read_tokens, metrics.cache_write_tokens) == (5, 300)
+
+
 def test_counts_proxied_calls_by_target() -> None:
     events: list[WispEvent] = [
         ToolExecutionStarted(call_id="1", name="mcp_search", arguments={"query": "orders"}),
@@ -165,7 +191,7 @@ def test_codemode_counts_scripts() -> None:
             summary="codemode: 12 tool calls",
         ),
         script("s2"),
-        ToolResultReady(call_id="s2", name="codemode", output="Script failed", is_error=True),
+        _failed_script("s2", "Script failed (runtime): ValueError: stop here\nCalls made"),
         script("s3"),
         ToolExecutionEnded(
             call_id="s3",
@@ -180,3 +206,89 @@ def test_codemode_counts_scripts() -> None:
 
     assert (metrics.scripts, metrics.failed_scripts, metrics.nested_calls) == (3, 1, 13)
     assert metrics.tool_calls["codemode"] == 3
+    assert dict(metrics.script_failures) == {"runtime: ValueError": 1}
+
+
+def _failed_script(
+    call_id: str, output: str, failure_code: ToolFailureCode | None = None
+) -> ToolResultReady:
+    return ToolResultReady(
+        call_id=call_id, name="codemode", output=output, is_error=True, failure_code=failure_code
+    )
+
+
+@pytest.mark.parametrize(
+    ("output", "failure_code", "reason"),
+    [
+        (
+            "Script failed (type): error[unresolved-reference]: Name `ascii` used when not defined",
+            None,
+            "type: unresolved-reference",
+        ),
+        ("Script failed (runtime): KeyError: '/Users/me/results/x'", None, "runtime: KeyError"),
+        ("Script failed (limit): The script made more than 200 tool calls.", None, "limit"),
+        # A message that only looks like an exception adds nothing to another kind.
+        ("Script failed (timeout): Note: it did not finish.", None, "timeout"),
+        ("code must be a string", "invalid_arguments", "invalid_arguments"),
+        ("codemode is unavailable", None, "unknown"),
+    ],
+    ids=["type", "runtime", "limit", "timeout", "refused", "unclassified"],
+)
+def test_script_failure_named(
+    output: str, failure_code: ToolFailureCode | None, reason: str
+) -> None:
+    assert script_failure_reason(_failed_script("s", output, failure_code)) == reason
+
+
+class _ReadTool:
+    name = "lookup"
+    safety = "read"
+    description = "Look a key up."
+    input_schema: ClassVar[ToolInputSchema] = {
+        "type": "object",
+        "properties": {"key": {"type": "string"}},
+        "required": ["key"],
+    }
+
+    async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
+        raise ToolError(f"no such key under {context.cwd}")
+
+
+@pytest.mark.parametrize(
+    ("code", "reason"),
+    [
+        ("x = ascii('a')", "type: unresolved-reference"),
+        ("raise ValueError('stop here')", "runtime: ValueError"),
+        # A tool call that fails inside a helper under `gather` raises in the script.
+        (
+            "import asyncio\n"
+            "async def one(key: str) -> str:\n"
+            "    return await lookup(key=key)\n"
+            "await asyncio.gather(one('a'), one('b'))",
+            "runtime: RuntimeError",
+        ),
+    ],
+    ids=["type", "runtime", "failed-call"],
+)
+def test_real_script_failure_named(tmp_path: Path, code: str, reason: str) -> None:
+    """The reason is read from the text codemode writes, so a real run supplies it."""
+    pytest.importorskip("pydantic_monty")
+    registry = ToolRegistry()
+    registry.register(_ReadTool())
+    script = ToolCall(call_id="s", name=CODEMODE, arguments={"code": code})
+    done = [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="done")]
+    session = CodingSession(
+        provider=ScriptedProvider([tool_call_stream(script), done]),
+        sessions=JsonlSessionStore(tmp_path / "sessions"),
+        tool_registry=registry,
+        tool_context=ToolContext(cwd=tmp_path),
+        tool_policy=ToolPolicy.allow_all_tools(),
+        codemode=True,
+    )
+
+    async def run() -> list[WispEvent]:
+        return [event async for event in session.run("go")]
+
+    metrics = measure(anyio.run(run))
+
+    assert (metrics.failed_scripts, dict(metrics.script_failures)) == (1, {reason: 1})
