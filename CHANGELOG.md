@@ -23,12 +23,24 @@ this policy.
 
 ### TUI
 
+- `/codemode` says how many of the next prompt's MCP tools a script can call, such as
+  `Scripts can call 0 of 12 MCP tools (tool_safety "read").`, and flags it when the answer is
+  none. With none, automatic mode leaves codemode off even when the tools are found on demand,
+  and scripts fail against those servers under `always`. The automatic choice now reads "with
+  on-demand MCP tools marked read", since it needs both. (HY-510)
 - While background processes run, a strip under the composer shows how many and their commands,
   even when the side panel is hidden or the terminal is too narrow to dock it. Down from an empty
   composer, a click on the strip, or `/ps` focuses the side panel on the first process, where
   Enter prepares `/kill` for it and Esc returns to the composer with the draft kept. `/ps` no
   longer prints the list as a notice. A new `panel.background` key action, unbound by default,
   does the same with a draft in the composer. (HY-544)
+
+### Event contract
+
+- `CodemodeState`, in `rpc.codemode`, gains `mcp_tools`, the MCP tools a run started now may use,
+  and `scriptable_mcp_tools`, how many of them a script may call: those marked `"read"`, less
+  any a run that sends its MCP tools directly cannot call by name. Both are required, so the
+  backend and every frontend must come from the same release.
 
 <!-- Keeps links to the pre-release "0.10.1 — Unreleased" heading working. -->
 <a id="0101--unreleased"></a>

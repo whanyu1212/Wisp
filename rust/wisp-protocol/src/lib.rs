@@ -519,7 +519,7 @@ pub mod commands {
         Yolo,
     }
 
-    /// When a run offers the codemode tool: with MCP tools found on demand, or
+    /// When a run offers the codemode tool: with read-only MCP tools found on demand, or
     /// always, or never.
     #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, Eq, PartialEq)]
     #[serde(rename_all = "snake_case")]
@@ -1390,6 +1390,11 @@ pub mod events {
         pub offered: bool,
         /// The setting `WISP_CODEMODE` gives, which outranks the saved one at startup.
         pub env_setting: Option<crate::commands::CodemodeSetting>,
+        /// The MCP tools a run started now may use.
+        pub mcp_tools: u64,
+        /// How many of them a script may call: those `tool_safety` marks read-only,
+        /// less any a run sending its MCP tools directly cannot call by name.
+        pub scriptable_mcp_tools: u64,
     }
 
     /// The session's subagents setting and what its next run's subagents would use.

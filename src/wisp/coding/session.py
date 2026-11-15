@@ -196,7 +196,7 @@ from wisp.tool_presentation import tool_result_status
 from wisp.tools.approval import ToolApprovalPolicy, confirms_every_call
 from wisp.tools.base import ToolExecutionMetadata
 from wisp.tools.codemode.calls import CODEMODE, NestedCallResult
-from wisp.tools.codemode.tool import CODEMODE_PROMPT, CodemodeTool
+from wisp.tools.codemode.tool import CODEMODE_PROMPT, CodemodeTool, callable_by_name
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
 from wisp.tools.result import ToolError
@@ -2314,6 +2314,37 @@ class CodingSession:
         registry = self._operation_tool_registry()
         tools, catalog = self._apply_mcp_exposure(self._effective_tools(registry), registry)
         return self._codemode_tool(tools, registry, _no_executor, catalog) is not None
+
+    def scriptable_mcp_tools(self) -> tuple[int, int]:
+        """Count the MCP tools a run started now may use and those a script may call.
+
+        The tools are worked out as a run would work them out, after mode, policy
+        and MCP exposure, without starting one. A script may call an MCP tool only
+        when its server's `tool_safety` marks it read-only. Sent directly, the tool
+        must also be callable by its name; found on demand, `mcp_call` reaches one
+        whose name Python does not accept.
+
+        Returns:
+            tuple[int, int]: The MCP tools a script may call, then every MCP tool
+            the run may use.
+        """
+
+        registry = self._operation_tool_registry()
+        if registry is None:
+            return 0, 0
+        tools = self._effective_tools(registry)
+        registered = set(registry.names())
+        mcp_tools = McpCatalog.from_tools(
+            registry.get(spec.name) for spec in tools if spec.name in registered
+        ).entries
+        _, found_on_demand = self._apply_mcp_exposure(tools, registry)
+        scriptable = sum(
+            1
+            for entry in mcp_tools
+            if entry.tool.safety == "read"
+            and (found_on_demand is not None or callable_by_name(entry.tool))
+        )
+        return scriptable, len(mcp_tools)
 
     def _codemode_tool(
         self,

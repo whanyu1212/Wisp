@@ -261,6 +261,18 @@ def _tail(text: str, limit: int) -> str:
     return f"[{len(text) - limit} earlier characters] …{tail}"
 
 
+def callable_by_name(tool: ScriptableTool) -> bool:
+    """Report whether a script can call ``tool`` as a function of its own name.
+
+    Returns:
+        bool: False when the tool's name or one of its parameters is not a Python
+        identifier. A script then reaches it only through `mcp_call`, which a run
+        has when it finds its MCP tools on demand.
+    """
+
+    return _signature(tool) is not None
+
+
 def _signature(tool: ScriptableTool) -> _Signature | None:
     """Declare ``tool`` as a keyword-only async Python function, or None if it can't be."""
 

@@ -100,7 +100,7 @@ const PERMISSION_CHOICES: [(char, &str, PermissionMode); 2] = [
 const CODEMODE_CHOICES: [(char, &str, CodemodeSetting); 3] = [
     (
         '1',
-        "Automatic — when MCP tools are found on demand",
+        "Automatic — with on-demand MCP tools marked read",
         CodemodeSetting::Automatic,
     ),
     (
@@ -735,10 +735,10 @@ fn codemode_notes(state: &UiState) -> Vec<(String, bool)> {
                 "Needs the codemode extra: pip install 'wisp-ai[codemode]'".to_owned(),
                 true,
             ));
-        } else if snapshot.offered {
-            notes.push(("On for the next prompt.".to_owned(), false));
         } else {
-            notes.push(("Off for the next prompt.".to_owned(), false));
+            let offered = if snapshot.offered { "On" } else { "Off" };
+            notes.push((format!("{offered} for the next prompt."), false));
+            notes.extend(scriptable_mcp_note(snapshot));
         }
         if let Some(env) = snapshot.env_setting {
             notes.push((
@@ -755,6 +755,25 @@ fn codemode_notes(state: &UiState) -> Vec<(String, bool)> {
         false,
     ));
     notes
+}
+
+/// How many of the next run's MCP tools a script may call, flagged when it is none.
+/// Scripts are refused every other MCP tool, so the note names the setting that
+/// decides it. It states the cause without urging a change: the tools left out may
+/// be ones that write. The counts come first, so a narrow panel cuts the setting.
+fn scriptable_mcp_note(snapshot: &wisp_protocol::events::CodemodeState) -> Option<(String, bool)> {
+    let (scriptable, total) = (snapshot.scriptable_mcp_tools, snapshot.mcp_tools);
+    if total == 0 || snapshot.setting == CodemodeSetting::Never {
+        return None;
+    }
+    let tools = if total == 1 { "tool" } else { "tools" };
+    if scriptable >= total {
+        return Some((format!("Scripts can call all {total} MCP {tools}."), false));
+    }
+    Some((
+        format!("Scripts can call {scriptable} of {total} MCP {tools} (tool_safety \"read\")."),
+        scriptable == 0,
+    ))
 }
 
 /// The setting's name as the side panel and picker notes show it.
@@ -824,10 +843,14 @@ mod tests {
             available: false,
             offered: false,
             env_setting: Some(CodemodeSetting::Never),
+            mcp_tools: 12,
+            scriptable_mcp_tools: 0,
         }));
         let rendered = draw(&mut view, &state, 72, codemode_panel_height(&state));
         assert!(rendered.contains("current"));
         assert!(rendered.contains("pip install 'wisp-ai[codemode]'"));
+        // Without the extra no script runs, so what one could call is not the news.
+        assert!(!rendered.contains("Scripts can call"));
         assert!(rendered.contains("WISP_CODEMODE sets never when Wisp starts."));
         assert!(rendered.contains("Applies from the next prompt."));
         assert!(matches!(
@@ -840,6 +863,72 @@ mod tests {
             view.handle_key(key(KeyCode::Char('4')), &state),
             DiscoveryAction::None
         ));
+    }
+
+    #[test]
+    fn codemode_picker_counts_scriptable_mcp_tools() {
+        let cases = [
+            // No MCP tools, or codemode never offered: nothing to say.
+            (CodemodeSetting::Automatic, 0, 0, None),
+            (CodemodeSetting::Never, 0, 12, None),
+            (
+                CodemodeSetting::Automatic,
+                0,
+                12,
+                Some((
+                    "Scripts can call 0 of 12 MCP tools (tool_safety \"read\").",
+                    true,
+                )),
+            ),
+            (
+                CodemodeSetting::Always,
+                5,
+                102,
+                Some((
+                    "Scripts can call 5 of 102 MCP tools (tool_safety \"read\").",
+                    false,
+                )),
+            ),
+            (
+                CodemodeSetting::Automatic,
+                1,
+                1,
+                Some(("Scripts can call all 1 MCP tool.", false)),
+            ),
+        ];
+        for (setting, scriptable_mcp_tools, mcp_tools, expected) in cases {
+            let mut state = UiState::unconfigured();
+            state.codemode.snapshot = Some(Arc::new(wisp_protocol::events::CodemodeState {
+                setting,
+                available: true,
+                offered: scriptable_mcp_tools > 0,
+                env_setting: None,
+                mcp_tools,
+                scriptable_mcp_tools,
+            }));
+            let notes = codemode_notes(&state);
+            let note = notes
+                .iter()
+                .find(|(text, _)| text.starts_with("Scripts can call"))
+                .map(|(text, warns)| (text.as_str(), *warns));
+            assert_eq!(
+                note, expected,
+                "{setting:?} {scriptable_mcp_tools}/{mcp_tools}"
+            );
+            // The docked panel grows by the note's row, and at 72 columns the whole
+            // note fits, a three-digit count included.
+            let rendered = draw(
+                &mut DiscoveryView::codemode(),
+                &state,
+                72,
+                codemode_panel_height(&state),
+            );
+            if let Some((text, _)) = expected {
+                assert!(rendered.contains(text), "{text}");
+            } else {
+                assert!(!rendered.contains("Scripts can call"));
+            }
+        }
     }
 
     #[test]

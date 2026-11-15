@@ -6893,6 +6893,8 @@ mod tests {
             available: true,
             offered: true,
             env_setting: None,
+            mcp_tools: 0,
+            scriptable_mcp_tools: 0,
         };
         reduce(
             &mut state,

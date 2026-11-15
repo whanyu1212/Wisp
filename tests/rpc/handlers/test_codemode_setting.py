@@ -74,8 +74,26 @@ def test_get_reports_without_saving(fixture: RpcExecutorFixture, settings_path: 
 
     state = _send(fixture, GetCodemodeCommand(id="codemode-1"))
 
-    assert state == CodemodeState(setting="never", available=codemode_available(), offered=False)
+    assert state == CodemodeState(
+        setting="never",
+        available=codemode_available(),
+        offered=False,
+        mcp_tools=0,
+        scriptable_mcp_tools=0,
+    )
     assert not settings_path.exists()
+
+
+def test_reports_scriptable_mcp_tools(
+    fixture: RpcExecutorFixture, settings_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The snapshot says how many of the run's MCP tools a script may call."""
+
+    monkeypatch.setattr(fixture.agent, "scriptable_mcp_tools", lambda: (3, 12))
+
+    state = _send(fixture, GetCodemodeCommand(id="codemode-1"))
+
+    assert (state.scriptable_mcp_tools, state.mcp_tools) == (3, 12)
 
 
 def test_env_setting_is_reported(
