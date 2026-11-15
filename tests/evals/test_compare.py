@@ -43,6 +43,7 @@ def _run(
         "input_tokens": tokens,
         "output_tokens": 0,
         "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
         "known_usd": "0",
         "tools_sha256": tools,
         "wisp_version": "wisp 0.6.1",
@@ -57,6 +58,7 @@ def _run(
         "codemode": "off",
         "scripts": 0,
         "failed_scripts": 0,
+        "script_failures": {},
         "nested_calls": 0,
     }
 
@@ -132,6 +134,31 @@ def test_noise_floor_and_marks_rendered() -> None:
     table = render_comparison(comparison)
     assert "12.0 → 22.0 (+10.0; " in table and ") *" in table
     assert "Of these 3 intervals, expect about 0 to be marked by chance" in table
+
+
+def test_tokens_include_cached_input() -> None:
+    """Anthropic reports cached tokens outside `input_tokens`; the metric adds them back."""
+    row = _run("a", 4, tokens=10) | {"provider": "anthropic", "cache_read_tokens": 600}
+    cached, written = row | {"rep": 2}, row | {"cache_write_tokens": 300}
+
+    comparison = compare_runs([row, cached], [written, written | {"rep": 2}])
+
+    (pair,) = comparison.pairs
+    tokens = pair.changes[2]
+    assert (tokens.before, tokens.after) == (610.0, 910.0)
+    assert not pair.cache_writes_uncounted
+
+
+def test_uncounted_cache_writes_marked() -> None:
+    """A side recorded before cache writes were counted reads low against one with some."""
+    current = _run("a", 4) | {"provider": "anthropic", "cache_write_tokens": 300}
+    older = {name: value for name, value in current.items() if name != "cache_write_tokens"}
+
+    comparison = compare_runs([older], [current])
+
+    assert comparison.pairs[0].cache_writes_uncounted
+    assert "| a (cache writes uncounted on one side) |" in render_comparison(comparison)
+    assert not compare_runs([older], [older]).pairs[0].cache_writes_uncounted
 
 
 def test_baseline_keeps_listed_fields(tmp_path: Path) -> None:

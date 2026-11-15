@@ -29,6 +29,9 @@ from wisp.tools.codemode.calls import CODEMODE
 
 # The codemode result's summary, as `tools/summary.py` writes it.
 _NESTED_CALLS = re.compile(r"^codemode: (\d+) tool calls?\b")
+# A failed script's result, as `tools/codemode/tool.py` heads it: the failure kind,
+# then the type checker's diagnostic code or the exception's class.
+_SCRIPT_FAILED = re.compile(r"^Script failed \((\w+)\): (?:error\[([\w-]+)\]|([A-Za-z_]\w*):)?")
 
 
 @dataclass(slots=True)
@@ -47,6 +50,7 @@ class RunMetrics:
         input_tokens (int): Input tokens over all model responses.
         output_tokens (int): Output tokens over all model responses.
         cache_read_tokens (int): Input tokens served from the provider's cache.
+        cache_write_tokens (int): Input tokens written to the provider's cache.
         known_usd (Decimal): Estimated cost of the priced responses.
         unpriced_responses (int): Responses without a cost estimate.
         retries (int): Provider retries (rate limits, transient errors).
@@ -65,6 +69,8 @@ class RunMetrics:
             many calls its script made.
         failed_scripts (int): `codemode` calls that failed: a script that did not
             type-check, raised, or hit a limit.
+        script_failures (Counter[str]): Those failures by reason, as
+            `script_failure_reason` names them. They add up to ``failed_scripts``.
         nested_calls (int): Tool calls the scripts that finished made.
     """
 
@@ -77,6 +83,7 @@ class RunMetrics:
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
     known_usd: Decimal = Decimal(0)
     unpriced_responses: int = 0
     retries: int = 0
@@ -87,15 +94,12 @@ class RunMetrics:
     proxied_argument_errors: int = 0
     scripts: int = 0
     failed_scripts: int = 0
+    script_failures: Counter[str] = field(default_factory=Counter)
     nested_calls: int = 0
 
     @property
     def last_error(self) -> str | None:
         return self.errors[-1] if self.errors else None
-
-    @property
-    def total_tokens(self) -> int:
-        return self.input_tokens + self.output_tokens
 
     def reruns(self, fragment: str | None = None) -> int:
         """Count `bash` commands repeated within the run.
@@ -148,7 +152,9 @@ def measure(events: Iterable[KnownWispEvent]) -> RunMetrics:
             metrics.proxied_argument_errors += (
                 event.name == MCP_CALL and event.failure_code == "invalid_arguments"
             )
-            metrics.failed_scripts += event.name == CODEMODE
+            if event.name == CODEMODE:
+                metrics.failed_scripts += 1
+                metrics.script_failures[script_failure_reason(event)] += 1
         elif isinstance(event, ToolExecutionEnded) and event.name == CODEMODE:
             match = _NESTED_CALLS.match(event.summary or "")
             metrics.nested_calls += int(match.group(1)) if match else 0
@@ -164,11 +170,37 @@ def measure(events: Iterable[KnownWispEvent]) -> RunMetrics:
     return metrics
 
 
+def script_failure_reason(result: ToolResultReady) -> str:
+    """Name why a `codemode` call failed, without quoting its error text.
+
+    The reason is safe to commit in a baseline: it comes from a fixed vocabulary,
+    while the error text can hold paths under the folder a run was made in.
+
+    Args:
+        result (ToolResultReady): The failed `codemode` result.
+
+    Returns:
+        str: The failure kind the script result names (`syntax`, `type`, `runtime`,
+        `limit`, `timeout` or `unavailable`). A `type` failure adds the type
+        checker's first diagnostic code and a `runtime` one the exception's class,
+        as in `type: unresolved-reference` and `runtime: ValueError`. A call refused
+        before any script ran gives its `failure_code`, or `unknown` without one.
+    """
+
+    match = _SCRIPT_FAILED.match(result.output)
+    if match is None:
+        return result.failure_code or "unknown"
+    kind, diagnostic, exception = match.groups()
+    detail = diagnostic if kind == "type" else exception if kind == "runtime" else None
+    return f"{kind}: {detail}" if detail else kind
+
+
 def _add_usage(metrics: RunMetrics, event: MessageCompleted | CompactionCompleted) -> None:
     if event.usage is not None:
         metrics.input_tokens += event.usage.input_tokens
         metrics.output_tokens += event.usage.output_tokens
         metrics.cache_read_tokens += event.usage.cache_read_input_tokens or 0
+        metrics.cache_write_tokens += event.usage.cache_write_input_tokens or 0
     if event.cost is not None and event.cost.estimated_usd is not None:
         metrics.known_usd += event.cost.estimated_usd
     elif event.usage is not None:
