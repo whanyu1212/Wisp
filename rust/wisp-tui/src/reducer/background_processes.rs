@@ -255,7 +255,7 @@ pub(super) fn observe_tool_result(state: &mut UiState, result: &ToolResultInput)
     let Some(process_id) = result.process_id.as_deref().map(identity_for_display) else {
         return;
     };
-    match result.process_state.as_deref() {
+    let ended = match result.process_state.as_deref() {
         Some("running") => {
             let command = start.map_or_else(|| process_id.to_owned(), |(_, command)| command);
             processes.add(BackgroundProcess {
@@ -263,9 +263,44 @@ pub(super) fn observe_tool_result(state: &mut UiState, result: &ToolResultInput)
                 command,
                 started_at_ms: result.process_started_at_ms,
             });
+            return;
         }
-        Some(_) => processes.remove(process_id),
-        None => {}
+        Some("completed") => ProcessDisplayState::Completed,
+        Some("failed") => ProcessDisplayState::Failed,
+        Some("timed_out") => ProcessDisplayState::TimedOut,
+        Some("cancelled") => ProcessDisplayState::Cancelled,
+        Some(_) => {
+            processes.remove(process_id);
+            return;
+        }
+        None => return,
+    };
+    // The agent's own cancel publishes no `process.ended`, so its result is the only
+    // word that the process ended; the backend still holds it for a peek.
+    let listed = processes
+        .running
+        .iter()
+        .find(|process| process.process_id == process_id);
+    let report = ProcessReport {
+        process_id: process_id.to_owned(),
+        command: listed.map_or_else(
+            || start.map_or_else(|| process_id.to_owned(), |(_, command)| command),
+            |process| process.command.clone(),
+        ),
+        state: ended,
+        exit_code: None,
+        started_at_ms: listed.and_then(|process| process.started_at_ms),
+        stopped_by_user: false,
+    };
+    // An outcome already listed, as from `process.ended`, has the exit code.
+    if !processes
+        .finished
+        .iter()
+        .any(|listed| listed.process_id == process_id)
+    {
+        processes.finish(report);
+    } else {
+        processes.remove(process_id);
     }
 }
 
@@ -1121,6 +1156,35 @@ mod tests {
         let again = reload(&mut state, &mut Ids::default()).unwrap();
         assert_eq!(sent(&again).len(), 1);
         assert_eq!(sent(&again)[0]["type"], "get_processes");
+    }
+
+    #[test]
+    fn agent_cancel_stays_listed() {
+        let mut state = UiState::new("fake".into(), None, None);
+        start(&mut state, "server", "npm run dev");
+        // The agent's cancel announces no `process.ended`; its result says it ended.
+        result(&mut state, "cancel-1", "server", "cancelled");
+
+        assert!(listed(&state).is_empty());
+        let ended = &state.background_processes.finished()[0];
+        assert_eq!(
+            (ended.command.as_str(), ended.state, ended.stopped_by_user),
+            ("npm run dev", ProcessDisplayState::Cancelled, false)
+        );
+    }
+
+    #[test]
+    fn exit_code_survives_result() {
+        let mut state = UiState::new("fake".into(), None, None);
+        start(&mut state, "tests", "make test");
+        ended(&mut state, "tests", 2);
+        result(&mut state, "poll-1", "tests", "failed");
+
+        let ended = &state.background_processes.finished()[0];
+        assert_eq!(
+            (ended.state, ended.exit_code),
+            (ProcessDisplayState::Failed, Some(2))
+        );
     }
 
     #[test]

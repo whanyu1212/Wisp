@@ -291,11 +291,13 @@ for line in sys.stdin:
             if (
                 phase == "startup"
                 and context_redraw_offset is not None
-                and command_types[:9]
+                and command_types[:10]
                 == [
                     "get_messages",
-                    # The background process list, read with the history.
+                    # The background process lists, running and ended, read with the
+                    # history.
                     "get_state",
+                    "get_processes",
                     "get_connection_catalog",
                     "get_model_catalog",
                     "get_commands",
