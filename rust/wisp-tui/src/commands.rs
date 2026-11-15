@@ -46,7 +46,7 @@ pub(crate) enum Command {
     Compact(Option<String>),
     /// `/cd`: the folder to work from, as typed.
     ChangeDirectory(String),
-    /// `/ps`: list the running background processes.
+    /// `/ps`: focus the running background processes in the side panel.
     Processes,
     /// `/kill`: the process to stop, by `/ps` number or id.
     KillProcess(String),

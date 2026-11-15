@@ -315,6 +315,8 @@ pub(crate) struct Conversation {
     pub selectable: Rect,
     /// The footer's jump-to-latest label, painted only while the transcript is scrolled back.
     pub jump_to_latest: Option<Rect>,
+    /// The background strip under the composer, painted while processes run.
+    pub background_strip: Option<Rect>,
     pub editor: Option<Editor>,
     pub completion: Rows,
     pub completion_visible: bool,
@@ -562,6 +564,14 @@ impl LiveUi {
                         .await?;
                     self.reconcile_browse_selection();
                     return Ok(control);
+                }
+                if frame
+                    .conversation
+                    .background_strip
+                    .is_some_and(|area| contains(area, event))
+                {
+                    self.focus_background_processes();
+                    return Ok(LoopControl::Continue);
                 }
                 // A press on a welcome menu row opens what it names.
                 if self.welcome_menu_rows() > 0 {

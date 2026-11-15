@@ -3,6 +3,8 @@
 #![forbid(unsafe_code)]
 
 mod attention;
+#[cfg(test)]
+mod background_strip_tests;
 mod cli;
 mod clipboard;
 mod color_depth;
@@ -3544,8 +3546,8 @@ impl LiveUi {
             }
             Command::Processes => {
                 self.editor.clear();
-                self.dispatch(UiAction::ListBackgroundProcesses, writer, limit)
-                    .await
+                self.show_background_processes();
+                Ok(LoopControl::Continue)
             }
             Command::KillProcess(target) => {
                 self.editor.clear();
@@ -5092,6 +5094,12 @@ impl LiveUi {
                 self.render_pending = true;
                 Ok(Some(LoopControl::Continue))
             }
+            Some(KeyAction::FocusBackground)
+                if self.active_overlay().is_none() && !decision_pending =>
+            {
+                self.show_background_processes();
+                Ok(Some(LoopControl::Continue))
+            }
             Some(KeyAction::BackgroundCommand) if !decision_pending => self
                 .dispatch(UiAction::BackgroundRunningCommand, writer, limit)
                 .await
@@ -5464,6 +5472,24 @@ impl LiveUi {
         Ok(LoopControl::Continue)
     }
 
+    /// `/ps` and the `panel.background` key: focuses the running processes, or says
+    /// none are running.
+    fn show_background_processes(&mut self) {
+        if self.state.background_processes.running().is_empty() {
+            self.notice = Some("No background processes are running.".into());
+            self.render_pending = true;
+        } else {
+            self.focus_background_processes();
+        }
+    }
+
+    /// Opens the side panel with focus on its first background process.
+    fn focus_background_processes(&mut self) {
+        self.side_panel.focus_background();
+        self.rendered_overlay = None;
+        self.render_pending = true;
+    }
+
     /// Esc or Ctrl+C closes the overlaid panel, like /diff, rather than interrupting.
     /// Enter opens the focused row's view in its place, keeping any draft in the
     /// composer.
@@ -5521,6 +5547,16 @@ impl LiveUi {
         }
         if self.state.view_status == ViewStatus::WaitingForTrust {
             return self.handle_trust_key(key, writer, limit).await;
+        }
+        // Down from an empty composer moves into the background strip under it; with
+        // a draft, Down stays the editor's.
+        if key.code == KeyCode::Down
+            && key.modifiers == KeyModifiers::NONE
+            && self.editor.text().is_empty()
+            && !self.state.background_processes.running().is_empty()
+        {
+            self.focus_background_processes();
+            return Ok(LoopControl::Continue);
         }
         let action = self.bindings.action(key);
         if matches!(action, Some(KeyAction::Submit | KeyAction::AlternateSubmit)) {

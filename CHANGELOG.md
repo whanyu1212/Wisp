@@ -44,6 +44,12 @@ this policy.
   none. With none, automatic mode leaves codemode off even when the tools are found on demand,
   and scripts fail against those servers under `always`. The automatic choice now reads "with
   on-demand MCP tools marked read", since it needs both. (HY-510)
+- While background processes run, a strip under the composer shows how many and their commands,
+  even when the side panel is hidden or the terminal is too narrow to dock it. Down from an empty
+  composer, a click on the strip, or `/ps` focuses the side panel on the first process, where
+  Enter prepares `/kill` for it and Esc returns to the composer with the draft kept. `/ps` no
+  longer prints the list as a notice. A new `panel.background` key action, unbound by default,
+  does the same with a draft in the composer. (HY-544)
 
 ### Event contract
 
