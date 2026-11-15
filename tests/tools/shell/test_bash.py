@@ -458,6 +458,42 @@ def test_bash_tool_cancels_resumable_process(tmp_path: Path) -> None:
 
 
 @pytest.mark.process
+def test_poll_names_user_stop(tmp_path: Path) -> None:
+    """A poll after the user stopped a process says the user stopped it."""
+
+    async def run() -> None:
+        context = ToolContext(cwd=tmp_path)
+        tool = BashTool()
+        python = shlex.quote(sys.executable)
+        command = f'{python} -c "import time; time.sleep(30)"'
+
+        try:
+            start = await tool.run(
+                {
+                    "operation": "start",
+                    "command": command,
+                    "yield_seconds": 0,
+                    "lifetime_seconds": 30,
+                },
+                context,
+            )
+            process_id = str(start.data["process_id"])
+            supervisor = tool._process_supervisor  # noqa: SLF001
+            assert supervisor is not None
+            # The path `/kill` and the TUI's stop take.
+            assert await supervisor.stop(process_id) == "cancelled"
+
+            polled = await tool.run({"operation": "poll", "process_id": process_id}, context)
+
+            assert polled.text.splitlines()[0] == f"Process {process_id} stopped by the user"
+            assert polled.data["process_state"] == "cancelled"
+        finally:
+            await tool.aclose()
+
+    anyio.run(run)
+
+
+@pytest.mark.process
 def test_bash_tool_cancels_started_process_when_initial_poll_is_cancelled(
     tmp_path: Path,
 ) -> None:

@@ -94,6 +94,9 @@ class ProcessUpdate:
     # The full streams, which the caller saves if its result shows only part of them.
     stdout_saved: SavedStream | None = None
     stderr_saved: SavedStream | None = None
+    # Whether the user stopped the process (``stop``), rather than a caller's cancel
+    # or the supervisor closing; only ever true with state ``cancelled``.
+    stopped_by_user: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -421,8 +424,9 @@ class _ManagedProcess:
     terminal_reported: bool = False
     notify_on_exit: bool = False
     exit_announced: bool = False
-    # A user stopped it, so its exit is announced like one that ended on its own.
-    announce_cancel: bool = False
+    # A user stopped it, so its exit is announced like one that ended on its own and
+    # its final snapshot says who stopped it.
+    stopped_by_user: bool = False
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     started_monotonic: float = field(default_factory=time.monotonic)
     ended_at: datetime | None = None
@@ -987,7 +991,8 @@ class ProcessSupervisor:
 
         Unlike ``cancel``, this reads nothing: the process's output and final state
         stay for the caller's next poll, as for a process that stopped on its own,
-        and the exit is announced to the exit listener as ``cancelled``.
+        and the exit is announced to the exit listener as ``cancelled``. That poll's
+        snapshot has ``stopped_by_user`` set, so the agent learns who stopped it.
 
         Args:
             process_id (str): The handle ``start`` returned.
@@ -1005,7 +1010,7 @@ class ProcessSupervisor:
         async with managed.operation_lock:
             if managed.state == "running":
                 managed.terminal_override = "cancelled"
-                managed.announce_cancel = True
+                managed.stopped_by_user = True
                 cleanup_task = asyncio.create_task(self._terminate_managed(managed))
                 await self._await_task_before_propagating_cancellation(cleanup_task)
             return managed.state
@@ -1409,7 +1414,7 @@ class ProcessSupervisor:
             listener is None
             or managed.exit_announced
             or managed.state == "running"
-            or (managed.state == "cancelled" and not managed.announce_cancel)
+            or (managed.state == "cancelled" and not managed.stopped_by_user)
             or managed.ended_at is None
         ):
             return
@@ -1531,6 +1536,7 @@ class ProcessSupervisor:
             ),
             stdout_saved=managed.stdout_saved,
             stderr_saved=managed.stderr_saved,
+            stopped_by_user=managed.state == "cancelled" and managed.stopped_by_user,
         )
 
     def _evict_terminals_for_capacity(self) -> None:

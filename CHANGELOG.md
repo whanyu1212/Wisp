@@ -27,6 +27,11 @@ this policy.
   `return_exceptions`. A bug in the script, or reaching a limit, still ends it. A failed call
   that a script returns among its results now reads as `RuntimeError: …`, not as a result.
   (HY-515)
+- A `bash` poll of a background process the user stopped (`/kill`, or the TUI's stop) now reads
+  `Process <id> stopped by the user`, as the exit notice already did, instead of `Process <id>
+  cancelled`. An agent that did not ask to hear of the exit could not tell the user had stopped
+  it, so it might start it again without asking. The agent's own cancels read as before.
+  (HY-542)
 
 ### TUI
 
