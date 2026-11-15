@@ -289,6 +289,10 @@
           "default": null,
           "title": "CodemodeStateEnvSetting"
         },
+        "mcp_found_on_demand": {
+          "title": "CodemodeStateMcpFoundOnDemand",
+          "type": "boolean"
+        },
         "mcp_tools": {
           "minimum": 0,
           "title": "CodemodeStateMcpTools",
@@ -314,7 +318,8 @@
         "offered",
         "env_setting",
         "mcp_tools",
-        "scriptable_mcp_tools"
+        "scriptable_mcp_tools",
+        "mcp_found_on_demand"
       ],
       "title": "CodemodeState",
       "type": "object"

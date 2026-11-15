@@ -80,6 +80,7 @@ def test_get_reports_without_saving(fixture: RpcExecutorFixture, settings_path: 
         offered=False,
         mcp_tools=0,
         scriptable_mcp_tools=0,
+        mcp_found_on_demand=False,
     )
     assert not settings_path.exists()
 

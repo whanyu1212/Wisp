@@ -471,6 +471,14 @@ pub(super) fn subagent_model(
     ])
 }
 
+/// Whether the side panel or the `/codemode` picker shows the codemode snapshot, so
+/// a change to MCP servers or a finished run should read it again. A read still in
+/// flight when that happens, such as the picker's first one during the startup MCP
+/// connect, is read again by `codemode` itself.
+pub(super) fn codemode_followed(state: &UiState) -> bool {
+    state.side_panel_visible || state.codemode_picker_open
+}
+
 /// Send the codemode read that was asked for while another request was in flight,
 /// once that request has finished.
 pub(super) fn read_codemode_again(

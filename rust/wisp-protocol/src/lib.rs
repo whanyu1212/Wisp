@@ -1427,6 +1427,9 @@ pub mod events {
         /// How many of them a script may call: those `tool_safety` marks read-only,
         /// less any a run sending its MCP tools directly cannot call by name.
         pub scriptable_mcp_tools: u64,
+        /// Whether a run started now would find its MCP tools on demand, which
+        /// automatic codemode needs.
+        pub mcp_found_on_demand: bool,
     }
 
     /// The session's subagents setting and what its next run's subagents would use.

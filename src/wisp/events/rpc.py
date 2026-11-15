@@ -470,6 +470,10 @@ class CodemodeState(BaseModel):
     # sending its MCP tools directly cannot call by name.
     mcp_tools: int = Field(ge=0)
     scriptable_mcp_tools: int = Field(ge=0)
+    # Whether a run started now would find its MCP tools on demand. Automatic
+    # codemode needs it: with the tools sent directly it stays off, however many
+    # are read-only.
+    mcp_found_on_demand: bool
 
 
 class RpcCodemodeReported(WispEvent):

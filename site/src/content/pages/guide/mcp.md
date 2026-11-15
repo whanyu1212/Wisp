@@ -366,8 +366,11 @@ out. Mark the read-only tools in [`tool_safety`](#settings-and-tool-safety) to g
 
 Both settings are user-only. `WISP_MCP_TOOL_EXPOSURE` and `WISP_CODEMODE` override their settings-file
 values at startup. In the TUI, `/codemode` shows the setting, extra availability, whether the
-next prompt would offer the tool, and how many of its MCP tools a script can call; choose
-automatic, always, or never there. `/codemode always` and
+next prompt would offer the tool, and how many of its MCP tools a script can call. When
+automatic is off because the run sends its MCP tools directly, it says so: it turns on only when
+the run finds them on demand, with `"mcp_tool_exposure": "on_demand"`, or under the default
+`auto` once the servers' tool schemas grow past its threshold. It updates when MCP servers connect or change and after each
+prompt. Choose automatic, always, or never there. `/codemode always` and
 `/codemode never` apply those choices directly. Settings changes affect the next prompt, not a script
 already running. RPC/SDK clients use `get_codemode` and `set_codemode` for the same information.
 
