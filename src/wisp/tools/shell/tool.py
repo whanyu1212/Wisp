@@ -694,6 +694,9 @@ def _managed_update_header(update: ProcessUpdate) -> str:
         return f"Process {update.process_id} completed with exit code {exit_code}"
     if update.state == "timed_out":
         return f"Process {update.process_id} timed out"
+    if update.state == "cancelled" and update.stopped_by_user:
+        # As the exit notice words it, so the agent asks before starting it again.
+        return f"Process {update.process_id} stopped by the user"
     if update.state == "cancelled":
         return f"Process {update.process_id} cancelled"
     if update.error:
