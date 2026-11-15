@@ -461,7 +461,8 @@ class TestReadOutputTool:
             "[stdout of `make`: lines 3-4 of 10]\nline 3\nline 4\n"
             "[More lines follow. Use offset=5 to continue.]"
         )
-        assert first.truncated is True
+        # It returned the two lines asked for; the notice says more follow.
+        assert first.truncated is False
         assert first.data == {
             "output_id": output_id,
             "offset": 3,
@@ -471,6 +472,33 @@ class TestReadOutputTool:
         }
         assert last.text == "[stdout of `make`: lines 9-10 of 10]\nline 9\nline 10"
         assert last.truncated is False
+
+    @pytest.mark.parametrize(
+        ("arguments", "max_lines", "truncated"),
+        [
+            ({"limit": 3}, 2000, False),
+            # The last lines, fewer than asked for: nothing follows, so it is whole.
+            ({"offset": 9, "limit": 5}, 2000, False),
+            ({}, 2000, False),
+            ({}, 6, True),
+            ({"limit": 8}, 6, True),
+        ],
+        ids=["limit-met", "limit-past-end", "whole", "budget-cut", "limit-over-budget"],
+    )
+    def test_page_cut_by_budget_is_truncated(
+        self, root: Path, arguments: dict[str, int], max_lines: int, truncated: bool
+    ) -> None:
+        """Only a page the output budget stopped is truncated, as with `read`."""
+
+        content = b"".join(f"line {number}\n".encode() for number in range(1, 11))
+        tool, output_id = self.saved(root, content)
+        context = ToolContext(cwd=root.parent, max_output_lines=max_lines)
+
+        result = run_tool(tool, {"output_id": output_id, **arguments}, context)
+
+        assert result.truncated is truncated
+        follows = "offset" not in arguments and ("limit" in arguments or truncated)
+        assert ("More lines follow" in result.text) is follows
 
     def test_marks_a_shortened_final_line_as_truncated(self, root: Path) -> None:
         tool, output_id = self.saved(root, b"x" * 2000)

@@ -731,12 +731,21 @@ def test_settled_calls_overlap() -> None:
         ("return await bug()", "RecursionError"),
         ("raise NotImplementedError('todo')", "NotImplementedError"),
         ("raise RuntimeError('gave up')", "RuntimeError: gave up"),
+        # Worded like a failed call, but no tool of this run is named `parse`.
+        ("raise RuntimeError('parse failed: bad row')", "RuntimeError: parse failed: bad row"),
         (
             "seen = {1: 1}\n    for key in seen:\n        seen[key + 1] = 1\n    return 'x'",
             "RuntimeError: dictionary changed size",
         ),
     ],
-    ids=["other-error", "recursion", "subclass", "own-runtime-error", "sandbox-runtime-error"],
+    ids=[
+        "other-error",
+        "recursion",
+        "subclass",
+        "own-runtime-error",
+        "not-a-tool",
+        "sandbox-runtime-error",
+    ],
 )
 def test_settled_keeps_script_bugs(bug: str, error: str) -> None:
     """Only a failed tool call comes back as a value: a bug in the script still ends it."""
@@ -745,6 +754,21 @@ def test_settled_keeps_script_bugs(bug: str, error: str) -> None:
 
     with pytest.raises(ToolError, match=rf"Script failed \(runtime\): {error}"):
         _run_tool(_tool(), code)
+
+
+@pytest.mark.parametrize("count", [1, 300])
+def test_settled_knows_every_tool(count: int) -> None:
+    """The helper loads for any number of tools and hands back each one's failures."""
+
+    names = [f"tool_{index}" for index in range(count)]
+
+    async def fail(name: str, arguments: object) -> NestedCallResult:
+        return NestedCallResult(text="locked", is_error=True)
+
+    tool = _tool(fail, tools=[_Tool(name) for name in names])
+    result = _run_tool(tool, f"[str(e) for e in await gather_settled({names[-1]}(table='a'))]")
+
+    assert f"{names[-1]} failed: locked" in result.text
 
 
 def test_helper_keeps_script_line_numbers() -> None:
@@ -804,6 +828,25 @@ def test_refused_call_is_a_settled_error(tmp_path: Path) -> None:
     assert [(call.target, call.failure_code) for call in refused] == [
         ("mcp__db__drop", "policy_denied")
     ]
+
+
+@dataclass
+class _LockedMcpTool(_McpTool):
+    async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
+        raise ToolError("table is locked")
+
+
+def test_failed_catalog_call_is_settled(tmp_path: Path) -> None:
+    """A catalog tool called by name, found on demand, is one of the run's tools too."""
+
+    tools = _Tools(query=_LockedMcpTool("mcp__db__query"))
+    code = "[str(outcome) for outcome in await gather_settled(mcp__db__query(table='a'))]"
+
+    events, _ = _run(tmp_path, tools, [_script(code)], exposure="on_demand")
+
+    result = _result(events)
+    assert not result.is_error
+    assert "mcp__db__query failed: table is locked" in result.output
 
 
 def test_failed_call_raises_in_script() -> None:

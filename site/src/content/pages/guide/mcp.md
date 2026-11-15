@@ -435,7 +435,9 @@ Tool functions take keyword arguments and return the same text as a normal call,
 up to 512 KiB, where a direct call stops at the output limit (50 KB by default), so a script can
 count or search all of a long listing before printing a little. A result that is only part of the
 answer, cut at that size or stopped early by the tool (`grep` at `max_results`, say), ends with the
-line `[result incomplete]`, and the script's tool-call summary counts it. A result is also cut
+line `[result incomplete]`, and the script's tool-call summary counts it. A page read with
+`limit` (from `read` or `read_output`) is not incomplete when it returns that many lines, even
+if more follow. A result is also cut
 at 50,000 lines. Print what the script found rather than whole results: three results near
 512 KiB already pass the 1 MiB a script may print, which ends it. A failed call
 raises `RuntimeError`; the script can catch it to continue with other work. Independent calls can
@@ -443,8 +445,9 @@ use `asyncio.gather`; Wisp still serializes tools not marked parallel-safe. Unde
 failed call ends the script and the other results are lost, so Wisp gives every script
 `await gather_settled(...)`: it takes the same calls and returns every outcome in order, with a
 failed call's `RuntimeError` in place of its result (`isinstance(outcome, RuntimeError)` tells
-them apart). It hands back only failed tool calls; a bug in the script, or reaching a limit,
-still ends it. Scripts may also call
+them apart). It hands back only failed tool calls, recognised by their message
+`<tool> failed: …` naming one of the run's tools; a bug in the script, or reaching a limit, still
+ends it. Scripts may also call
 the run's read-only local tools, but only through their provided functions, not by opening files.
 
 With on-demand discovery, read-only catalog tools need not appear in codemode's description to be

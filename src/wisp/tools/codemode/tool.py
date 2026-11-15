@@ -60,12 +60,27 @@ async def gather_settled(*calls):
             return await call
         except RuntimeError as error:
             tool, failed, _ = str(error).partition(" failed: ")
-            if type(error).__name__ != "RuntimeError" or not failed or not tool.isidentifier():
+            if type(error).__name__ != "RuntimeError" or not failed or tool not in _TOOL_NAMES:
                 raise
             return error
 
     return await _asyncio.gather(*[settled(call) for call in calls])
 """
+
+
+def _helpers(tool_names: tuple[str, ...]) -> str:
+    """Return the helper code for a run whose scripts may call ``tool_names``.
+
+    A failed call reaches the script as a plain `RuntimeError` reading
+    `<tool> failed: …`: monty keeps only the message of an error the host raises,
+    so no mark on it survives. `gather_settled` therefore hands back only errors
+    that name one of the run's own tools. A script that raises that message
+    itself is handed back too, which is the remaining, harmless gap.
+    """
+
+    # `repr` quotes each name, so no name can change the helper's code.
+    return f"_TOOL_NAMES = {tool_names!r}\n{_HELPERS}"
+
 
 # The last line of a result that is only part of the tool's answer, so a script
 # can check for it before counting or searching the rest.
@@ -222,7 +237,7 @@ class CodemodeTool:
             functions={name: self._function(name, log) for name in self.tool_names},
             stubs=self._stubs,
             limits=self._limits,
-            helpers=_HELPERS,
+            helpers=_helpers(self.tool_names),
         )
         if run.failure == "internal":
             # Wisp's own helpers did not load, so the script never ran: not a
