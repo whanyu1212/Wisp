@@ -12,11 +12,15 @@ import hashlib
 import struct
 import zlib
 from collections.abc import Callable
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from typing_extensions import TypeAliasType
 
-from wisp.events import ImageMediaType, ImagePart
+if TYPE_CHECKING:
+    # Not at runtime: `wisp.events` loads the skills package, whose file tools
+    # import this module, so a program importing this module first would find it
+    # half loaded. `inspect_image` imports `ImagePart` when it runs instead.
+    from wisp.events import ImageMediaType, ImagePart
 
 # Claude accepts at most 10 MB of base64 per image, the tightest per-image limit
 # among the supported vision APIs; base64 grows bytes by 4/3.
@@ -91,6 +95,8 @@ def inspect_image(data: bytes) -> ImagePart:
             "dimensions_too_large",
             f"Image is {width}x{height} px; each side must be at most {MAX_IMAGE_SIDE} px",
         )
+    from wisp.events import ImagePart  # noqa: PLC0415 - see the TYPE_CHECKING import
+
     return ImagePart(
         media_type=media_type,
         sha256=hashlib.sha256(data).hexdigest(),
