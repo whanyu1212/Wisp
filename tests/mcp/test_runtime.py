@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
@@ -22,6 +23,7 @@ from wisp.config.runtime import WispConfig
 from wisp.events import ErrorEvent, KnownWispEvent, RpcCommandFinished, RpcMcpStatusReported
 from wisp.mcp.config import McpServerConfig
 from wisp.mcp.runtime import McpRuntime, _discover_tools
+from wisp.mcp.tool import McpTool, mcp_tool_name
 from wisp.rpc import RpcController
 from wisp.rpc.host import InProcessOptions
 from wisp.runtime.api import ExtensionAPI
@@ -498,6 +500,61 @@ def test_reports_read_only_tools(
             await runtime.aclose()
 
     assert anyio.run(scenario) == read_only
+
+
+@pytest.mark.parametrize(
+    ("hints", "tool_safety", "hinted"),
+    [
+        ({"echo": True}, {}, ("echo",)),
+        ({"runtime_environment": True, "echo": True}, {}, ("echo", "runtime_environment")),
+        # Only an explicit `true` hints; false, null and no annotations do not.
+        ({"echo": False, "runtime_environment": None}, {}, ()),
+        # A `tool_safety` entry, whatever it says, settles the tool.
+        (
+            {"echo": True, "runtime_environment": True},
+            {"echo": "command"},
+            ("runtime_environment",),
+        ),
+        ({"echo": True}, {"echo": "read"}, ()),
+        # A hashed Wisp name maps back to the server's own name. A name `tool_safety`
+        # cannot hold (the 129-character tool, always hinted) is never offered.
+        ({"docs.search": True}, {}, ("docs.search",)),
+    ],
+    ids=["hinted", "in-order", "not-true", "explicit-command", "already-read", "odd-names"],
+)
+def test_hint_never_makes_a_tool_read_only(
+    tmp_path: Path,
+    hints: dict[str, bool | None],
+    tool_safety: dict[str, str],
+    hinted: tuple[str, ...],
+) -> None:
+    """A server's `readOnlyHint` is reported for the user to accept, never trusted."""
+
+    env = {"WISP_MCP_TEST_READ_ONLY_HINTS": json.dumps(hints), "WISP_MCP_TEST_ODD_NAMES": "1"}
+    server = _fixture_server(tmp_path, env=env).model_copy(
+        update={"tool_safety": tuple(tool_safety.items())}
+    )
+
+    async def scenario() -> tuple[dict[str, str], dict[str, str]]:
+        api, tools = _api()
+        runtime = await McpRuntime.start((server,), api=api, existing_tool_names=frozenset())
+        try:
+            # A server that failed to start would hint nothing and pass vacuously.
+            assert runtime.diagnostics == ()
+            safety = {
+                tool.remote_name: tool.safety for tool in tools.all() if isinstance(tool, McpTool)
+            }
+            return runtime.read_only_hints_for("fixture"), safety
+        finally:
+            await runtime.aclose()
+
+    reported, safety = anyio.run(scenario)
+    assert reported == {mcp_tool_name("fixture", remote): remote for remote in hinted}
+    assert tuple(reported.values()) == hinted
+    assert mcp_tool_name("fixture", "docs.search") != "mcp__fixture__docs.search"
+    # Safety still comes from `tool_safety` alone, so a hinted tool still asks.
+    assert len(safety) == 4
+    assert safety == {remote: tool_safety.get(remote, "command") for remote in safety}
 
 
 def test_sdk_reports_read_only_tools(tmp_path: Path) -> None:

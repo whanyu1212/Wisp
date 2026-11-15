@@ -47,6 +47,7 @@ _SequentialRpcCommandType = TypeAliasType(
         "add_mcp_server",
         "remove_mcp_server",
         "set_mcp_server_enabled",
+        "mark_mcp_tools_read_only",
         "reconnect_mcp",
         "login_mcp_server",
         "logout_mcp_server",

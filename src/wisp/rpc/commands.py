@@ -34,6 +34,7 @@ from wisp.events import (
     RpcMcpServerLaunch,
 )
 from wisp.images import MAX_IMAGE_BYTES
+from wisp.mcp.config import MAX_MCP_TOOL_OVERRIDES
 from wisp.validation import redact_validation_error_inputs
 
 ApprovalScope = TypeAliasType(
@@ -43,6 +44,12 @@ ApprovalScope = TypeAliasType(
 MAX_RPC_COMMAND_ID_CHARS = 256
 MAX_RPC_MCP_SERVER_NAME_CHARS = 64
 MAX_RPC_MCP_SNIPPET_CHARS = 65_536
+# Registered MCP tool names are provider-safe, so no longer than this.
+MAX_RPC_MCP_TOOL_NAME_CHARS = 64
+RpcMcpToolName = TypeAliasType(
+    "RpcMcpToolName",
+    Annotated[str, StringConstraints(min_length=1, max_length=MAX_RPC_MCP_TOOL_NAME_CHARS)],
+)
 MAX_RPC_COMMAND_TYPE_CHARS = 64
 MAX_RPC_API_KEY_CHARS = 8_192
 # Base64 of the largest image Wisp accepts: 4 characters per 3 bytes, padded.
@@ -416,6 +423,26 @@ class SetMcpServerEnabledCommand(RpcCommandModel):
         if self.enabled and self.expected is None:
             raise ValueError("enabling an MCP server requires the confirmed launch settings")
         return self
+
+
+class MarkMcpToolsReadOnlyCommand(RpcCommandModel):
+    """Mark tools read-only in an MCP server's user settings, then restart MCP servers.
+
+    Marking a tool read-only lets codemode scripts, subagents and plan mode call it,
+    and lets it run without approval, so it is the user's decision. ``tool_names``
+    are the tools the user was shown and confirmed, from the server's
+    ``read_only_hint_tool_names`` in the ``rpc.mcp`` status. Nothing is saved unless
+    every one is still hinted by the running server, none already has a
+    `tool_safety` entry, and the server's saved settings are still the ones it was
+    started with.
+    """
+
+    type: Literal["mark_mcp_tools_read_only"] = "mark_mcp_tools_read_only"
+    name: str = Field(min_length=1, max_length=MAX_RPC_MCP_SERVER_NAME_CHARS)
+    # JSON arrays arrive as lists, which strict tuples reject.
+    tool_names: tuple[RpcMcpToolName, ...] = Field(
+        min_length=1, max_length=MAX_MCP_TOOL_OVERRIDES, strict=False
+    )
 
 
 class PreviewMcpSnippetCommand(RpcCommandModel):
@@ -812,6 +839,7 @@ RpcCommand = TypeAliasType(
         | AddMcpServerCommand
         | RemoveMcpServerCommand
         | SetMcpServerEnabledCommand
+        | MarkMcpToolsReadOnlyCommand
         | ReconnectMcpCommand
         | LoginMcpServerCommand
         | LogoutMcpServerCommand

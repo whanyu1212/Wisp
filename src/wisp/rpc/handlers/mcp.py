@@ -36,6 +36,7 @@ from wisp.config.mcp_servers import (
     McpSettingsError,
     add_user_mcp_servers,
     load_user_mcp_servers,
+    mark_user_mcp_tools_read_only,
     parse_mcp_snippet,
     remove_user_mcp_server,
     set_user_mcp_server_enabled,
@@ -60,6 +61,7 @@ from wisp.rpc.commands import (
     AddMcpServerCommand,
     LoginMcpServerCommand,
     LogoutMcpServerCommand,
+    MarkMcpToolsReadOnlyCommand,
     PreviewMcpSnippetCommand,
     ReconnectMcpCommand,
     RemoveMcpServerCommand,
@@ -93,6 +95,7 @@ McpServerCommand = TypeAliasType(
     AddMcpServerCommand
     | RemoveMcpServerCommand
     | SetMcpServerEnabledCommand
+    | MarkMcpToolsReadOnlyCommand
     | ReconnectMcpCommand
     | LoginMcpServerCommand
     | LogoutMcpServerCommand,
@@ -387,6 +390,13 @@ class RpcMcpServers:
         try:
             if isinstance(command, LogoutMcpServerCommand):
                 await anyio.to_thread.run_sync(self._sign_out, command.name)
+            elif isinstance(command, MarkMcpToolsReadOnlyCommand):
+                remote_names, started = self._accepted_hints(command)
+                await anyio.to_thread.run_sync(
+                    lambda: mark_user_mcp_tools_read_only(
+                        command.name, remote_names, started=started
+                    )
+                )
             elif not isinstance(command, LoginMcpServerCommand):
                 await anyio.to_thread.run_sync(_change_settings, command)
             servers = await anyio.to_thread.run_sync(load_user_mcp_servers)
@@ -433,6 +443,34 @@ class RpcMcpServers:
         except McpLoginError as exc:
             return str(exc)
         return None
+
+    def _accepted_hints(
+        self, command: MarkMcpToolsReadOnlyCommand
+    ) -> tuple[tuple[str, ...], McpServerConfig]:
+        """Resolve the confirmed tools to remote names from the running server's hints.
+
+        Returns:
+            tuple[tuple[str, ...], McpServerConfig]: The tools' remote names, and the
+                settings the server was started with.
+
+        Raises:
+            McpSettingsError: If a tool is not one the running server currently says
+                is read-only and `tool_safety` leaves unset. A server that is not
+                running hints nothing.
+        """
+
+        mcp_runtime = self._runtime.mcp_runtime
+        hints = mcp_runtime.read_only_hints_for(command.name) if mcp_runtime is not None else {}
+        if unknown := [name for name in command.tool_names if name not in hints]:
+            raise McpSettingsError(
+                f"MCP server {command.name!r} does not say these tools are read-only: "
+                f"{', '.join(unknown)}; refresh and try again"
+            )
+        # A server with hints was started from one of these settings.
+        (started,) = (
+            server for server in self._runtime.mcp_server_configs if server.name == command.name
+        )
+        return tuple(hints[name] for name in command.tool_names), started
 
     def _sign_out(self, name: str) -> None:
         if not self._token_store().delete(name):
@@ -623,6 +661,7 @@ def rpc_mcp_status_snapshot(runtime: WispRuntime) -> RpcMcpStatusSnapshot:
                 status="connected" if mcp_runtime.is_connected(name) else "disconnected",
                 tool_names=mcp_runtime.tool_names_for(name),
                 read_only_tool_names=mcp_runtime.read_only_tool_names_for(name),
+                read_only_hint_tool_names=tuple(mcp_runtime.read_only_hints_for(name)),
                 launch=launch,
             )
         sign_in = _sign_in_state(config, mcp_runtime, diagnostic)

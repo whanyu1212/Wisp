@@ -15,7 +15,12 @@ from mcp.client.stdio import StdioServerParameters
 from mcp.types import Tool as McpToolDefinition
 from typing_extensions import TypeAliasType
 
-from wisp.mcp.config import HeaderUnavailable, McpServerConfig, resolve_headers
+from wisp.mcp.config import (
+    HeaderUnavailable,
+    McpServerConfig,
+    is_tool_safety_name,
+    resolve_headers,
+)
 from wisp.mcp.credentials import McpTokenStore, uses_header_authorization
 from wisp.mcp.http_transport import bounded_http_client
 from wisp.mcp.oauth import McpLoginRequired, stored_oauth
@@ -122,6 +127,10 @@ class McpRuntime:
         self._read_only_tool_names: dict[str, tuple[str, ...]] = {
             server.name: () for server in servers
         }
+        # Registered tools whose server says they only read (`readOnlyHint`) and that
+        # its `tool_safety` does not mention, mapped to their remote names. Shown to
+        # the user to accept; never used as a tool's safety.
+        self._read_only_hints: dict[str, dict[str, str]] = {server.name: {} for server in servers}
         self._disconnected_server_names: set[str] = set()
         # HTTP servers started with a saved OAuth sign-in.
         self._signed_in_server_names: set[str] = set()
@@ -182,6 +191,19 @@ class McpRuntime:
         """
 
         return self._read_only_tool_names.get(server_name, ())
+
+    def read_only_hints_for(self, server_name: str) -> dict[str, str]:
+        """Return the tools one server says are read-only, which `tool_safety` leaves unset.
+
+        The hint is the server's own claim, so it never makes a tool read-only: the
+        user may copy it into `tool_safety`, which an explicit entry would override.
+
+        Returns:
+            dict[str, str]: Registered tool names mapped to their remote names, in
+                the server's order, as the server last started.
+        """
+
+        return dict(self._read_only_hints.get(server_name, {}))
 
     def is_signed_in(self, server_name: str) -> bool:
         """Return whether ``server_name`` started with a saved OAuth sign-in."""
@@ -401,10 +423,26 @@ class McpRuntime:
             self._read_only_tool_names[result.server.name] = tuple(
                 tool.name for tool in tools if tool.safety == "read"
             )
+            configured = dict(result.server.tool_safety)
+            # A name `tool_safety` cannot hold is never offered: marking it would
+            # fail, and with it every tool offered beside it.
+            self._read_only_hints[result.server.name] = {
+                tool.name: tool.remote_name
+                for tool, definition in zip(tools, result.definitions, strict=True)
+                if _hints_read_only(definition)
+                and tool.remote_name not in configured
+                and is_tool_safety_name(tool.remote_name)
+            }
             registered_names.update(names)
             registered_tools += len(tools)
             registered_definition_bytes += result.definition_bytes
         return tuple(diagnostics)
+
+
+def _hints_read_only(definition: McpToolDefinition) -> bool:
+    # Only an explicit `true` counts; a missing or null hint means "may write".
+    annotations = definition.annotations
+    return annotations is not None and annotations.read_only_hint is True
 
 
 async def _discover_tools(client: Client) -> tuple[tuple[McpToolDefinition, ...], int]:

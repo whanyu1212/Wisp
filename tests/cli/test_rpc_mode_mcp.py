@@ -13,6 +13,7 @@ from tests.support.cli import CliRunner, _jsonl_records
 from tests.support.paths import FIXTURES_DIR
 from wisp.cli import app
 from wisp.config.settings import user_settings_path
+from wisp.mcp.tool import mcp_tool_name
 
 SECRET = "sentinel-mcp-secret"
 
@@ -116,6 +117,7 @@ def test_add_disable_enable_and_remove_apply_without_restart(tmp_path: Path) -> 
                 "status": "connected",
                 "tool_names": ["mcp__fixture__echo", "mcp__fixture__runtime_environment"],
                 "read_only_tool_names": [],
+                "read_only_hint_tool_names": [],
                 "error": None,
             }
         ]
@@ -129,6 +131,7 @@ def test_add_disable_enable_and_remove_apply_without_restart(tmp_path: Path) -> 
                     "status": "disabled",
                     "tool_names": [],
                     "read_only_tool_names": [],
+                    "read_only_hint_tool_names": [],
                     "error": None,
                 }
             ]
@@ -336,3 +339,72 @@ def test_preview_lists_servers_without_snippet_values(tmp_path: Path) -> None:
     assert finished["secret-type"]["ok"] is False
     # Previewing never saves anything.
     assert _saved_servers() is None
+
+
+@pytest.mark.process
+def test_marking_hinted_tools_read_only(tmp_path: Path) -> None:
+    """Only tools the running server hints may be marked, and only once."""
+
+    add = {
+        "id": "add",
+        "type": "add_mcp_server",
+        "name": "fixture",
+        "command": sys.executable,
+        "args": ["-u", str(FIXTURES_DIR / "mcp_stdio_server.py")],
+        "env": {
+            "WISP_MCP_TEST_READ_ONLY_HINTS": json.dumps(
+                {"echo": True, "runtime_environment": False, "docs.search": True}
+            ),
+            "WISP_MCP_TEST_ODD_NAMES": "1",
+        },
+    }
+    # Wisp hashes this name; the settings must hold the server's own.
+    docs_search = mcp_tool_name("fixture", "docs.search")
+
+    def mark(command_id: str, *tool_names: str) -> dict[str, object]:
+        return {
+            "id": command_id,
+            "type": "mark_mcp_tools_read_only",
+            "name": "fixture",
+            "tool_names": list(tool_names),
+        }
+
+    records = _run_rpc(
+        tmp_path,
+        [
+            {**mark("not-running", "mcp__fixture__echo"), "name": "other"},
+            add,
+            mark("not-hinted", "mcp__fixture__echo", "mcp__fixture__runtime_environment"),
+            mark("mark", "mcp__fixture__echo", docs_search),
+            mark("again", "mcp__fixture__echo"),
+        ],
+    )
+
+    finished = _finished(records)
+    assert {name: record["ok"] for name, record in finished.items()} == {
+        "not-running": False,
+        "add": True,
+        "not-hinted": False,
+        "mark": True,
+        "again": False,
+    }
+    assert "MCP server 'other' does not say" in str(finished["not-running"]["error"])
+    assert "does not say these tools are read-only: mcp__fixture__runtime_environment" in str(
+        finished["not-hinted"]["error"]
+    )
+    reports = _reports(records)
+    (added,) = reports["add"]["servers"]
+    (marked,) = reports["mark"]["servers"]
+    assert added["status"] == marked["status"] == "connected"
+    assert len(added["tool_names"]) == 4
+    assert added["read_only_tool_names"] == []
+    # The 129-character tool cannot be a `tool_safety` key, so it is never offered.
+    assert added["read_only_hint_tool_names"] == ["mcp__fixture__echo", docs_search]
+    assert marked["tool_names"] == added["tool_names"]
+    assert marked["read_only_tool_names"] == ["mcp__fixture__echo", docs_search]
+    assert marked["read_only_hint_tool_names"] == []
+    # A refused command reports nothing and saves nothing.
+    assert set(reports) == {"add", "mark"}
+    saved = _saved_servers()
+    assert isinstance(saved, dict)
+    assert saved["fixture"]["tool_safety"] == {"docs.search": "read", "echo": "read"}
