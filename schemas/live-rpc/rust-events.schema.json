@@ -3179,6 +3179,14 @@
           "title": "RpcMcpServerSnapshotName",
           "type": "string"
         },
+        "read_only_tool_names": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "RpcMcpServerSnapshotReadOnlyToolNames",
+          "type": "array"
+        },
         "sign_in": {
           "anyOf": [
             {
@@ -3220,6 +3228,7 @@
         "name",
         "status",
         "tool_names",
+        "read_only_tool_names",
         "error",
         "launch",
         "sign_in"

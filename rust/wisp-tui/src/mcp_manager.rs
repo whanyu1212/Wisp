@@ -891,19 +891,26 @@ fn server_row(
     width: usize,
     palette: Palette,
 ) -> Line<'static> {
-    let state = match server.status {
-        McpServerStatus::Connected | McpServerStatus::Disconnected => format!(
-            "{} · {} tools",
-            server.status.as_str(),
-            server.tool_names.len()
-        ),
-        status => status.as_str().to_owned(),
-    };
-    let state = match server.sign_in {
-        Some(McpSignIn::Required) => format!("{state} · sign in required"),
-        Some(McpSignIn::SignedIn) => format!("{state} · signed in"),
-        _ => state,
-    };
+    let mut state = server.status.as_str().to_owned();
+    // The sign-in note comes before the tool counts: a narrow panel cuts the end of
+    // the row, and the note is something to act on.
+    match server.sign_in {
+        Some(McpSignIn::Required) => state.push_str(" · sign in required"),
+        Some(McpSignIn::SignedIn) => state.push_str(" · signed in"),
+        _ => {}
+    }
+    if matches!(
+        server.status,
+        McpServerStatus::Connected | McpServerStatus::Disconnected
+    ) {
+        state.push_str(&format!(" · {} tools", server.tool_names.len()));
+        if !server.tool_names.is_empty() {
+            state.push_str(&format!(
+                ", {} read-only",
+                server.read_only_tool_names.len()
+            ));
+        }
+    }
     let text = terminal_row(
         &format!("{}  {state}", server.name),
         width.saturating_sub(2),
@@ -934,8 +941,17 @@ fn server_detail(server: &McpServerSnapshot) -> Vec<String> {
         None => {}
     }
     if !server.tool_names.is_empty() {
-        rows.push("tools:".into());
-        rows.extend(server.tool_names.iter().map(|name| format!("  {name}")));
+        // Only read-only tools can be called from a codemode script, a subagent or
+        // plan mode. The mark leads, so a long name wraps after it.
+        rows.push("tools (read = read-only, set by tool_safety; c reconnects):".into());
+        rows.extend(server.tool_names.iter().map(|name| {
+            let mark = if server.read_only_tool_names.contains(name) {
+                "read "
+            } else {
+                "     "
+            };
+            format!("  {mark}{name}")
+        }));
     }
     rows
 }
@@ -1310,6 +1326,7 @@ mod tests {
             name: name.into(),
             status,
             tool_names: tools,
+            read_only_tool_names: Vec::new(),
             error: (status == McpServerStatus::Unavailable).then(|| "startup failed".into()),
             launch: Some(launch),
             sign_in: None,
@@ -1399,7 +1416,7 @@ mod tests {
             let mut view = McpView::default();
             let wide = text(&draw_buffer(&mut view, &state, 100, 30, palette));
             assert!(
-                wide.contains("› github  connected · 1 tools"),
+                wide.contains("› github  connected · 1 tools, 0 read-only"),
                 "{name}: {wide}"
             );
             assert!(wide.contains("  archive  disabled"), "{name}");
@@ -1419,6 +1436,57 @@ mod tests {
             assert!(small.contains("› github"), "{name}: {small}");
             assert!(small.contains("a e d l o c r"), "{name}: {small}");
         }
+    }
+
+    #[test]
+    fn read_only_tools_are_counted_and_marked() {
+        let mut docs = server(
+            "docs",
+            McpServerStatus::Connected,
+            launch("docs-server", &[]),
+        );
+        docs.tool_names = vec!["mcp__docs__delete".into(), "mcp__docs__search".into()];
+        docs.read_only_tool_names = vec!["mcp__docs__search".into()];
+        let mut writer = server(
+            "writer",
+            McpServerStatus::Disconnected,
+            launch("writer-server", &[]),
+        );
+        writer.tool_names = vec!["mcp__writer__save".into()];
+        let state = state(vec![docs, writer]);
+
+        let rendered = draw(&mut McpView::default(), &state, 100, 30);
+
+        assert!(
+            rendered.contains("› docs  connected · 2 tools, 1 read-only"),
+            "{rendered}"
+        );
+        // A server of write tools is normal, so its count is stated, not flagged.
+        assert!(
+            rendered.contains("  writer  disconnected · 1 tools, 0 read-only"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("tools (read = read-only, set by tool_safety; c reconnects):"));
+        assert!(rendered.contains("  read mcp__docs__search"), "{rendered}");
+        assert!(rendered.contains("       mcp__docs__delete"), "{rendered}");
+        // The mark follows the name, not its place in the list.
+        assert!(!rendered.contains("read mcp__docs__delete"), "{rendered}");
+    }
+
+    #[test]
+    fn sign_in_note_comes_before_tool_counts() {
+        let mut linear = server(
+            "linear",
+            McpServerStatus::Connected,
+            launch("linear-server", &[]),
+        );
+        linear.sign_in = Some(McpSignIn::Required);
+        let rendered = draw(&mut McpView::default(), &state(vec![linear]), 100, 30);
+
+        assert!(
+            rendered.contains("› linear  connected · sign in required · 1 tools, 0 read-only"),
+            "{rendered}"
+        );
     }
 
     #[test]

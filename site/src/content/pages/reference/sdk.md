@@ -289,6 +289,10 @@ directly, one whose name or parameters are not Python identifiers is left out. `
 current operation; when saving fails, the setting still applies to the session and an `error`
 event comes first.
 
+For each server, `RpcMcpServerSnapshot` in `rpc.mcp` and `mcp.status.updated` lists `tool_names`
+and, in the same order, `read_only_tool_names`: those its `tool_safety` marked `"read"` when it
+last started, whatever their names.
+
 `SubagentsState` reports whether subagents are `enabled`, whether a run started now would be
 `offered` the `spawn_agent` tool, and `env_enabled`, what `WISP_SUBAGENTS` sets at startup. It
 also reports `model`, the `subagent_model` user setting, and `model_in_use`, the model a subagent

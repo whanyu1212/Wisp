@@ -622,6 +622,7 @@ def rpc_mcp_status_snapshot(runtime: WispRuntime) -> RpcMcpStatusSnapshot:
                 name=name,
                 status="connected" if mcp_runtime.is_connected(name) else "disconnected",
                 tool_names=mcp_runtime.tool_names_for(name),
+                read_only_tool_names=mcp_runtime.read_only_tool_names_for(name),
                 launch=launch,
             )
         sign_in = _sign_in_state(config, mcp_runtime, diagnostic)

@@ -211,6 +211,10 @@ class RpcMcpServerSnapshot(BaseModel):
     # connect ending; a server never returns to it.
     status: Literal["connecting", "connected", "disconnected", "unavailable", "disabled"]
     tool_names: tuple[str, ...] = ()
+    # The tools among ``tool_names`` Wisp treats as read-only, in the same order:
+    # those the server's `tool_safety` marked so when it last started. Only these
+    # can a codemode script, a subagent or plan mode call.
+    read_only_tool_names: tuple[str, ...] = ()
     error: str | None = None
     # The configuration the server was last started (or skipped) with.
     launch: RpcMcpServerLaunch | None = None
