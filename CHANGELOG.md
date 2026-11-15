@@ -10,6 +10,17 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
+## Unreleased
+
+### Tools
+
+- Automatic codemode is no longer offered when none of a run's MCP tools can be called from a
+  script. An MCP tool is read-only only where its server's `tool_safety` marks it `"read"`, so on
+  a server with no such entries every call a script made to it was refused, and the model paid
+  for the tool's description and a failed script before falling back to direct calls. Runs whose
+  on-demand catalog has a `"read"` tool are offered codemode as before, and `"codemode": true`
+  still offers it for the built-in read tools alone. (HY-510)
+
 <!-- Keeps links to the pre-release "0.10.1 — Unreleased" heading working. -->
 <a id="0101--unreleased"></a>
 

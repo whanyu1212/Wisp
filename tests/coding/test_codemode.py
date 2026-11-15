@@ -190,7 +190,7 @@ def test_offered_only_when_on(tmp_path: Path, enabled: bool) -> None:
 def test_automatic_with_on_demand(
     tmp_path: Path, codemode: bool | None, exposure: McpToolExposure, offered: bool
 ) -> None:
-    """Unset, codemode is offered exactly when the run finds its MCP tools on demand."""
+    """Unset, codemode is offered when the run finds its MCP tools on demand."""
 
     _, provider = _run(tmp_path, _Tools(), [], codemode=codemode, exposure=exposure)
 
@@ -291,24 +291,34 @@ def test_not_offered_without_monty(
 
 
 @pytest.mark.parametrize(
-    ("codemode", "exposure", "offered"),
+    ("codemode", "exposure", "mcp_safety", "offered"),
     [
-        (True, "direct", True),
-        (None, "direct", False),
-        (None, "on_demand", True),
-        (False, "on_demand", False),
+        (True, "direct", "read", True),
+        (None, "direct", "read", False),
+        (None, "on_demand", "read", True),
+        (False, "on_demand", "read", False),
+        # Unset, the built-in read tools are not enough: with no MCP tool a script
+        # may call, every call a script made to the catalog would be refused.
+        (None, "on_demand", "command", False),
+        (True, "on_demand", "command", True),
     ],
 )
 def test_offered_matches_the_run(
-    tmp_path: Path, codemode: bool | None, exposure: McpToolExposure, offered: bool
+    tmp_path: Path,
+    codemode: bool | None,
+    exposure: McpToolExposure,
+    mcp_safety: ToolSafety,
+    offered: bool,
 ) -> None:
     """The session predicts, without a run, whether its next run offers codemode."""
 
+    tools = _Tools()
+    tools.query.safety = mcp_safety
     provider = ScriptedProvider([_done()])
     session = CodingSession(
         provider=provider,
         sessions=JsonlSessionStore(tmp_path / "sessions"),
-        tool_registry=_Tools().registry(),
+        tool_registry=tools.registry(),
         tool_context=ToolContext(cwd=tmp_path),
         mcp_tool_exposure=exposure,
         codemode=codemode,

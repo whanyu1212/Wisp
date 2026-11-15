@@ -70,7 +70,7 @@ is not saved. These choices do not change project trust or protected paths. In t
 folder above it, YOLO applies for the session only and the panel says so; Ask is still saved.
 
 Use `/codemode` to choose when runs offer the [codemode](../mcp.md#mcp-with-codemode)
-tool: automatic (when a run finds its MCP tools on demand), always, or never. `/codemode always`
+tool: automatic (when a run finds its MCP tools on demand and a script may call one of them), always, or never. `/codemode always`
 and the other settings apply one directly. The panel docks above the composer like
 `/permissions`, marks the current setting, and says whether the next prompt offers the tool.
 Choose with `1`–`3`, or highlight with `↑`/`↓` and press `Enter`. The choice applies from the

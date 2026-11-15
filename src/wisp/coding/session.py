@@ -2339,13 +2339,15 @@ class CodingSession:
                 None when exposure is direct.
 
         Unset (``self.codemode`` None), codemode is offered only when the run found
-        its MCP tools on demand: scripts save the most there, by calling catalog
-        tools without a turn each to look them up.
+        its MCP tools on demand and a script may call at least one of them: scripts
+        save the most there, by calling catalog tools without a turn each to look
+        them up. An MCP tool is read-only only where its server's `tool_safety` says
+        so, so a catalog with none would have every script call to it refused.
 
         Returns:
             CodemodeTool | None: The registered tool, or None when codemode is off,
-            or automatic and the run found no MCP tools on demand, when the run has
-            no registry, or when no read-only tool is offered.
+            or automatic and the run found no read-only MCP tool on demand, when the
+            run has no registry, or when no read-only tool is offered.
         """
 
         automatic = self.codemode is None
@@ -2370,7 +2372,7 @@ class CodingSession:
             for entry in (catalog.entries if catalog is not None else ())
             if entry.tool.safety == "read"
         ]
-        if not scriptable and not discoverable:
+        if not discoverable and (automatic or not scriptable):
             return None
         call_ids = itertools.count(1)
 

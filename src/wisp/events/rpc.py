@@ -28,7 +28,7 @@ AgentMode = TypeAliasType("AgentMode", Literal["build", "plan"])
 
 DEFAULT_AGENT_MODE: AgentMode = "build"
 
-# When a run offers the codemode tool: "automatic" when it finds its MCP tools on demand,
+# When a run offers the codemode tool: "automatic" when it finds a read-only MCP tool on demand,
 # or "always" or "never". Saved as the user setting ``codemode`` (unset, true or false).
 CodemodeSetting = TypeAliasType("CodemodeSetting", Literal["automatic", "always", "never"])
 

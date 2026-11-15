@@ -337,9 +337,15 @@ The following table assumes the extra is installed and the run has eligible read
 
 | `mcp_tool_exposure` | `codemode` omitted or `null` (automatic) | `codemode: true` | `codemode: false` |
 |---|---|---|---|
-| `auto` | Offered only when this run chooses on-demand discovery | Offered | Not offered |
-| `on_demand` | Offered when this run has an on-demand MCP catalog | Offered | Not offered |
+| `auto` | Offered only when this run chooses on-demand discovery and a script may call one of its MCP tools | Offered | Not offered |
+| `on_demand` | Offered when this run's on-demand MCP catalog has a tool a script may call | Offered | Not offered |
 | `direct` | Not offered | Offered | Not offered |
+
+A script may call an MCP tool only when its server's `tool_safety` marks it `"read"`; every other
+MCP tool is treated as a command. In automatic mode the built-in read tools are not enough: a
+catalog with no `"read"` tool would have every script call to it refused, so codemode is left
+out. Mark the read-only tools in [`tool_safety`](#settings-and-tool-safety) to get it, or set
+`codemode: true` to script the built-in tools alone.
 
 Both settings are user-only. `WISP_MCP_TOOL_EXPOSURE` and `WISP_CODEMODE` override their settings-file
 values at startup. In the TUI, `/codemode` shows the setting, extra availability, and whether the
@@ -421,7 +427,7 @@ MCP tool returns JSON or has Python-compatible parameters.
 
 | Symptom | Check or next step |
 |---|---|
-| Codemode is missing | Check the installed extra, `/codemode`, environment overrides, and the discovery mode for this run. Automatic mode does not offer it for a small catalog sent directly. |
+| Codemode is missing | Check the installed extra, `/codemode`, environment overrides, and the discovery mode for this run. Automatic mode does not offer it for a small catalog sent directly, or for a catalog with no tool marked `"read"` in `tool_safety`. |
 | A tool is missing or not read-only | Check tool selection, plan mode, the exact `tool_safety` remote name, and reconnect after changes. Otherwise call it normally; do not loosen safety just to make the script work. |
 | A write or command call is refused | Expected: scripts cannot call non-read tools, even under YOLO, `--yes`, a session grant, or through `mcp_call`. Use a normal direct call or top-level `mcp_call`, under its usual approval policy. |
 | A read tool requires confirmation | A script cannot open an approval prompt. Without an existing applicable grant, a confirmation-required call fails. |
