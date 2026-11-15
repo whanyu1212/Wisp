@@ -42,6 +42,12 @@ this policy.
   it, so it might start it again without asking. The agent's own cancels read as before.
   (HY-542)
 
+### Python API
+
+- `import wisp.images` works as the first Wisp import in a program. It failed with a circular
+  import, because `wisp.images` loaded `wisp.events`, which loads the file tools, which import
+  `wisp.images`. A test now imports every `wisp` module on its own in a fresh process. (HY-501)
+
 ### TUI
 
 - `/codemode` says how many of the next prompt's MCP tools a script can call, such as

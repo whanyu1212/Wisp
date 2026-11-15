@@ -61,31 +61,6 @@ _CODING_FORBIDDEN_IMPORTS = (
     "wisp.cli.native_tui",
 )
 _FRONTEND_MODULES = (Path("cli/application.py"),)
-_FRESH_IMPORT_MODULES = (
-    "wisp.agent.harness",
-    "wisp.agent.request_boundary",
-    "wisp.agent.tool_contracts",
-    "wisp.coding.compaction",
-    "wisp.coding.persistence",
-    "wisp.coding.prompt",
-    "wisp.coding.session",
-    "wisp.coding.tool_execution",
-    # The config root re-exports eagerly; importing an MCP module first must not
-    # re-enter wisp.config while wisp.mcp.config is still initializing.
-    "wisp.config",
-    "wisp.config.settings",
-    "wisp.mcp.config",
-    "wisp.mcp.transport",
-    "wisp.messages",
-    "wisp.messages.history",
-    "wisp.providers.base",
-    "wisp.runtime.api",
-    # wisp.trust.permissions is a leaf below wisp.config; it must not import
-    # wisp.events at runtime or the events package cannot initialize first.
-    "wisp.trust.flow",
-    "wisp.trust.permissions",
-    "wisp.trust.records",
-)
 _FRESH_IMPORT_TIMEOUT_SECONDS = 30
 _RPC_COORDINATOR_FORBIDDEN_IMPORTS = (
     "os",
@@ -578,20 +553,46 @@ def _fresh_import_failure(module: str, *, root: Path, pythonpath: str) -> str | 
     return f"{module} (exit {result.returncode}):\n{result.stderr}"
 
 
+def _wisp_modules() -> list[str]:
+    """Every module of the `wisp` package, found from its files without importing them."""
+
+    package = REPO_ROOT / "src" / "wisp"
+    names = []
+    for path in sorted(package.rglob("*.py")):
+        relative = path.relative_to(package.parent).with_suffix("")
+        # Only files inside packages are modules; bundled skill files are data.
+        if not all(
+            (package.parent / Path(*relative.parts[:depth]) / "__init__.py").exists()
+            for depth in range(1, len(relative.parts))
+        ):
+            continue
+        parts = relative.parts[:-1] if relative.name == "__init__" else relative.parts
+        names.append(".".join(parts))
+    return names
+
+
 @pytest.mark.slow
-def test_layer_modules_import_cleanly_in_fresh_processes() -> None:
+def test_every_module_imports_fresh() -> None:
+    """Each module imports on its own, as the first Wisp module a program loads.
+
+    A cycle shows only when the module that closes it is imported first, so every
+    module gets its own process. Cycles caught this way: `wisp.config` re-entered
+    from an MCP module, `wisp.trust.permissions` importing `wisp.events` at runtime,
+    and `wisp.images` imported before `wisp.events`.
+    """
+
     root = REPO_ROOT
     existing_pythonpath = os.environ.get("PYTHONPATH")
     pythonpath = str(root / "src")
     if existing_pythonpath:
         pythonpath = f"{pythonpath}{os.pathsep}{existing_pythonpath}"
+    modules = _wisp_modules()
+    assert {"wisp.images", "wisp.coding.session", "wisp"} <= set(modules)
 
     check_import = partial(_fresh_import_failure, root=root, pythonpath=pythonpath)
-    with ThreadPoolExecutor(max_workers=len(_FRESH_IMPORT_MODULES)) as executor:
+    with ThreadPoolExecutor(max_workers=8) as executor:
         failures = [
-            failure
-            for failure in executor.map(check_import, _FRESH_IMPORT_MODULES)
-            if failure is not None
+            failure for failure in executor.map(check_import, modules) if failure is not None
         ]
 
     assert not failures, "\n\n".join(failures)
