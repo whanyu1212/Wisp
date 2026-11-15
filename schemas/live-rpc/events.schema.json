@@ -3369,6 +3369,14 @@
           "title": "Name",
           "type": "string"
         },
+        "read_only_tool_names": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Read Only Tool Names",
+          "type": "array"
+        },
         "sign_in": {
           "anyOf": [
             {
@@ -3410,6 +3418,7 @@
         "name",
         "status",
         "tool_names",
+        "read_only_tool_names",
         "error",
         "launch",
         "sign_in"
@@ -9444,7 +9453,22 @@
     "rpc.mcp": {
       "command_id": "command-1",
       "status": {
-        "servers": []
+        "servers": [
+          {
+            "error": null,
+            "launch": null,
+            "name": "fixture",
+            "read_only_tool_names": [
+              "mcp__fixture__search"
+            ],
+            "sign_in": null,
+            "status": "connected",
+            "tool_names": [
+              "mcp__fixture__search",
+              "mcp__fixture__delete"
+            ]
+          }
+        ]
       },
       "timestamp": "2026-01-02T03:04:05Z",
       "type": "rpc.mcp"

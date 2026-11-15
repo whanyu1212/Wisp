@@ -985,6 +985,7 @@ mod tests {
                     name: "connected-server".into(),
                     status: McpServerStatus::Connected,
                     tool_names: vec!["find".into()],
+                    read_only_tool_names: Vec::new(),
                     error: None,
                     launch: None,
                     sign_in: None,
@@ -993,6 +994,7 @@ mod tests {
                     name: "disconnected-server".into(),
                     status: McpServerStatus::Disconnected,
                     tool_names: vec![format!("{} final-tool", "wide界".repeat(100))],
+                    read_only_tool_names: Vec::new(),
                     error: None,
                     launch: None,
                     sign_in: None,
@@ -1001,6 +1003,7 @@ mod tests {
                     name: "offline".into(),
                     status: McpServerStatus::Unavailable,
                     tool_names: vec![],
+                    read_only_tool_names: Vec::new(),
                     error: Some("\u{1b}[31mbackend failed".into()),
                     launch: None,
                     sign_in: None,
@@ -1009,6 +1012,7 @@ mod tests {
                     name: "paused".into(),
                     status: McpServerStatus::Disabled,
                     tool_names: vec![],
+                    read_only_tool_names: Vec::new(),
                     error: None,
                     launch: None,
                     sign_in: None,
@@ -1021,7 +1025,9 @@ mod tests {
         view.handle_key(key(KeyCode::Down), &state);
         draw(&mut view, &state, 30, 8);
         view.handle_key(key(KeyCode::End), &state);
-        assert!(draw(&mut view, &state, 30, 8).contains("final-tool"));
+        // The name wraps after the read-only mark's column, so its end spans two rows.
+        let end = draw(&mut view, &state, 30, 8);
+        assert!(end.contains("final-t│") && end.contains("│ool "), "{end}");
         view.handle_key(key(KeyCode::Down), &state);
         let rendered = draw(&mut view, &state, 30, 8);
         assert!(rendered.contains("unavailable"));

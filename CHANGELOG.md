@@ -52,6 +52,10 @@ this policy.
 
 ### TUI
 
+- `/mcp` shows how many of each server's tools are read-only, such as
+  `connected · 12 tools, 3 read-only`, and its details mark each read-only tool. Only those can be
+  called from a codemode script, by a subagent or in plan mode, and `tool_safety` is what marks
+  them, so a server with no entries now shows `0 read-only` instead of looking ready. (HY-510)
 - `/codemode` says how many of the next prompt's MCP tools a script can call, such as
   `Scripts can call 0 of 12 MCP tools (tool_safety "read").`, and flags it when the answer is
   none. With none, automatic mode leaves codemode off even when the tools are found on demand,
@@ -82,6 +86,9 @@ this policy.
   listed until a new process needs its slot; before, the agent's next shell command dropped
   every ended process whose final state it had read. Processes from a session that was left are
   not listed. (HY-543)
+- `RpcMcpServerSnapshot`, in `rpc.mcp` and `mcp.status.updated`, gains `read_only_tool_names`: the tools
+  among `tool_names`, in the same order, that the server's `tool_safety` marked `"read"` when it
+  last started.
 
 <!-- Keeps links to the pre-release "0.10.1 — Unreleased" heading working. -->
 <a id="0101--unreleased"></a>

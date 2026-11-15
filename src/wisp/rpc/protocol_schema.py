@@ -438,7 +438,19 @@ _EVENT_FIXTURE_VALUES: dict[str, dict[str, object]] = {
         "attempt": 1,
     },
     "mcp.status.updated": {"status": {"servers": ()}},
-    "rpc.mcp": {"command_id": "command-1", "status": {"servers": ()}},
+    "rpc.mcp": {
+        "command_id": "command-1",
+        "status": {
+            "servers": (
+                {
+                    "name": "fixture",
+                    "status": "connected",
+                    "tool_names": ("mcp__fixture__search", "mcp__fixture__delete"),
+                    "read_only_tool_names": ("mcp__fixture__search",),
+                },
+            )
+        },
+    },
     "rpc.mcp.login": {
         "command_id": "command-1",
         "name": "fixture",

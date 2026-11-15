@@ -6988,6 +6988,7 @@ mod tests {
             name: "docs".into(),
             status,
             tool_names: Vec::new(),
+            read_only_tool_names: Vec::new(),
             error: None,
             launch: None,
             sign_in: None,

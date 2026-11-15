@@ -115,6 +115,7 @@ def test_add_disable_enable_and_remove_apply_without_restart(tmp_path: Path) -> 
                 "name": "fixture",
                 "status": "connected",
                 "tool_names": ["mcp__fixture__echo", "mcp__fixture__runtime_environment"],
+                "read_only_tool_names": [],
                 "error": None,
             }
         ]
@@ -122,7 +123,15 @@ def test_add_disable_enable_and_remove_apply_without_restart(tmp_path: Path) -> 
     assert _reports(records) == {
         "add": connected,
         "disable": {
-            "servers": [{"name": "fixture", "status": "disabled", "tool_names": [], "error": None}]
+            "servers": [
+                {
+                    "name": "fixture",
+                    "status": "disabled",
+                    "tool_names": [],
+                    "read_only_tool_names": [],
+                    "error": None,
+                }
+            ]
         },
         "enable": connected,
         "reconnect": connected,
