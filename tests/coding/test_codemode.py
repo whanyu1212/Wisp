@@ -74,6 +74,9 @@ class _Tool:
     input_schema: ToolInputSchema = field(default_factory=lambda: dict(_SCHEMA))
     delay: float = 0.0
     reply: str | None = None
+    # An MCP tool's output schema, and the structured result it returns beside text.
+    output_schema: dict[str, object] | None = None
+    structured: object = None
     confirm_every_call: bool = False
     calls: list[dict[str, object]] = field(default_factory=list)
     running: int = 0
@@ -87,7 +90,10 @@ class _Tool:
             await anyio.sleep(self.delay)
         finally:
             self.running -= 1
-        return ToolResult(text=self.reply or f"{self.name}:{arguments.get('table')}")
+        return ToolResult(
+            text=self.reply or f"{self.name}:{arguments.get('table')}",
+            structured=self.structured,
+        )
 
 
 @dataclass
@@ -1504,3 +1510,213 @@ def test_records_stay_bounded() -> None:
     assert len(ended.nested_calls) == 200 and ended.nested_calls_omitted == 10
     assert ended.nested_calls[0].arguments is None
     assert ended.nested_calls[1].arguments == {"table": "a"}
+
+
+_ORDER_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "id": {"type": "integer"},
+        "lines": {
+            "type": "array",
+            "items": {"type": "object", "properties": {"sku": {"type": "string"}}},
+        },
+        "note": {"type": ["string", "null"]},
+    },
+    "required": ["id", "lines"],
+}
+
+
+def _structured_tools(structured: object) -> _Tools:
+    return _Tools(
+        query=_McpTool(
+            "mcp__db__query", reply="order 7", output_schema=_ORDER_SCHEMA, structured=structured
+        )
+    )
+
+
+def test_script_reads_structured_fields(tmp_path: Path) -> None:
+    """A tool with an output schema returns its structured result to a script, typed."""
+
+    tools = _structured_tools({"id": 7, "lines": [{"sku": "a-1"}]})
+    code = (
+        "order = await mcp__db__query(table='orders')\n(order['id'] + 1, order['lines'][0]['sku'])"
+    )
+
+    events, provider = _run(tmp_path, tools, [_script(code)])
+
+    assert _result(events).output.startswith('[8, "a-1"]')
+    description = next(t for t in provider.calls[0].tools if t.name == CODEMODE).description
+    assert "- mcp__db__query: a dict: id, lines, note" in description
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "(await mcp__db__query(table='o'))['total']",
+        "(await mcp__db__query(table='o'))['lines'][0]['qty']",
+    ],
+    ids=["top-level", "nested"],
+)
+def test_unknown_field_fails_type_check(tmp_path: Path, code: str) -> None:
+    tools = _structured_tools({"id": 7, "lines": []})
+
+    events, _ = _run(tmp_path, tools, [_script(code)])
+
+    result = _result(events)
+    assert result.is_error and "Script failed (type)" in result.output
+    assert "invalid-key" in result.output
+    assert tools.query.calls == []
+
+
+def test_direct_call_still_reads_text(tmp_path: Path) -> None:
+    """The model's own call gets the text; the structured result reaches no event."""
+
+    tools = _structured_tools({"id": 7, "lines": [], "note": "only-in-structured"})
+    call = ToolCall(call_id="call-1", name="mcp__db__query", arguments={"table": "o"})
+
+    events, provider = _run(tmp_path, tools, [tool_call_stream(call)], codemode=False)
+
+    assert _result(events).output == "order 7"
+    assert not any("only-in-structured" in event.model_dump_json() for event in events)
+    # Nor the model's next request, which carries the call's result.
+    assert "only-in-structured" not in repr(provider.calls[-1])
+
+
+@pytest.mark.parametrize(
+    ("structured", "problem"),
+    [
+        (None, "it returned no structured result"),
+        (["not", "a", "dict"], "it returned no structured result"),
+        ({"blob": "x" * (600 * 1024)}, "its structured result is larger than 512 KiB"),
+        ({"bad": float("nan")}, "its structured result is not JSON"),
+        ({"bad": "\ud800"}, "its structured result is not JSON"),
+    ],
+    ids=["missing", "not-a-dict", "too-large", "not-json", "lone-surrogate"],
+)
+def test_unusable_structured_result_fails_the_call(
+    tmp_path: Path, structured: object, problem: str
+) -> None:
+    """The stub promises a value, so a call without a usable one fails, never text."""
+
+    tools = _structured_tools(structured)
+    code = "(outcome,) = await gather_settled(mcp__db__query(table='o'))\nstr(outcome)"
+
+    events, _ = _run(tmp_path, tools, [_script(code)])
+
+    result = _result(events)
+    assert not result.is_error
+    assert f"mcp__db__query failed: {problem}" in result.output
+    assert _ended(events).nested_calls[0].is_error is False
+    assert "1 failed" in result.output
+
+
+def test_wrapped_result_is_unwrapped(tmp_path: Path) -> None:
+    """A schema that only wraps `result`, as the MCP Python SDK writes, returns its value."""
+
+    schema = {
+        "type": "object",
+        "properties": {"result": {"type": "array", "items": {"type": "integer"}}},
+        "required": ["result"],
+    }
+    tools = _Tools(
+        query=_McpTool("mcp__db__query", output_schema=schema, structured={"result": [1, 2]})
+    )
+
+    events, _ = _run(tmp_path, tools, [_script("sum(await mcp__db__query(table='o'))")])
+
+    assert _result(events).output.startswith("3")
+
+
+def test_wrapped_string_stays_text(tmp_path: Path) -> None:
+    """The SDK gives every tool returning a string this schema; such tools keep text."""
+
+    schema = {
+        "type": "object",
+        "properties": {"result": {"type": "string"}},
+        "required": ["result"],
+    }
+    tools = _Tools(
+        query=_McpTool(
+            "mcp__db__query", reply="rows", output_schema=schema, structured={"result": "rows"}
+        )
+    )
+
+    events, provider = _run(tmp_path, tools, [_script("(await mcp__db__query(table='o')).upper()")])
+
+    assert _result(events).output.startswith("ROWS\n")
+    description = next(t for t in provider.calls[0].tools if t.name == CODEMODE).description
+    assert "structured result instead of text" not in description
+
+
+@pytest.mark.parametrize(
+    ("limits", "value"),
+    [(None, None), (SCRIPT_RESULT_LIMITS, {"id": 7})],
+    ids=["subagent", "script"],
+)
+def test_structured_result_only_for_scripts(limits: ResultLimits | None, value: object) -> None:
+    """A subagent's calls go to a model, which reads text; only a script's carry the value."""
+
+    tools = _Tools(lookup=_Tool("lookup", structured={"id": 7}))
+    executor = _executor(tools, ToolApprovalPolicy.approve_all())
+
+    async def run() -> NestedCallResult:
+        call = ToolCall(call_id="nested-1", name="lookup", arguments={"table": "a"})
+        return await executor.run_nested(call, result_limits=limits)
+
+    assert anyio.run(run).value == value
+
+
+def test_hostile_output_schema_leaves_other_tools(tmp_path: Path) -> None:
+    """Keys that look like code, deep nesting and many fields still give valid stubs."""
+
+    deep: dict[str, object] = {"type": "object", "properties": {}}
+    node = deep
+    for _ in range(40):
+        child: dict[str, object] = {"type": "object", "properties": {}}
+        node["properties"] = {"n": child}
+        node = child
+    schema = {
+        "type": "object",
+        "properties": {
+            "a'] = 1\nimport os\n#": {"type": "string"},
+            "deep": deep,
+            **{
+                f"f{index}": {"type": "object", "properties": {"x": {"type": "integer"}}}
+                for index in range(100)
+            },
+        },
+    }
+    tools = _Tools(query=_McpTool("mcp__db__query", output_schema=schema, structured={}))
+
+    events, _ = _run(tmp_path, tools, [_script("await lookup(table='a')")])
+
+    assert _result(events).output.startswith("lookup:a\n")
+
+
+def test_found_on_demand_returns_structured(tmp_path: Path) -> None:
+    """A catalog tool called by name, found on demand, returns its typed value too."""
+
+    tools = _structured_tools({"id": 7, "lines": []})
+
+    events, _ = _run(
+        tmp_path,
+        tools,
+        [_script("(await mcp__db__query(table='o'))['id']")],
+        exposure="on_demand",
+    )
+
+    assert _result(events).output.startswith("7")
+
+
+def test_unwrapped_without_result_fails(tmp_path: Path) -> None:
+    schema = {
+        "type": "object",
+        "properties": {"result": {"type": "integer"}},
+        "required": ["result"],
+    }
+    tools = _Tools(query=_McpTool("mcp__db__query", output_schema=schema, structured={"x": 1}))
+    code = "(outcome,) = await gather_settled(mcp__db__query(table='o'))\nstr(outcome)"
+
+    events, _ = _run(tmp_path, tools, [_script(code)])
+
+    assert "its structured result has no `result` field" in _result(events).output

@@ -160,6 +160,8 @@ class _ToolRunOutcome:
 
     output: str
     is_error: bool = False
+    # The tool's structured result as it returned it, for a script's call only.
+    structured: object = None
     failure_code: ToolFailureCode | None = None
     retryable: bool = False
     recovery_hint: str | None = None
@@ -273,6 +275,7 @@ class _RawToolResultSnapshot:
     data: dict[str, object]
     truncated: object
     images: object
+    structured: object = None
 
 
 @dataclass(frozen=True)
@@ -283,6 +286,8 @@ class _ToolResultSnapshot:
     data: dict[str, object]
     truncated: bool
     images: tuple[bytes, ...]
+    # Unchecked until a script's call copies it; see `_script_value`.
+    structured: object = None
 
 
 class _MalformedToolResultError(TypeError):
@@ -602,7 +607,9 @@ class ConfiguredToolExecutor:
 
         log = _SCRIPT_CALLS.get()
         if log is None:
-            return _nested_result(await self._nested_outcome(tool_call, result_limits))
+            return _nested_result(
+                await self._nested_outcome(tool_call, result_limits), result_limits
+            )
         target = self.resolve_target(tool_call)
         arguments = _recorded_arguments(tool_call.arguments)
         started_at = utc_now()
@@ -646,7 +653,7 @@ class ConfiguredToolExecutor:
             await self._publish_nested(
                 log, ToolNestedCallEnded(parent_call_id=log.parent_call_id, call=call)
             )
-        return _nested_result(outcome)
+        return _nested_result(outcome, result_limits)
 
     async def _nested_outcome(
         self, tool_call: ToolCall, result_limits: ResultLimits | None
@@ -883,6 +890,7 @@ class ConfiguredToolExecutor:
             snapshot = _normalize_tool_result(raw_snapshot, tool_name=tool_name, context=context)
             outcome = _ToolRunOutcome(
                 output=snapshot.text,
+                structured=snapshot.structured,
                 exit_code=_promote_exit_code(tool_name, snapshot.data),
                 output_has_exit_status=_promote_output_has_exit_status(
                     tool_name,
@@ -1093,18 +1101,58 @@ def _read_tool_result(result: ToolResult, *, tool_name: str) -> _RawToolResultSn
         raise TypeError("ToolResult.data must be a mapping")
     raw_data = {key: data.get(key) for key in _RESULT_DATA_KEYS.get(tool_name, ())}
     return _RawToolResultSnapshot(
-        text=text, data=raw_data, truncated=truncated, images=result.images
+        text=text,
+        data=raw_data,
+        truncated=truncated,
+        images=result.images,
+        structured=result.structured,
     )
 
 
-def _nested_result(outcome: _ToolRunOutcome) -> NestedCallResult:
-    """What a nested call returns to its script or subagent."""
+def _nested_result(
+    outcome: _ToolRunOutcome, result_limits: ResultLimits | None
+) -> NestedCallResult:
+    """What a nested call returns to its script or subagent.
 
+    Only a script's calls, which pass ``result_limits``, carry the structured
+    result; a subagent's go to a model, which reads the text.
+    """
+
+    value, value_error = (
+        _script_value(outcome.structured, result_limits.max_bytes)
+        if result_limits is not None and not outcome.is_error
+        else (None, None)
+    )
     return NestedCallResult(
         text=outcome.output,
         is_error=outcome.is_error,
         incomplete=outcome.truncated and not outcome.is_error,
+        value=value,
+        value_error=value_error,
     )
+
+
+def _script_value(structured: object, max_bytes: int) -> tuple[object, str | None]:
+    """Copy a tool's structured result through JSON for a script, within ``max_bytes``.
+
+    The copy holds only JSON values, so nothing the tool built reaches the sandbox.
+
+    Returns:
+        tuple[object, str | None]: The copy, or None with why it cannot be given:
+        not JSON, or larger than ``max_bytes`` encoded.
+    """
+
+    if structured is None:
+        return None, None
+    try:
+        text = json.dumps(structured, allow_nan=False, ensure_ascii=False, separators=(",", ":"))
+        size = len(text.encode("utf-8"))
+    except (RecursionError, TypeError, ValueError):
+        # ValueError includes the UnicodeEncodeError of a lone surrogate.
+        return None, "its structured result is not JSON"
+    if size > max_bytes:
+        return None, f"its structured result is larger than {max_bytes // 1024} KiB"
+    return json.loads(text), None
 
 
 def _normalize_tool_result(
@@ -1155,6 +1203,7 @@ def _normalize_tool_result(
         data=data,
         truncated=(truncated if type(truncated) is bool else False) or bounded_text.truncated,
         images=cast(tuple[bytes, ...], images),
+        structured=result.structured,
     )
 
 

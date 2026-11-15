@@ -18,7 +18,13 @@ from typing import Protocol
 
 from wisp.tool_types import ToolSafety
 from wisp.tools.base import ToolArguments, ToolInputSchema, ToolPromptMetadata
-from wisp.tools.codemode.calls import CODEMODE, SCRIPT_RESULT_LIMITS, NestedToolCaller
+from wisp.tools.codemode.calls import (
+    CODEMODE,
+    SCRIPT_RESULT_LIMITS,
+    NestedCallResult,
+    NestedToolCaller,
+)
+from wisp.tools.codemode.result_types import STUB_IMPORTS, ResultType, result_type
 from wisp.tools.codemode.sandbox import ScriptFunction, ScriptLimits, ScriptRun, run_script
 from wisp.tools.context import ToolContext
 from wisp.tools.result import ToolError, ToolResult
@@ -117,6 +123,8 @@ class _Signature:
 
     name: str
     declaration: str
+    # How its structured result is typed, or None when it returns text.
+    result: ResultType | None = None
 
 
 @dataclass(slots=True)
@@ -207,15 +215,33 @@ class CodemodeTool:
                 the defaults.
         """
 
-        listed = tuple(signature for tool in tools if (signature := _signature(tool)) is not None)
+        taken = frozenset(tool.name for tool in (*tools, *discoverable))
+        listed = tuple(
+            signature for tool in tools if (signature := _signature(tool, taken)) is not None
+        )
         found = tuple(
-            signature for tool in discoverable if (signature := _signature(tool)) is not None
+            signature for tool in discoverable if (signature := _signature(tool, taken)) is not None
         )
         self._signatures = (*listed, *found)
+        self._results = {
+            signature.name: signature.result
+            for signature in self._signatures
+            if signature.result is not None
+        }
         self._call = call
         self._limits = limits or ScriptLimits()
         self.description = _description(listed, self._limits, discoverable=bool(found))
-        self._stubs = "\n".join(signature.declaration for signature in self._signatures) + "\n"
+        declarations = [
+            declaration
+            for signature in self._signatures
+            if signature.result is not None
+            for declaration in signature.result.declarations
+        ]
+        self._stubs = (
+            STUB_IMPORTS
+            + "\n".join((*declarations, *(signature.declaration for signature in self._signatures)))
+            + "\n"
+        )
 
     @property
     def tool_names(self) -> tuple[str, ...]:
@@ -264,8 +290,9 @@ class CodemodeTool:
 
     def _function(self, name: str, log: _CallLog) -> ScriptFunction:
         call = self._call
+        returns = self._results.get(name)
 
-        async def call_tool(*args: object, **kwargs: object) -> str:
+        async def call_tool(*args: object, **kwargs: object) -> object:
             if args:
                 raise TypeError(f"Call {name} with keyword arguments, such as {name}(path=...).")
             log.by_tool[name] += 1
@@ -273,6 +300,12 @@ class CodemodeTool:
             if result.is_error:
                 log.failed += 1
                 raise RuntimeError(f"{name} failed: {result.text}")
+            if returns is not None:
+                value, problem = _structured(result, returns)
+                if problem is not None:
+                    log.failed += 1
+                    raise RuntimeError(f"{name} failed: {problem}")
+                return value
             if not result.incomplete:
                 return result.text
             log.incomplete += 1
@@ -359,11 +392,16 @@ def callable_by_name(tool: ScriptableTool) -> bool:
         has when it finds its MCP tools on demand.
     """
 
-    return _signature(tool) is not None
+    return _signature(tool, frozenset()) is not None
 
 
-def _signature(tool: ScriptableTool) -> _Signature | None:
-    """Declare ``tool`` as a keyword-only async Python function, or None if it can't be."""
+def _signature(tool: ScriptableTool, taken: frozenset[str]) -> _Signature | None:
+    """Declare ``tool`` as a keyword-only async Python function, or None if it can't be.
+
+    A tool with an output schema returns its structured result, typed from that
+    schema (see `result_types`); any other returns its text. ``taken`` holds the
+    names a result type's declarations must not reuse.
+    """
 
     if not _is_identifier(tool.name):
         return None
@@ -384,10 +422,35 @@ def _signature(tool: ScriptableTool) -> _Signature | None:
             return None
         parameters.append(parameter)
     listed = f"*, {', '.join(parameters)}" if parameters else ""
+    output_schema = getattr(tool, "output_schema", None)
+    returns = result_type(
+        tool.name, output_schema if isinstance(output_schema, Mapping) else None, taken=taken
+    )
+    annotation = returns.annotation if returns is not None else "str"
     return _Signature(
         name=tool.name,
-        declaration=f"async def {tool.name}({listed}) -> str: ...",
+        declaration=f"async def {tool.name}({listed}) -> {annotation}: ...",
+        result=returns,
     )
+
+
+def _structured(result: NestedCallResult, returns: ResultType) -> tuple[object, str | None]:
+    """The value a structured tool's call gives its script, or why it has none.
+
+    The stub promises the script a value, so a call without one fails rather than
+    falling back to text.
+    """
+
+    if result.value_error is not None:
+        return None, result.value_error
+    value = result.value
+    if not isinstance(value, dict):
+        return None, "it returned no structured result"
+    if returns.kind == "unwrapped":
+        if "result" not in value:
+            return None, "its structured result has no `result` field"
+        return value["result"], None
+    return value, None
 
 
 def _parameter(name: object, schema: object, *, required: bool) -> str | None:
@@ -443,6 +506,18 @@ def _description(
         "Callable tools:",
         *_grouped_names(signature.name for signature in signatures),
     ]
+    structured = [signature for signature in signatures if signature.result is not None]
+    if structured:
+        lines += [
+            "",
+            "These return their structured result instead of text, typed so a script "
+            "using a field they lack fails its type check:",
+            *(
+                f"- {signature.name}: {signature.result.summary}"
+                for signature in structured
+                if signature.result is not None
+            ),
+        ]
     if discoverable:
         lines += [
             "",
@@ -450,7 +525,7 @@ def _description(
             "(such as mcp__server__tool_name), when that name and its parameters are "
             "Python identifiers; call any other through mcp_call(name=..., "
             "arguments=...). Calls by name are type-checked: mcp_describe shows a tool's "
-            "parameter types.",
+            "parameter types, and what a script calling it receives when that is not text.",
         ]
     return "\n".join(lines)
 

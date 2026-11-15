@@ -19,12 +19,16 @@ class ToolResult:
         images (tuple[bytes, ...]): Complete image files to attach to the result.
             The executor validates and stores them; an image it refuses fails the
             call.
+        structured (object): A JSON value the tool returns beside its text, such as
+            an MCP tool's structured content, or None. Only a codemode script
+            receives it, never the model, events or the session.
     """
 
     text: str
     data: Mapping[str, object] = field(default_factory=dict)
     truncated: bool = False
     images: tuple[bytes, ...] = ()
+    structured: object = None
 
 
 _INVALID_ARGUMENT_RECOVERY_HINT = "Retry with arguments that match the tool's input schema."

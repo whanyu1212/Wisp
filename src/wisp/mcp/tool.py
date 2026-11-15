@@ -56,6 +56,9 @@ class McpTool:
     remote_name: str
     server_name: str
     _client: McpToolClient = field(repr=False, compare=False)
+    # The server's schema for the tool's structured result, when it declares a valid
+    # one. Only a codemode script receives that result; the model reads the text.
+    output_schema: dict[str, object] | None = None
 
     async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
         try:
@@ -82,7 +85,11 @@ class McpTool:
             raise ToolError(_INVALID_TEXT_CONTENT) from None
         if result.is_error:
             raise ToolError(bounded.text or "MCP tool reported an error")
-        return ToolResult(text=bounded.text, truncated=bounded.truncated)
+        return ToolResult(
+            text=bounded.text,
+            truncated=bounded.truncated,
+            structured=result.structured_content,
+        )
 
 
 def adapt_mcp_tool(
@@ -100,6 +107,10 @@ def adapt_mcp_tool(
     except UnicodeEncodeError:
         raise _definition_error(server.name, "invalid-name") from None
     input_schema = _copy_input_schema(server.name, tool.name, tool.input_schema)
+    # A bad output schema only costs the tool its typed result, not the server its tools.
+    output_schema = (
+        _copied_object_schema(tool.output_schema) if tool.output_schema is not None else None
+    )
     description_source = tool.description or tool.title
     if not description_source:
         description_source = f"MCP tool {tool.name}"
@@ -122,6 +133,7 @@ def adapt_mcp_tool(
         remote_name=tool.name,
         server_name=server.name,
         _client=client,
+        output_schema=output_schema,
     )
 
 
@@ -151,6 +163,18 @@ def _copy_input_schema(
     remote_name: str,
     schema: Mapping[str, object],
 ) -> dict[str, object]:
+    copied = _copied_object_schema(schema)
+    if copied is None:
+        raise _definition_error(server_name, remote_name)
+    return copied
+
+
+def _copied_object_schema(schema: Mapping[str, object]) -> dict[str, object] | None:
+    """Copy a server's object schema through JSON, or None when it is not a valid one.
+
+    A schema with no `type` is an object schema; any other `type` is refused.
+    """
+
     try:
         serialized = json.dumps(
             schema,
@@ -160,20 +184,20 @@ def _copy_input_schema(
         )
         encoded = serialized.encode("utf-8")
     except (RecursionError, TypeError, ValueError):
-        raise _definition_error(server_name, remote_name) from None
+        return None
     if len(encoded) > _MAX_SCHEMA_BYTES:
-        raise _definition_error(server_name, remote_name)
+        return None
     copied = json.loads(serialized)
     if not isinstance(copied, dict):
-        raise _definition_error(server_name, remote_name)
+        return None
     schema_type = copied.get("type")
     if schema_type is None:
         copied["type"] = "object"
         normalized = json.dumps(copied, ensure_ascii=False, separators=(",", ":"))
         if len(normalized.encode("utf-8")) > _MAX_SCHEMA_BYTES:
-            raise _definition_error(server_name, remote_name)
+            return None
     elif schema_type != "object":
-        raise _definition_error(server_name, remote_name)
+        return None
     try:
         if "$schema" in copied:
             # jsonschema supports None to disable fallback, but types-jsonschema omits it.
@@ -181,10 +205,10 @@ def _copy_input_schema(
         else:
             validator = validator_for(copied)
         if validator is None:
-            raise _definition_error(server_name, remote_name)
+            return None
         validator.check_schema(copied)
     except (SchemaError, TypeError):
-        raise _definition_error(server_name, remote_name) from None
+        return None
     return copied
 
 

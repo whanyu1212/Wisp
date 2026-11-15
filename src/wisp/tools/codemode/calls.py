@@ -20,11 +20,17 @@ class NestedCallResult:
         incomplete (bool): Whether the text is only part of the tool's result: cut
             at the size limit, or stopped early by the tool, as `grep` does at
             ``max_results``.
+        value (object): The tool's structured result, copied through JSON, or None
+            when it returned none. Only a script's calls carry it.
+        value_error (str | None): Why the structured result the tool returned
+            cannot be given to the script, such as its size.
     """
 
     text: str
     is_error: bool = False
     incomplete: bool = False
+    value: object = None
+    value_error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

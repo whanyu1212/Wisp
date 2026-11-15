@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -27,6 +28,7 @@ class _Tool:
     summary: str
     server_name: str = "inventory"
     safety: ToolSafety = "read"
+    output_schema: dict[str, object] | None = None
     input_schema: ToolInputSchema = field(
         default_factory=lambda: {
             "type": "object",
@@ -96,9 +98,52 @@ def test_describe_returns_schema(tmp_path: Path) -> None:
 
     assert text.startswith("mcp__billing__get_invoice (server billing)")
     assert '"required":["sku"]' in text
+    assert "Output schema" not in text
     with pytest.raises(ToolError) as error:
         anyio.run(lambda: describe.run({"name": "bash"}, context))
     assert error.value.failure_code == "unknown_tool"
+
+
+@pytest.mark.parametrize(
+    ("output_schema", "receives"),
+    [
+        (
+            {"type": "object", "properties": {"total": {"type": "number"}}},
+            "receives a dict: total, not text.",
+        ),
+        (
+            {
+                "type": "object",
+                "properties": {"result": {"type": "string"}},
+                "required": ["result"],
+            },
+            "receives its text.",
+        ),
+        (
+            {
+                "type": "object",
+                "properties": {"result": {"type": "array", "items": {"type": "integer"}}},
+                "required": ["result"],
+            },
+            "receives the `result` value: list[int].",
+        ),
+    ],
+    ids=["dict", "wrapped-string", "wrapped-list"],
+)
+def test_describe_shows_output_schema(
+    tmp_path: Path, output_schema: dict[str, object], receives: str
+) -> None:
+    """A script receives a tool's structured result, so describing it says what comes back."""
+
+    tool = _Tool("get_order", "Look up an order.")
+    tool.output_schema = output_schema
+    describe = McpDescribeTool(McpCatalog.from_tools([tool]))
+
+    text = anyio.run(lambda: describe.run({"name": tool.name}, ToolContext(cwd=tmp_path))).text
+
+    *_, schema_line, receives_line = text.splitlines()
+    assert json.loads(schema_line.removeprefix("Output schema: ")) == output_schema
+    assert receives_line.endswith(receives)
 
 
 @pytest.mark.parametrize(

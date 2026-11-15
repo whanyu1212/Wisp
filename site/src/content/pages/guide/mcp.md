@@ -453,6 +453,14 @@ them apart). It hands back only failed tool calls, recognised by their message
 ends it. Scripts may also call
 the run's read-only local tools, but only through their provided functions, not by opening files.
 
+An MCP tool that declares an output schema returns its structured result to a script instead of
+text: a dict typed from the schema, so a script that reads a field the schema lacks fails its type
+check before any call runs. Codemode's description lists those tools with their top-level fields,
+and `mcp_describe` shows a catalog tool's output schema and what a script receives. A schema that only wraps one `result`
+field, which the MCP Python SDK writes for a tool returning a plain value, returns that value, and
+one wrapping a string keeps returning text. A call whose structured result is missing, not JSON,
+or over 512 KiB fails like any failed call. Direct calls and subagents still read the text.
+
 With on-demand discovery, read-only catalog tools need not appear in codemode's description to be
 callable by full name. The name and all parameter names must be Python identifiers and not keywords.
 For other schemas, use the provided `mcp_call(name=..., arguments=...)` function in the script;
