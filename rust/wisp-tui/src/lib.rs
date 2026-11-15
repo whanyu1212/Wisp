@@ -1409,6 +1409,14 @@ impl LiveUi {
         self.render_pending = true;
     }
 
+    /// Open, replace or close the docked discovery view. The reducer re-reads the
+    /// codemode snapshot when MCP servers or a prompt change it, but only while the
+    /// side panel or the `/codemode` picker shows it, so it is told which this is.
+    fn set_discovery_view(&mut self, view: Option<DiscoveryView>) {
+        self.state.codemode_picker_open = matches!(view, Some(DiscoveryView::Codemode(_)));
+        self.discovery_view = view;
+    }
+
     async fn dispatch_session_action(
         &mut self,
         action: UiAction,
@@ -1563,7 +1571,7 @@ impl LiveUi {
             self.context_view = None;
             self.git_diff_view = None;
             self.state.git_diff.set_open(false);
-            self.discovery_view = None;
+            self.set_discovery_view(None);
             self.prompt_history_view = None;
             self.completion.dismiss();
             self.file_picker.dismiss();
@@ -3493,7 +3501,7 @@ impl LiveUi {
                 self.dispatch(UiAction::LoadContext, writer, limit).await
             }
             Command::Permissions(mode) => {
-                self.discovery_view = Some(DiscoveryView::permissions());
+                self.set_discovery_view(Some(DiscoveryView::permissions()));
                 self.editor.clear();
                 self.notice = None;
                 self.render_pending = true;
@@ -3501,7 +3509,7 @@ impl LiveUi {
                     .await
             }
             Command::Codemode(setting) => {
-                self.discovery_view = Some(DiscoveryView::codemode());
+                self.set_discovery_view(Some(DiscoveryView::codemode()));
                 self.editor.clear();
                 self.notice = None;
                 self.render_pending = true;
@@ -3509,7 +3517,7 @@ impl LiveUi {
                     .await
             }
             Command::Subagents(enabled) => {
-                self.discovery_view = Some(DiscoveryView::subagents());
+                self.set_discovery_view(Some(DiscoveryView::subagents()));
                 self.editor.clear();
                 self.notice = None;
                 self.render_pending = true;
@@ -3517,7 +3525,7 @@ impl LiveUi {
                     .await
             }
             Command::SubagentModel(model) => {
-                self.discovery_view = Some(DiscoveryView::subagents());
+                self.set_discovery_view(Some(DiscoveryView::subagents()));
                 self.editor.clear();
                 self.notice = None;
                 self.render_pending = true;
@@ -3533,7 +3541,7 @@ impl LiveUi {
                 } else {
                     (DiscoveryView::mcp(), UiAction::LoadMcpStatus)
                 };
-                self.discovery_view = Some(view);
+                self.set_discovery_view(Some(view));
                 self.editor.clear();
                 self.notice = None;
                 self.render_pending = true;
@@ -4083,7 +4091,7 @@ impl LiveUi {
                     .await
             }
             side_panel::Target::Mcp => {
-                self.discovery_view = Some(DiscoveryView::mcp());
+                self.set_discovery_view(Some(DiscoveryView::mcp()));
                 self.notice = None;
                 self.dispatch(UiAction::LoadMcpStatus, writer, limit).await
             }
@@ -5382,7 +5390,7 @@ impl LiveUi {
             .handle_key(key, &self.state);
         self.render_pending = true;
         match action {
-            DiscoveryAction::Close => self.discovery_view = None,
+            DiscoveryAction::Close => self.set_discovery_view(None),
             DiscoveryAction::Refresh(action) => {
                 return self.dispatch_discovery_action(action, writer, limit).await;
             }
@@ -5390,7 +5398,7 @@ impl LiveUi {
                 let outcome = self.editor.replace_range(0..0, &prefix);
                 self.update_edit_notice(outcome);
                 if !outcome.rejected_limit {
-                    self.discovery_view = None;
+                    self.set_discovery_view(None);
                     self.completion
                         .sync(&self.editor, self.state.workspace_cwd.as_deref());
                     self.completion.dismiss();

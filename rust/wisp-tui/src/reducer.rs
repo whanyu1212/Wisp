@@ -867,6 +867,8 @@ pub struct UiState {
     /// Whether the side panel is on screen, so the changed files stay loaded and
     /// refresh after each run.
     pub(crate) side_panel_visible: bool,
+    /// Whether the `/codemode` picker is open, which shows the codemode snapshot.
+    pub(crate) codemode_picker_open: bool,
     pub(crate) project_files: project_files::ProjectFiles,
     pending_queue_submissions: std::collections::BTreeMap<String, PendingQueueSubmission>,
     pending_queue_restore: Option<PendingQueueRestore>,
@@ -958,6 +960,7 @@ impl UiState {
             project_files: project_files::ProjectFiles::default(),
             git_diff: git_diff::GitDiff::default(),
             side_panel_visible: false,
+            codemode_picker_open: false,
             pending_queue_submissions: std::collections::BTreeMap::new(),
             pending_queue_restore: None,
             next_queue_order: 0,
@@ -5773,7 +5776,7 @@ fn observe_backend_event(
     if let Some(mut effects) = discovery::observe(state, event) {
         effects.extend(discovery::read_permissions_again(state, ids)?);
         // Connecting or changing MCP servers changes whether automatic codemode is on.
-        if state.side_panel_visible
+        if discovery::codemode_followed(state)
             && matches!(
                 event,
                 BackendEvent::McpStatusReported { .. } | BackendEvent::McpStatusUpdated(_)
@@ -6108,7 +6111,7 @@ fn finish_current_command(
     state.git_diff.refresh_for_panel();
     let mut effects = context::start_refresh(state, history_sync_follows, ids)?;
     // A run can connect MCP servers, which changes whether the next one offers codemode.
-    if state.side_panel_visible {
+    if discovery::codemode_followed(state) {
         effects.extend(discovery::codemode(state, None, ids)?);
     }
     if let Some(message) = init_failure {
@@ -6391,6 +6394,18 @@ mod tests {
             ids,
         )
         .unwrap()
+    }
+
+    fn codemode_state() -> wisp_protocol::events::CodemodeState {
+        wisp_protocol::events::CodemodeState {
+            setting: wisp_protocol::commands::CodemodeSetting::Automatic,
+            available: true,
+            offered: false,
+            env_setting: None,
+            mcp_tools: 0,
+            scriptable_mcp_tools: 0,
+            mcp_found_on_demand: false,
+        }
     }
 
     /// End a prompt run and return what its end sends.
@@ -6927,6 +6942,7 @@ mod tests {
             env_setting: None,
             mcp_tools: 0,
             scriptable_mcp_tools: 0,
+            mcp_found_on_demand: true,
         };
         reduce(
             &mut state,
@@ -7067,6 +7083,57 @@ mod tests {
         assert!(!sent(&end_run(&mut state, &mut ids)).contains(&"get_codemode".to_owned()));
         state.side_panel_visible = true;
         assert!(sent(&end_run(&mut state, &mut ids)).contains(&"get_codemode".to_owned()));
+    }
+
+    #[test]
+    fn picker_rereads_without_the_panel() {
+        // `/codemode` opened before the startup MCP connect finished, panel hidden.
+        let mut state = UiState::new("fake".into(), None, None);
+        state.input_ready = true;
+        state.codemode_picker_open = true;
+        let mut ids = DeterministicIds::default();
+        let opened = reduce(&mut state, UiAction::Codemode(None), &mut ids).unwrap();
+        let first = sent_id(&opened, "get_codemode");
+
+        let connected = reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::McpStatusUpdated(Ok(std::sync::Arc::new(
+                wisp_protocol::events::McpStatusSnapshot {
+                    servers: Vec::new(),
+                },
+            )))),
+            &mut ids,
+        )
+        .unwrap();
+        // The read in flight may predate the connect, so another follows it.
+        assert!(sent(&connected).is_empty());
+        let answered = reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::CodemodeReported {
+                command_id: first.clone(),
+                codemode: Ok(std::sync::Arc::new(codemode_state())),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        let again = reduce(
+            &mut state,
+            UiAction::BackendEvent(finished(&first, "get_codemode", true)),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(
+            [sent(&answered), sent(&again)].concat(),
+            ["get_codemode"],
+            "one more read after the first answer"
+        );
+
+        // A finished run reads it again while the picker is open, and not after.
+        state.codemode = Default::default();
+        assert!(sent(&end_run(&mut state, &mut ids)).contains(&"get_codemode".to_owned()));
+        state.codemode = Default::default();
+        state.codemode_picker_open = false;
+        assert!(!sent(&end_run(&mut state, &mut ids)).contains(&"get_codemode".to_owned()));
     }
 
     #[test]

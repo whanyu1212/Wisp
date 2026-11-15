@@ -288,7 +288,9 @@ whether the `codemode` extra is `available`, whether a run started now would be 
 `env_setting`, the setting `WISP_CODEMODE` gives at startup, and `mcp_tools` with
 `scriptable_mcp_tools`: the MCP tools such a run may use, and how many of them a script may call.
 Those are the tools their server's `tool_safety` marks `"read"`; when the run sends its MCP tools
-directly, one whose name or parameters are not Python identifiers is left out. `set_codemode` waits for the
+directly, one whose name or parameters are not Python identifiers is left out.
+`mcp_found_on_demand` says whether such a run would find its MCP tools on demand, which automatic
+codemode needs. `set_codemode` waits for the
 current operation; when saving fails, the setting still applies to the session and an `error`
 event comes first.
 

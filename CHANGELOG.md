@@ -61,6 +61,11 @@ this policy.
 
 ### TUI
 
+- `/codemode` says when automatic mode is off because the next prompt sends its MCP tools
+  directly, not found on demand. Before, it showed "Off" beside a count of scriptable tools above
+  zero, and marking more tools read-only would not have turned it on. It also updates when MCP
+  servers connect or a prompt ends with the side panel hidden, so a picker opened during the
+  startup MCP connect shows its count without being reopened. (HY-545)
 - `/mcp` shows how many of each server's tools are read-only, such as
   `connected · 12 tools, 3 read-only`, and its details mark each read-only tool. Only those can be
   called from a codemode script, by a subagent or in plan mode, and `tool_safety` is what marks
@@ -93,6 +98,8 @@ this policy.
 
 ### Event contract
 
+- `CodemodeState`, in `rpc.codemode`, gains `mcp_found_on_demand`: whether a run started now
+  would find its MCP tools on demand, which automatic codemode needs.
 - `CodemodeState`, in `rpc.codemode`, gains `mcp_tools`, the MCP tools a run started now may use,
   and `scriptable_mcp_tools`, how many of them a script may call: those marked `"read"`, less
   any a run that sends its MCP tools directly cannot call by name. Both are required, so the

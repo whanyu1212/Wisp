@@ -2346,6 +2346,23 @@ class CodingSession:
         )
         return scriptable, len(mcp_tools)
 
+    def mcp_found_on_demand(self) -> bool:
+        """Report whether a run started now would find its MCP tools on demand.
+
+        Worked out as a run would, after mode, policy and the `mcp_tool_exposure`
+        setting, without starting one. Automatic codemode is offered only then.
+
+        Returns:
+            bool: True when the run would offer the discovery tools in place of its
+            MCP tools; False when it sends them directly or has none.
+        """
+
+        registry = self._operation_tool_registry()
+        if registry is None:
+            return False
+        _, catalog = self._apply_mcp_exposure(self._effective_tools(registry), registry)
+        return catalog is not None
+
     def _codemode_tool(
         self,
         offered: tuple[ToolSpec, ...],

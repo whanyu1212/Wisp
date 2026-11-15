@@ -1366,6 +1366,15 @@
    "operation": "remove",
    "path": [
     "codemode",
+    "mcp_found_on_demand"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.codemode",
+   "operation": "remove",
+   "path": [
+    "codemode",
     "mcp_tools"
    ],
    "accepted": false

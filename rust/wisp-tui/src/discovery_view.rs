@@ -738,6 +738,7 @@ fn codemode_notes(state: &UiState) -> Vec<(String, bool)> {
         } else {
             let offered = if snapshot.offered { "On" } else { "Off" };
             notes.push((format!("{offered} for the next prompt."), false));
+            notes.extend(direct_mcp_note(snapshot));
             notes.extend(scriptable_mcp_note(snapshot));
         }
         if let Some(env) = snapshot.env_setting {
@@ -755,6 +756,23 @@ fn codemode_notes(state: &UiState) -> Vec<(String, bool)> {
         false,
     ));
     notes
+}
+
+/// Why automatic mode is off when the next run sends its MCP tools directly:
+/// counting more tools read-only would not turn it on.
+fn direct_mcp_note(snapshot: &wisp_protocol::events::CodemodeState) -> Option<(String, bool)> {
+    let off_by_exposure = snapshot.setting == CodemodeSetting::Automatic
+        && !snapshot.offered
+        && snapshot.mcp_tools > 0
+        && !snapshot.mcp_found_on_demand;
+    off_by_exposure.then(|| {
+        (
+            "MCP tools are sent directly, not found on demand, so automatic stays off \
+             (mcp_tool_exposure)."
+                .to_owned(),
+            false,
+        )
+    })
 }
 
 /// How many of the next run's MCP tools a script may call, flagged when it is none.
@@ -845,6 +863,7 @@ mod tests {
             env_setting: Some(CodemodeSetting::Never),
             mcp_tools: 12,
             scriptable_mcp_tools: 0,
+            mcp_found_on_demand: true,
         }));
         let rendered = draw(&mut view, &state, 72, codemode_panel_height(&state));
         assert!(rendered.contains("current"));
@@ -863,6 +882,39 @@ mod tests {
             view.handle_key(key(KeyCode::Char('4')), &state),
             DiscoveryAction::None
         ));
+    }
+
+    #[test]
+    fn codemode_picker_says_direct_mcp_keeps_automatic_off() {
+        let cases = [
+            // Automatic and off with MCP tools sent directly: the exposure is why.
+            (CodemodeSetting::Automatic, false, 12, false, true),
+            // Found on demand, it is off for another reason, already noted.
+            (CodemodeSetting::Automatic, false, 12, true, false),
+            (CodemodeSetting::Automatic, false, 0, false, false),
+            (CodemodeSetting::Automatic, true, 12, false, false),
+            // Always and never do not depend on exposure.
+            (CodemodeSetting::Always, false, 12, false, false),
+            (CodemodeSetting::Never, false, 12, false, false),
+        ];
+        for (setting, offered, mcp_tools, on_demand, noted) in cases {
+            let mut state = UiState::unconfigured();
+            state.codemode.snapshot = Some(Arc::new(wisp_protocol::events::CodemodeState {
+                setting,
+                available: true,
+                offered,
+                env_setting: None,
+                mcp_tools,
+                scriptable_mcp_tools: 3,
+                mcp_found_on_demand: on_demand,
+            }));
+            let notes = codemode_notes(&state);
+            assert_eq!(
+                notes.iter().any(|(text, _)| text.contains("sent directly")),
+                noted,
+                "{setting:?} offered={offered} tools={mcp_tools} on_demand={on_demand}"
+            );
+        }
     }
 
     #[test]
@@ -905,6 +957,7 @@ mod tests {
                 env_setting: None,
                 mcp_tools,
                 scriptable_mcp_tools,
+                mcp_found_on_demand: true,
             }));
             let notes = codemode_notes(&state);
             let note = notes

@@ -402,6 +402,47 @@ def test_direct_counts_callable_names(
     assert session.scriptable_mcp_tools() == (scriptable, 3)
 
 
+@pytest.mark.parametrize(
+    ("exposure", "threshold", "allowed", "on_demand"),
+    [
+        ("on_demand", None, None, True),
+        ("direct", None, None, False),
+        ("auto", None, None, False),
+        # `auto` finds a catalog on demand once its schemas reach the threshold.
+        ("auto", 0, None, True),
+        # A run the policy leaves no MCP tool has nothing to find.
+        ("on_demand", None, {"lookup"}, False),
+    ],
+    ids=["on-demand", "direct", "auto-small-catalog", "auto-large-catalog", "no-mcp-tools"],
+)
+def test_reports_mcp_found_on_demand(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    exposure: McpToolExposure,
+    threshold: int | None,
+    allowed: set[str] | None,
+    on_demand: bool,
+) -> None:
+    """The snapshot says whether MCP tools are found on demand, as a run would decide."""
+
+    if threshold is not None:
+        monkeypatch.setattr("wisp.coding.session.AUTO_ON_DEMAND_SCHEMA_TOKENS", threshold)
+    session = CodingSession(
+        provider=ScriptedProvider([]),
+        sessions=JsonlSessionStore(tmp_path / "sessions"),
+        tool_registry=_Tools().registry(),
+        tool_context=ToolContext(cwd=tmp_path),
+        mcp_tool_exposure=exposure,
+        **({} if allowed is None else {"tool_policy": ToolPolicy.allow_tool_names(allowed)}),
+    )
+    assert session.tool_registry is not None
+    before = session.tool_registry.names()
+
+    # Asked twice: working it out registers nothing on the session itself.
+    assert [session.mcp_found_on_demand() for _ in range(2)] == [on_demand, on_demand]
+    assert session.tool_registry.names() == before
+
+
 def test_policy_limits_counted_tools(tmp_path: Path) -> None:
     """A tool the policy keeps from the run is not one of its MCP tools."""
 
@@ -422,6 +463,7 @@ def test_no_registry_counts_no_mcp_tools(tmp_path: Path) -> None:
     )
 
     assert session.scriptable_mcp_tools() == (0, 0)
+    assert session.mcp_found_on_demand() is False
 
 
 def test_script_is_safe_to_replay(tmp_path: Path) -> None:

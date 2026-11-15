@@ -2174,6 +2174,7 @@ mod tests {
                 env_setting: None,
                 mcp_tools: 0,
                 scriptable_mcp_tools: 0,
+                mcp_found_on_demand: true,
             }));
             let text = codemode_line(&state, 44, Palette::default()).map(|line| {
                 line.spans
