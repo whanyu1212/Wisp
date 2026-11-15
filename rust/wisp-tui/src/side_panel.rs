@@ -62,6 +62,9 @@ pub(crate) struct SidePanel {
     hidden: bool,
     /// Opened with Ctrl+P on a terminal too narrow to dock it.
     overlay: bool,
+    /// Whether closing the overlay hides the panel again, because the background
+    /// strip opened a panel the user had hidden.
+    rehide: bool,
     /// The width of the last frame, which decides whether the panel docks.
     width: u16,
     /// The visibility last reported to the reducer.
@@ -185,10 +188,15 @@ impl SidePanel {
     /// overlay opens with focus on the first row it can act on.
     pub(crate) fn toggle(&mut self) {
         if docks(self.width) {
+            self.rehide = false;
             self.hidden = !self.hidden;
             self.overlay = false;
         } else {
-            self.overlay = !self.overlay;
+            if self.overlay {
+                self.close_overlay();
+            } else {
+                self.overlay = true;
+            }
             self.cursor = None;
             *self.painted.borrow_mut() = Painted::default();
         }
@@ -197,7 +205,21 @@ impl SidePanel {
     pub(crate) fn focus(&mut self) {
         self.hidden = false;
         self.overlay = true;
+        self.rehide = false;
         self.cursor = None;
+    }
+
+    /// Focuses the panel on its first background process, as the strip under the
+    /// composer does. While nothing is listed there, focus falls back to the first
+    /// row the panel can act on. A panel the user hid hides again when focus leaves.
+    pub(crate) fn focus_background(&mut self) {
+        let hidden = self.hidden;
+        self.focus();
+        self.rehide = hidden;
+        self.cursor = Some(Cursor {
+            section: Section::Background,
+            row: 0,
+        });
     }
 
     /// Keyboard navigation follows the same rows and disclosure controls as clicks.
@@ -385,6 +407,9 @@ impl SidePanel {
 
     pub(crate) fn close_overlay(&mut self) {
         self.overlay = false;
+        if std::mem::take(&mut self.rehide) {
+            self.hidden = true;
+        }
     }
 
     /// Follow the terminal's width. An overlay open when the terminal grows wide
@@ -392,7 +417,8 @@ impl SidePanel {
     pub(crate) fn observe_width(&mut self, width: u16) {
         if self.overlay && !docks(self.width) && docks(width) {
             self.overlay = false;
-            self.hidden = false;
+            // A panel the background strip opened over a hidden one stays hidden.
+            self.hidden = std::mem::take(&mut self.rehide);
         }
         self.width = width;
     }
@@ -723,13 +749,16 @@ pub(crate) fn render(
             }
         }
     }
-    if let Some(lines) = background_lines(state, width, palette) {
+    // With focus, as `/ps` and the background strip open it, every process is listed
+    // so each can be selected; the docked panel alone shows the first few.
+    let shown = if panel.overlay_open() {
+        usize::MAX
+    } else {
+        MAX_BACKGROUND_ROWS
+    };
+    if let Some(lines) = background_lines(state, shown, width, palette) {
         rows.section(Section::Background, lines);
-        let listed = state
-            .background_processes
-            .running()
-            .len()
-            .min(MAX_BACKGROUND_ROWS);
+        let listed = state.background_processes.running().len().min(shown);
         for number in 1..=listed {
             rows.action(number, PanelAction::Open(Target::Process(number)));
         }
@@ -1001,12 +1030,18 @@ fn duration(elapsed: Duration) -> String {
 
 /// Queued rows listed before the rest are counted.
 const MAX_QUEUE_ROWS: usize = 5;
-/// Background processes listed before the rest are counted.
+/// Background processes the unfocused panel lists before the rest are counted.
 const MAX_BACKGROUND_ROWS: usize = 5;
 
 /// `Background`: processes the agent started that are still running, numbered as
-/// `/ps` and `/kill` number them, with how long each has run. Nothing while none run.
-fn background_lines(state: &UiState, width: usize, palette: Palette) -> Option<Vec<Line<'static>>> {
+/// `/ps` and `/kill` number them, with how long each has run; past `shown` rows the
+/// rest are counted. Nothing while none run.
+fn background_lines(
+    state: &UiState,
+    shown: usize,
+    width: usize,
+    palette: Palette,
+) -> Option<Vec<Line<'static>>> {
     let running = state.background_processes.running();
     if running.is_empty() {
         return None;
@@ -1021,7 +1056,7 @@ fn background_lines(state: &UiState, width: usize, palette: Palette) -> Option<V
         .map_or(0, |since| {
             i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
         });
-    for (index, process) in running.iter().enumerate().take(MAX_BACKGROUND_ROWS) {
+    for (index, process) in running.iter().enumerate().take(shown) {
         let elapsed = process
             .started_at_ms
             .and_then(|started| u64::try_from(now_ms.checked_sub(started)?).ok())
@@ -1038,9 +1073,9 @@ fn background_lines(state: &UiState, width: usize, palette: Palette) -> Option<V
             width,
         ));
     }
-    if running.len() > MAX_BACKGROUND_ROWS {
+    if running.len() > shown {
         lines.push(Line::styled(
-            format!("+{} more", running.len() - MAX_BACKGROUND_ROWS),
+            format!("+{} more · /ps", running.len() - shown),
             muted,
         ));
     }
@@ -2798,6 +2833,79 @@ mod tests {
         );
         assert_eq!(panel.key(KeyCode::Char('x'), &state), OverlayKey::Ignored);
         assert_eq!(panel.key(KeyCode::Esc, &state), OverlayKey::Close);
+    }
+
+    #[test]
+    fn focus_lists_every_process() {
+        let mut state = session();
+        let processes: Vec<_> = (1..=8)
+            .map(|n| serde_json::json!({"process_id": format!("p{n}"), "command": format!("job {n}"), "started_at_ms": 0}))
+            .collect();
+        backend(
+            &mut state,
+            crate::reducer::BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "rpc.state", "command_id": "get_state-1",
+                "timestamp": "2026-11-15T09:00:00Z",
+                "state": {
+                    "provider": "fake", "auto_compaction_enabled": true,
+                    "steering_mode": "one_at_a_time", "follow_up_mode": "one_at_a_time",
+                    "pending_steering_count": 0, "pending_follow_up_count": 0,
+                    "background_processes": processes
+                }
+            }))
+            .unwrap(),
+        );
+
+        // The docked panel shows five and points at /ps for the rest.
+        let docked = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
+        assert!(docked.contains("5 ● job 5"), "{docked}");
+        assert!(!docked.contains("job 6"), "{docked}");
+        assert!(docked.contains("+3 more · /ps"), "{docked}");
+
+        // Focused, every process is listed and the last one can be selected.
+        let mut panel = SidePanel::default();
+        panel.observe_width(140);
+        panel.focus_background();
+        paint_overlay(&state, &panel);
+        panel.key(KeyCode::End, &state);
+        assert_eq!(
+            panel.key(KeyCode::Enter, &state),
+            OverlayKey::Open(Target::Process(8))
+        );
+    }
+
+    #[test]
+    fn background_focus_skips_queue() {
+        let mut state = running();
+        queue(&mut state, &["steer"], &[]);
+        backend(
+            &mut state,
+            crate::reducer::BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "rpc.state", "command_id": "get_state-1",
+                "timestamp": "2026-11-15T09:00:00Z",
+                "state": {
+                    "provider": "fake", "auto_compaction_enabled": true,
+                    "steering_mode": "one_at_a_time", "follow_up_mode": "one_at_a_time",
+                    "pending_steering_count": 1, "pending_follow_up_count": 0,
+                    "background_processes": [
+                        {"process_id": "server", "command": "npm run dev", "started_at_ms": 0}
+                    ]
+                }
+            }))
+            .unwrap(),
+        );
+        let mut panel = SidePanel::default();
+        panel.observe_width(140);
+        panel.focus_background();
+        paint_overlay(&state, &panel);
+
+        // The queue is listed first, but focus starts on the process.
+        assert_eq!(panel.sections(&state)[0], Section::Queue);
+        assert_eq!(panel.focused(&state).unwrap().section, Section::Background);
+        assert_eq!(
+            panel.key(KeyCode::Enter, &state),
+            OverlayKey::Open(Target::Process(1))
+        );
     }
 
     #[test]

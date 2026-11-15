@@ -48,6 +48,7 @@ the entire default keymap; other valid user settings still apply.
 | `panel.toggle` | Ctrl+P | Show or hide the side panel |
 | `run.background` | Ctrl+B | Move the running shell command to the background |
 | `panel.focus` | F8 | Focus the side panel; Esc returns to the composer |
+| `panel.background` | Unbound (`Down`, `/ps`) | Focus the side panel's background processes |
 | `session.tree` | Ctrl+T | Open the session tree to switch branches (`/tree`) |
 | `transcript.browse` | F6 | Select transcript cards |
 | `transcript.page_up`, `transcript.page_down` | PgUp, PgDn | Scroll one page |
@@ -141,6 +142,7 @@ characters per chord.
 | `Shift+Enter` | Insert newline in Rust when the terminal reports the modified key |
 | `Tab` | Switch fuzzy/tree for an active file picker; complete an active slash command |
 | `Up` / `Down` | Move through an active suggestion menu |
+| `Down` | From an empty composer while background processes run, focus the first one in the side panel |
 | `Left` / `Right` | Collapse/expand the selected directory in tree mode |
 | `Shift+Tab` | Toggle plan/build mode |
 | `Ctrl+T` | Open the session tree to switch branches (`/tree`) |

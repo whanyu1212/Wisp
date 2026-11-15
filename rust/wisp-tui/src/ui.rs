@@ -46,6 +46,9 @@ pub(crate) const APPROVAL_CHOICES: usize = 4;
 pub(crate) const TRUST_CHOICES: usize = 2;
 const COMPOSER_PREFIX: &str = "› ";
 const CONTENT_PADDING: u16 = 1;
+/// The conversation height below which the background strip gives its row back to
+/// the transcript and composer.
+const BACKGROUND_STRIP_MIN_HEIGHT: u16 = 12;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConnectionInfo {
@@ -58,10 +61,13 @@ pub fn decision_context_visible(area: Rect) -> bool {
 
 fn composer_height(area: Rect, state: &UiState, layout: Option<&ComposerLayout>) -> u16 {
     let framed = area.height >= 16;
-    // A draft grows to half the conversation, and never past the footer, the
-    // transcript's two rows, and the status line while running.
+    // A draft grows to half the conversation, and never past the transcript's two
+    // rows and the rows around the composer.
     let ceiling = (area.height / 2)
-        .min(area.height.saturating_sub(3 + status_line_height(state)))
+        .min(
+            area.height
+                .saturating_sub(2 + rows_around_composer(area, state)),
+        )
         .max(2);
     if editable(state) {
         u16::try_from(
@@ -118,7 +124,9 @@ pub(crate) fn file_picker_area(
     let layout = editable(state).then(|| layout_cache.layout(editor, editor_width));
     let bottom = area
         .bottom()
-        .saturating_sub(composer_height(composer, state, layout) + status_line_height(state) + 1)
+        .saturating_sub(
+            composer_height(composer, state, layout) + rows_around_composer(composer, state),
+        )
         .max(area.y + 4);
     let height = (bottom - area.y).min(12);
     Some(Rect::new(
@@ -146,7 +154,9 @@ pub(crate) fn docked_popup_area(
     let layout = editable(state).then(|| layout_cache.layout(editor, editor_width));
     let bottom = surface
         .bottom()
-        .saturating_sub(composer_height(surface, state, layout) + status_line_height(state) + 1)
+        .saturating_sub(
+            composer_height(surface, state, layout) + rows_around_composer(surface, state),
+        )
         .max(surface.y + 4);
     let height = (bottom - surface.y).min(height);
     Some(Rect::new(surface.x, bottom - height, surface.width, height))
@@ -337,14 +347,16 @@ pub fn render_interactive(
     }
 
     let editor_width = composer_editor_width(area.width);
+    let editor_is_empty = editor.text().is_empty();
     let composer_layout =
         editable(state).then(|| composer_layout_cache.layout(editor, editor_width));
     let composer_height = composer_height(area, state, composer_layout);
     let status_height = status_line_height(state);
+    let strip_height = background_strip_height(area, state);
     let completion_height = completion.map_or(0, |view| {
         (view.items.len().min(5) as u16).min(
             area.height
-                .saturating_sub(composer_height + status_height + 3),
+                .saturating_sub(composer_height + rows_around_composer(area, state) + 2),
         )
     });
     let chunks = Layout::default()
@@ -354,6 +366,7 @@ pub fn render_interactive(
             Constraint::Length(completion_height),
             Constraint::Length(status_height),
             Constraint::Length(composer_height),
+            Constraint::Length(strip_height),
             Constraint::Length(1),
         ])
         .split(area);
@@ -399,9 +412,23 @@ pub fn render_interactive(
         palette,
         bindings,
     );
+    // Browsing and the welcome menu take Down first, so only an empty composer
+    // without them offers it.
+    let down_focuses_strip =
+        editor_is_empty && browse_selected.is_none() && welcome_rows.is_empty();
+    let background_strip = (strip_height > 0).then(|| {
+        render_background_strip(
+            frame,
+            content_area(chunks[4]),
+            state,
+            down_focuses_strip,
+            palette,
+            bindings,
+        )
+    });
     let notice_scrolls = render_footer(
         frame,
-        content_area(chunks[4]),
+        content_area(chunks[5]),
         state,
         viewport,
         notice,
@@ -425,6 +452,7 @@ pub fn render_interactive(
             ..content_area(chunks[0])
         },
         jump_to_latest,
+        background_strip,
         editor,
         completion: completion_rows,
         completion_visible: completion_height > 0,
@@ -1169,6 +1197,65 @@ fn row_tool_in_progress(state: &UiState, row: &TranscriptRow) -> bool {
 /// One row above the composer while a run is going, so it never takes a row at idle.
 fn status_line_height(state: &UiState) -> u16 {
     u16::from(run_in_status_line(state))
+}
+
+/// One row under the composer while background processes run, on a conversation
+/// tall enough to spare it.
+fn background_strip_height(area: Rect, state: &UiState) -> u16 {
+    u16::from(
+        !state.background_processes.running().is_empty()
+            && area.height >= BACKGROUND_STRIP_MIN_HEIGHT,
+    )
+}
+
+/// The rows stacked against the composer: the status line above it, and the
+/// background strip and the footer below it. Popups docked above the composer and
+/// the composer's own ceiling both leave room for them.
+fn rows_around_composer(area: Rect, state: &UiState) -> u16 {
+    status_line_height(state) + background_strip_height(area, state) + 1
+}
+
+/// The strip under the composer: how many background processes run and their
+/// commands, clipped to fit, with the key that focuses them in the side panel on the
+/// right. Returns the strip's area, which a click also focuses.
+fn render_background_strip(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &UiState,
+    down_focuses_strip: bool,
+    palette: Palette,
+    bindings: &Bindings,
+) -> Rect {
+    let muted = Style::default().fg(palette.muted);
+    let running = state.background_processes.running();
+    // Where Down does not focus the strip, only a bound key does, so the hint names
+    // it or says nothing.
+    let key = if down_focuses_strip {
+        Some("↓".to_owned())
+    } else {
+        Some(primary_label(bindings, KeyAction::FocusBackground)).filter(|key| key != "Unbound")
+    };
+    let hint = key.map(|key| format!("{key} open")).unwrap_or_default();
+    let width = usize::from(area.width);
+    let count = format!("{} background", running.len());
+    // Two columns for the dot, three for the separator, and one keeping the hint apart.
+    let room = width.saturating_sub(count.width() + hint.width() + 6);
+    let commands = running
+        .iter()
+        .map(|process| crate::reducer::background_processes::command_line(&process.command))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut left = vec![
+        Span::styled("● ", Style::default().fg(palette.secondary)),
+        Span::styled(count, muted),
+    ];
+    if room > 0 {
+        left.push(Span::styled(" · ", muted));
+        left.push(Span::raw(clip_columns(&commands, room)));
+    }
+    let line = crate::side_panel::spread(left, vec![Span::styled(hint, muted)], width);
+    frame.render_widget(Paragraph::new(line), area);
+    area
 }
 
 /// The run's status line: what is running and for how long, the session turn, and

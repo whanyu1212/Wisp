@@ -270,33 +270,6 @@ pub(super) fn move_running(
     ])
 }
 
-/// `/ps`: the running processes, numbered as `/kill` and the side panel number them.
-pub(super) fn list(state: &UiState) -> Vec<UiEffect> {
-    let running = state.background_processes.running();
-    let notice = if running.is_empty() {
-        "No background processes are running.".to_owned()
-    } else {
-        let rows = running
-            .iter()
-            .enumerate()
-            .map(|(index, process)| {
-                format!(
-                    "{} {} ({})",
-                    index + 1,
-                    command_line(&process.command),
-                    process.process_id
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" · ");
-        format!("Background: {rows} · /kill <number> stops one")
-    };
-    vec![
-        UiEffect::Notice(bounded_session_text(&notice, SESSION_NOTICE_MAX_BYTES)),
-        UiEffect::RequestRender,
-    ]
-}
-
 /// `/kill`: stops the running process with this number from `/ps`, or this id.
 pub(super) fn stop(
     state: &mut UiState,
@@ -310,7 +283,7 @@ pub(super) fn stop(
         Err(_) => running.iter().find(|process| process.process_id == target),
     };
     let Some(process) = process else {
-        let notice = format!("No running background process {target}. /ps lists them.");
+        let notice = format!("No running background process {target}. /ps shows them.");
         return Ok(vec![
             UiEffect::Notice(bounded_session_text(&notice, SESSION_NOTICE_MAX_BYTES)),
             UiEffect::RequestRender,
@@ -810,26 +783,6 @@ mod tests {
 
         assert!(listed(&state).is_empty());
         assert_eq!(state.background_processes.exits(), (0, None));
-    }
-
-    #[test]
-    fn ps_lists_numbered() {
-        let mut state = UiState::new("fake".into(), None, None);
-        assert_eq!(
-            notices(&list(&state)),
-            ["No background processes are running."]
-        );
-        start(&mut state, "server", "npm run dev\u{1b}]0;x\u{7}");
-
-        let listing = list(&state);
-
-        let [notice] = notices(&listing).try_into().unwrap();
-        assert!(notice.starts_with("Background: 1 npm run dev"), "{notice}");
-        assert!(
-            notice.ends_with("(server) · /kill <number> stops one"),
-            "{notice}"
-        );
-        assert!(!notice.contains(['\u{1b}', '\u{7}']), "{notice:?}");
     }
 
     #[test]

@@ -36,10 +36,11 @@ pub(crate) enum Action {
     SessionTree,
     ExternalEditor,
     BackgroundCommand,
+    FocusBackground,
 }
 
 impl Action {
-    pub(crate) const ALL: [Self; 19] = [
+    pub(crate) const ALL: [Self; 20] = [
         Self::Submit,
         Self::AlternateSubmit,
         Self::Newline,
@@ -59,6 +60,7 @@ impl Action {
         Self::SessionTree,
         Self::ExternalEditor,
         Self::BackgroundCommand,
+        Self::FocusBackground,
     ];
 
     pub(crate) const fn id(self) -> &'static str {
@@ -73,6 +75,7 @@ impl Action {
             Self::SessionTree => "session.tree",
             Self::ExternalEditor => "prompt.external_editor",
             Self::BackgroundCommand => "run.background",
+            Self::FocusBackground => "panel.background",
             Self::History => "history.open",
             Self::ToggleTheme => "theme.toggle",
             Self::Browse => "transcript.browse",
@@ -97,6 +100,9 @@ impl Action {
             Self::SessionTree => "Open the session tree to switch branches (/tree)",
             Self::ExternalEditor => "Edit the draft, or open a browsed card's file, in $EDITOR",
             Self::BackgroundCommand => "Move the running shell command to the background",
+            Self::FocusBackground => {
+                "Focus the side panel's background processes (Down from an empty prompt)"
+            }
             Self::History => "Open prompt history",
             Self::ToggleTheme => "Toggle the theme",
             Self::Browse => "Browse transcript details",
