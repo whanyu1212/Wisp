@@ -1297,6 +1297,22 @@ pub mod commands {
             )
         }
 
+        /// List the session's background processes, running or ended.
+        pub fn get_processes(id: &str) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({"type": "get_processes", "id": id}))
+        }
+
+        /// Read a background process's latest output without draining what the agent
+        /// polls.
+        pub fn get_process_output(
+            id: &str,
+            process_id: &str,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(
+                serde_json::json!({"type": "get_process_output", "id": id, "process_id": process_id}),
+            )
+        }
+
         /// Request the active or retained queue state.
         pub fn get_queue_state(id: &str) -> Result<Self, super::ProtocolDecodeError> {
             deserialize(serde_json::json!({"type": "get_queue_state", "id": id}))

@@ -476,6 +476,13 @@ impl LiveUi {
                     return Ok(LoopControl::Continue);
                 };
                 if !contains(area, event) {
+                    if wheel.is_none() && kind == OverlayKind::SidePanel {
+                        // The panel's Esc closes an open peek first, but a click away
+                        // leaves the panel entirely, so typing cannot reach its keys.
+                        self.side_panel.close_overlay();
+                        self.render_pending = true;
+                        return Ok(LoopControl::Continue);
+                    }
                     if wheel.is_none() {
                         // Closing owns the whole click; never dispatch it again to the background.
                         return self

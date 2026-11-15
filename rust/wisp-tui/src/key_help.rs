@@ -136,7 +136,7 @@ impl KeyHelp {
                 "Side panel: the session, its context, cost, changed files, and turns.",
                 "Tab/Shift+Tab move between the queue, changed files, and MCP; Up/Down/Home/End select.",
                 "Enter opens the focused row: /queue, /diff at that file, or /mcp; a ◆ file jumps to its edit card.",
-                "On a background process, Enter fills in /kill for it; press Enter again to stop it.",
+                "On a background process, Enter opens its peek: Enter again opens its card, x then y stops it, Esc closes.",
                 "Ctrl+P or Esc closes it; on a wide terminal it stays docked beside the transcript.",
             ],
             Owner::Overlay(OverlayKind::Detail) => &[

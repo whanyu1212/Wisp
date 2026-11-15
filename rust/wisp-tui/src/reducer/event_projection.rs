@@ -98,6 +98,45 @@ impl BackendEvent {
                     subagents,
                 });
             }
+            "rpc.processes" => {
+                let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
+                let processes = array_field(&value, &event_type, "processes")?
+                    .iter()
+                    .map(|process| process_report(process, &event_type))
+                    .collect::<Result<_, _>>()?;
+                return Ok(Self::ProcessesReported {
+                    command_id,
+                    processes,
+                });
+            }
+            "rpc.process_output" => {
+                let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
+                let process = process_report(&value["process"], &event_type)?;
+                let chunks = array_field(&value, &event_type, "chunks")?
+                    .iter()
+                    .map(|chunk| {
+                        let stream = match string_field_ref(chunk, &event_type, "stream")? {
+                            "stdout" => super::background_processes::OutputStream::Stdout,
+                            "stderr" => super::background_processes::OutputStream::Stderr,
+                            _ => {
+                                return Err(EventProjectionError::InvalidField {
+                                    event_type: event_type.clone(),
+                                    field: "chunks.stream",
+                                });
+                            }
+                        };
+                        Ok((stream, string_field(chunk, &event_type, "text")?))
+                    })
+                    .collect::<Result<_, _>>()?;
+                return Ok(Self::ProcessOutputReported {
+                    command_id,
+                    output: std::sync::Arc::new(super::background_processes::ProcessOutput {
+                        process,
+                        chunks,
+                        omitted_bytes: u64_field(&value, &event_type, "omitted_bytes")?,
+                    }),
+                });
+            }
             "rpc.codemode" => {
                 let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
                 let codemode = discovery_report(&value["codemode"], || {
@@ -404,6 +443,8 @@ impl BackendEvent {
             | "rpc.permissions"
             | "rpc.codemode"
             | "rpc.subagents"
+            | "rpc.processes"
+            | "rpc.process_output"
             | "rpc.commands"
             | "rpc.state"
             | "session.stats"
@@ -1700,6 +1741,33 @@ fn background_processes(
             })
         })
         .collect()
+}
+
+/// A process as `rpc.processes` and `rpc.process_output` describe it.
+fn process_report(
+    value: &Value,
+    event_type: &str,
+) -> Result<super::background_processes::ProcessReport, EventProjectionError> {
+    let exit_code = optional_i64_field(value, event_type, "exit_code")?
+        .map(i32::try_from)
+        .transpose()
+        .map_err(|_| EventProjectionError::InvalidField {
+            event_type: event_type.to_owned(),
+            field: "exit_code",
+        })?;
+    let state = if string_field_ref(value, event_type, "state")? == "running" {
+        crate::tool_cards::ProcessDisplayState::Running
+    } else {
+        ended_process_state(value, event_type, exit_code)?
+    };
+    Ok(super::background_processes::ProcessReport {
+        process_id: exact_string_field(value, event_type, "process_id", 128)?,
+        command: string_field(value, event_type, "command")?,
+        state,
+        exit_code,
+        started_at_ms: optional_i64_field(value, event_type, "started_at_ms")?,
+        stopped_by_user: value["stopped_by_user"].as_bool().unwrap_or(false),
+    })
 }
 
 /// How the card of a process that stopped on its own reads: a non-zero exit fails.

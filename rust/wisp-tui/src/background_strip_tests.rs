@@ -184,10 +184,16 @@ async fn down_focuses_first_process() {
         draw(&mut ui, width, HEIGHT);
         press(&mut ui, key(KeyCode::Down), width).await;
         assert_eq!(ui.active_overlay(), Some(OverlayKind::SidePanel));
-        // Focus starts on the first process, so Enter prepares to stop it.
+        // Focus starts on the first process, so Enter opens its peek in place.
         press(&mut ui, key(KeyCode::Enter), width).await;
-        assert_eq!(ui.active_overlay(), None);
-        assert_eq!(ui.editor.text(), "/kill server");
+        assert_eq!(ui.active_overlay(), Some(OverlayKind::SidePanel));
+        let rows = rows(&draw(&mut ui, width, HEIGHT));
+        let peek = rows
+            .iter()
+            .position(|row| row.contains("│ reading…"))
+            .expect("peek painted");
+        assert!(rows[peek - 1].contains("1 ● npm run dev"), "{rows:#?}");
+        assert_eq!(ui.editor.text(), "");
     }
 }
 
