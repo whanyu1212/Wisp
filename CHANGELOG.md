@@ -14,6 +14,15 @@ this policy.
 
 ### Tools
 
+- `gather_settled` hands back an error as a failed tool call only when its `<tool> failed: …`
+  message names one of the run's own tools. Before, any identifier counted, so a script's own
+  `RuntimeError("parse failed: …")` came back as a result instead of ending the script. A script
+  can still raise a real tool's message itself; monty keeps only an error's message, so nothing
+  else can mark a failed call. (HY-545)
+- A `read_output` page read with `limit` is no longer marked truncated just because more lines
+  follow, as `read` already did. A codemode script reading one page no longer gets
+  `[result incomplete]` or an incomplete count for it. A page the output limit cut short still is.
+  (HY-545)
 - Automatic codemode is no longer offered when none of a run's MCP tools can be called from a
   script. An MCP tool is read-only only where its server's `tool_safety` marks it `"read"`, so on
   a server with no such entries every call a script made to it was refused, and the model paid

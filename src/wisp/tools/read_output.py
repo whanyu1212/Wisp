@@ -73,8 +73,14 @@ class ReadOutputTool:
                 "selected_count": len(page.lines),
                 "line_count": page.line_count,
             },
-            truncated=bounded.truncated or page.next_offset is not None or page.line_truncated,
+            truncated=bounded.truncated or page.line_truncated or _cut_short(page, limit),
         )
+
+
+def _cut_short(page: OutputPage, limit: int | None) -> bool:
+    # As with `read`, a page that returned the lines the caller asked for is whole,
+    # even when more follow; one the output budget stopped first is not.
+    return page.next_offset is not None and (limit is None or len(page.lines) < limit)
 
 
 def _page_header(page: OutputPage) -> str:
