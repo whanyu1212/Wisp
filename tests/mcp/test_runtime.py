@@ -459,7 +459,72 @@ def test_sdk_reports_connected_mcp_server_and_registered_tools(tmp_path: Path) -
         "mcp__fixture__echo",
         "mcp__fixture__runtime_environment",
     )
+    # No `tool_safety` entries, so no tool is read-only.
+    assert status.read_only_tool_names == ()
     assert status.error is None
+
+
+@pytest.mark.parametrize(
+    ("tool_safety", "read_only"),
+    [
+        ({"echo": "read"}, ("mcp__fixture__echo",)),
+        ({"runtime_environment": "read"}, ("mcp__fixture__runtime_environment",)),
+        # In the order the server lists them, whatever the order of the settings.
+        (
+            {"runtime_environment": "read", "echo": "read"},
+            ("mcp__fixture__echo", "mcp__fixture__runtime_environment"),
+        ),
+        # `tool_safety` takes the server's own tool name, not Wisp's full one.
+        ({"mcp__fixture__echo": "read"}, ()),
+        ({"echo": "mutating"}, ()),
+    ],
+    ids=["marked", "not-first", "both-in-order", "full-name", "mutating"],
+)
+def test_reports_read_only_tools(
+    tmp_path: Path, tool_safety: dict[str, str], read_only: tuple[str, ...]
+) -> None:
+    """The status names the tools `tool_safety` marks read-only, as the server started."""
+
+    server = _fixture_server(tmp_path).model_copy(
+        update={"tool_safety": tuple(tool_safety.items())}
+    )
+
+    async def scenario() -> tuple[str, ...]:
+        api, _ = _api()
+        runtime = await McpRuntime.start((server,), api=api, existing_tool_names=frozenset())
+        try:
+            return runtime.read_only_tool_names_for("fixture")
+        finally:
+            await runtime.aclose()
+
+    assert anyio.run(scenario) == read_only
+
+
+def test_sdk_reports_read_only_tools(tmp_path: Path) -> None:
+    """The MCP status a frontend reads names the tools `tool_safety` marks read-only."""
+
+    server = _fixture_server(tmp_path).model_copy(
+        update={"tool_safety": (("runtime_environment", "read"),)}
+    )
+    config = WispConfig(provider="fake", session_dir=tmp_path, mcp_servers=(server,))
+
+    async def scenario() -> RpcMcpStatusReported:
+        controller = await InProcessWisp.start(
+            config,
+            options=InProcessOptions(startup_trusted=True),
+        )
+        try:
+            await controller.get_mcp_status(command_id="mcp-1")
+            async for event in controller.events():
+                if isinstance(event, RpcMcpStatusReported):
+                    return event
+            raise AssertionError("MCP status was not reported")
+        finally:
+            await controller.aclose()
+
+    (status,) = anyio.run(scenario).status.servers
+
+    assert status.read_only_tool_names == ("mcp__fixture__runtime_environment",)
 
 
 def test_sdk_reports_zero_tool_server_as_disconnected(

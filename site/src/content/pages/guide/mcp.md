@@ -125,6 +125,15 @@ default to `command` safety and require approval; server-provided annotations ca
 policy. `tool_safety` is the only way to assign `read` or `mutating` safety and matches the remote
 tool name exactly.
 
+`/mcp` shows each server's tool count with how many are read-only, such as
+`connected · 12 tools, 3 read-only`, and its details mark each read-only tool with `read`. The list
+shows Wisp's full names, `mcp__<server>__<tool>`; `tool_safety` takes the part after the second
+`__`. Wisp rewrites some names with a hash (too long, characters providers reject, or a leading
+`_`); for those, use the server's own name. Changes apply when the server reconnects (`c` in
+`/mcp`). `/codemode` can count fewer tools than `/mcp` shows as read-only: its count is for the
+next run, after tool selection, policy and plan mode, and a run that sends its MCP tools directly
+can call from a script only tools whose names and parameters are Python identifiers.
+
 ## Connection limits
 
 Startup is failure-isolated: an unavailable or malformed server produces a sanitized error event

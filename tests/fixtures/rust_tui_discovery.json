@@ -112,6 +112,9 @@
           "tool_names": [
             "mcp__search__query"
           ],
+          "read_only_tool_names": [
+            "mcp__search__query"
+          ],
           "error": null,
           "launch": {
             "command": "npx",
@@ -135,6 +138,7 @@
           "tool_names": [
             "mcp__files__read"
           ],
+          "read_only_tool_names": [],
           "error": null,
           "launch": {
             "command": null,
@@ -159,6 +163,7 @@
           "name": "offline",
           "status": "unavailable",
           "tool_names": [],
+          "read_only_tool_names": [],
           "error": "Server startup failed",
           "launch": {
             "command": "offline-server",
@@ -175,6 +180,7 @@
           "name": "archived",
           "status": "disabled",
           "tool_names": [],
+          "read_only_tool_names": [],
           "error": null,
           "launch": {
             "command": "uvx",
@@ -203,6 +209,9 @@
           "name": "search",
           "status": "connected",
           "tool_names": [
+            "mcp__search__query"
+          ],
+          "read_only_tool_names": [
             "mcp__search__query"
           ],
           "error": null,

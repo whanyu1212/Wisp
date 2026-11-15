@@ -2016,6 +2016,93 @@
    "accepted": false
   },
   {
+   "event": "rpc.mcp",
+   "operation": "remove",
+   "path": [
+    "status",
+    "servers",
+    0,
+    "error"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.mcp",
+   "operation": "remove",
+   "path": [
+    "status",
+    "servers",
+    0,
+    "launch"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.mcp",
+   "operation": "remove",
+   "path": [
+    "status",
+    "servers",
+    0,
+    "name"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.mcp",
+   "operation": "remove",
+   "path": [
+    "status",
+    "servers",
+    0,
+    "read_only_tool_names"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.mcp",
+   "operation": "remove",
+   "path": [
+    "status",
+    "servers",
+    0,
+    "sign_in"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.mcp",
+   "operation": "remove",
+   "path": [
+    "status",
+    "servers",
+    0,
+    "status"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.mcp",
+   "operation": "remove",
+   "path": [
+    "status",
+    "servers",
+    0,
+    "tool_names"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.mcp",
+   "operation": "add_unknown",
+   "path": [
+    "status",
+    "servers",
+    0
+   ],
+   "accepted": false
+  },
+  {
    "event": "rpc.mcp.login",
    "operation": "remove",
    "path": [

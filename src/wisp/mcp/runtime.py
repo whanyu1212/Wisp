@@ -118,6 +118,10 @@ class McpRuntime:
         self._registered_tool_names: dict[str, tuple[str, ...]] = {
             server.name: () for server in servers
         }
+        # The registered tools each server's `tool_safety` marks read-only.
+        self._read_only_tool_names: dict[str, tuple[str, ...]] = {
+            server.name: () for server in servers
+        }
         self._disconnected_server_names: set[str] = set()
         # HTTP servers started with a saved OAuth sign-in.
         self._signed_in_server_names: set[str] = set()
@@ -168,6 +172,16 @@ class McpRuntime:
         """Return tool names registered by this runtime for one configured server."""
 
         return self._registered_tool_names.get(server_name, ())
+
+    def read_only_tool_names_for(self, server_name: str) -> tuple[str, ...]:
+        """Return the registered tools of one server that are read-only, in order.
+
+        A tool is read-only when its server's `tool_safety` marks it so, as it was
+        when the server last started. Only these can a codemode script, a subagent
+        or plan mode call.
+        """
+
+        return self._read_only_tool_names.get(server_name, ())
 
     def is_signed_in(self, server_name: str) -> bool:
         """Return whether ``server_name`` started with a saved OAuth sign-in."""
@@ -384,6 +398,9 @@ class McpRuntime:
             for tool in tools:
                 self._api.register_tool(cast(Tool, tool), replace=False)
             self._registered_tool_names[result.server.name] = tuple(names)
+            self._read_only_tool_names[result.server.name] = tuple(
+                tool.name for tool in tools if tool.safety == "read"
+            )
             registered_names.update(names)
             registered_tools += len(tools)
             registered_definition_bytes += result.definition_bytes
