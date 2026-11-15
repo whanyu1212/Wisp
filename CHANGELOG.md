@@ -20,6 +20,13 @@ this policy.
   for the tool's description and a failed script before falling back to direct calls. Runs whose
   on-demand catalog has a `"read"` tool are offered codemode as before, and `"codemode": true`
   still offers it for the built-in read tools alone. (HY-510)
+- Codemode scripts get `await gather_settled(...)`, which runs calls at once like
+  `asyncio.gather` and returns every outcome in order, with a failed call's `RuntimeError` in
+  place of its result. Under `gather` one failed call ended the script, the results of the calls
+  that succeeded were lost, and the retry repeated them all; the sandbox's `gather` takes no
+  `return_exceptions`. A bug in the script, or reaching a limit, still ends it. A failed call
+  that a script returns among its results now reads as `RuntimeError: …`, not as a result.
+  (HY-515)
 
 ### TUI
 

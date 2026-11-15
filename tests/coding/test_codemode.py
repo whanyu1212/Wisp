@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import itertools
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -508,6 +509,155 @@ def _run_tool(tool: CodemodeTool, code: str) -> ToolResult:
     return anyio.run(run)
 
 
+async def _locked_b(name: str, arguments: Mapping[str, object]) -> NestedCallResult:
+    """Answer every table but `b`, which fails."""
+
+    table = arguments["table"]
+    if table == "b":
+        return NestedCallResult(text="table b is locked", is_error=True)
+    return NestedCallResult(text=f"rows of {table}")
+
+
+_THREE_TABLES = "(*[query(table=t) for t in ('a', 'b', 'c')])"
+
+
+def test_settled_fan_out_keeps_results() -> None:
+    """One failed call costs a fan-out only its own result, and the error says so."""
+
+    result = _run_tool(_tool(_locked_b), f"await gather_settled{_THREE_TABLES}")
+
+    outcomes, footer = result.text.rsplit("\n", 1)
+    assert json.loads(outcomes) == [
+        "rows of a",
+        "RuntimeError: query failed: table b is locked",
+        "rows of c",
+    ]
+    # The failure stays visible to the model even when the script ignores it.
+    assert footer == "[3 tool calls (1 failed): query ×3]"
+    assert result.data == {"calls": 3, "failed_calls": 1}
+    with pytest.raises(ToolError, match=r"Script failed \(runtime\): RuntimeError"):
+        _run_tool(_tool(_locked_b), f"import asyncio\nawait asyncio.gather{_THREE_TABLES}")
+
+
+def test_settled_errors_are_runtime_errors() -> None:
+    """A script tells a failed call from a result by the error's type, whatever a result is."""
+
+    code = (
+        f"outcomes = await gather_settled{_THREE_TABLES}\n"
+        "[str(o) if isinstance(o, RuntimeError) else o.upper() for o in outcomes]"
+    )
+
+    result = _run_tool(_tool(_locked_b), code)
+
+    assert json.loads(result.text.rsplit("\n", 1)[0]) == [
+        "ROWS OF A",
+        "query failed: table b is locked",
+        "ROWS OF C",
+    ]
+
+
+def test_settled_calls_overlap() -> None:
+    """The helper wraps each call without making the calls take turns."""
+
+    running = most_running = 0
+
+    async def slow(name: str, arguments: object) -> NestedCallResult:
+        nonlocal running, most_running
+        running += 1
+        most_running = max(most_running, running)
+        await anyio.sleep(0.05)
+        running -= 1
+        return NestedCallResult(text="done")
+
+    _run_tool(_tool(slow), f"await gather_settled{_THREE_TABLES}")
+
+    assert most_running == 3
+
+
+@pytest.mark.parametrize(
+    ("bug", "error"),
+    [
+        ("return str(1 / 0)", "ZeroDivisionError"),
+        # The sandbox raises these as RuntimeError or a subclass of it, like a
+        # failed tool call, and they are still the script's own mistakes.
+        ("return await bug()", "RecursionError"),
+        ("raise NotImplementedError('todo')", "NotImplementedError"),
+        ("raise RuntimeError('gave up')", "RuntimeError: gave up"),
+        (
+            "seen = {1: 1}\n    for key in seen:\n        seen[key + 1] = 1\n    return 'x'",
+            "RuntimeError: dictionary changed size",
+        ),
+    ],
+    ids=["other-error", "recursion", "subclass", "own-runtime-error", "sandbox-runtime-error"],
+)
+def test_settled_keeps_script_bugs(bug: str, error: str) -> None:
+    """Only a failed tool call comes back as a value: a bug in the script still ends it."""
+
+    code = f"async def bug() -> str:\n    {bug}\nawait gather_settled(bug(), query(table='a'))"
+
+    with pytest.raises(ToolError, match=rf"Script failed \(runtime\): {error}"):
+        _run_tool(_tool(), code)
+
+
+def test_helper_keeps_script_line_numbers() -> None:
+    """The helper runs before the script, apart from it, so line 1 is the script's own."""
+
+    with pytest.raises(ToolError, match=r"main\.py:1:") as failure:
+        _run_tool(_tool(), "await gather_settled(query(table=1))")
+
+    assert "Script failed (type)" in str(failure.value)
+
+
+def test_broken_helpers_are_not_the_scripts_fault(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """If Wisp's own helper code stops loading, no script runs and none is blamed."""
+
+    calls: list[str] = []
+
+    async def record(name: str, arguments: object) -> NestedCallResult:
+        calls.append(name)
+        return NestedCallResult(text="rows")
+
+    tool = _tool(record)
+    monkeypatch.setattr("wisp.tools.codemode.tool._HELPERS", "def gather_settled(:\n")
+
+    with pytest.raises(ToolError) as failure:
+        _run_tool(tool, "await query(table='a')")
+
+    assert calls == []
+    assert failure.value.failure_code == "internal_error"
+    assert "Script failed" not in str(failure.value)
+    assert "codemode's helpers did not load" in caplog.text
+
+
+def test_description_names_the_helper() -> None:
+    assert "`await gather_settled(...)`" in _tool().description
+
+
+def test_refused_call_is_a_settled_error(tmp_path: Path) -> None:
+    """A call a script may not make comes back as an error value, recorded and never run."""
+
+    tools = _Tools()
+    code = (
+        "outcomes = await gather_settled(\n"
+        "    mcp__db__query(table='a'),\n"
+        "    mcp_call(name='mcp__db__drop', arguments={'table': 'users'}),\n"
+        ")\n"
+        "[isinstance(outcome, RuntimeError) for outcome in outcomes]"
+    )
+
+    events, _ = _run(tmp_path, tools, [_script(code)], exposure="on_demand")
+
+    result = _result(events)
+    assert not result.is_error and result.output.startswith("[false, true]")
+    assert (tools.query.calls, tools.drop.calls) == ([{"table": "a"}], [])
+    refused = [call for call in _ended(events).nested_calls if call.is_error]
+    assert [(call.target, call.failure_code) for call in refused] == [
+        ("mcp__db__drop", "policy_denied")
+    ]
+
+
 def test_failed_call_raises_in_script() -> None:
     async def fail(name: str, arguments: object) -> NestedCallResult:
         return NestedCallResult(text="table is locked", is_error=True)
@@ -539,6 +689,14 @@ _GATHER = "import asyncio\nawait asyncio.gather(*[query(table='a') for _ in rang
             r"\(limit\): The script made more than 3 tool calls",
         ),
         (_GATHER.format(5000), ScriptLimits(max_calls=3), r"\(limit\): .* more than 3 tool calls"),
+        # The call limit is not an error a script can catch, so the helper that
+        # hands failed calls back as values does not hand this one back.
+        (
+            "async def one() -> str:\n    return await query(table='a')\n"
+            "await gather_settled(*[one() for _ in range(5000)])",
+            ScriptLimits(max_calls=3),
+            r"\(limit\): .* more than 3 tool calls",
+        ),
         (
             "x = []\nwhile True:\n    x.append('a' * 100000)",
             ScriptLimits(memory_bytes=8 * 1024 * 1024),
@@ -559,6 +717,7 @@ _GATHER = "import asyncio\nawait asyncio.gather(*[query(table='a') for _ in rang
         "compute",
         "calls",
         "gather",
+        "settled",
         "memory",
         "printed",
         "recursion",
@@ -821,8 +980,17 @@ def test_policy_limits_scripts() -> None:
     assert (allowed.is_error, allowed.text) == (False, "lookup:t")
 
 
-@pytest.mark.parametrize("ending", ["timeout", "caller-cancels"])
-def test_script_end_cancels_calls(ending: str) -> None:
+@pytest.mark.parametrize(
+    ("ending", "fan_out"),
+    [
+        ("timeout", "import asyncio\nawait asyncio.gather"),
+        ("caller-cancels", "import asyncio\nawait asyncio.gather"),
+        ("timeout", "await gather_settled"),
+        ("caller-cancels", "await gather_settled"),
+    ],
+    ids=["timeout", "caller-cancels", "timeout-settled", "caller-cancels-settled"],
+)
+def test_script_end_cancels_calls(ending: str, fan_out: str) -> None:
     """Calls still running when a script ends are cancelled, not left running."""
 
     finished: list[str] = []
@@ -837,7 +1005,7 @@ def test_script_end_cancels_calls(ending: str) -> None:
         finished.append(name)
         return NestedCallResult(text="late")
 
-    code = "import asyncio\nawait asyncio.gather(*[query(table='a') for _ in range(4)])"
+    code = f"{fan_out}(*[query(table='a') for _ in range(4)])"
 
     async def run() -> None:
         if ending == "timeout":

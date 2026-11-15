@@ -21,7 +21,8 @@ from typing_extensions import TypeAliasType
 
 ScriptFunction = TypeAliasType("ScriptFunction", Callable[..., Awaitable[str]])
 ScriptFailure = TypeAliasType(
-    "ScriptFailure", Literal["unavailable", "syntax", "type", "runtime", "limit", "timeout"]
+    "ScriptFailure",
+    Literal["unavailable", "internal", "syntax", "type", "runtime", "limit", "timeout"],
 )
 
 
@@ -68,6 +69,7 @@ async def run_script(
     functions: Mapping[str, ScriptFunction],
     stubs: str,
     limits: ScriptLimits,
+    helpers: str = "",
 ) -> ScriptRun:
     """Type-check ``code`` against ``stubs``, then run it with ``functions``.
 
@@ -78,11 +80,15 @@ async def run_script(
         stubs (str): Python declarations of ``functions``, which the script is
             type-checked against before anything runs.
         limits (ScriptLimits): The bounds it runs under.
+        helpers (str): The caller's own Python, run in the sandbox before ``code``
+            so the script can use what it defines. It runs on its own, so the
+            script's line numbers still start at 1.
 
     Returns:
         ScriptRun: What it printed and returned, or why it failed. A failure inside
         the script, such as an exception it did not catch, is a result, not an
-        exception.
+        exception. So is ``helpers`` failing to load, as `internal`: that is the
+        caller's fault, not the script's, and the script does not run.
 
     Raises:
         anyio.get_cancelled_exc_class(): When the caller is cancelled; the worker is
@@ -94,6 +100,7 @@ async def run_script(
             AsyncMonty,
             CollectString,
             MontyError,
+            MontyRuntimeError,
             MontySyntaxError,
             MontyTypingError,
             ResourceLimits,
@@ -118,6 +125,13 @@ async def run_script(
                 async with pool.checkout(
                     limits=resource_limits, type_check=True, type_check_stubs=stubs
                 ) as session:
+                    if helpers:
+                        try:
+                            await session.feed_run(helpers)
+                        except (MontySyntaxError, MontyTypingError, MontyRuntimeError) as exc:
+                            # Only the helpers' own code failing. A worker that
+                            # crashed or was refused is reported like any other run.
+                            return ScriptRun(printed="", failure="internal", error=str(exc))
                     value = await session.feed_run(
                         code,
                         external_lookup={
@@ -211,6 +225,18 @@ def _as_text(value: object) -> str | None:
     if isinstance(value, str):
         return value
     try:
-        return json.dumps(value, ensure_ascii=False, default=str)
+        return json.dumps(value, ensure_ascii=False, default=_json_default)
     except (TypeError, ValueError):
         return repr(value)
+
+
+def _json_default(value: object) -> str:
+    """Text for a value JSON has no form for.
+
+    An exception keeps its class, so an error a script returned among its results,
+    as `gather_settled` gives them, does not read as one of the results.
+    """
+
+    if isinstance(value, BaseException):
+        return f"{type(value).__name__}: {value}"
+    return str(value)
