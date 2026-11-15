@@ -44,12 +44,18 @@ from wisp.sessions.jsonl import JsonlSessionStore
 from wisp.tool_types import ToolSafety
 from wisp.tools.approval import ToolApprovalPolicy
 from wisp.tools.base import ToolArguments, ToolExecutionMetadata, ToolInputSchema
-from wisp.tools.codemode.calls import CODEMODE, NestedCallResult
+from wisp.tools.codemode.calls import (
+    CODEMODE,
+    SCRIPT_RESULT_LIMITS,
+    NestedCallResult,
+    ResultLimits,
+)
 from wisp.tools.codemode.sandbox import ScriptLimits
-from wisp.tools.codemode.tool import CodemodeTool
+from wisp.tools.codemode.tool import INCOMPLETE_MARKER, CodemodeTool
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
 from wisp.tools.result import ToolError, ToolResult
+from wisp.tools.truncation import truncate_text
 
 pytest.importorskip("pydantic_monty")
 
@@ -473,15 +479,157 @@ def test_eval_reaches_only_given_tools(tmp_path: Path) -> None:
     assert tools.drop.calls == []
 
 
-def test_huge_tool_output_bounded(tmp_path: Path) -> None:
-    """A script reads a tool's result as the model would: cut to the output limit."""
+@pytest.mark.parametrize(
+    ("size", "script_sees", "incomplete"),
+    [
+        # More than a direct call returns, so the script can filter all of it.
+        (200_000, 200_000, False),
+        # Cut at the script's own limit, and the last line says so.
+        (5_000_000, None, True),
+    ],
+    ids=["above-model-limit", "above-script-limit"],
+)
+def test_script_reads_more_than_the_model(
+    tmp_path: Path, size: int, script_sees: int | None, incomplete: bool
+) -> None:
+    """A script gets more of a result than the model would, and the model still gets its cap."""
 
-    tools = _Tools(lookup=_Tool("lookup", reply="r" * 5_000_000))
+    tools = _Tools(lookup=_Tool("lookup", reply="r" * size))
+    code = (
+        "text = await lookup(table='a')\n"
+        f"print(len(text.encode()), text.endswith('{INCOMPLETE_MARKER}'))\n"
+        "text"
+    )
+
+    events, _ = _run(tmp_path, tools, [_script(code)])
+
+    output = _result(events).output
+    seen, marked = output.splitlines()[0].split()
+    if script_sees is None:
+        assert ToolContext(cwd=tmp_path).max_output_bytes < int(seen)
+        assert int(seen) <= SCRIPT_RESULT_LIMITS.max_bytes + 64
+    else:
+        assert int(seen) == script_sees
+    assert marked == str(incomplete)
+    # What the script returned is cut for the model as any result is, keeping the
+    # list of calls, which says whether a result came back incomplete.
+    assert len(output.encode()) <= ToolContext(cwd=tmp_path).max_output_bytes
+    counted = " (1 incomplete)" if incomplete else ""
+    assert output.endswith(f"[truncated]\n[1 tool call{counted}: lookup]")
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "for i in range(3000):\n    print(i)",
+        "for i in range(1998):\n    print(i)\n'last\\n'",
+        "print('x' * 200_000)",
+    ],
+    ids=["many-lines", "boundary-lines", "one-long-line"],
+)
+def test_footer_survives_cut_output(tmp_path: Path, code: str) -> None:
+    """However the script's output is cut for the model, the list of calls stays last."""
+
+    events, _ = _run(tmp_path, _Tools(), [_script(f"await lookup(table='a')\n{code}")])
+
+    output = _result(events).output
+    context = ToolContext(cwd=tmp_path)
+    assert output.endswith("\n[1 tool call: lookup]")
+    assert len(output.splitlines()) <= context.max_output_lines
+    assert len(output.encode()) <= context.max_output_bytes
+
+
+@dataclass
+class _SelfCappingTool(_Tool):
+    """A tool that cuts its own output to the context's limit, as `read` and MCP tools do."""
+
+    async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
+        bounded = truncate_text(
+            self.reply or "",
+            max_bytes=context.max_output_bytes,
+            max_lines=context.max_output_lines,
+        )
+        return ToolResult(text=bounded.text, truncated=bounded.truncated)
+
+
+def test_tool_runs_with_script_budget(tmp_path: Path) -> None:
+    """The tool itself sees the larger budget, not only the step that bounds its result."""
+
+    tools = _Tools(lookup=_SelfCappingTool("lookup", reply="r" * 200_000))
 
     events, _ = _run(tmp_path, tools, [_script("len(await lookup(table='a'))")])
 
-    seen = int(_result(events).output.splitlines()[0])
-    assert 0 < seen <= ToolContext(cwd=tmp_path).max_output_bytes
+    assert _result(events).output.startswith("200000\n")
+
+
+def test_footer_counts_incomplete_calls() -> None:
+    """The model sees how many results were only part of the answer, even if the script didn't."""
+
+    async def partial(name: str, arguments: object) -> NestedCallResult:
+        return NestedCallResult(text="first page\n", incomplete=True)
+
+    result = _run_tool(_tool(partial), "await query(table='a')")
+
+    assert result.text == f"first page\n{INCOMPLETE_MARKER}\n[1 tool call (1 incomplete): query]"
+
+
+def test_incomplete_through_mcp_call(tmp_path: Path) -> None:
+    """A result reached through `mcp_call` gets the same budget and marker as one by name."""
+
+    tools = _Tools()
+    tools.query.reply = "q" * 5_000_000
+    code = (
+        "text = await mcp_call(name='mcp__db__query', arguments={'table': 'a'})\n"
+        f"[len(text.encode()) > 100_000, text.endswith('{INCOMPLETE_MARKER}')]"
+    )
+
+    events, _ = _run(tmp_path, tools, [_script(code)], exposure="on_demand")
+
+    assert _result(events).output.startswith("[true, true]")
+
+
+@pytest.mark.parametrize(
+    ("limits", "seen"),
+    [
+        (None, ToolContext(cwd=Path(".")).max_output_bytes),
+        (SCRIPT_RESULT_LIMITS, SCRIPT_RESULT_LIMITS.max_bytes),
+    ],
+    ids=["subagent", "script"],
+)
+def test_nested_limits_are_opt_in(limits: ResultLimits | None, seen: int) -> None:
+    """Only a caller that asks for larger results gets them: a subagent's go to a model."""
+
+    tools = _Tools(lookup=_Tool("lookup", reply="r" * 5_000_000))
+    executor = _executor(tools, ToolApprovalPolicy.approve_all())
+
+    async def run() -> NestedCallResult:
+        call = ToolCall(call_id="nested-1", name="lookup", arguments={"table": "a"})
+        return await executor.run_nested(call, result_limits=limits)
+
+    result = anyio.run(run)
+
+    assert result.incomplete and not result.is_error
+    assert seen - 64 <= len(result.text.encode()) <= seen
+
+
+def test_larger_context_budget_kept() -> None:
+    """An embedder whose context allows more than the script limit keeps its budget."""
+
+    tools = _Tools(lookup=_Tool("lookup", reply="r" * 900_000))
+    executor = ConfiguredToolExecutor(
+        registry=tools.registry(),
+        context=ToolContext(cwd=Path("."), max_output_bytes=2_000_000),
+        policy=ToolPolicy.allow_all_tools(),
+        approval_policy=ToolApprovalPolicy.approve_all(),
+    )
+
+    async def run() -> NestedCallResult:
+        call = ToolCall(call_id="nested-1", name="lookup", arguments={"table": "a"})
+        return await executor.run_nested(call, result_limits=SCRIPT_RESULT_LIMITS)
+
+    result = anyio.run(run)
+
+    assert (len(result.text), result.incomplete) == (900_000, False)
 
 
 def test_offered_in_plan_mode(tmp_path: Path) -> None:

@@ -52,7 +52,7 @@ from wisp.sessions.errors import SessionError
 from wisp.tool_types import ToolFailureCode
 from wisp.tools.approval import ToolApprovalPolicy, confirms_every_call
 from wisp.tools.base import ArgumentCheckedTool, Tool
-from wisp.tools.codemode.calls import CODEMODE, NestedCallResult
+from wisp.tools.codemode.calls import CODEMODE, NestedCallResult, ResultLimits
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
 from wisp.tools.progress import ToolProgress
@@ -566,7 +566,9 @@ class ConfiguredToolExecutor:
             return _failure_outcome(problem, failure_code="invalid_arguments", retryable=True)
         return _CheckedCall(tool, arguments, target)
 
-    async def run_nested(self, tool_call: ToolCall) -> NestedCallResult:
+    async def run_nested(
+        self, tool_call: ToolCall, *, result_limits: ResultLimits | None = None
+    ) -> NestedCallResult:
         """Run a call a codemode script made, under the same policy as a direct call.
 
         The call passes every check a direct call does, and the tool that runs must
@@ -584,9 +586,14 @@ class ConfiguredToolExecutor:
 
         Args:
             tool_call (ToolCall): The call, with an id unique within the script.
+            result_limits (ResultLimits | None): How much of the tool's result to
+                return, when that may exceed this executor's own output limits; a
+                larger budget of the context never shrinks. None keeps the context's,
+                as a subagent's calls, whose results go to a model, must.
 
         Returns:
-            NestedCallResult: The tool's text, and whether it failed.
+            NestedCallResult: The tool's text, whether it failed, and whether it is
+            only part of the result.
 
         Raises:
             anyio.get_cancelled_exc_class(): When the script ends before the call
@@ -595,8 +602,7 @@ class ConfiguredToolExecutor:
 
         log = _SCRIPT_CALLS.get()
         if log is None:
-            outcome = await self._nested_outcome(tool_call)
-            return NestedCallResult(text=outcome.output, is_error=outcome.is_error)
+            return _nested_result(await self._nested_outcome(tool_call, result_limits))
         target = self.resolve_target(tool_call)
         arguments = _recorded_arguments(tool_call.arguments)
         started_at = utc_now()
@@ -630,7 +636,7 @@ class ConfiguredToolExecutor:
                     arguments=arguments,
                 ),
             )
-            outcome = await self._nested_outcome(tool_call)
+            outcome = await self._nested_outcome(tool_call, result_limits)
         except anyio.get_cancelled_exc_class():
             # Recorded without waiting: nothing may be published once the script ended.
             log.record(index, recorded(ended_first))
@@ -640,9 +646,11 @@ class ConfiguredToolExecutor:
             await self._publish_nested(
                 log, ToolNestedCallEnded(parent_call_id=log.parent_call_id, call=call)
             )
-        return NestedCallResult(text=outcome.output, is_error=outcome.is_error)
+        return _nested_result(outcome)
 
-    async def _nested_outcome(self, tool_call: ToolCall) -> _ToolRunOutcome:
+    async def _nested_outcome(
+        self, tool_call: ToolCall, result_limits: ResultLimits | None
+    ) -> _ToolRunOutcome:
         """Check and run one nested call, or explain why it may not run."""
 
         if tool_call.name == CODEMODE:
@@ -679,9 +687,22 @@ class ConfiguredToolExecutor:
             if self._registry is not None
             else False
         )
+        context = self._context
+        if result_limits is not None:
+            # The tool caps its own output from the context too, so both steps get it.
+            context = replace(
+                context,
+                max_output_bytes=max(context.max_output_bytes, result_limits.max_bytes),
+                max_output_lines=max(context.max_output_lines, result_limits.max_lines),
+            )
         async with self._nested_parallel_limit if parallel_safe else self._nested_serial_lock:
             return await self._run_tool(
-                tool, arguments, call_id=tool_call.call_id, tool_name=name, nested=True
+                tool,
+                arguments,
+                call_id=tool_call.call_id,
+                tool_name=name,
+                nested=True,
+                context=context,
             )
 
     async def _publish_nested(self, log: _ScriptCallLog, event: WispEvent) -> None:
@@ -828,21 +849,24 @@ class ConfiguredToolExecutor:
         call_id: str,
         tool_name: str,
         nested: bool = False,
+        context: ToolContext | None = None,
     ) -> _ToolRunOutcome:
         """Run ``tool`` and normalize its result.
 
         A ``nested`` call, one a codemode script or a subagent made, reports no
         progress of its own and stores no images, since only its text reaches the
-        script or subagent; a result that had an image says it was left out.
+        script or subagent; a result that had an image says it was left out. It may
+        run in its own ``context``, whose output limits then bound its result.
         """
 
+        context = context or self._context
         try:
             if not nested:
                 result = await self._run_reporting_progress(
                     tool, arguments, call_id=call_id, tool_name=tool_name
                 )
             else:
-                result = await tool.run(arguments, self._context)
+                result = await tool.run(arguments, context)
         except Exception as exc:  # noqa: BLE001 - tool failures are recoverable results
             return _tool_exception_outcome(exc)
 
@@ -856,9 +880,7 @@ class ConfiguredToolExecutor:
             )
 
         try:
-            snapshot = _normalize_tool_result(
-                raw_snapshot, tool_name=tool_name, context=self._context
-            )
+            snapshot = _normalize_tool_result(raw_snapshot, tool_name=tool_name, context=context)
             outcome = _ToolRunOutcome(
                 output=snapshot.text,
                 exit_code=_promote_exit_code(tool_name, snapshot.data),
@@ -1072,6 +1094,16 @@ def _read_tool_result(result: ToolResult, *, tool_name: str) -> _RawToolResultSn
     raw_data = {key: data.get(key) for key in _RESULT_DATA_KEYS.get(tool_name, ())}
     return _RawToolResultSnapshot(
         text=text, data=raw_data, truncated=truncated, images=result.images
+    )
+
+
+def _nested_result(outcome: _ToolRunOutcome) -> NestedCallResult:
+    """What a nested call returns to its script or subagent."""
+
+    return NestedCallResult(
+        text=outcome.output,
+        is_error=outcome.is_error,
+        incomplete=outcome.truncated and not outcome.is_error,
     )
 
 

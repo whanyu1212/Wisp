@@ -18,7 +18,7 @@ from typing import Protocol
 
 from wisp.tool_types import ToolSafety
 from wisp.tools.base import ToolArguments, ToolInputSchema, ToolPromptMetadata
-from wisp.tools.codemode.calls import CODEMODE, NestedToolCaller
+from wisp.tools.codemode.calls import CODEMODE, SCRIPT_RESULT_LIMITS, NestedToolCaller
 from wisp.tools.codemode.sandbox import ScriptFunction, ScriptLimits, ScriptRun, run_script
 from wisp.tools.context import ToolContext
 from wisp.tools.result import ToolError, ToolResult
@@ -67,6 +67,10 @@ async def gather_settled(*calls):
     return await _asyncio.gather(*[settled(call) for call in calls])
 """
 
+# The last line of a result that is only part of the tool's answer, so a script
+# can check for it before counting or searching the rest.
+INCOMPLETE_MARKER = "[result incomplete]"
+
 _logger = logging.getLogger(__name__)
 
 CODEMODE_PROMPT = ToolPromptMetadata(
@@ -106,6 +110,7 @@ class _CallLog:
 
     by_tool: Counter[str] = field(default_factory=Counter)
     failed: int = 0
+    incomplete: int = 0
 
     @property
     def total(self) -> int:
@@ -117,8 +122,13 @@ class _CallLog:
         if not self.by_tool:
             return "No tool calls."
         noun = "call" if self.total == 1 else "calls"
-        failed = f" ({self.failed} failed)" if self.failed else ""
-        head = f"{self.total} tool {noun}{failed}: "
+        notes = [
+            f"{count} {label}"
+            for count, label in ((self.failed, "failed"), (self.incomplete, "incomplete"))
+            if count
+        ]
+        counted = f" ({', '.join(notes)})" if notes else ""
+        head = f"{self.total} tool {noun}{counted}: "
         entries = [
             name if count == 1 else f"{name} ×{count}" for name, count in self.by_tool.items()
         ]
@@ -226,17 +236,15 @@ class CodemodeTool:
         if run.failure is not None:
             # The calls already made stand: every tool a script reaches is read-only.
             raise ToolError(_failure_message(run, log))
-        parts = [part for part in (run.printed.rstrip("\n"), run.value) if part]
-        parts.append(f"[{log.line()}]")
-        bounded = truncate_text(
-            "\n".join(parts),
-            max_bytes=context.max_output_bytes,
-            max_lines=context.max_output_lines,
-        )
+        body = "\n".join(part for part in (run.printed.rstrip("\n"), run.value) if part)
+        # The list of calls is cut last: it says how many failed or came back
+        # incomplete, which the model needs most when the script's output is long.
+        footer = f"[{log.line()}]"
+        text, truncated = _with_footer(body, footer, context)
         return ToolResult(
-            text=bounded.text,
+            text=text,
             data={"calls": log.total, "failed_calls": log.failed},
-            truncated=bounded.truncated,
+            truncated=truncated,
         )
 
     def _function(self, name: str, log: _CallLog) -> ScriptFunction:
@@ -250,9 +258,36 @@ class CodemodeTool:
             if result.is_error:
                 log.failed += 1
                 raise RuntimeError(f"{name} failed: {result.text}")
-            return result.text
+            if not result.incomplete:
+                return result.text
+            log.incomplete += 1
+            separator = "" if not result.text or result.text.endswith("\n") else "\n"
+            return f"{result.text}{separator}{INCOMPLETE_MARKER}"
 
         return call_tool
+
+
+def _with_footer(body: str, footer: str, context: ToolContext) -> tuple[str, bool]:
+    """Fit ``body`` and then ``footer`` within the context's output limits.
+
+    The body is cut first. A cut adds a `[truncated]` line of its own, so two lines
+    are kept free: one for it and one for the footer. When even that does not fit
+    a tiny budget, the footer stands alone.
+
+    Returns:
+        tuple[str, bool]: The text, and whether the body was cut.
+    """
+
+    max_bytes, max_lines = context.max_output_bytes, context.max_output_lines
+    bounded = truncate_text(
+        body,
+        max_bytes=max(0, max_bytes - len(footer.encode("utf-8")) - 1),
+        max_lines=max(0, max_lines - 2),
+    )
+    text = f"{bounded.text}\n{footer}" if bounded.text else footer
+    if len(text.splitlines()) > max_lines or len(text.encode("utf-8")) > max_bytes:
+        return footer, bool(body)
+    return text, bounded.truncated
 
 
 def _failure_message(run: ScriptRun, log: _CallLog) -> str:
@@ -372,9 +407,11 @@ def _description(
         "the script.",
         "",
         "Each tool named below is an async function with the tool's own name and "
-        "parameters, called with keyword arguments only. It returns the text the tool "
-        "would return to you, and raises RuntimeError when the call fails; catch it to "
-        "carry on. Run independent calls at once with `await asyncio.gather(...)` after "
+        "parameters, called with keyword arguments only. It returns the tool's text, up "
+        f"to {_kib(SCRIPT_RESULT_LIMITS.max_bytes)}, more than a direct call returns, and "
+        "raises RuntimeError when the call fails; catch it to carry on. A result that is "
+        f"only part of the answer ends with the line `{INCOMPLETE_MARKER}`. Run "
+        "independent calls at once with `await asyncio.gather(...)` after "
         "`import asyncio`: one failed call ends it and loses the other results. "
         "`await gather_settled(...)` takes the same calls and returns every outcome in "
         "order, a failed call's RuntimeError in place of its result.",
@@ -385,7 +422,8 @@ def _description(
         "dir() and vars(); use comprehensions, f-strings and plain attribute access. "
         "json, re, collections, itertools and math are available. It is type-checked "
         "against the tools' parameters before it runs.",
-        f"Limits: {limits.max_calls} tool calls and {limits.wall_seconds:g} seconds per script.",
+        f"Limits: {limits.max_calls} tool calls, {limits.wall_seconds:g} seconds and "
+        f"{_kib(limits.max_printed_bytes)} printed per script.",
         "",
         "Callable tools:",
         *_grouped_names(signature.name for signature in signatures),
@@ -400,6 +438,10 @@ def _description(
             "parameter types.",
         ]
     return "\n".join(lines)
+
+
+def _kib(size: int) -> str:
+    return f"{size // 1024} KiB"
 
 
 def _grouped_names(names: Iterable[str]) -> list[str]:

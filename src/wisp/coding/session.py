@@ -195,7 +195,7 @@ from wisp.skills.tool import SkillTool
 from wisp.tool_presentation import tool_result_status
 from wisp.tools.approval import ToolApprovalPolicy, confirms_every_call
 from wisp.tools.base import ToolExecutionMetadata
-from wisp.tools.codemode.calls import CODEMODE, NestedCallResult
+from wisp.tools.codemode.calls import CODEMODE, SCRIPT_RESULT_LIMITS, NestedCallResult
 from wisp.tools.codemode.tool import CODEMODE_PROMPT, CodemodeTool, callable_by_name
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
@@ -2411,7 +2411,7 @@ class CodingSession:
             tool_call = ToolCall(
                 call_id=f"{CODEMODE}-{next(call_ids)}", name=name, arguments=dict(arguments)
             )
-            return await executor().run_nested(tool_call)
+            return await executor().run_nested(tool_call, result_limits=SCRIPT_RESULT_LIMITS)
 
         tool = CodemodeTool(scriptable, call, discoverable=discoverable)
         registry.register(
