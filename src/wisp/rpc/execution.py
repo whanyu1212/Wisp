@@ -36,6 +36,8 @@ from wisp.rpc.commands import (
     GetMessagesCommand,
     GetModelCatalogCommand,
     GetPermissionsCommand,
+    GetProcessesCommand,
+    GetProcessOutputCommand,
     GetProjectFilesCommand,
     GetQueueStateCommand,
     GetSessionsCommand,
@@ -78,6 +80,8 @@ from wisp.rpc.handlers.mcp import (
 )
 from wisp.rpc.handlers.processes import (
     handle_background_tool_call,
+    handle_get_process_output,
+    handle_get_processes,
     start_cancel_process_command,
 )
 from wisp.rpc.handlers.project_files import ProjectFilesPublisher, RpcProjectFiles
@@ -347,6 +351,18 @@ class RpcCommandExecutor:
                 supervisor=self.runtime.process_supervisor,
                 task_group=self.task_group,
                 write_event=self.write_event,
+            )
+            return _RpcDispatchResult(running_command=running_command)
+        if isinstance(known, GetProcessesCommand):
+            self.coordinator.running_command = running_command
+            handle_get_processes(
+                known, supervisor=self.runtime.process_supervisor, write_event=self.write_event
+            )
+            return _RpcDispatchResult(running_command=running_command)
+        if isinstance(known, GetProcessOutputCommand):
+            self.coordinator.running_command = running_command
+            handle_get_process_output(
+                known, supervisor=self.runtime.process_supervisor, write_event=self.write_event
             )
             return _RpcDispatchResult(running_command=running_command)
         if isinstance(known, (CancelCommand, ApprovalCommand, TrustCommand, ShutdownCommand)):

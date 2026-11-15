@@ -673,6 +673,27 @@ class CancelProcessCommand(RpcCommandModel):
     process_id: str = Field(min_length=1, max_length=128)
 
 
+class GetProcessesCommand(RpcCommandModel):
+    """List the session's background processes, running or ended.
+
+    It runs beside any active command and replies with ``rpc.processes``.
+    """
+
+    type: Literal["get_processes"] = "get_processes"
+
+
+class GetProcessOutputCommand(RpcCommandModel):
+    """Read the latest output of one of the session's background processes.
+
+    It runs beside any active command and replies with ``rpc.process_output``.
+    Reading drains nothing: the agent's next poll returns what it would have. The
+    command fails when the session has no background process with this id.
+    """
+
+    type: Literal["get_process_output"] = "get_process_output"
+    process_id: str = Field(min_length=1, max_length=128)
+
+
 class ApprovalCommand(RpcCommandModel):
     """Resolve a pending tool approval request."""
 
@@ -813,6 +834,8 @@ RpcCommand = TypeAliasType(
         | ClearQueueCommand
         | CancelCommand
         | CancelProcessCommand
+        | GetProcessesCommand
+        | GetProcessOutputCommand
         | BackgroundToolCallCommand
         | ApprovalCommand
         | TrustCommand

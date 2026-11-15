@@ -857,6 +857,8 @@ class RpcHost:
             # left: an approval or a dev server is not inherited by another one.
             approval_policy.reset_session_grants()
             failed = await runtime.process_supervisor.cancel_all()
+            # Frontends list and read only the new session's processes.
+            runtime.process_supervisor.unlist_all()
             # After the cancel, so an exit that lands during it is dropped too.
             process_exits.clear()
             if failed:

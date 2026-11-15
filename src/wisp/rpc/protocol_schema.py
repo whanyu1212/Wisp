@@ -255,6 +255,8 @@ _COMMAND_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     "change_directory": {"path": "src"},
     "cancel": {"target_id": "command-1"},
     "cancel_process": {"process_id": "process-1"},
+    "get_process_output": {"process_id": "process-1"},
+    "get_processes": {},
     "background_tool_call": {"call_id": "call-1"},
     "clear_queue": {},
     "clone_session": {},
@@ -352,6 +354,12 @@ _RPC_STATE = {
     "background_processes": [
         {"process_id": "process-1", "command": "make test", "started_at_ms": 1_700_000_000_000}
     ],
+}
+_RPC_PROCESS = {
+    "process_id": "process-1",
+    "command": "npm run dev",
+    "state": "running",
+    "started_at_ms": 1_700_000_000_000,
 }
 _EVENT_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     "agent.completed": {"session_id": "session-1", "turns": 1, "outcome": "completed"},
@@ -570,6 +578,16 @@ _EVENT_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     },
     "project_files.invalidated": {"generation": 2},
     "rpc.state": {"command_id": "command-1", "state": _RPC_STATE},
+    "rpc.processes": {"command_id": "command-1", "processes": (_RPC_PROCESS,)},
+    "rpc.process_output": {
+        "command_id": "command-1",
+        "process": _RPC_PROCESS,
+        "chunks": (
+            {"stream": "stdout", "text": "ready on :5173\n"},
+            {"stream": "stderr", "text": "warning: unused import\n"},
+        ),
+        "omitted_bytes": 0,
+    },
     "rpc.workspace": {"cwd": Path("/workspace"), "git_branch": "main"},
     "rpc.permissions": {"command_id": "command-1", "permissions": {"mode": "ask"}},
     "rpc.codemode": {
