@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Literal
 
 import anyio
+import pytest
 
 from tests.rpc.coordinator_support import (
     Receiver,
@@ -318,5 +319,39 @@ def test_coordinator_owns_running_and_queued_cancellation() -> None:
             [{"prompt": "", "id": "later", "type": "prompt"}]
         )
         assert missing_result.outcome == "missing"
+
+    anyio.run(scenario)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        {"id": "list", "type": "get_processes"},
+        {"id": "read", "type": "get_process_output", "process_id": "process-1"},
+    ],
+)
+def test_process_reads_bypass_active_prompt(command: dict[str, str]) -> None:
+    """Listing processes and reading their output work while a prompt runs."""
+
+    async def scenario() -> None:
+        coordinator = RpcCoordinator(_RpcSessionState(None, (), 0))
+        running_command = _RpcRunningCommand(
+            command_id="prompt", command_type="prompt", cancel_scope=anyio.CancelScope()
+        )
+        coordinator.running_command = running_command
+        dispatched: list[str] = []
+
+        async def dispatch(
+            parsed: ParsedRpcCommand, running: _RpcRunningCommand | None
+        ) -> _RpcDispatchResult:
+            dispatched.append(str(parsed.command_id))
+            return _RpcDispatchResult(running)
+
+        await coordinator.handle_event(
+            input_command(command), dispatch=dispatch, reject=ignore_reject
+        )
+
+        assert dispatched == [command["id"]]
+        assert not coordinator.queued_commands
 
     anyio.run(scenario)

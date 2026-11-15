@@ -102,6 +102,10 @@ from wisp.events.rpc import (
     RpcModelProviderSnapshot,
     RpcModelSelectionSnapshot,
     RpcPermissionsReported,
+    RpcProcessesReported,
+    RpcProcessOutputChunk,
+    RpcProcessOutputReported,
+    RpcProcessSnapshot,
     RpcProjectFile,
     RpcProjectFilesReported,
     RpcProviderId,
@@ -351,6 +355,10 @@ __all__ = [
     "RpcSkillDiagnostic",
     "RpcSkillInvocationSnapshot",
     "RpcSkillsReported",
+    "RpcProcessOutputChunk",
+    "RpcProcessOutputReported",
+    "RpcProcessSnapshot",
+    "RpcProcessesReported",
     "RpcStateReported",
     "RpcSubagentsReported",
     "RpcWorkspaceReported",
@@ -437,6 +445,8 @@ KnownWispEvent = TypeAliasType(
         | RpcPermissionsReported
         | RpcCodemodeReported
         | RpcSubagentsReported
+        | RpcProcessesReported
+        | RpcProcessOutputReported
         | RpcCommandsReported
         | RpcModelCatalogReported
         | RpcConnectionCatalogReported

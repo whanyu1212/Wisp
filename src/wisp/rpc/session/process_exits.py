@@ -3,17 +3,24 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from datetime import datetime
 
 from wisp.events import (
     PROCESS_COMMAND_SUMMARY_MAX_CHARS,
     BackgroundProcess,
     EndedProcessState,
     ProcessEnded,
+    RpcProcessSnapshot,
     WarningEvent,
     WispEvent,
 )
 from wisp.messages import ProcessNotice
-from wisp.tools.shell.supervisor import ProcessExit, ProcessState, ProcessSupervisor
+from wisp.tools.shell.supervisor import (
+    ProcessExit,
+    ProcessListing,
+    ProcessState,
+    ProcessSupervisor,
+)
 
 # Wake runs that may start between the user's prompts.
 MAX_WAKE_RUNS = 3
@@ -208,6 +215,32 @@ def _ended_state(state: ProcessState) -> EndedProcessState:
     return state
 
 
+def process_snapshot(process: ProcessListing) -> RpcProcessSnapshot:
+    """Describe one of the session's processes, running or ended, for frontends.
+
+    Args:
+        process (ProcessListing): The process as the supervisor lists it.
+
+    Returns:
+        RpcProcessSnapshot: The process, with its command cut to a summary.
+    """
+
+    return RpcProcessSnapshot(
+        process_id=process.process_id,
+        command=command_summary(process.command),
+        state=process.state,
+        exit_code=process.exit_code,
+        started_at_ms=_unix_ms(process.started_at),
+        ended_at_ms=_unix_ms(process.ended_at) if process.ended_at is not None else None,
+        stopped_by_user=process.stopped_by_user,
+        notify=process.notify,
+    )
+
+
+def _unix_ms(moment: datetime) -> int:
+    return max(0, int(moment.timestamp() * 1000))
+
+
 def background_processes(supervisor: ProcessSupervisor) -> tuple[BackgroundProcess, ...]:
     """Describe the supervisor's running background processes for frontends.
 
@@ -222,7 +255,7 @@ def background_processes(supervisor: ProcessSupervisor) -> tuple[BackgroundProce
         BackgroundProcess(
             process_id=process.process_id,
             command=command_summary(process.command),
-            started_at_ms=max(0, int(process.started_at.timestamp() * 1000)),
+            started_at_ms=_unix_ms(process.started_at),
             notify=process.notify,
         )
         for process in supervisor.running_processes()

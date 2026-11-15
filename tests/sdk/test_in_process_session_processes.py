@@ -16,6 +16,8 @@ from wisp.events import (
     ProcessEnded,
     RpcCommandFinished,
     RpcCommandStarted,
+    RpcProcessesReported,
+    RpcProcessOutputReported,
 )
 from wisp.messages import Message
 from wisp.sdk import InProcessOptions, InProcessWisp
@@ -32,7 +34,9 @@ from wisp.tools.shell.supervisor import ProcessSupervisor
     ],
 )
 def test_leaving_session_stops_processes(tmp_path: Path, change: str, state: str) -> None:
-    async def scenario() -> str:
+    """Leaving a session stops its processes and hides them from frontends' lists."""
+
+    async def scenario() -> tuple[str, bool]:
         controller = await InProcessWisp.start(
             WispConfig(provider="fake", session_dir=tmp_path),
             options=InProcessOptions(startup_trusted=True),
@@ -59,11 +63,12 @@ def test_leaving_session_stops_processes(tmp_path: Path, change: str, state: str
             # of the session that was left have stopped.
             await _finished(events, await controller.get_state())
 
-            return (await supervisor.poll(process_id)).state
+            listed = process_id in {process.process_id for process in supervisor.processes()}
+            return (await supervisor.poll(process_id)).state, listed
         finally:
             await controller.aclose()
 
-    assert anyio.run(scenario) == state
+    assert anyio.run(scenario) == (state, state == "running")
 
 
 def test_reports_process_it_cannot_stop(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
@@ -140,6 +145,47 @@ def test_wake_off_by_default(tmp_path: Path, setting: bool | None, wakes: bool) 
     assert ("process_wake" in started) is wakes
     # Unset, the exit's wake stays unclaimed rather than refused.
     assert wake_due is not wakes
+
+
+@pytest.mark.process
+def test_sdk_reads_process_output(tmp_path: Path) -> None:
+    """The SDK lists the session's processes and reads one's output through the host."""
+
+    async def scenario() -> tuple[str, RpcProcessesReported, RpcProcessOutputReported]:
+        controller = await InProcessWisp.start(
+            WispConfig(provider="fake", session_dir=tmp_path),
+            options=InProcessOptions(startup_trusted=True),
+        )
+        supervisor: ProcessSupervisor = (
+            controller._in_process_transport._host.runtime.process_supervisor
+        )
+        events = aiter(controller.events())
+        try:
+            process_id = await supervisor.start("echo ready; sleep 30", cwd=tmp_path, timeout=60)
+            with anyio.fail_after(10):
+                while not supervisor.output_tail(process_id)[1].chunks:
+                    await anyio.sleep(0.01)
+            list_id = await controller.get_processes()
+            read_id = await controller.get_process_output(process_id)
+            replies: dict[str, KnownWispEvent] = {}
+            with anyio.fail_after(10):
+                async for event in events:
+                    if isinstance(event, RpcProcessesReported | RpcProcessOutputReported):
+                        replies[event.command_id] = event
+                    if isinstance(event, RpcCommandFinished) and event.command_id == read_id:
+                        break
+            listing, output = replies[list_id], replies[read_id]
+            assert isinstance(listing, RpcProcessesReported)
+            assert isinstance(output, RpcProcessOutputReported)
+            return process_id, listing, output
+        finally:
+            await controller.aclose()
+
+    process_id, listing, output = anyio.run(scenario)
+
+    assert [process.process_id for process in listing.processes] == [process_id]
+    assert output.process.process_id == process_id
+    assert [(chunk.stream, chunk.text) for chunk in output.chunks] == [("stdout", "ready\n")]
 
 
 async def _finished(

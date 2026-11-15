@@ -2616,6 +2616,309 @@
    "accepted": false
   },
   {
+   "event": "rpc.process_output",
+   "operation": "remove",
+   "path": [
+    "chunks"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.process_output",
+   "operation": "remove",
+   "path": [
+    "command_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.process_output",
+   "operation": "remove",
+   "path": [
+    "omitted_bytes"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.process_output",
+   "operation": "remove",
+   "path": [
+    "process"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.process_output",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.process_output",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "rpc.process_output",
+   "operation": "remove",
+   "path": [
+    "chunks",
+    0,
+    "stream"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.process_output",
+   "operation": "remove",
+   "path": [
+    "chunks",
+    0,
+    "text"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.process_output",
+   "operation": "add_unknown",
+   "path": [
+    "chunks",
+    0
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.process_output",
+   "operation": "remove",
+   "path": [
+    "chunks",
+    1,
+    "stream"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.process_output",
+   "operation": "remove",
+   "path": [
+    "chunks",
+    1,
+    "text"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.process_output",
+   "operation": "add_unknown",
+   "path": [
+    "chunks",
+    1
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.process_output",
+   "operation": "remove",
+   "path": [
+    "process",
+    "command"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.process_output",
+   "operation": "remove",
+   "path": [
+    "process",
+    "ended_at_ms"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.process_output",
+   "operation": "remove",
+   "path": [
+    "process",
+    "exit_code"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.process_output",
+   "operation": "remove",
+   "path": [
+    "process",
+    "notify"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.process_output",
+   "operation": "remove",
+   "path": [
+    "process",
+    "process_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.process_output",
+   "operation": "remove",
+   "path": [
+    "process",
+    "started_at_ms"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.process_output",
+   "operation": "remove",
+   "path": [
+    "process",
+    "state"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.process_output",
+   "operation": "remove",
+   "path": [
+    "process",
+    "stopped_by_user"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.process_output",
+   "operation": "add_unknown",
+   "path": [
+    "process"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.processes",
+   "operation": "remove",
+   "path": [
+    "command_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.processes",
+   "operation": "remove",
+   "path": [
+    "processes"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.processes",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.processes",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "rpc.processes",
+   "operation": "remove",
+   "path": [
+    "processes",
+    0,
+    "command"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.processes",
+   "operation": "remove",
+   "path": [
+    "processes",
+    0,
+    "ended_at_ms"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.processes",
+   "operation": "remove",
+   "path": [
+    "processes",
+    0,
+    "exit_code"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.processes",
+   "operation": "remove",
+   "path": [
+    "processes",
+    0,
+    "notify"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.processes",
+   "operation": "remove",
+   "path": [
+    "processes",
+    0,
+    "process_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.processes",
+   "operation": "remove",
+   "path": [
+    "processes",
+    0,
+    "started_at_ms"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.processes",
+   "operation": "remove",
+   "path": [
+    "processes",
+    0,
+    "state"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.processes",
+   "operation": "remove",
+   "path": [
+    "processes",
+    0,
+    "stopped_by_user"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.processes",
+   "operation": "add_unknown",
+   "path": [
+    "processes",
+    0
+   ],
+   "accepted": false
+  },
+  {
    "event": "rpc.project_files",
    "operation": "remove",
    "path": [
