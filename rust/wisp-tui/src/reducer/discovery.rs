@@ -10,11 +10,12 @@ pub type McpPreviewReport = Result<Arc<Vec<McpServerPreview>>, String>;
 
 /// Commands answered with an `rpc.mcp` status report under their own ID. A
 /// refresh reports nothing when it fails, so treating it as a change is harmless.
-const MCP_STATUS_COMMANDS: [&str; 7] = [
+const MCP_STATUS_COMMANDS: [&str; 8] = [
     "get_mcp_status",
     "add_mcp_server",
     "remove_mcp_server",
     "set_mcp_server_enabled",
+    "mark_mcp_tools_read_only",
     "reconnect_mcp",
     "login_mcp_server",
     "logout_mcp_server",
@@ -279,6 +280,9 @@ pub(super) fn change_mcp(
             enabled,
             expected.as_ref(),
         )?),
+        McpChange::MarkReadOnly { name, tool_names } => UiEffect::SendCommand(
+            WispTypedClientRpcCommands::mark_mcp_tools_read_only(&id, &name, &tool_names)?,
+        ),
         McpChange::Reconnect => {
             UiEffect::SendCommand(WispTypedClientRpcCommands::reconnect_mcp(&id)?)
         }
@@ -935,6 +939,13 @@ mod tests {
                     expected: Some(launch.clone()),
                 },
                 "set_mcp_server_enabled",
+            ),
+            (
+                McpChange::MarkReadOnly {
+                    name: "docs".into(),
+                    tool_names: vec!["mcp__docs__search".into()],
+                },
+                "mark_mcp_tools_read_only",
             ),
             (McpChange::Reconnect, "reconnect_mcp"),
         ] {

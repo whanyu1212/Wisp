@@ -177,6 +177,7 @@ request. Completion and results arrive through `events()`.
 | `add_mcp_server` | `(name: str, *, command=None, args=(), url=None, env=None, env_from=(), headers=None, headers_from=None, replace=False, command_id=None)` | Saves the server, restarts MCP servers, then `RpcMcpStatusReported` and terminal `RpcCommandFinished` |
 | `remove_mcp_server` | `(name: str, *, command_id: str \| None = None)` | Same as `add_mcp_server` |
 | `set_mcp_server_enabled` | `(name: str, enabled: bool, *, expected=None, command_id=None)` | Same as `add_mcp_server`; `expected` is required when enabling |
+| `mark_mcp_tools_read_only` | `(name: str, tool_names, *, command_id=None)` | Same as `add_mcp_server`; pass tools the user confirmed from `read_only_hint_tool_names` |
 | `reconnect_mcp` | `(*, command_id: str \| None = None)` | Reloads servers from the settings file and restarts them; same events |
 | `login_mcp_server` | `(name: str, *, command_id: str \| None = None)` | Signs in to an HTTP server with OAuth: `RpcMcpLoginStarted` with the sign-in page's URL, then, once the browser returns, the same events as `add_mcp_server`; cancel the command to stop waiting |
 | `logout_mcp_server` | `(name: str, *, command_id: str \| None = None)` | Forgets a server's sign-in; same events as `add_mcp_server` |
@@ -291,7 +292,9 @@ event comes first.
 
 For each server, `RpcMcpServerSnapshot` in `rpc.mcp` and `mcp.status.updated` lists `tool_names`
 and, in the same order, `read_only_tool_names`: those its `tool_safety` marked `"read"` when it
-last started, whatever their names.
+last started, whatever their names. `read_only_hint_tool_names` lists the tools the server itself
+says are read-only (`readOnlyHint`) and `tool_safety` leaves unset. They are treated like any other
+tool until `mark_mcp_tools_read_only` adds them to `tool_safety`; marking is the user's decision.
 
 `SubagentsState` reports whether subagents are `enabled`, whether a run started now would be
 `offered` the `spawn_agent` tool, and `env_enabled`, what `WISP_SUBAGENTS` sets at startup. It
@@ -408,7 +411,7 @@ idempotent and re-raises a retained close failure.
   `PopQueueCommand`, `ClearQueueCommand`, `CancelCommand`
 - safety: `ApprovalCommand`, `TrustCommand`
 - MCP servers: `AddMcpServerCommand`, `RemoveMcpServerCommand`, `SetMcpServerEnabledCommand`,
-  `ReconnectMcpCommand`, `PreviewMcpSnippetCommand`
+  `MarkMcpToolsReadOnlyCommand`, `ReconnectMcpCommand`, `PreviewMcpSnippetCommand`
 - sessions: `GetMessagesCommand`, `GetSessionsCommand`, `NewSessionCommand`,
   `SelectSessionCommand`, `SetSessionNameCommand`, `CloneSessionCommand`, `ForkSessionCommand`,
   `GetSessionTreeCommand`, `NavigateSessionTreeCommand`, `UnrevertSessionTreeCommand`

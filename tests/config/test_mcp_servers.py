@@ -15,6 +15,7 @@ from wisp.config.mcp_servers import (
     McpSettingsError,
     add_user_mcp_servers,
     load_user_mcp_servers,
+    mark_user_mcp_tools_read_only,
     parse_mcp_snippet,
     remove_user_mcp_server,
     same_launch,
@@ -157,11 +158,50 @@ def test_remove_and_enable_round_trip(tmp_path: Path) -> None:
     assert "mcp_servers" not in _settings(tmp_path)
 
 
+def test_marks_tools_read_only(tmp_path: Path) -> None:
+    started = _stdio(tool_safety={"drop": "command"})
+    add_user_mcp_servers((started,), home_dir=tmp_path)
+
+    mark_user_mcp_tools_read_only("github", ["search", "list"], started=started, home_dir=tmp_path)
+
+    (saved,) = load_user_mcp_servers(home_dir=tmp_path)
+    assert dict(saved.tool_safety) == {"drop": "command", "list": "read", "search": "read"}
+    assert same_launch(saved, started)
+
+
+@pytest.mark.parametrize(
+    ("names", "saved", "error"),
+    [
+        # An entry the user wrote wins over the server's hint, whatever it says.
+        (["drop"], {"tool_safety": {"drop": "command"}}, "already sets the safety of drop"),
+        (["search"], {"args": ["-y", "other"]}, "changed since it started"),
+        (["search"], {"tool_safety": {"other": "read"}}, "changed since it started"),
+        (["search", "search"], {}, "only once"),
+        ([f"tool-{index}" for index in range(257)], {}, "invalid"),
+    ],
+    ids=["explicit-entry", "launch-changed", "safety-changed", "repeated", "too-many"],
+)
+def test_marking_refused_leaves_settings(
+    tmp_path: Path, names: list[str], saved: dict[str, object], error: str
+) -> None:
+    started = _stdio(tool_safety={"drop": "command"})
+    entry = {"command": "npx", "args": ["-y", "server"], "tool_safety": {"drop": "command"}}
+    path = _write_settings(tmp_path, {"mcp_servers": {"github": {**entry, **saved}}})
+    before = path.read_bytes()
+
+    with pytest.raises(McpSettingsError, match=error):
+        mark_user_mcp_tools_read_only("github", names, started=started, home_dir=tmp_path)
+
+    assert path.read_bytes() == before
+
+
 def test_changing_a_missing_server_fails(tmp_path: Path) -> None:
     with pytest.raises(McpSettingsError, match="no MCP server named 'nope'"):
         remove_user_mcp_server("nope", home_dir=tmp_path)
     with pytest.raises(McpSettingsError, match="no MCP server named 'nope'"):
         set_user_mcp_server_enabled("nope", False, home_dir=tmp_path)
+    with pytest.raises(McpSettingsError, match="no MCP server named 'nope'"):
+        mark_user_mcp_tools_read_only("nope", ["x"], started=_stdio("nope"), home_dir=tmp_path)
 
 
 def test_adding_several_servers_is_all_or_nothing(tmp_path: Path) -> None:

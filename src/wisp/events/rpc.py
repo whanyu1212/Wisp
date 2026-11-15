@@ -215,6 +215,11 @@ class RpcMcpServerSnapshot(BaseModel):
     # those the server's `tool_safety` marked so when it last started. Only these
     # can a codemode script, a subagent or plan mode call.
     read_only_tool_names: tuple[str, ...] = ()
+    # The tools among ``tool_names`` the server itself says are read-only
+    # (`readOnlyHint`) and its `tool_safety` leaves unset, in the same order. Wisp
+    # treats them as any other tool until the user accepts them into `tool_safety`
+    # with ``mark_mcp_tools_read_only``.
+    read_only_hint_tool_names: tuple[str, ...] = ()
     error: str | None = None
     # The configuration the server was last started (or skipped) with.
     launch: RpcMcpServerLaunch | None = None

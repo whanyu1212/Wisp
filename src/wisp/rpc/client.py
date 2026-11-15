@@ -61,6 +61,7 @@ from wisp.rpc.commands import (
     InitCommand,
     LoginMcpServerCommand,
     LogoutMcpServerCommand,
+    MarkMcpToolsReadOnlyCommand,
     NavigateSessionTreeCommand,
     NewSessionCommand,
     PopQueueCommand,
@@ -451,6 +452,22 @@ class RpcController:
             SetMcpServerEnabledCommand(
                 id=selected_id, name=name, enabled=enabled, expected=expected
             )
+        )
+        return selected_id
+
+    async def mark_mcp_tools_read_only(
+        self, name: str, tool_names: Sequence[str], *, command_id: str | None = None
+    ) -> str:
+        """Mark tools read-only in an MCP server's settings and restart MCP servers.
+
+        Marking is the user's decision: a read-only tool runs without approval and
+        can be called by codemode scripts, subagents and plan mode. Pass the tools
+        the user confirmed from the server's ``read_only_hint_tool_names``.
+        """
+
+        selected_id = command_id or self._command_id_factory("mcp-read-only")
+        await self._transport.send(
+            MarkMcpToolsReadOnlyCommand(id=selected_id, name=name, tool_names=tuple(tool_names))
         )
         return selected_id
 

@@ -3369,6 +3369,14 @@
           "title": "Name",
           "type": "string"
         },
+        "read_only_hint_tool_names": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Read Only Hint Tool Names",
+          "type": "array"
+        },
         "read_only_tool_names": {
           "default": [],
           "items": {
@@ -3419,6 +3427,7 @@
         "status",
         "tool_names",
         "read_only_tool_names",
+        "read_only_hint_tool_names",
         "error",
         "launch",
         "sign_in"
@@ -9261,6 +9270,9 @@
             "error": null,
             "launch": null,
             "name": "fixture",
+            "read_only_hint_tool_names": [
+              "mcp__fixture__list"
+            ],
             "read_only_tool_names": [
               "mcp__fixture__search"
             ],
@@ -9268,6 +9280,7 @@
             "status": "connected",
             "tool_names": [
               "mcp__fixture__search",
+              "mcp__fixture__list",
               "mcp__fixture__delete"
             ]
           }

@@ -7,16 +7,28 @@ import sys
 from pathlib import Path
 
 from mcp.server.mcpserver import MCPServer
+from mcp.types import ToolAnnotations
 
 server = MCPServer("wisp-stdio-test")
+# Tool name to the `readOnlyHint` the server sends for it, as JSON; unlisted tools
+# send no annotations.
+_READ_ONLY_HINTS: dict[str, bool | None] = json.loads(
+    os.environ.get("WISP_MCP_TEST_READ_ONLY_HINTS", "{}")
+)
 
 
-@server.tool()
+def _annotations(name: str) -> ToolAnnotations | None:
+    if name not in _READ_ONLY_HINTS:
+        return None
+    return ToolAnnotations(read_only_hint=_READ_ONLY_HINTS[name])
+
+
+@server.tool(annotations=_annotations("echo"))
 def echo(value: str) -> str:
     return f"echo={value}"
 
 
-@server.tool()
+@server.tool(annotations=_annotations("runtime_environment"))
 def runtime_environment() -> str:
     return json.dumps(
         {
@@ -27,6 +39,19 @@ def runtime_environment() -> str:
         },
         sort_keys=True,
     )
+
+
+# Optional tools whose names Wisp cannot use as they are, so their Wisp names are
+# hashed, for tests that map names back to the server's own.
+if os.environ.get("WISP_MCP_TEST_ODD_NAMES"):
+
+    @server.tool(name="docs.search", annotations=_annotations("docs.search"))
+    def docs_search() -> str:
+        return "docs"
+
+    @server.tool(name="x" * 129, annotations=ToolAnnotations(read_only_hint=True))
+    def overlong() -> str:
+        return "overlong"
 
 
 def _record_close() -> None:

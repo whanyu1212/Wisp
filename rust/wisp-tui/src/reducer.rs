@@ -338,6 +338,11 @@ pub enum McpChange {
         enabled: bool,
         expected: Option<wisp_protocol::events::McpServerLaunch>,
     },
+    /// Mark the hinted tools the user confirmed read-only.
+    MarkReadOnly {
+        name: String,
+        tool_names: Vec<String>,
+    },
     Reconnect,
     /// Sign in to an HTTP server with OAuth in the browser.
     Login(String),
@@ -6989,6 +6994,7 @@ mod tests {
             status,
             tool_names: Vec::new(),
             read_only_tool_names: Vec::new(),
+            read_only_hint_tool_names: Vec::new(),
             error: None,
             launch: None,
             sign_in: None,

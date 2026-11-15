@@ -175,6 +175,55 @@ def set_user_mcp_server_enabled(
     _update_user_mcp_servers(change, home_dir=home_dir)
 
 
+def mark_user_mcp_tools_read_only(
+    name: str,
+    remote_names: Sequence[str],
+    *,
+    started: McpServerConfig,
+    home_dir: Path | None = None,
+) -> None:
+    """Add ``remote_names`` to a server's `tool_safety` as read-only, all or none.
+
+    Only names without an entry are added, so an entry the user wrote, read-only or
+    not, is never replaced.
+
+    Args:
+        name (str): Server to change.
+        remote_names (Sequence[str]): The server's own names for the tools.
+        started (McpServerConfig): The settings the running server was started
+            with. Checked under the settings lock, so tools listed by one command
+            are never marked on another the user saved in the meantime.
+        home_dir (Path | None): User home override, for isolated callers.
+
+    Raises:
+        McpSettingsError: If no such server exists, it changed since it started, a
+            name is repeated or already has an entry, or the settings would be
+            invalid (such as too many entries).
+    """
+
+    if len(set(remote_names)) != len(remote_names):
+        raise McpSettingsError("each tool can be marked read-only only once")
+
+    def change(servers: dict[str, object]) -> None:
+        entry = servers.get(name)
+        if not isinstance(entry, dict):
+            raise McpSettingsError(f"no MCP server named {name!r} is configured")
+        saved = validated_mcp_server(name, entry)
+        if not same_launch(saved, started) or saved.tool_safety != started.tool_safety:
+            raise McpSettingsError(
+                f"MCP server {name!r} changed since it started; reconnect and try again"
+            )
+        configured = dict(saved.tool_safety)
+        if taken := [remote for remote in remote_names if remote in configured]:
+            raise McpSettingsError(
+                f"MCP server {name!r} already sets the safety of {', '.join(taken)}"
+            )
+        tool_safety = {**configured, **dict.fromkeys(remote_names, "read")}
+        servers[name] = {**entry, "tool_safety": tool_safety}
+
+    _update_user_mcp_servers(change, home_dir=home_dir)
+
+
 def parse_mcp_snippet(text: str) -> tuple[McpServerConfig, ...]:
     """Parse a published MCP config snippet into validated servers.
 
@@ -385,6 +434,7 @@ __all__ = [
     "McpSettingsError",
     "add_user_mcp_servers",
     "load_user_mcp_servers",
+    "mark_user_mcp_tools_read_only",
     "parse_mcp_snippet",
     "remove_user_mcp_server",
     "same_launch",

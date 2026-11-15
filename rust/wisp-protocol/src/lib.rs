@@ -939,6 +939,22 @@ pub mod commands {
             deserialize(command)
         }
 
+        /// Mark tools read-only in an MCP server's settings, then restart MCP servers.
+        ///
+        /// `tool_names` are the hinted tools the user confirmed.
+        pub fn mark_mcp_tools_read_only(
+            id: &str,
+            name: &str,
+            tool_names: &[String],
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({
+                "type": "mark_mcp_tools_read_only",
+                "id": id,
+                "name": name,
+                "tool_names": tool_names,
+            }))
+        }
+
         /// Sign in to an HTTP MCP server with OAuth in the user's browser.
         pub fn login_mcp_server(id: &str, name: &str) -> Result<Self, super::ProtocolDecodeError> {
             deserialize(serde_json::json!({"type": "login_mcp_server", "id": id, "name": name}))
