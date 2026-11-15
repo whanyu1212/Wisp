@@ -46,6 +46,8 @@ mod mouse_tests;
 #[cfg(test)]
 mod overlay_tests;
 mod process;
+#[cfg(test)]
+mod process_peek_tests;
 mod prompt_editor;
 mod prompt_highlighting;
 mod prompt_history;
@@ -185,6 +187,8 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const ACTIVITY_INTERVAL: Duration = Duration::from_millis(125);
 /// How often an open `/diff` repaints the age of its snapshot.
 const DIFF_AGE_INTERVAL: Duration = Duration::from_secs(1);
+/// How often an open peek reads its running process's output again.
+const PEEK_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -4020,13 +4024,42 @@ impl LiveUi {
         if !self.state.input_ready {
             return Ok(LoopControl::Continue);
         }
-        match self.side_panel.take_visibility_change() {
-            Some(visible) => {
-                self.dispatch(UiAction::SetSidePanelVisible(visible), writer, limit)
+        if let Some(visible) = self.side_panel.take_visibility_change()
+            && self
+                .dispatch(UiAction::SetSidePanelVisible(visible), writer, limit)
+                .await?
+                == LoopControl::Exit
+        {
+            return Ok(LoopControl::Exit);
+        }
+        if self.side_panel.take_processes_wanted()
+            && self
+                .dispatch(UiAction::LoadBackgroundProcesses, writer, limit)
+                .await?
+                == LoopControl::Exit
+        {
+            return Ok(LoopControl::Exit);
+        }
+        match self.side_panel.peek_change(&self.state) {
+            Some(process_id) => {
+                self.dispatch(UiAction::PeekProcess(process_id), writer, limit)
                     .await
             }
             None => Ok(LoopControl::Continue),
         }
+    }
+
+    /// Reads the peeked process's output again, on the poll tick while it runs.
+    async fn poll_process_peek(
+        &mut self,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        if !self.state.input_ready || !self.state.background_processes.peek_polling() {
+            return Ok(LoopControl::Continue);
+        }
+        self.dispatch(UiAction::PollProcessPeek, writer, limit)
+            .await
     }
 
     /// Open the view a side panel row summarizes, as its slash command would, without
@@ -4063,26 +4096,13 @@ impl LiveUi {
                 self.context_view = Some(context_view::ContextView::default());
                 self.dispatch(UiAction::LoadContext, writer, limit).await
             }
-            side_panel::Target::Process(number) => {
-                let Some(process) = number
-                    .checked_sub(1)
-                    .and_then(|index| self.state.background_processes.running().get(index))
-                else {
+            side_panel::Target::Process(process_id) => {
+                self.render_pending = true;
+                let Some(entry) = self.state.transcript.process_card(&process_id) else {
+                    self.notice = Some("That process's card is not in the transcript.".into());
                     return Ok(LoopControl::Continue);
                 };
-                let command = reducer::background_processes::command_line(&process.command);
-                // Stopping takes the Enter of a typed command, so a click cannot stop a
-                // process by itself; a draft in the composer is left alone. The id, not
-                // the number, names it, so a row that leaves first cannot shift the
-                // command onto another process.
-                let kill = format!("/kill {}", process.process_id);
-                self.notice = Some(if self.editor.text().is_empty() {
-                    self.editor.restore_prompt(&kill);
-                    format!("Press Enter to stop {command}")
-                } else {
-                    format!("Type {kill} to stop {command}")
-                });
-                self.render_pending = true;
+                self.reveal_card(entry);
                 Ok(LoopControl::Continue)
             }
             side_panel::Target::Tree => {
@@ -4122,6 +4142,18 @@ impl LiveUi {
                 .dispatch(UiAction::SetGitDiffOpen(true), writer, limit)
                 .await;
         };
+        self.reveal_card(entry);
+        if self.git_diff_view.take().is_some() {
+            return self
+                .dispatch(UiAction::SetGitDiffOpen(false), writer, limit)
+                .await;
+        }
+        Ok(LoopControl::Continue)
+    }
+
+    /// Unfolds a card, and the group folding it, and scrolls it to the top of the
+    /// transcript.
+    fn reveal_card(&mut self, entry: TranscriptEntryId) {
         let fold = self.transcript_row_cache.fold_mut();
         if let Some((start, members)) = card_run(&self.state.transcript, entry) {
             if !fold.is_run_expanded(&members) {
@@ -4130,12 +4162,6 @@ impl LiveUi {
         }
         fold.expand(entry);
         self.transcript_viewport.reveal_entry(entry);
-        if self.git_diff_view.take().is_some() {
-            return self
-                .dispatch(UiAction::SetGitDiffOpen(false), writer, limit)
-                .await;
-        }
-        Ok(LoopControl::Continue)
     }
 
     async fn poll_session_catalog(
@@ -5476,7 +5502,8 @@ impl LiveUi {
     /// `/ps` and the `panel.background` key: focuses the running processes, or says
     /// none are running.
     fn show_background_processes(&mut self) {
-        if self.state.background_processes.running().is_empty() {
+        let processes = &self.state.background_processes;
+        if processes.running().is_empty() && processes.finished().is_empty() {
             self.notice = Some("No background processes are running.".into());
             self.render_pending = true;
         } else {
@@ -5516,6 +5543,12 @@ impl LiveUi {
                 return self.open_from_panel(target, writer, limit).await;
             }
             side_panel::OverlayKey::Moved => {}
+            side_panel::OverlayKey::Stop(process_id) => {
+                self.render_pending = true;
+                return self
+                    .dispatch(UiAction::StopBackgroundProcess(process_id), writer, limit)
+                    .await;
+            }
             side_panel::OverlayKey::Ignored => return Ok(LoopControl::Continue),
         }
         self.render_pending = true;
@@ -10997,7 +11030,7 @@ mod tests {
             )
             .await
             .unwrap();
-        for expected in ["get_messages", "get_state"] {
+        for expected in ["get_messages", "get_state", "get_processes"] {
             let WriterMessage::Frame { payload, .. } = writer_rx.recv().await.unwrap() else {
                 panic!("startup hydration must queue {expected}");
             };

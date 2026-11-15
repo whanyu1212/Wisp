@@ -88,6 +88,16 @@ pub(crate) struct SidePanel {
     skills: Fold,
     server_details: BTreeSet<String>,
     skill_details: BTreeSet<String>,
+    /// The background process whose peek is open under its row, while the panel has
+    /// focus; moving off its row closes it.
+    peek: Option<String>,
+    /// Whether `x` asked to stop the peeked process and waits for `y`.
+    confirm_stop: bool,
+    /// Whether the next paint scrolls the peek that just opened into view.
+    reveal_peek: Cell<bool>,
+    /// Whether focus moved to the background processes since the reducer was last
+    /// asked to read them.
+    processes_wanted: bool,
 }
 
 #[derive(Debug, Default)]
@@ -105,6 +115,8 @@ pub(crate) enum Disclosure {
     Skills,
     Server(String),
     Skill(String),
+    /// The peek of a background process, by its id.
+    Process(String),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -156,8 +168,8 @@ pub(crate) enum Target {
     Skills,
     Context,
     Tree,
-    /// A running background process, by its number in the list (from 1).
-    Process(usize),
+    /// The transcript card of a background process, by its id.
+    Process(String),
 }
 
 /// What a key in the overlay asks of the app.
@@ -168,6 +180,8 @@ pub(crate) enum OverlayKey {
     Open(Target),
     /// Focus moved; repaint.
     Moved,
+    /// Stop the background process with this id; the user confirmed it.
+    Stop(String),
     Ignored,
 }
 
@@ -220,10 +234,99 @@ impl SidePanel {
             section: Section::Background,
             row: 0,
         });
+        self.processes_wanted = true;
+    }
+
+    /// Whether focus moved to the background processes since this was last asked,
+    /// so their list, ended ones included, should be read again.
+    pub(crate) fn take_processes_wanted(&mut self) -> bool {
+        std::mem::take(&mut self.processes_wanted)
+    }
+
+    /// The peek to give the reducer, which reads its output, when the two differ. A
+    /// peek whose process the panel no longer lists closes first. The reducer's own
+    /// peek is the comparison, since a transcript rebuild closes it there alone.
+    pub(crate) fn peek_change(&mut self, state: &UiState) -> Option<Option<String>> {
+        if let Some(process_id) = &self.peek {
+            let processes = &state.background_processes;
+            let listed = processes
+                .running()
+                .iter()
+                .any(|process| process.process_id == *process_id)
+                || processes
+                    .finished()
+                    .iter()
+                    .any(|process| process.process_id == *process_id);
+            if !listed || !self.overlay {
+                self.close_peek();
+            }
+        }
+        let reading = state
+            .background_processes
+            .peek()
+            .map(|peek| peek.process_id.as_str());
+        (self.peek.as_deref() != reading).then(|| self.peek.clone())
+    }
+
+    fn close_peek(&mut self) {
+        self.peek = None;
+        self.confirm_stop = false;
+    }
+
+    /// The keys of an open peek: Enter opens the process's card, `x` asks to stop it
+    /// and `y` confirms, and Esc closes the peek. Any other key cancels a pending
+    /// stop. `None` leaves the key to the panel.
+    fn peek_key(
+        &mut self,
+        key: KeyCode,
+        focused: Option<&PanelAction>,
+        state: &UiState,
+    ) -> Option<OverlayKey> {
+        let running = |process_id: &str| {
+            state
+                .background_processes
+                .running()
+                .iter()
+                .any(|process| process.process_id == process_id)
+        };
+        // The confirmation names the peeked process, so `y` stops that one.
+        if std::mem::take(&mut self.confirm_stop) {
+            return Some(match (key, self.peek.clone()) {
+                (KeyCode::Char('y'), Some(process_id)) if running(&process_id) => {
+                    OverlayKey::Stop(process_id)
+                }
+                _ => OverlayKey::Moved,
+            });
+        }
+        let Some(PanelAction::Toggle(Disclosure::Process(process_id))) = focused else {
+            return None;
+        };
+        let running = running(process_id);
+        let open = self.peek.as_ref() == Some(process_id);
+        match key {
+            KeyCode::Char('x') if running => {
+                self.reveal_peek.set(!open);
+                self.peek = Some(process_id.clone());
+                self.confirm_stop = true;
+                Some(OverlayKey::Moved)
+            }
+            KeyCode::Enter if open => Some(OverlayKey::Open(Target::Process(process_id.clone()))),
+            KeyCode::Esc if open => {
+                self.close_peek();
+                Some(OverlayKey::Moved)
+            }
+            _ => None,
+        }
     }
 
     /// Keyboard navigation follows the same rows and disclosure controls as clicks.
     pub(crate) fn key(&mut self, key: KeyCode, state: &UiState) -> OverlayKey {
+        let focused = self
+            .focused(state)
+            .and_then(|cursor| self.targets(cursor.section, state).get(cursor.row).cloned());
+        if let Some(handled) = self.peek_key(key, focused.as_ref(), state) {
+            return handled;
+        }
         if key == KeyCode::Esc {
             return OverlayKey::Close;
         }
@@ -273,6 +376,13 @@ impl SidePanel {
             _ => return OverlayKey::Ignored,
         };
         self.cursor = Some(moved);
+        // The peek belongs to the row it opened under.
+        if self.peek.is_some() {
+            let target = self.targets(moved.section, state).get(moved.row).cloned();
+            if target != focused {
+                self.close_peek();
+            }
+        }
         if let Some((line, ..)) = self
             .painted
             .borrow()
@@ -313,6 +423,21 @@ impl SidePanel {
     }
 
     fn focused(&self, state: &UiState) -> Option<Cursor> {
+        // Focus stays on the peeked process while rows move, as when one ends and
+        // leaves the running list.
+        if let Some(process_id) = &self.peek {
+            let peeked = PanelAction::Toggle(Disclosure::Process(process_id.clone()));
+            if let Some(row) = self
+                .targets(Section::Background, state)
+                .iter()
+                .position(|target| *target == peeked)
+            {
+                return Some(Cursor {
+                    section: Section::Background,
+                    row,
+                });
+            }
+        }
         let sections = self.sections(state);
         let section = self
             .cursor
@@ -337,6 +462,18 @@ impl SidePanel {
                     Disclosure::Skills => self.skills.toggle(),
                     Disclosure::Server(name) => toggle_member(&mut self.server_details, name),
                     Disclosure::Skill(name) => toggle_member(&mut self.skill_details, name),
+                    Disclosure::Process(process_id) => {
+                        if self.peek.as_ref() == Some(&process_id) {
+                            self.close_peek();
+                        } else {
+                            self.peek = Some(process_id);
+                            self.confirm_stop = false;
+                            self.reveal_peek.set(true);
+                            // The peek's keys need focus, which a click on the docked
+                            // panel does not otherwise give it.
+                            self.overlay = true;
+                        }
+                    }
                 }
                 // The row stays selected; the next paint rebuilds its hit regions.
                 OverlayKey::Moved
@@ -407,6 +544,7 @@ impl SidePanel {
 
     pub(crate) fn close_overlay(&mut self) {
         self.overlay = false;
+        self.close_peek();
         if std::mem::take(&mut self.rehide) {
             self.hidden = true;
         }
@@ -756,11 +894,15 @@ pub(crate) fn render(
     } else {
         MAX_BACKGROUND_ROWS
     };
-    if let Some(lines) = background_lines(state, shown, width, palette) {
-        rows.section(Section::Background, lines);
-        let listed = state.background_processes.running().len().min(shown);
-        for number in 1..=listed {
-            rows.action(number, PanelAction::Open(Target::Process(number)));
+    let mut peek_span = None;
+    if let Some(background) = background_lines(state, panel, shown, width, palette) {
+        rows.section(Section::Background, background.lines);
+        let start = rows.current.map_or(0, |(start, _)| start);
+        peek_span = background
+            .peek
+            .map(|(first, last)| (start + first, start + last));
+        for (line, process_id) in background.processes {
+            rows.action(line, PanelAction::Toggle(Disclosure::Process(process_id)));
         }
     }
     reading_context(&mut rows, state, panel, width, palette);
@@ -806,7 +948,16 @@ pub(crate) fn render(
         ..inner
     };
     let max_scroll = rows.lines.len().saturating_sub(usize::from(body.height));
-    let offset = panel.scroll.get().min(max_scroll);
+    let mut offset = panel.scroll.get().min(max_scroll);
+    // A peek that just opened scrolls into view, its process row first if it must.
+    if let Some((first, last)) = peek_span.filter(|_| panel.reveal_peek.take()) {
+        let height = usize::from(body.height).max(1);
+        if last >= offset + height {
+            offset = (last + 1 - height).min(first);
+        } else if first < offset {
+            offset = first;
+        }
+    }
     panel.scroll.set(offset);
     *panel.painted.borrow_mut() = Painted {
         surface: area,
@@ -1033,24 +1184,51 @@ const MAX_QUEUE_ROWS: usize = 5;
 /// Background processes the unfocused panel lists before the rest are counted.
 const MAX_BACKGROUND_ROWS: usize = 5;
 
+/// The `Background` section's lines, for each process row its line and id, and the
+/// first and last line of the open peek with its process row.
+struct BackgroundRows {
+    lines: Vec<Line<'static>>,
+    processes: Vec<(usize, String)>,
+    peek: Option<(usize, usize)>,
+}
+
 /// `Background`: processes the agent started that are still running, numbered as
-/// `/ps` and `/kill` number them, with how long each has run; past `shown` rows the
-/// rest are counted. Nothing while none run.
+/// `/ps` and `/kill` number them, with how long each has run, then those that ended
+/// with their outcome; past `shown` rows the rest are counted. The open peek follows
+/// its process's row. Nothing while none are listed.
 fn background_lines(
     state: &UiState,
+    panel: &SidePanel,
     shown: usize,
     width: usize,
     palette: Palette,
-) -> Option<Vec<Line<'static>>> {
+) -> Option<BackgroundRows> {
     let running = state.background_processes.running();
-    if running.is_empty() {
+    let finished = state.background_processes.finished();
+    if running.is_empty() && finished.is_empty() {
         return None;
     }
     let muted = Style::default().fg(palette.muted);
+    let count = match (running.len(), finished.len()) {
+        (running, 0) => running.to_string(),
+        (0, ended) => format!("{ended} ended"),
+        (running, ended) => format!("{running} running · {ended} ended"),
+    };
     let mut lines = vec![Line::from(vec![
         heading("Background ", palette),
-        Span::styled(running.len().to_string(), muted),
+        Span::styled(count, muted),
     ])];
+    let mut process_rows = Vec::new();
+    // The open peek's process row and its last line.
+    let mut peek_span = None;
+    let peek_open =
+        |process_id: &str| panel.overlay_open() && panel.peek.as_deref() == Some(process_id);
+    let peek = |process_id: &str| {
+        state
+            .background_processes
+            .peek()
+            .filter(|peek| peek.process_id == process_id)
+    };
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| {
@@ -1064,6 +1242,7 @@ fn background_lines(
             .unwrap_or_default();
         let lead = format!("{} ● ", index + 1);
         let room = width.saturating_sub(elapsed.width() + lead.width() + 1);
+        process_rows.push((lines.len(), process.process_id.clone()));
         lines.push(spread(
             vec![
                 Span::styled(lead, Style::default().fg(palette.secondary)),
@@ -1072,14 +1251,62 @@ fn background_lines(
             vec![Span::styled(elapsed, muted)],
             width,
         ));
+        if peek_open(&process.process_id) {
+            let first = lines.len() - 1;
+            lines.extend(peek::peek_lines(
+                peek(&process.process_id),
+                None,
+                panel.confirm_stop,
+                &process.command,
+                width,
+                palette,
+            ));
+            peek_span = Some((first, lines.len() - 1));
+        }
     }
-    if running.len() > shown {
+    for process in finished.iter().take(shown.saturating_sub(running.len())) {
+        let (mark, color) = match process.state {
+            ProcessDisplayState::Completed => ("✓ ", palette.success),
+            ProcessDisplayState::Cancelled => ("■ ", palette.muted),
+            ProcessDisplayState::TimedOut => ("✗ ", palette.warning),
+            _ => ("✗ ", palette.error),
+        };
+        let outcome = peek::outcome(process);
+        let room = width.saturating_sub(outcome.width() + mark.width() + 1);
+        process_rows.push((lines.len(), process.process_id.clone()));
+        lines.push(spread(
+            vec![
+                Span::styled(mark, Style::default().fg(color)),
+                Span::styled(ui::clip_columns(&first_line(&process.command), room), muted),
+            ],
+            vec![Span::styled(outcome, muted)],
+            width,
+        ));
+        if peek_open(&process.process_id) {
+            let first = lines.len() - 1;
+            lines.extend(peek::peek_lines(
+                peek(&process.process_id),
+                Some(process),
+                false,
+                &process.command,
+                width,
+                palette,
+            ));
+            peek_span = Some((first, lines.len() - 1));
+        }
+    }
+    let listed = running.len() + finished.len();
+    if listed > shown {
         lines.push(Line::styled(
-            format!("+{} more · /ps", running.len() - shown),
+            format!("+{} more · /ps", listed - shown),
             muted,
         ));
     }
-    Some(lines)
+    Some(BackgroundRows {
+        lines,
+        processes: process_rows,
+        peek: peek_span,
+    })
 }
 
 /// Messages waiting for the run, in the order it takes them in: steers join at its
@@ -1464,7 +1691,9 @@ fn folded_turn_lines(
     )]
 }
 
+mod peek;
 mod reading;
+use crate::tool_cards::ProcessDisplayState;
 use reading::{Fold, inventory_rows, reading_context};
 
 fn toggle_member(expanded: &mut BTreeSet<String>, name: String) {
@@ -2644,13 +2873,11 @@ mod tests {
             "{panel:?}"
         );
 
-        // Enter on a row asks to stop that process.
+        // Enter on a row opens its peek.
         let mut panel = overlay(&state);
         focus_section(&mut panel, &state, Section::Background);
-        assert_eq!(
-            panel.key(KeyCode::Enter, &state),
-            OverlayKey::Open(Target::Process(1))
-        );
+        assert_eq!(panel.key(KeyCode::Enter, &state), OverlayKey::Moved);
+        assert_eq!(panel.peek.as_deref(), Some("server"));
     }
 
     #[test]
@@ -2870,10 +3097,8 @@ mod tests {
         panel.focus_background();
         paint_overlay(&state, &panel);
         panel.key(KeyCode::End, &state);
-        assert_eq!(
-            panel.key(KeyCode::Enter, &state),
-            OverlayKey::Open(Target::Process(8))
-        );
+        panel.key(KeyCode::Enter, &state);
+        assert_eq!(panel.peek.as_deref(), Some("p8"));
     }
 
     #[test]
@@ -2904,10 +3129,8 @@ mod tests {
         // The queue is listed first, but focus starts on the process.
         assert_eq!(panel.sections(&state)[0], Section::Queue);
         assert_eq!(panel.focused(&state).unwrap().section, Section::Background);
-        assert_eq!(
-            panel.key(KeyCode::Enter, &state),
-            OverlayKey::Open(Target::Process(1))
-        );
+        panel.key(KeyCode::Enter, &state);
+        assert_eq!(panel.peek.as_deref(), Some("server"));
     }
 
     #[test]
