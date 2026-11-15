@@ -10,6 +10,7 @@ grants none. The run offers only read-only tools to scripts.
 from __future__ import annotations
 
 import keyword
+import logging
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -39,6 +40,34 @@ _FAILURE_MESSAGE_CHARS = 1_900
 _SHORTENED_MARKER_CHARS = 64
 # The most a failure's list of calls may take, so the error always keeps room.
 _FAILURE_CALLS_CHARS = 600
+
+# Run in the sandbox before every script. `asyncio.gather` ends on the first failed
+# call and drops the results of the rest, and the sandbox's `gather` takes no
+# `return_exceptions`, so each call is wrapped to hand its error back as a value.
+#
+# Only a failed tool call is handed back, which `CodemodeTool._function` raises as
+# a plain RuntimeError reading "<tool> failed: ...". The sandbox also raises
+# RuntimeError, or a subclass, for bugs in the script itself (endless recursion,
+# a dict changed while iterating, a coroutine awaited twice), and those must still
+# end it. The alias keeps `asyncio` itself for the script to import.
+_HELPERS = """\
+import asyncio as _asyncio
+
+
+async def gather_settled(*calls):
+    async def settled(call):
+        try:
+            return await call
+        except RuntimeError as error:
+            tool, failed, _ = str(error).partition(" failed: ")
+            if type(error).__name__ != "RuntimeError" or not failed or not tool.isidentifier():
+                raise
+            return error
+
+    return await _asyncio.gather(*[settled(call) for call in calls])
+"""
+
+_logger = logging.getLogger(__name__)
 
 CODEMODE_PROMPT = ToolPromptMetadata(
     prompt_snippet="codemode: run a Python script that calls the read-only tools.",
@@ -183,7 +212,17 @@ class CodemodeTool:
             functions={name: self._function(name, log) for name in self.tool_names},
             stubs=self._stubs,
             limits=self._limits,
+            helpers=_HELPERS,
         )
+        if run.failure == "internal":
+            # Wisp's own helpers did not load, so the script never ran: not a
+            # mistake the model can fix by rewriting it.
+            _logger.error("codemode's helpers did not load: %s", run.error)
+            raise ToolError(
+                "codemode could not start: its own setup failed, so no script can run. "
+                "Call the tools directly.",
+                failure_code="internal_error",
+            )
         if run.failure is not None:
             # The calls already made stand: every tool a script reaches is read-only.
             raise ToolError(_failure_message(run, log))
@@ -336,7 +375,9 @@ def _description(
         "parameters, called with keyword arguments only. It returns the text the tool "
         "would return to you, and raises RuntimeError when the call fails; catch it to "
         "carry on. Run independent calls at once with `await asyncio.gather(...)` after "
-        "`import asyncio`.",
+        "`import asyncio`: one failed call ends it and loses the other results. "
+        "`await gather_settled(...)` takes the same calls and returns every outcome in "
+        "order, a failed call's RuntimeError in place of its result.",
         "",
         "The script runs in a sandbox with a subset of Python: no files, network, "
         "classes with inheritance or third-party packages. Some builtins are missing: "

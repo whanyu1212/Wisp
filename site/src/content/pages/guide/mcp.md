@@ -415,7 +415,12 @@ items = [json.loads(text) for text in raw]
 
 Tool functions take keyword arguments and return the same text as a normal call. A failed call
 raises `RuntimeError`; the script can catch it to continue with other work. Independent calls can
-use `asyncio.gather`; Wisp still serializes tools not marked parallel-safe. Scripts may also call
+use `asyncio.gather`; Wisp still serializes tools not marked parallel-safe. Under `gather` one
+failed call ends the script and the other results are lost, so Wisp gives every script
+`await gather_settled(...)`: it takes the same calls and returns every outcome in order, with a
+failed call's `RuntimeError` in place of its result (`isinstance(outcome, RuntimeError)` tells
+them apart). It hands back only failed tool calls; a bug in the script, or reaching a limit,
+still ends it. Scripts may also call
 the run's read-only local tools, but only through their provided functions, not by opening files.
 
 With on-demand discovery, read-only catalog tools need not appear in codemode's description to be
