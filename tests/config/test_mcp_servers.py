@@ -176,16 +176,31 @@ def test_marks_tools_read_only(tmp_path: Path) -> None:
         (["drop"], {"tool_safety": {"drop": "command"}}, "already sets the safety of drop"),
         (["search"], {"args": ["-y", "other"]}, "changed since it started"),
         (["search"], {"tool_safety": {"other": "read"}}, "changed since it started"),
+        # A literal value is never shown, but it can point the server elsewhere.
+        (["search"], {"env": {"BACKEND_URL": "https://new.test"}}, "changed since it started"),
         (["search", "search"], {}, "only once"),
         ([f"tool-{index}" for index in range(257)], {}, "invalid"),
     ],
-    ids=["explicit-entry", "launch-changed", "safety-changed", "repeated", "too-many"],
+    ids=[
+        "explicit-entry",
+        "launch-changed",
+        "safety-changed",
+        "env-value-changed",
+        "repeated",
+        "too-many",
+    ],
 )
 def test_marking_refused_leaves_settings(
     tmp_path: Path, names: list[str], saved: dict[str, object], error: str
 ) -> None:
-    started = _stdio(tool_safety={"drop": "command"})
-    entry = {"command": "npx", "args": ["-y", "server"], "tool_safety": {"drop": "command"}}
+    env = {"BACKEND_URL": "https://old.test"}
+    started = _stdio(env=env, tool_safety={"drop": "command"})
+    entry = {
+        "command": "npx",
+        "args": ["-y", "server"],
+        "env": env,
+        "tool_safety": {"drop": "command"},
+    }
     path = _write_settings(tmp_path, {"mcp_servers": {"github": {**entry, **saved}}})
     before = path.read_bytes()
 

@@ -191,8 +191,9 @@ def mark_user_mcp_tools_read_only(
         name (str): Server to change.
         remote_names (Sequence[str]): The server's own names for the tools.
         started (McpServerConfig): The settings the running server was started
-            with. Checked under the settings lock, so tools listed by one command
-            are never marked on another the user saved in the meantime.
+            with. The saved settings must equal them, checked under the settings
+            lock, so tools listed by one server are never marked on settings the
+            user changed in the meantime.
         home_dir (Path | None): User home override, for isolated callers.
 
     Raises:
@@ -209,7 +210,10 @@ def mark_user_mcp_tools_read_only(
         if not isinstance(entry, dict):
             raise McpSettingsError(f"no MCP server named {name!r} is configured")
         saved = validated_mcp_server(name, entry)
-        if not same_launch(saved, started) or saved.tool_safety != started.tool_safety:
+        # Every setting counts, literal env and header values included: a changed
+        # value can point the server at a different backend whose tools the user
+        # never saw. `same_launch` ignores values, so it is not enough here.
+        if saved != started:
             raise McpSettingsError(
                 f"MCP server {name!r} changed since it started; reconnect and try again"
             )
