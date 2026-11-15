@@ -10,7 +10,10 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.10.1 — Unreleased
+<!-- Keeps links to the pre-release "0.10.1 — Unreleased" heading working. -->
+<a id="0101--unreleased"></a>
+
+## 0.10.1 — 2026-11-15
 
 0.10.1 is a patch release on 0.10.0 with one fix in the terminal UI: pressing `Ctrl+C` again
 while Wisp is quitting no longer ends the backend. It changes no command, event, handshake,
