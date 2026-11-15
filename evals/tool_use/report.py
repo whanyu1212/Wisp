@@ -440,16 +440,17 @@ def _setup_warnings(rows: Iterable[dict[str, object]]) -> list[str]:
 
 
 def _cache_write_warnings(rows: Iterable[Mapping[str, object]]) -> list[str]:
-    """Flag runs whose input tokens leave out cache writes.
+    """Flag runs whose input tokens may leave out cache writes.
 
     Only rows recorded before `cache_write_tokens` existed, from a provider that
-    counts cached tokens outside `input_tokens`, can be missing any.
+    counts cached tokens outside `input_tokens`, can be missing any. Such a run can
+    have written to the cache without reading from it, so its own counts do not say.
     """
 
     missing = sum(
         1
         for row in rows
-        if "cache_write_tokens" not in row and token_split(row).input > _int(row["input_tokens"])
+        if "cache_write_tokens" not in row and _counts_cache_outside_input(str(row["provider"]))
     )
     if not missing:
         return []
@@ -457,6 +458,15 @@ def _cache_write_warnings(rows: Iterable[Mapping[str, object]]) -> list[str]:
         "runs recorded before cache writes were counted, whose input tokens leave "
         f"them out: {missing}"
     ]
+
+
+def _counts_cache_outside_input(provider: str) -> bool:
+    """Whether a provider reports cached tokens beside `input_tokens`, not within it."""
+
+    cached = TokenUsage(input_tokens=1, output_tokens=0, total_tokens=1, cache_read_input_tokens=1)
+    billable = _billable_parts(provider, None, None, cached).billable
+    # A provider that counts them within its input bills that one token as cached only.
+    return billable is not None and billable.input_tokens == 1
 
 
 def _billable(row: Mapping[str, object]) -> BillableTokenUsage | None:

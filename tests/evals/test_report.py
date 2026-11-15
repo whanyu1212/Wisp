@@ -19,6 +19,8 @@ from evals.tool_use.report import (
 from wisp.providers.catalog import ModelCatalog, ModelRegistry
 
 _BASELINES = Path(__file__).parents[2] / "evals" / "tool_use" / "baselines"
+# Providers that count cached tokens within their input, and one Wisp cannot sort.
+_INSIDE = ("openai", "openai-codex", "google", "acme")
 
 
 @pytest.mark.parametrize(
@@ -204,11 +206,13 @@ def test_estimate_column_rendered() -> None:
 def test_missing_cache_writes_warned() -> None:
     """Only a provider that counts cached tokens outside its input can be missing writes."""
     older = _tokens("anthropic", input_tokens=100, cache_read_tokens=600)
-    current = older | {"rep": 2, "cache_write_tokens": 300}
-    openai = _tokens("openai", input_tokens=1000, cache_read_tokens=600)
+    # A run can write to the cache without reading from it, so reads are no signal.
+    uncached = _tokens("anthropic", input_tokens=100, cache_read_tokens=0) | {"rep": 2}
+    current = older | {"rep": 3, "cache_write_tokens": 300}
+    others = [_tokens(provider, input_tokens=1000, cache_read_tokens=600) for provider in _INSIDE]
 
-    assert build_report([older, current, openai]).warnings == [
-        "runs recorded before cache writes were counted, whose input tokens leave them out: 1"
+    assert build_report([older, uncached, current, *others]).warnings == [
+        "runs recorded before cache writes were counted, whose input tokens leave them out: 2"
     ]
 
 
