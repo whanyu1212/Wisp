@@ -8,7 +8,7 @@ from typing import Annotated, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing_extensions import TypeAliasType
 
-from wisp.events._base import QueueMode, WispEvent
+from wisp.events._base import ManagedProcessState, QueueMode, WispEvent
 from wisp.events.tools import PROCESS_COMMAND_SUMMARY_MAX_CHARS
 from wisp.project_files import (
     MAX_PROJECT_FILES,
@@ -80,6 +80,37 @@ class BackgroundProcess(BaseModel):
     started_at_ms: int = Field(ge=0)
     # Whether the model asked to be told when it stops.
     notify: bool = False
+
+
+class RpcProcessSnapshot(BaseModel):
+    """A background process of the current session, running or ended."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    process_id: str = Field(min_length=1, max_length=128)
+    # The command as started, cut to a summary for display.
+    command: str = Field(max_length=PROCESS_COMMAND_SUMMARY_MAX_CHARS)
+    state: ManagedProcessState
+    # Set once the process completed; None for any other state.
+    exit_code: int | None = None
+    # When it started and, once it has, when it ended, in Unix milliseconds.
+    started_at_ms: int = Field(ge=0)
+    ended_at_ms: int | None = Field(default=None, ge=0)
+    # Whether the user stopped it (state ``cancelled``), rather than the agent.
+    stopped_by_user: bool = False
+    # Whether the model asked to be told when it stops.
+    notify: bool = False
+
+
+class RpcProcessOutputChunk(BaseModel):
+    """A run of text one stream printed with nothing from the other in between."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    stream: Literal["stdout", "stderr"]
+    # Decoded as UTF-8 with invalid bytes replaced; untrusted, so frontends make it
+    # safe before drawing it.
+    text: str
 
 
 class RpcStateSnapshot(CodingSessionState):
@@ -536,6 +567,35 @@ class RpcStateReported(WispEvent):
     type: Literal["rpc.state"] = "rpc.state"
     command_id: str
     state: RpcStateSnapshot
+
+
+class RpcProcessesReported(WispEvent):
+    """The session's background processes, running or ended.
+
+    They come in the order they became background processes: a foreground command
+    moved there joins when it moves.
+    """
+
+    type: Literal["rpc.processes"] = "rpc.processes"
+    command_id: str
+    processes: tuple[RpcProcessSnapshot, ...] = ()
+
+
+class RpcProcessOutputReported(WispEvent):
+    """The latest output of one background process, read without draining it.
+
+    The agent's next poll of the process returns what it would have without this
+    read. ``chunks`` hold both streams in the order they printed, oldest first;
+    output from before a foreground command moved to the background comes as its
+    stdout, then its stderr.
+    """
+
+    type: Literal["rpc.process_output"] = "rpc.process_output"
+    command_id: str
+    process: RpcProcessSnapshot
+    chunks: tuple[RpcProcessOutputChunk, ...] = ()
+    # UTF-8 bytes printed before the first chunk that the tail no longer holds.
+    omitted_bytes: int = Field(default=0, ge=0)
 
 
 class RpcCommandsReported(WispEvent):

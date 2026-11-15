@@ -1,4 +1,5 @@
-"""Stop a background process, or move a foreground one there, on the user's behalf."""
+"""Background processes on the user's behalf: list them, read their output, stop one,
+or move a foreground command there."""
 
 from __future__ import annotations
 
@@ -6,10 +7,73 @@ import anyio
 from anyio.abc import TaskGroup
 
 from wisp.coding.session import CodingSession
-from wisp.rpc.commands import BackgroundToolCallCommand, CancelProcessCommand
+from wisp.events import RpcProcessesReported, RpcProcessOutputChunk, RpcProcessOutputReported
+from wisp.rpc.commands import (
+    BackgroundToolCallCommand,
+    CancelProcessCommand,
+    GetProcessesCommand,
+    GetProcessOutputCommand,
+)
 from wisp.rpc.lifecycle import RpcCommandLifecycle, RpcEventWriter
+from wisp.rpc.session.process_exits import process_snapshot
 from wisp.tools.result import ToolError
 from wisp.tools.shell.supervisor import ProcessSupervisor
+
+
+def handle_get_processes(
+    command: GetProcessesCommand,
+    *,
+    supervisor: ProcessSupervisor,
+    write_event: RpcEventWriter,
+) -> None:
+    """Report the session's background processes, running or ended.
+
+    Args:
+        command (GetProcessesCommand): The command asking for them.
+        supervisor (ProcessSupervisor): The supervisor that started them.
+        write_event (RpcEventWriter): Writes the reply and the command's lifecycle.
+    """
+
+    lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
+    processes = tuple(process_snapshot(process) for process in supervisor.processes())
+    write_event(RpcProcessesReported(command_id=lifecycle.command_id, processes=processes))
+    lifecycle.finish()
+
+
+def handle_get_process_output(
+    command: GetProcessOutputCommand,
+    *,
+    supervisor: ProcessSupervisor,
+    write_event: RpcEventWriter,
+) -> None:
+    """Report one background process and the latest output it printed.
+
+    The read drains nothing, so the agent's next poll is unchanged. The command
+    fails when the session has no background process with this id.
+
+    Args:
+        command (GetProcessOutputCommand): The command naming the process.
+        supervisor (ProcessSupervisor): The supervisor that started it.
+        write_event (RpcEventWriter): Writes the reply and the command's lifecycle.
+    """
+
+    lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
+    try:
+        process, tail = supervisor.output_tail(command.process_id)
+    except ToolError as exc:
+        lifecycle.fail(str(exc))
+        return
+    write_event(
+        RpcProcessOutputReported(
+            command_id=lifecycle.command_id,
+            process=process_snapshot(process),
+            chunks=tuple(
+                RpcProcessOutputChunk(stream=chunk.stream, text=chunk.text) for chunk in tail.chunks
+            ),
+            omitted_bytes=tail.omitted_bytes,
+        )
+    )
+    lifecycle.finish()
 
 
 def start_cancel_process_command(

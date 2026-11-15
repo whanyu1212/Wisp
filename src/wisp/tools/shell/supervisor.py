@@ -20,6 +20,7 @@ import anyio
 from wisp.tools.output_store import OutputStore, SavedStream, saved_output_notice
 from wisp.tools.progress import OutputProgress, ToolProgress
 from wisp.tools.result import ToolError
+from wisp.tools.shell.output_tail import OutputTail, OutputTailSnapshot, ProcessStream
 from wisp.tools.shell.process import (
     ProcessResult,
     _CapturedOutput,
@@ -139,6 +140,31 @@ class RunningProcess:
     process_id: str
     command: str
     started_at: datetime
+    notify: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessListing:
+    """A started process of the current session, running or ended, for frontends.
+
+    Attributes:
+        process_id (str): The handle ``start`` returned.
+        command (str): The command as started.
+        state (ProcessState): Its current state.
+        exit_code (int | None): Its exit code, once it completed.
+        started_at (datetime): When it started, in UTC.
+        ended_at (datetime | None): When it reached a terminal state, in UTC.
+        stopped_by_user (bool): Whether the user stopped it.
+        notify (bool): Whether the caller asked to be told of its exit.
+    """
+
+    process_id: str
+    command: str
+    state: ProcessState
+    exit_code: int | None
+    started_at: datetime
+    ended_at: datetime | None
+    stopped_by_user: bool
     notify: bool
 
 
@@ -430,6 +456,10 @@ class _ManagedProcess:
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     started_monotonic: float = field(default_factory=time.monotonic)
     ended_at: datetime | None = None
+    # The latest output of both streams for frontends; polls never drain it.
+    output_tail: OutputTail = field(default_factory=OutputTail)
+    # Whether frontends list it: false once the session that started it ends.
+    listed: bool = True
 
     def mark_ended(self) -> None:
         """Record when the process first reached a terminal state.
@@ -515,14 +545,61 @@ class ProcessSupervisor:
 
         return tuple(
             RunningProcess(
-                process_id=managed.process_id,
-                command=managed.command,
-                started_at=managed.started_at,
-                notify=managed.notify_on_exit,
+                process_id=process.process_id,
+                command=process.command,
+                started_at=process.started_at,
+                notify=process.notify,
             )
-            for managed in self._managed.values()
-            if managed.state == "running" and not _completion_ended(managed)
+            for process in self.processes()
+            if process.state == "running"
         )
+
+    def processes(self) -> tuple[ProcessListing, ...]:
+        """Return the current session's started processes, running or ended.
+
+        An ended process stays until the supervisor needs its slot for a new process
+        after its final state was reported, or until ``unlist_all`` hides it when its
+        session ends. A process whose completion stopped without recording a final
+        state is left out, as ``running_processes`` leaves it out. The order is the
+        order processes became background processes: a moved command joins when it
+        moves.
+
+        Returns:
+            tuple[ProcessListing, ...]: One entry per process, in the order they started.
+        """
+
+        return tuple(_listing(managed) for managed in self._managed.values() if _visible(managed))
+
+    def output_tail(self, process_id: str) -> tuple[ProcessListing, OutputTailSnapshot]:
+        """Return a listed process and the latest output it printed, for frontends.
+
+        Unlike ``poll``, this reads without draining: the agent's next poll returns
+        the same output and final state it would have without this read.
+
+        Args:
+            process_id (str): The handle ``start`` returned.
+
+        Returns:
+            tuple[ProcessListing, OutputTailSnapshot]: The process and its tail.
+
+        Raises:
+            ToolError: No listed process has this handle.
+        """
+
+        managed = self._managed.get(process_id)
+        if managed is None or not _visible(managed):
+            raise ToolError(f"No background process has the id {process_id}")
+        return _listing(managed), managed.output_tail.snapshot()
+
+    def unlist_all(self) -> None:
+        """Hide every process started so far from ``processes`` and ``output_tail``.
+
+        The host calls this when the session that started them ends, after stopping
+        them, so another session never lists them. A poll by id still works.
+        """
+
+        for managed in self._managed.values():
+            managed.listed = False
 
     def is_terminal_reported(self, process_id: str) -> bool:
         """Whether a poll or cancel has already returned this process's final state.
@@ -843,8 +920,12 @@ class ProcessSupervisor:
             managed.stdout_task, managed.stderr_task = handover.readers
             managed.stdout.append_bytes(stdout_partial)
             managed.stderr.append_bytes(stderr_partial)
-            handover.stdout_tail.sink = partial(_forward_output, managed, managed.stdout)
-            handover.stderr_tail.sink = partial(_forward_output, managed, managed.stderr)
+            # The foreground call kept each stream apart, so the tail starts with its
+            # stdout and then its stderr, the end of each.
+            managed.output_tail.seed("stdout", stdout_so_far.output, stdout_so_far.dropped_bytes)
+            managed.output_tail.seed("stderr", stderr_so_far.output, stderr_so_far.dropped_bytes)
+            handover.stdout_tail.sink = partial(_receive_output, managed, "stdout")
+            handover.stderr_tail.sink = partial(_receive_output, managed, "stderr")
             self._managed[managed.process_id] = managed
             del self._one_shot[process]
             self._one_shot_locks.pop(process, None)
@@ -918,10 +999,10 @@ class ProcessSupervisor:
                 notify_on_exit=notify_on_exit,
             )
             managed.stdout_task = asyncio.create_task(
-                self._read_stream(managed, process.stdout, managed.stdout, managed.stdout_saved)
+                self._read_stream(managed, process.stdout, "stdout", managed.stdout_saved)
             )
             managed.stderr_task = asyncio.create_task(
-                self._read_stream(managed, process.stderr, managed.stderr, managed.stderr_saved)
+                self._read_stream(managed, process.stderr, "stderr", managed.stderr_saved)
             )
             managed.completion_task = asyncio.create_task(
                 self._wait_for_completion(managed, timeout)
@@ -1272,7 +1353,7 @@ class ProcessSupervisor:
         self,
         managed: _ManagedProcess,
         stream: asyncio.StreamReader | None,
-        output: _PendingTextLike,
+        name: ProcessStream,
         saved: SavedStream,
     ) -> None:
         try:
@@ -1282,11 +1363,9 @@ class ProcessSupervisor:
                 chunk = await stream.read(8192)
                 if not chunk:
                     break
-                output.append_bytes(chunk)
-                managed.changed.set()
+                _receive_output(managed, name, chunk, False)
                 await saved.append(chunk)
-            output.append_bytes(b"", final=True)
-            managed.changed.set()
+            _receive_output(managed, name, b"", True)
         finally:
             # Reading ends here however it stops: end of file or cancellation.
             saved.close()
@@ -1540,7 +1619,16 @@ class ProcessSupervisor:
         )
 
     def _evict_terminals_for_capacity(self) -> None:
-        for process_id, managed in tuple(self._managed.items()):
+        """Free one slot by dropping ended processes whose final state was reported.
+
+        Only as many go as a new process needs, oldest first and a left session's
+        first, so frontends can still list and read the rest.
+        """
+
+        by_age = sorted(self._managed.items(), key=lambda item: item[1].listed)
+        for process_id, managed in by_age:
+            if self._owned_process_count() < self._max_processes:
+                return
             if managed.terminal_reported and managed.error != PROCESS_TREE_CLEANUP_ERROR:
                 del self._managed[process_id]
 
@@ -1603,13 +1691,40 @@ def _split_incomplete_utf8(data: bytes) -> tuple[bytes, bytes]:
     return data[: start - 1], data[start - 1 :]
 
 
-def _forward_output(
-    managed: _ManagedProcess, output: _PendingTextLike, chunk: bytes, final: bool
+def _receive_output(
+    managed: _ManagedProcess, stream: ProcessStream, chunk: bytes, final: bool
 ) -> None:
-    """Hand a moved command's next output to its managed process, as `_read_stream` does."""
+    """Give a managed process's next output to the agent's buffer and to its tail.
 
+    Every chunk a managed process prints arrives here, from its own reader or from
+    the foreground call it was moved from, so the two copies never differ.
+    """
+
+    output = managed.stdout if stream == "stdout" else managed.stderr
     output.append_bytes(chunk, final=final)
+    managed.output_tail.append(stream, chunk, final=final)
     managed.changed.set()
+
+
+def _visible(managed: _ManagedProcess) -> bool:
+    """Whether frontends list and read a process: its session is current, and it is
+    not one whose completion stopped without recording a final state."""
+
+    return managed.listed and not (managed.state == "running" and _completion_ended(managed))
+
+
+def _listing(managed: _ManagedProcess) -> ProcessListing:
+    ended = managed.state != "running"
+    return ProcessListing(
+        process_id=managed.process_id,
+        command=managed.command,
+        state=managed.state,
+        exit_code=managed.exit_code if managed.state == "completed" else None,
+        started_at=managed.started_at,
+        ended_at=managed.ended_at if ended else None,
+        stopped_by_user=managed.state == "cancelled" and managed.stopped_by_user,
+        notify=managed.notify_on_exit,
+    )
 
 
 async def _capture_or_background(

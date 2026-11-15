@@ -47,6 +47,8 @@ this policy.
 - `import wisp.images` works as the first Wisp import in a program. It failed with a circular
   import, because `wisp.images` loaded `wisp.events`, which loads the file tools, which import
   `wisp.images`. A test now imports every `wisp` module on its own in a fresh process. (HY-501)
+- `RpcController.get_processes()` and `get_process_output(process_id)` list the session's
+  background processes and read one's latest output. (HY-543)
 
 ### TUI
 
@@ -78,6 +80,18 @@ this policy.
   and `scriptable_mcp_tools`, how many of them a script may call: those marked `"read"`, less
   any a run that sends its MCP tools directly cannot call by name. Both are required, so the
   backend and every frontend must come from the same release.
+- New commands `get_processes` and `get_process_output` (`process_id`) let a frontend list the
+  session's background processes, running or ended, and read one's latest output. They reply
+  with the new events `rpc.processes` (each process's id, command, state, exit code, start and
+  end times, and whether the user stopped it) and `rpc.process_output` (the process and up to
+  32 KiB of its latest output as `chunks`, both streams in the order they printed, with
+  `omitted_bytes` for what came before; what a foreground command printed before it moved there
+  comes as its stdout, then its stderr). Both run beside an active run. Reading drains nothing:
+  the agent's `bash poll` returned only what it had not read, so output it had read was gone,
+  and the backend now keeps a separate tail of each process for frontends. An ended process stays
+  listed until a new process needs its slot; before, the agent's next shell command dropped
+  every ended process whose final state it had read. Processes from a session that was left are
+  not listed. (HY-543)
 - `RpcMcpServerSnapshot`, in `rpc.mcp` and `mcp.status.updated`, gains `read_only_tool_names`: the tools
   among `tool_names`, in the same order, that the server's `tool_safety` marked `"read"` when it
   last started, and `read_only_hint_tool_names`: those the server itself said were read-only and

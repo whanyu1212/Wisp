@@ -4243,6 +4243,196 @@
       "title": "RpcPermissionsReported",
       "type": "object"
     },
+    "RpcProcessOutputChunk": {
+      "additionalProperties": false,
+      "description": "A run of text one stream printed with nothing from the other in between.",
+      "properties": {
+        "stream": {
+          "enum": [
+            "stdout",
+            "stderr"
+          ],
+          "title": "RpcProcessOutputChunkStream",
+          "type": "string"
+        },
+        "text": {
+          "title": "RpcProcessOutputChunkText",
+          "type": "string"
+        }
+      },
+      "required": [
+        "stream",
+        "text"
+      ],
+      "title": "RpcProcessOutputChunk",
+      "type": "object"
+    },
+    "RpcProcessOutputReported": {
+      "additionalProperties": false,
+      "description": "The latest output of one background process, read without draining it.\n\nThe agent's next poll of the process returns what it would have without this\nread. ``chunks`` hold both streams in the order they printed, oldest first;\noutput from before a foreground command moved to the background comes as its\nstdout, then its stderr.",
+      "properties": {
+        "chunks": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RpcProcessOutputChunk"
+          },
+          "title": "RpcProcessOutputReportedChunks",
+          "type": "array"
+        },
+        "command_id": {
+          "title": "RpcProcessOutputReportedCommandId",
+          "type": "string"
+        },
+        "omitted_bytes": {
+          "default": 0,
+          "minimum": 0,
+          "title": "RpcProcessOutputReportedOmittedBytes",
+          "type": "integer"
+        },
+        "process": {
+          "$ref": "#/$defs/RpcProcessSnapshot",
+          "title": "RpcProcessOutputReportedProcess"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "RpcProcessOutputReportedTimestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "rpc.process_output",
+          "default": "rpc.process_output",
+          "title": "RpcProcessOutputReportedType",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "timestamp",
+        "command_id",
+        "process",
+        "chunks",
+        "omitted_bytes"
+      ],
+      "title": "RpcProcessOutputReported",
+      "type": "object"
+    },
+    "RpcProcessSnapshot": {
+      "additionalProperties": false,
+      "description": "A background process of the current session, running or ended.",
+      "properties": {
+        "command": {
+          "maxLength": 500,
+          "title": "RpcProcessSnapshotCommand",
+          "type": "string"
+        },
+        "ended_at_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "RpcProcessSnapshotEndedAtMs"
+        },
+        "exit_code": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "RpcProcessSnapshotExitCode"
+        },
+        "notify": {
+          "default": false,
+          "title": "RpcProcessSnapshotNotify",
+          "type": "boolean"
+        },
+        "process_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "RpcProcessSnapshotProcessId",
+          "type": "string"
+        },
+        "started_at_ms": {
+          "minimum": 0,
+          "title": "RpcProcessSnapshotStartedAtMs",
+          "type": "integer"
+        },
+        "state": {
+          "enum": [
+            "running",
+            "completed",
+            "failed",
+            "timed_out",
+            "cancelled"
+          ],
+          "title": "RpcProcessSnapshotState",
+          "type": "string"
+        },
+        "stopped_by_user": {
+          "default": false,
+          "title": "RpcProcessSnapshotStoppedByUser",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "process_id",
+        "command",
+        "state",
+        "exit_code",
+        "started_at_ms",
+        "ended_at_ms",
+        "stopped_by_user",
+        "notify"
+      ],
+      "title": "RpcProcessSnapshot",
+      "type": "object"
+    },
+    "RpcProcessesReported": {
+      "additionalProperties": false,
+      "description": "The session's background processes, running or ended.\n\nThey come in the order they became background processes: a foreground command\nmoved there joins when it moves.",
+      "properties": {
+        "command_id": {
+          "title": "RpcProcessesReportedCommandId",
+          "type": "string"
+        },
+        "processes": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RpcProcessSnapshot"
+          },
+          "title": "RpcProcessesReportedProcesses",
+          "type": "array"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "RpcProcessesReportedTimestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "rpc.processes",
+          "default": "rpc.processes",
+          "title": "RpcProcessesReportedType",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "timestamp",
+        "command_id",
+        "processes"
+      ],
+      "title": "RpcProcessesReported",
+      "type": "object"
+    },
     "RpcProjectFile": {
       "additionalProperties": false,
       "description": "Display-safe relative metadata; never authorization for a file operation.",
@@ -8192,6 +8382,8 @@
       "rpc.messages": "#/$defs/RpcMessagesReported",
       "rpc.model_catalog": "#/$defs/RpcModelCatalogReported",
       "rpc.permissions": "#/$defs/RpcPermissionsReported",
+      "rpc.process_output": "#/$defs/RpcProcessOutputReported",
+      "rpc.processes": "#/$defs/RpcProcessesReported",
       "rpc.project_files": "#/$defs/RpcProjectFilesReported",
       "rpc.session.cloned": "#/$defs/RpcSessionCloned",
       "rpc.session.forked": "#/$defs/RpcSessionForked",
@@ -8333,6 +8525,12 @@
     },
     {
       "$ref": "#/$defs/RpcSubagentsReported"
+    },
+    {
+      "$ref": "#/$defs/RpcProcessesReported"
+    },
+    {
+      "$ref": "#/$defs/RpcProcessOutputReported"
     },
     {
       "$ref": "#/$defs/RpcCommandsReported"

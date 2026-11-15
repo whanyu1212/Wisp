@@ -1136,6 +1136,67 @@
       "title": "GetPermissionsCommand",
       "type": "object"
     },
+    "GetProcessOutputCommand": {
+      "additionalProperties": false,
+      "description": "Read the latest output of one of the session's background processes.\n\nIt runs beside any active command and replies with ``rpc.process_output``.\nReading drains nothing: the agent's next poll returns what it would have. The\ncommand fails when the session has no background process with this id.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "process_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Process Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "get_process_output",
+          "default": "get_process_output",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "process_id"
+      ],
+      "title": "GetProcessOutputCommand",
+      "type": "object"
+    },
+    "GetProcessesCommand": {
+      "additionalProperties": false,
+      "description": "List the session's background processes, running or ended.\n\nIt runs beside any active command and replies with ``rpc.processes``.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "type": {
+          "const": "get_processes",
+          "default": "get_processes",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "GetProcessesCommand",
+      "type": "object"
+    },
     "GetProjectFilesCommand": {
       "additionalProperties": false,
       "description": "Discover bounded metadata using only backend-owned root and policy.",
@@ -2490,6 +2551,8 @@
       "get_messages": "#/$defs/GetMessagesCommand",
       "get_model_catalog": "#/$defs/GetModelCatalogCommand",
       "get_permissions": "#/$defs/GetPermissionsCommand",
+      "get_process_output": "#/$defs/GetProcessOutputCommand",
+      "get_processes": "#/$defs/GetProcessesCommand",
       "get_project_files": "#/$defs/GetProjectFilesCommand",
       "get_queue_state": "#/$defs/GetQueueStateCommand",
       "get_session_stats": "#/$defs/GetSessionStatsCommand",
@@ -2671,6 +2734,12 @@
       "$ref": "#/$defs/CancelProcessCommand"
     },
     {
+      "$ref": "#/$defs/GetProcessesCommand"
+    },
+    {
+      "$ref": "#/$defs/GetProcessOutputCommand"
+    },
+    {
       "$ref": "#/$defs/BackgroundToolCallCommand"
     },
     {
@@ -2784,6 +2853,13 @@
     },
     "get_permissions": {
       "type": "get_permissions"
+    },
+    "get_process_output": {
+      "process_id": "process-1",
+      "type": "get_process_output"
+    },
+    "get_processes": {
+      "type": "get_processes"
     },
     "get_project_files": {
       "type": "get_project_files"

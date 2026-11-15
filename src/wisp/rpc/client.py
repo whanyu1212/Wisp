@@ -50,6 +50,8 @@ from wisp.rpc.commands import (
     GetMessagesCommand,
     GetModelCatalogCommand,
     GetPermissionsCommand,
+    GetProcessesCommand,
+    GetProcessOutputCommand,
     GetProjectFilesCommand,
     GetQueueStateCommand,
     GetSessionsCommand,
@@ -774,6 +776,23 @@ class RpcController:
 
         selected_id = command_id or self._command_id_factory("cancel_process")
         await self._transport.send(CancelProcessCommand(id=selected_id, process_id=process_id))
+        return selected_id
+
+    async def get_processes(self, *, command_id: str | None = None) -> str:
+        """List the session's background processes; the reply is ``rpc.processes``."""
+
+        selected_id = command_id or self._command_id_factory("get_processes")
+        await self._transport.send(GetProcessesCommand(id=selected_id))
+        return selected_id
+
+    async def get_process_output(self, process_id: str, *, command_id: str | None = None) -> str:
+        """Read a background process's latest output without draining it.
+
+        The reply is ``rpc.process_output``; the agent's next poll is unchanged.
+        """
+
+        selected_id = command_id or self._command_id_factory("get_process_output")
+        await self._transport.send(GetProcessOutputCommand(id=selected_id, process_id=process_id))
         return selected_id
 
     async def approve(
