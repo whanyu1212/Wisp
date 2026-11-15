@@ -1638,6 +1638,26 @@ impl Transcript {
             .retain(|candidate| candidate != call_id);
     }
 
+    /// The card that shows a background process: its process card once the agent
+    /// has polled it, otherwise the `bash` call that started it. Cards name the
+    /// process raw or as an identity.
+    pub fn process_card(&self, process_id: &str) -> Option<TranscriptEntryId> {
+        let names = |id: &str| id == process_id || identity_for_display(id) == process_id;
+        let polled = self.entries.iter().find_map(|entry| match &entry.kind {
+            TranscriptEntryKind::Process(card) if names(&card.process_id) => Some(entry.id),
+            _ => None,
+        });
+        polled.or_else(|| {
+            self.entries.iter().find_map(|entry| {
+                let card = entry.tool_card()?;
+                card.process_id
+                    .as_deref()
+                    .is_some_and(names)
+                    .then_some(entry.id)
+            })
+        })
+    }
+
     fn process_task_label(&self, process_id: &str) -> Option<String> {
         self.entries.iter().rev().find_map(|entry| {
             let card = entry.tool_card()?;

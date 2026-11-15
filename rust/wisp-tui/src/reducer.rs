@@ -1133,6 +1133,8 @@ pub enum CommandKind {
     ChangeDirectory,
     CancelProcess,
     BackgroundToolCall,
+    GetProcesses,
+    GetProcessOutput,
     StoreApiKey,
     DisconnectProvider,
     BeginDeviceCode,
@@ -1181,6 +1183,8 @@ impl CommandKind {
             Self::ChangeDirectory => "change_directory",
             Self::CancelProcess => "cancel_process",
             Self::BackgroundToolCall => "background_tool_call",
+            Self::GetProcesses => "get_processes",
+            Self::GetProcessOutput => "get_process_output",
             Self::StoreApiKey => "store_api_key",
             Self::DisconnectProvider => "disconnect_provider",
             Self::BeginDeviceCode => "begin_device_code",
@@ -1260,6 +1264,16 @@ pub enum BackendEvent {
     },
     /// Servers that were still connecting when the backend started have settled.
     McpStatusUpdated(discovery::McpReport),
+    /// The session's background processes, running or ended, from `get_processes`.
+    ProcessesReported {
+        command_id: String,
+        processes: Vec<background_processes::ProcessReport>,
+    },
+    /// One process's latest output, from `get_process_output`.
+    ProcessOutputReported {
+        command_id: String,
+        output: std::sync::Arc<background_processes::ProcessOutput>,
+    },
     /// A background process stopped on its own, during a run or between runs.
     ProcessEnded {
         process_id: String,
@@ -1489,6 +1503,12 @@ pub enum UiAction {
     StopBackgroundProcess(String),
     /// Move the newest running foreground shell command to the background.
     BackgroundRunningCommand,
+    /// Read the session's background processes, running or ended.
+    LoadBackgroundProcesses,
+    /// Open the side panel's peek on this process, or close it with `None`.
+    PeekProcess(Option<String>),
+    /// Read the peeked process's latest output again, while it runs.
+    PollProcessPeek,
     Compact(Option<String>),
     Steer(String),
     SteerPresented {
@@ -1716,6 +1736,11 @@ pub fn reduce(
             Ok(background_processes::stop(state, &target, ids)?)
         }
         UiAction::BackgroundRunningCommand => Ok(background_processes::move_running(state, ids)?),
+        UiAction::LoadBackgroundProcesses => Ok(background_processes::load(state, ids)?),
+        UiAction::PeekProcess(process_id) => {
+            Ok(background_processes::set_peek(state, process_id, ids)?)
+        }
+        UiAction::PollProcessPeek => Ok(background_processes::poll_peek(state, ids)?),
         UiAction::ConfigureAutoCompaction(enabled) => {
             Ok(context::configure_auto(state, enabled, ids)?)
         }
@@ -5630,6 +5655,8 @@ fn handle_backend_event(
         | BackendEvent::PermissionsReported { .. }
         | BackendEvent::CodemodeReported { .. }
         | BackendEvent::SubagentsReported { .. }
+        | BackendEvent::ProcessesReported { .. }
+        | BackendEvent::ProcessOutputReported { .. }
         | BackendEvent::SessionStatsReported { .. }
         | BackendEvent::ContextEstimated(_)
         | BackendEvent::CompactionStarted(_)

@@ -64,9 +64,17 @@ this policy.
 - While background processes run, a strip under the composer shows how many and their commands,
   even when the side panel is hidden or the terminal is too narrow to dock it. Down from an empty
   composer, a click on the strip, or `/ps` focuses the side panel on the first process, where
-  Enter prepares `/kill` for it and Esc returns to the composer with the draft kept. `/ps` no
+  Enter opens its peek and Esc returns to the composer with the draft kept. `/ps` no
   longer prints the list as a notice. A new `panel.background` key action, unbound by default,
   does the same with a draft in the composer. (HY-544)
+- The side panel's background processes open a peek in place: Enter or a click on a process shows
+  its latest output under its row, read again each second while it runs, without moving the
+  transcript. In the peek, Enter opens the process's card in the transcript, `x` asks to stop it
+  and `y` confirms, and Esc closes the peek. Enter on a process no longer fills in `/kill`.
+  Processes that ended stay listed with how they ended (finished, failed with its exit code,
+  timed out, stopped) for as long as the backend keeps them, and their peek shows their last
+  lines. Reading a process's output this way does not change what the agent's next poll returns.
+  (HY-492)
 
 ### Event contract
 

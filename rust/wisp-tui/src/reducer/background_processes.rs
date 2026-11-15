@@ -7,8 +7,15 @@
 //! whenever the transcript is rebuilt, since history replays no process events.
 //! Once that list arrives, a history card still reading running for a process it
 //! leaves out is closed, and so is any such card a later history page brings.
+//!
+//! Processes that ended stay listed with their outcome for as long as the backend
+//! holds them: `process.ended` adds one, and each `get_processes` reply replaces
+//! them with the backend's own list. The side panel's peek reads one process's
+//! latest output with `get_process_output`, once when it opens and then on each poll
+//! tick while the process runs; reading drains nothing the agent polls.
 
 use std::collections::{HashSet, VecDeque};
+use std::sync::Arc;
 
 use super::*;
 use crate::tool_cards::{
@@ -39,6 +46,59 @@ pub struct BackgroundProcess {
     pub started_at_ms: Option<i64>,
 }
 
+/// A process as `get_processes` and `get_process_output` report it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProcessReport {
+    pub process_id: String,
+    /// The command as started, unsanitized; views sanitize it when they draw it.
+    pub command: String,
+    /// `Running`, or the outcome it ended with.
+    pub state: ProcessDisplayState,
+    pub exit_code: Option<i32>,
+    pub started_at_ms: Option<i64>,
+    /// Whether the user stopped it, rather than the agent or a timeout.
+    pub stopped_by_user: bool,
+}
+
+/// Which stream printed a run of output.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OutputStream {
+    Stdout,
+    Stderr,
+}
+
+/// A process's latest output: both streams in the order they printed, unsanitized.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProcessOutput {
+    pub process: ProcessReport,
+    pub chunks: Vec<(OutputStream, String)>,
+    /// Bytes printed before the first chunk that the backend no longer keeps.
+    pub omitted_bytes: u64,
+}
+
+/// The process the side panel's peek shows, and what it last read of it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Peek {
+    pub process_id: String,
+    /// The latest reply; `None` until the first one arrives.
+    pub output: Option<Arc<ProcessOutput>>,
+    /// Whether the backend no longer holds the process, so there is nothing to read.
+    pub gone: bool,
+    /// The read in flight, at most one at a time.
+    read: Option<String>,
+}
+
+impl Peek {
+    /// Whether another read could show something new: the process may still print.
+    fn live(&self) -> bool {
+        !self.gone
+            && self
+                .output
+                .as_ref()
+                .is_none_or(|output| output.process.state == ProcessDisplayState::Running)
+    }
+}
+
 /// The running list, and the exits seen so far for the notification.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct BackgroundProcesses {
@@ -59,12 +119,32 @@ pub struct BackgroundProcesses {
     /// Whether `running` holds the backend's list since the transcript was last
     /// rebuilt, so a card it leaves out can be closed.
     listed: bool,
+    /// Processes that ended and the backend still holds, in the order it lists them.
+    finished: Vec<ProcessReport>,
+    /// The `get_processes` read in flight.
+    list_read: Option<String>,
+    peek: Option<Peek>,
 }
 
 impl BackgroundProcesses {
     /// The processes still running, oldest first.
     pub fn running(&self) -> &[BackgroundProcess] {
         &self.running
+    }
+
+    /// Processes that ended and the backend still holds, with their outcome.
+    pub fn finished(&self) -> &[ProcessReport] {
+        &self.finished
+    }
+
+    /// What the side panel's peek shows, while one is open.
+    pub fn peek(&self) -> Option<&Peek> {
+        self.peek.as_ref()
+    }
+
+    /// Whether the open peek wants another read on the next poll tick.
+    pub fn peek_polling(&self) -> bool {
+        self.peek.as_ref().is_some_and(Peek::live)
     }
 
     /// Whether a foreground shell command is running that the user may move.
@@ -110,6 +190,24 @@ impl BackgroundProcesses {
         for process in processes {
             self.add(process.clone());
         }
+    }
+
+    /// Lists a process that ended with its outcome. One already listed keeps its
+    /// place, so the side panel's rows do not move under its focus.
+    fn finish(&mut self, report: ProcessReport) {
+        self.remove(&report.process_id);
+        if let Some(listed) = self
+            .finished
+            .iter_mut()
+            .find(|listed| listed.process_id == report.process_id)
+        {
+            *listed = report;
+            return;
+        }
+        if self.finished.len() == MAX_LISTED {
+            self.finished.remove(0);
+        }
+        self.finished.push(report);
     }
 }
 
@@ -181,7 +279,20 @@ pub(super) fn observe_process_ended(
     exit_code: Option<i32>,
 ) {
     let processes = &mut state.background_processes;
-    processes.remove(process_id);
+    let started_at_ms = processes
+        .running
+        .iter()
+        .find(|process| process.process_id == process_id)
+        .and_then(|process| process.started_at_ms);
+    processes.finish(ProcessReport {
+        process_id: process_id.to_owned(),
+        command: command.to_owned(),
+        state: ended,
+        exit_code,
+        started_at_ms,
+        // The backend announces a cancelled process only when the user stopped it.
+        stopped_by_user: ended == ProcessDisplayState::Cancelled,
+    });
     if ended == ProcessDisplayState::Cancelled {
         return;
     }
@@ -189,22 +300,32 @@ pub(super) fn observe_process_ended(
     processes.last_exit = Some(exit_notice(command, ended, exit_code));
 }
 
-/// Empties the list and asks the backend for it again, after the transcript was
-/// rebuilt for another session or another point in this one.
+/// Empties the list and asks the backend for it again, the running processes and
+/// those that ended, after the transcript was rebuilt for another session or another
+/// point in this one.
 pub(super) fn reload(
     state: &mut UiState,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
-    state.background_processes.running.clear();
-    state.background_processes.foreground.clear();
-    state.background_processes.listed = false;
-    if state.background_processes.read.is_some() || state.exit_requested {
-        return Ok(Vec::new());
+    let processes = &mut state.background_processes;
+    processes.running.clear();
+    processes.foreground.clear();
+    processes.listed = false;
+    // Another session's processes are not listed. A list read already sent answers
+    // for the session that was left, so its reply, matching no read, is dropped.
+    processes.finished.clear();
+    processes.peek = None;
+    processes.list_read = None;
+    let mut effects = Vec::new();
+    if state.background_processes.read.is_none() && !state.exit_requested {
+        let id = ids.next_id(CommandKind::GetState);
+        effects.push(UiEffect::SendCommand(
+            WispTypedClientRpcCommands::get_state(&id)?,
+        ));
+        state.background_processes.read = Some(id);
     }
-    let id = ids.next_id(CommandKind::GetState);
-    let command = WispTypedClientRpcCommands::get_state(&id)?;
-    state.background_processes.read = Some(id);
-    Ok(vec![UiEffect::SendCommand(command)])
+    effects.extend(load(state, ids)?);
+    Ok(effects)
 }
 
 /// Closes the process cards still reading running whose process the backend no
@@ -304,6 +425,73 @@ pub(super) fn stop(
     ])
 }
 
+/// Asks the backend for the session's processes, running or ended, unless a read
+/// is already in flight.
+pub(super) fn load(
+    state: &mut UiState,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    let processes = &mut state.background_processes;
+    if processes.list_read.is_some() || state.exit_requested {
+        return Ok(Vec::new());
+    }
+    let id = ids.next_id(CommandKind::GetProcesses);
+    let command = WispTypedClientRpcCommands::get_processes(&id)?;
+    processes.list_read = Some(id);
+    Ok(vec![UiEffect::SendCommand(command)])
+}
+
+/// Opens the side panel's peek on a process and reads its output at once, or closes
+/// the peek. Opening the one already open changes nothing.
+pub(super) fn set_peek(
+    state: &mut UiState,
+    process_id: Option<String>,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    let processes = &mut state.background_processes;
+    if processes.peek.as_ref().map(|peek| &peek.process_id) == process_id.as_ref() {
+        return Ok(Vec::new());
+    }
+    // A read still in flight for the peek it replaces matches no read when it
+    // answers, so it is dropped.
+    processes.peek = None;
+    let Some(process_id) = process_id else {
+        return Ok(vec![UiEffect::RequestRender]);
+    };
+    processes.peek = Some(Peek {
+        process_id,
+        output: None,
+        gone: false,
+        read: None,
+    });
+    let mut effects = poll_peek(state, ids)?;
+    effects.push(UiEffect::RequestRender);
+    Ok(effects)
+}
+
+/// Reads the peeked process's output again, unless a read is in flight or the
+/// process can print nothing more.
+pub(super) fn poll_peek(
+    state: &mut UiState,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    if state.exit_requested {
+        return Ok(Vec::new());
+    }
+    let Some(peek) = state
+        .background_processes
+        .peek
+        .as_mut()
+        .filter(|peek| peek.read.is_none() && peek.live())
+    else {
+        return Ok(Vec::new());
+    };
+    let id = ids.next_id(CommandKind::GetProcessOutput);
+    let command = WispTypedClientRpcCommands::get_process_output(&id, &peek.process_id)?;
+    peek.read = Some(id);
+    Ok(vec![UiEffect::SendCommand(command)])
+}
+
 /// A command's first line, made safe to show, cut to a notice's width.
 pub(crate) fn command_line(command: &str) -> String {
     let line = crate::ui::sanitize_for_terminal(command.lines().next().unwrap_or(""));
@@ -316,11 +504,16 @@ pub(crate) fn command_line(command: &str) -> String {
     }
 }
 
-/// Applies the list from any `get_state` reply, and retires this module's own read.
+/// Applies the list from any `get_state` reply, and retires this module's own read;
+/// before that, applies and consumes the replies to its process list and output
+/// reads.
 ///
-/// A reply is not consumed, since another reader may have asked for it; only the
-/// read's `command.finished` is.
+/// A `get_state` reply is not consumed, since another reader may have asked for it;
+/// only the read's `command.finished` is.
 pub(super) fn observe(state: &mut UiState, event: &BackendEvent) -> Option<Vec<UiEffect>> {
+    if let Some(effects) = observe_reads(&mut state.background_processes, event) {
+        return Some(effects);
+    }
     match event {
         BackendEvent::StateReported {
             command_id,
@@ -363,6 +556,78 @@ pub(super) fn observe(state: &mut UiState, event: &BackendEvent) -> Option<Vec<U
                     UiEffect::RequestRender,
                 ]
             })
+        }
+        _ => None,
+    }
+}
+
+/// Applies the replies to this module's `get_processes` and `get_process_output`
+/// reads, and consumes them. A reply to a read that no longer applies matches
+/// nothing here and goes on unused, as does its `command.finished`.
+fn observe_reads(
+    processes: &mut BackgroundProcesses,
+    event: &BackendEvent,
+) -> Option<Vec<UiEffect>> {
+    match event {
+        BackendEvent::ProcessesReported {
+            command_id,
+            processes: reported,
+        } if processes.list_read.as_deref() == Some(command_id.as_str()) => {
+            let previous = std::mem::take(&mut processes.finished);
+            for report in reported {
+                // A list read before an exit arrived keeps the outcome already seen.
+                let ended = previous
+                    .iter()
+                    .find(|ended| ended.process_id == report.process_id);
+                if let (ProcessDisplayState::Running, Some(ended)) = (report.state, ended) {
+                    processes.finish(ended.clone());
+                } else if report.state == ProcessDisplayState::Running {
+                    processes.add(BackgroundProcess {
+                        process_id: report.process_id.clone(),
+                        command: report.command.clone(),
+                        started_at_ms: report.started_at_ms,
+                    });
+                } else {
+                    processes.finish(report.clone());
+                }
+            }
+            Some(vec![UiEffect::RequestRender])
+        }
+        BackendEvent::ProcessOutputReported { command_id, output } => {
+            let peek = processes.peek.as_mut().filter(|peek| {
+                peek.read.as_deref() == Some(command_id.as_str())
+                    && peek.process_id == output.process.process_id
+            });
+            let peek = peek?;
+            peek.output = Some(Arc::clone(output));
+            if output.process.state != ProcessDisplayState::Running {
+                processes.finish(output.process.clone());
+            }
+            Some(vec![UiEffect::RequestRender])
+        }
+        BackendEvent::CommandFinished { command_id, ok, .. } => {
+            if processes.list_read.as_deref() == Some(command_id.as_str()) {
+                processes.list_read = None;
+                return Some(vec![UiEffect::RequestRender]);
+            }
+            if let Some(peek) = processes
+                .peek
+                .as_mut()
+                .filter(|peek| peek.read.as_deref() == Some(command_id.as_str()))
+            {
+                peek.read = None;
+                // The backend no longer holds the process: a later session dropped it
+                // from the list, or a new process took its slot.
+                if !ok {
+                    peek.gone = true;
+                    let process_id = peek.process_id.clone();
+                    processes
+                        .finished
+                        .retain(|listed| listed.process_id != process_id);
+                }
+                return Some(vec![UiEffect::RequestRender]);
+            }
+            None
         }
         _ => None,
     }
@@ -846,11 +1111,60 @@ mod tests {
         let effects = reload(&mut state, &mut Ids::default()).unwrap();
 
         assert!(listed(&state).is_empty());
-        let [UiEffect::SendCommand(command)] = effects.as_slice() else {
-            panic!("expected one command, got {effects:?}");
-        };
-        assert_eq!(command.to_value().unwrap()["type"], "get_state");
-        assert!(reload(&mut state, &mut Ids::default()).unwrap().is_empty());
+        let types: Vec<_> = sent(&effects)
+            .iter()
+            .map(|command| command["type"].clone())
+            .collect();
+        assert_eq!(types, ["get_state", "get_processes"]);
+        // The running list's read is still in flight, so only the ended list, whose
+        // earlier read no longer applies, is asked for again.
+        let again = reload(&mut state, &mut Ids::default()).unwrap();
+        assert_eq!(sent(&again).len(), 1);
+        assert_eq!(sent(&again)[0]["type"], "get_processes");
+    }
+
+    #[test]
+    fn user_stop_is_marked() {
+        let mut state = UiState::new("fake".into(), None, None);
+        start(&mut state, "server", "npm run dev");
+        apply(
+            &mut state,
+            serde_json::json!({
+                "type": "process.ended", "timestamp": "2026-11-13T09:00:00Z",
+                "process_id": "server", "command": "npm run dev", "state": "cancelled",
+                "exit_code": null, "duration_ms": 1000, "notify": false
+            }),
+        );
+
+        let ended = &state.background_processes.finished()[0];
+        assert_eq!(ended.state, ProcessDisplayState::Cancelled);
+        assert!(ended.stopped_by_user);
+    }
+
+    #[test]
+    fn ended_keeps_its_place() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = Ids::default();
+        for process_id in ["a", "b"] {
+            start(&mut state, process_id, "make");
+            ended(&mut state, process_id, 0);
+        }
+        let effects = reduce_with(
+            &mut state,
+            UiAction::PeekProcess(Some("a".into())),
+            &mut ids,
+        );
+        let read = sent(&effects)[0]["id"].as_str().unwrap().to_owned();
+
+        apply(&mut state, output(&read, "a", "completed", "done\n"));
+
+        assert_eq!(
+            finished(&state),
+            [
+                ("a", ProcessDisplayState::Completed),
+                ("b", ProcessDisplayState::Completed)
+            ]
+        );
     }
 
     #[test]
@@ -865,5 +1179,154 @@ mod tests {
             event,
             BackendEvent::StateReported { background_processes, .. } if background_processes.is_empty()
         ));
+    }
+
+    fn report(process_id: &str, state: &str) -> serde_json::Value {
+        serde_json::json!({
+            "process_id": process_id, "command": "make test", "state": state,
+            "exit_code": if state == "running" { None } else { Some(0) },
+            "started_at_ms": 0, "ended_at_ms": null, "stopped_by_user": false,
+            "notify": false
+        })
+    }
+
+    fn output(command_id: &str, process_id: &str, state: &str, text: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": "rpc.process_output", "command_id": command_id,
+            "timestamp": "2026-11-15T09:00:00Z", "process": report(process_id, state),
+            "chunks": [{"stream": "stdout", "text": text}], "omitted_bytes": 0
+        })
+    }
+
+    fn finished_command(command_id: &str, ok: bool) -> serde_json::Value {
+        serde_json::json!({
+            "type": "rpc.command.finished", "command_id": command_id,
+            "command_type": "get_process_output", "ok": ok,
+            "error": if ok { None } else { Some("No background process has the id p") }
+        })
+    }
+
+    fn reduce_with(state: &mut UiState, action: UiAction, ids: &mut Ids) -> Vec<UiEffect> {
+        reduce(state, action, ids).unwrap()
+    }
+
+    fn finished(state: &UiState) -> Vec<(&str, ProcessDisplayState)> {
+        state
+            .background_processes
+            .finished()
+            .iter()
+            .map(|process| (process.process_id.as_str(), process.state))
+            .collect()
+    }
+
+    #[test]
+    fn ended_process_stays_listed() {
+        let mut state = UiState::new("fake".into(), None, None);
+        start(&mut state, "tests", "make test");
+        ended(&mut state, "tests", 2);
+
+        assert!(listed(&state).is_empty());
+        assert_eq!(finished(&state), [("tests", ProcessDisplayState::Failed)]);
+        assert_eq!(state.background_processes.finished()[0].exit_code, Some(2));
+    }
+
+    #[test]
+    fn list_reply_keeps_seen_exit() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = Ids::default();
+        start(&mut state, "tests", "make test");
+        let effects = reduce_with(&mut state, UiAction::LoadBackgroundProcesses, &mut ids);
+        let read = sent(&effects)[0]["id"].as_str().unwrap().to_owned();
+        assert_eq!(sent(&effects)[0]["type"], "get_processes");
+        // The exit arrives before the reply that was read while it still ran.
+        ended(&mut state, "tests", 0);
+        apply(
+            &mut state,
+            serde_json::json!({
+                "type": "rpc.processes", "command_id": read,
+                "timestamp": "2026-11-15T09:00:00Z",
+                "processes": [report("tests", "running"), report("build", "completed"),
+                    report("server", "running")]
+            }),
+        );
+
+        assert_eq!(listed(&state), [("server", "make test")]);
+        assert_eq!(
+            finished(&state),
+            [
+                ("tests", ProcessDisplayState::Completed),
+                ("build", ProcessDisplayState::Completed)
+            ]
+        );
+    }
+
+    #[test]
+    fn stale_output_is_dropped() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = Ids::default();
+        start(&mut state, "a", "make a");
+        start(&mut state, "b", "make b");
+        let first = reduce_with(
+            &mut state,
+            UiAction::PeekProcess(Some("a".into())),
+            &mut ids,
+        );
+        let first = sent(&first)[0]["id"].as_str().unwrap().to_owned();
+        reduce_with(
+            &mut state,
+            UiAction::PeekProcess(Some("b".into())),
+            &mut ids,
+        );
+
+        let late = apply(&mut state, output(&first, "a", "running", "from a\n"));
+        let failed = apply(&mut state, finished_command(&first, false));
+
+        let peek = state.background_processes.peek().unwrap();
+        assert_eq!(peek.process_id, "b");
+        assert!(peek.output.is_none() && !peek.gone);
+        assert!(late.is_empty() && failed.is_empty(), "{late:?} {failed:?}");
+    }
+
+    #[test]
+    fn failed_read_marks_gone() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = Ids::default();
+        start(&mut state, "p", "make test");
+        ended(&mut state, "p", 0);
+        let effects = reduce_with(
+            &mut state,
+            UiAction::PeekProcess(Some("p".into())),
+            &mut ids,
+        );
+        let read = sent(&effects)[0]["id"].as_str().unwrap().to_owned();
+
+        let effects = apply(&mut state, finished_command(&read, false));
+
+        assert!(notices(&effects).is_empty(), "{effects:?}");
+        assert!(state.background_processes.peek().unwrap().gone);
+        assert!(finished(&state).is_empty());
+        assert!(!state.background_processes.peek_polling());
+        assert!(reduce_with(&mut state, UiAction::PollProcessPeek, &mut ids).is_empty());
+    }
+
+    #[test]
+    fn reload_closes_peek() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = Ids::default();
+        start(&mut state, "p", "make test");
+        ended(&mut state, "p", 0);
+        let effects = reduce_with(
+            &mut state,
+            UiAction::PeekProcess(Some("p".into())),
+            &mut ids,
+        );
+        let read = sent(&effects)[0]["id"].as_str().unwrap().to_owned();
+
+        reload(&mut state, &mut ids).unwrap();
+        let late = apply(&mut state, output(&read, "p", "completed", "old\n"));
+
+        assert!(state.background_processes.peek().is_none());
+        assert!(finished(&state).is_empty());
+        assert!(late.is_empty(), "{late:?}");
     }
 }

@@ -261,9 +261,11 @@ folder and branch, compact context usage, MCP servers, skills, changed files, an
 earlier turns. The latest turn is left out because its prompt stays pinned above its reply, so a
 session with one turn has no turn list. While processes the agent started with
 `bash operation=start` are running, a **Background** section lists them, numbered, with how long
-each has run (the first five, until the panel has focus); a process leaves the list when it stops or
-is cancelled. Selecting a row fills in
-`/kill` with that process's id, and Enter stops it. While any are running, a strip under the composer
+each has run (the first five, until the panel has focus). A process that ended stays listed with how
+it ended (finished, failed with its exit code, timed out, stopped) for as long as the backend keeps
+it. Selecting a row opens its peek: its latest output under the row, read again each second while it
+runs, without moving the transcript. In the peek, Enter opens the process's card in the transcript,
+`x` asks to stop it and `y` confirms, and Esc closes the peek. While any are running, a strip under the composer
 shows how many and their commands, at any terminal width; Down from an empty composer, a click
 on the strip, or `/ps` focuses the panel on the first one. Stopping one tells the agent
 with its next prompt if it asked to hear when the process stops, and never wakes it. Model, effort, and YOLO remain in the composer,
