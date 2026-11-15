@@ -27,6 +27,15 @@ this policy.
   `return_exceptions`. A bug in the script, or reaching a limit, still ends it. A failed call
   that a script returns among its results now reads as `RuntimeError: …`, not as a result.
   (HY-515)
+- A codemode script's tool calls return up to 512 KiB of each result, where they were cut at the
+  model's output limit (50 KB by default). A script that counted or searched a long listing or a
+  large file worked on its first 50 KB without knowing it. A result that is only part of the
+  answer, cut at 512 KiB or stopped early by the tool, now ends with the line
+  `[result incomplete]`, and the script's tool-call summary counts such results. That summary is
+  now kept when the script's own output is cut for the model, by size or by line count; before,
+  it was cut off with the rest. What reaches the model is cut as before, and a subagent's calls
+  keep the model's limit. Printing whole results reaches the 1 MiB print limit sooner, so the
+  description now names that limit. (HY-511)
 - A `bash` poll of a background process the user stopped (`/kill`, or the TUI's stop) now reads
   `Process <id> stopped by the user`, as the exit notice already did, instead of `Process <id>
   cancelled`. An agent that did not ask to hear of the exit could not tell the user had stopped

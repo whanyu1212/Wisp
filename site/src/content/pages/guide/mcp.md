@@ -413,7 +413,13 @@ items = [json.loads(text) for text in raw]
 [(item["id"], item["stock"]) for item in items if item["stock"] == 0]
 ```
 
-Tool functions take keyword arguments and return the same text as a normal call. A failed call
+Tool functions take keyword arguments and return the same text as a normal call, but more of it:
+up to 512 KiB, where a direct call stops at the output limit (50 KB by default), so a script can
+count or search all of a long listing before printing a little. A result that is only part of the
+answer, cut at that size or stopped early by the tool (`grep` at `max_results`, say), ends with the
+line `[result incomplete]`, and the script's tool-call summary counts it. A result is also cut
+at 50,000 lines. Print what the script found rather than whole results: three results near
+512 KiB already pass the 1 MiB a script may print, which ends it. A failed call
 raises `RuntimeError`; the script can catch it to continue with other work. Independent calls can
 use `asyncio.gather`; Wisp still serializes tools not marked parallel-safe. Under `gather` one
 failed call ends the script and the other results are lost, so Wisp gives every script
