@@ -24,6 +24,7 @@ from wisp.events import (
     TokenUsage,
     ToolExecutionEnded,
     ToolExecutionStarted,
+    ToolNestedCallStarted,
     ToolResultReady,
     UsageCost,
     UsageCostRates,
@@ -191,6 +192,9 @@ def test_codemode_counts_scripts() -> None:
             summary="codemode: 12 tool calls",
         ),
         script("s2"),
+        *_nested("s2", 2),
+        # A subagent's calls, which no failed script made.
+        *_nested("agent", 4),
         _failed_script("s2", "Script failed (runtime): ValueError: stop here\nCalls made"),
         script("s3"),
         ToolExecutionEnded(
@@ -205,8 +209,16 @@ def test_codemode_counts_scripts() -> None:
     metrics = measure(events)
 
     assert (metrics.scripts, metrics.failed_scripts, metrics.nested_calls) == (3, 1, 13)
+    assert metrics.failed_script_calls == 2
     assert metrics.tool_calls["codemode"] == 3
     assert dict(metrics.script_failures) == {"runtime: ValueError": 1}
+
+
+def _nested(parent_call_id: str, count: int) -> list[ToolNestedCallStarted]:
+    return [
+        ToolNestedCallStarted(parent_call_id=parent_call_id, call_id=f"{index}", name="read")
+        for index in range(count)
+    ]
 
 
 def _failed_script(

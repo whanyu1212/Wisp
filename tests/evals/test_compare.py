@@ -60,6 +60,7 @@ def _run(
         "failed_scripts": 0,
         "script_failures": {},
         "nested_calls": 0,
+        "failed_script_calls": 0,
         "mcp_results": "text",
     }
 

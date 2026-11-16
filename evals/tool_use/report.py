@@ -135,11 +135,19 @@ class ScriptUse:
         reasons (Counter[str]): The failures by reason, from each run's
             `script_failures`. Runs recorded before that field add nothing here,
             so these can add up to less than ``failed``.
+        calls (int): Tool calls the scripts made, finished or failed.
+        failed_calls (int): The part of ``calls`` that failed scripts made before
+            they failed: what retrying them repeats.
+        calls_recorded (bool): Whether any run recorded ``failed_calls``; older
+            runs did not.
     """
 
     scripts: int = 0
     failed: int = 0
     reasons: Counter[str] = field(default_factory=Counter)
+    calls: int = 0
+    failed_calls: int = 0
+    calls_recorded: bool = False
 
 
 @dataclass(slots=True)
@@ -312,6 +320,10 @@ def build_report(
             use.scripts += scripts
             use.failed += _int(row.get("failed_scripts", 0))
             use.reasons.update(_counts(row.get("script_failures", {})))
+            failed_calls = _int(row.get("failed_script_calls", 0))
+            use.calls += _int(row.get("nested_calls", 0)) + failed_calls
+            use.failed_calls += failed_calls
+            use.calls_recorded |= "failed_script_calls" in row
     return report
 
 
@@ -358,9 +370,16 @@ def render_markdown(report: Report) -> str:
         for label, (calls, errors) in sorted(report.proxied.items()):
             lines.append(f"| {label} | {calls} | {errors} ({errors / calls:.0%}) |")
     if report.scripts:
-        lines += ["", "| Model | Scripts | Failed | Why they failed |", "|---|---|---|---|"]
+        lines += [
+            "",
+            "| Model | Scripts | Failed | Why they failed | Calls in failed scripts |",
+            "|---|---|---|---|---|",
+        ]
         for label, use in sorted(report.scripts.items()):
-            lines.append(f"| {label} | {use.scripts} | {use.failed} | {_reasons(use)} |")
+            lines.append(
+                f"| {label} | {use.scripts} | {use.failed} | {_reasons(use)} | "
+                f"{_failed_calls(use)} |"
+            )
     if report.warnings:
         lines += ["", "Warnings:", *(f"- {warning}" for warning in report.warnings)]
     return "\n".join(lines)
@@ -481,6 +500,13 @@ def _billable(row: Mapping[str, object]) -> BillableTokenUsage | None:
         cache_write_input_tokens=_int(row.get("cache_write_tokens", 0)),
     )
     return _billable_parts(str(row["provider"]), None, None, usage).billable
+
+
+def _failed_calls(use: ScriptUse) -> str:
+    if not use.calls_recorded:
+        return "not recorded"
+    share = f" ({use.failed_calls / use.calls:.0%})" if use.calls else ""
+    return f"{use.failed_calls} of {use.calls}{share}"
 
 
 def _reasons(use: ScriptUse) -> str:

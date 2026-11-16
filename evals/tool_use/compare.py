@@ -55,6 +55,7 @@ BASELINE_FIELDS = (
     "failed_scripts",
     "script_failures",
     "nested_calls",
+    "failed_script_calls",
     "mcp_results",
 )
 SUITE_FIELDS = (
