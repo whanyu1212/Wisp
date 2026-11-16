@@ -66,7 +66,7 @@ test("section indexes list exactly the shared navigation destinations", async ({
   }
 });
 
-test("production-rendered demo captures load responsively with captions in both themes", async ({
+test("TUI captures load responsively with accurate provenance in both themes", async ({
   page,
 }) => {
   for (const route of [
@@ -83,14 +83,14 @@ test("production-rendered demo captures load responsively with captions in both 
       await figure.scrollIntoViewIfNeeded();
       const image = figure.locator("img");
       await expect(image).toHaveAttribute("alt", /Wisp/);
-      // Masters are drawn at 2× cell size: 2400 px for a 100-column frame.
-      expect(Number(await image.getAttribute("width"))).toBeGreaterThanOrEqual(
-        2400,
-      );
-      await expect(image).toHaveAttribute(
-        "srcset",
-        /480w.*800w.*1200w.*1600w.*2400w/,
-      );
+      // Real-session crops and synthetic masters retain their source dimensions.
+      const sourceWidth = Number(await image.getAttribute("width"));
+      expect(sourceWidth).toBeGreaterThanOrEqual(1780);
+      // Astro caps responsive derivatives at the source width rather than upscaling.
+      const srcset = (await image.getAttribute("srcset")) ?? "";
+      expect(
+        [...srcset.matchAll(/ (\d+)w/g)].map((match) => Number(match[1])),
+      ).toEqual([480, 800, 1200, 1600, Math.min(2400, sourceWidth)]);
       await expect
         .poll(() =>
           image.evaluate(
@@ -99,13 +99,26 @@ test("production-rendered demo captures load responsively with captions in both 
         )
         .toBe(true);
       await expect(figure.locator("figcaption")).toContainText(
-        "synthetic demo data",
+        route === "" ? "Real session screenshot" : "synthetic demo data",
       );
       const fullSize = await figure.locator("a").getAttribute("href");
       expect(fullSize).toMatch(/^\/Wisp\/_astro\//);
       const response = await page.request.get(fullSize!);
       expect(response.ok()).toBe(true);
       expect(response.headers()["content-type"]).toContain("image/png");
+    }
+    if (route === "") {
+      await expect(figures).toHaveCount(3);
+      await expect(page.locator(".home-showcase img")).toHaveAttribute(
+        "alt",
+        /welcome screen with the Braille mascot/,
+      );
+      await expect(
+        page.getByRole("heading", { name: "Follow every edit" }),
+      ).toBeVisible();
+      await expect(page.getByText("Steer without starting over")).toHaveCount(
+        0,
+      );
     }
     for (const theme of ["light", "dark"]) {
       await page.getByRole("combobox", { name: "Theme" }).selectOption(theme);

@@ -3,8 +3,32 @@ import approval from "../../../assets/docs/tui-approval.png";
 import mcp from "../../../assets/docs/tui-mcp.png";
 import working from "../../../assets/docs/tui-new-turn.png";
 import showcase from "../../../assets/docs/tui-showcase.png";
+import sessionWelcome from "../../../assets/docs/tui-session-welcome.png";
+import sessionEditing from "../../../assets/docs/tui-session-editing.png";
+import sessionApproval from "../../../assets/docs/tui-session-approval.png";
 
 export const tuiCaptures = {
+  sessionWelcome: {
+    image: sessionWelcome,
+    alt: "Wisp welcome screen with the Braille mascot and shortcuts for resuming a session, browsing commands, and mentioning a project file.",
+    caption:
+      "Start a task in your terminal, resume a session, or browse the available commands.",
+    provenance: "Real session screenshot · cropped to the welcome panel.",
+  },
+  sessionEditing: {
+    image: sessionEditing,
+    alt: "Wisp editing its own documentation, with inline diffs and a side panel tracking context, skills, changed files, and recent turns.",
+    caption:
+      "Follow repository exploration and edits inline, with context and changed files alongside the conversation.",
+    provenance: "Real session screenshot · window chrome cropped.",
+  },
+  sessionApproval: {
+    image: sessionApproval,
+    alt: "Wisp command approval for git status --short, offering allow once, allow bash for this session, YOLO for this session, or deny.",
+    caption:
+      "Inspect the proposed command and choose whether to allow it once, allow a broader scope for the session, or deny it.",
+    provenance: "Real session screenshot · cropped to the approval prompt.",
+  },
   showcase: {
     image: showcase,
     alt: "Wisp terminal with a finished turn of tool calls and an inline diff, beside a panel listing context use, MCP servers, skills, changed files, and recent turns.",

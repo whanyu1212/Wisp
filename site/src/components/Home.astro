@@ -63,7 +63,7 @@ const introductions: Record<string, { title: string; summary: string }> = {
 </div>
 <div class="home-showcase">
   <TuiCapture
-    capture="showcase"
+    capture="sessionWelcome"
     eager
     sizes="(max-width: 1380px) calc(100vw - 40px), 1324px"
   />
@@ -86,7 +86,7 @@ const introductions: Record<string, { title: string; summary: string }> = {
   </div>
 </section>
 <section class="home-workflows" aria-labelledby="work-with-wisp">
-  <h2 id="work-with-wisp">Stay involved in the work</h2>
+  <h2 id="work-with-wisp">See the work as it happens</h2>
   <div class="workflow-grid">
     <div class="workflow-card">
       <h3>Approve deliberately</h3>
@@ -94,20 +94,20 @@ const introductions: Record<string, { title: string; summary: string }> = {
         Project trust and tool approval are separate decisions. Inspect a
         proposed command before it executes.
       </p>
-      <TuiCapture capture="approval" />
+      <TuiCapture capture="sessionApproval" />
       <a class="workflow-link" href={href("guide/tools-and-safety.html")}>
         Understand tools and safety →
       </a>
     </div>
     <div class="workflow-card">
-      <h3>Steer without starting over</h3>
+      <h3>Follow every edit</h3>
       <p>
-        Send a correction at a safe boundary, queue the next task, or cancel the
-        current run.
+        Read tool activity and inline diffs as Wisp works, with context usage,
+        changed files, and recent turns in the side panel.
       </p>
-      <TuiCapture capture="working" />
-      <a class="workflow-link" href={href("guide/staying-in-sync.html")}>
-        Learn the live controls →
+      <TuiCapture capture="sessionEditing" />
+      <a class="workflow-link" href={href("guide/tui.html")}>
+        Explore the terminal UI →
       </a>
     </div>
   </div>

@@ -12,7 +12,12 @@ const {
   eager = false,
   sizes = "(max-width: 760px) 100vw, 760px",
 } = Astro.props;
-const { image, alt, caption } = tuiCaptures[capture];
+const entry = tuiCaptures[capture];
+const { image, alt, caption } = entry;
+const provenance =
+  "provenance" in entry
+    ? entry.provenance
+    : "Production TUI renderer · synthetic demo data · static capture.";
 ---
 
 <figure class="tui-capture">
@@ -30,8 +35,7 @@ const { image, alt, caption } = tuiCaptures[capture];
   <figcaption>
     {caption}{" "}
     <span class="capture-provenance">
-      Production TUI renderer · synthetic demo data · static capture. Open the
-      image for full size.
+      {provenance} Open the image for full size.
     </span>
   </figcaption>
 </figure>
