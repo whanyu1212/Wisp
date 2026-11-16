@@ -514,3 +514,72 @@ def test_project_refresh_cannot_hide_startup_only_changes(tmp_path: Path) -> Non
             assert {"session_dir", "wake_on_process_exit"} <= set(report.restart_required)
 
     anyio.run(scenario)
+
+
+@pytest.mark.parametrize(
+    ("choice", "variable", "value", "field"),
+    [
+        ("codemode", "WISP_CODEMODE", "1", "codemode"),
+        ("subagents", "WISP_SUBAGENTS", "1", "subagents"),
+        ("subagent_model", "WISP_SUBAGENT_MODEL", "fake", "subagent_model"),
+    ],
+)
+def test_explicit_rpc_choices_survive_reload_over_environment_defaults(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    choice: str,
+    variable: str,
+    value: str,
+    field: str,
+) -> None:
+    from wisp.events import RpcCodemodeReported, RpcSubagentsReported
+
+    monkeypatch.setenv(variable, value)
+
+    async def scenario() -> None:
+        user_file = Path.home() / ".wisp/settings.json"
+        user_file.parent.mkdir(parents=True, exist_ok=True)
+        user_file.write_text('{"provider":"fake"}', encoding="utf-8")
+        controller = await InProcessWisp.from_environment(
+            provider="fake",
+            session_dir=tmp_path / "sessions",
+            options=InProcessOptions(cwd=tmp_path, project_context_root=tmp_path),
+        )
+        stream = controller.events()
+
+        async def finished(command_id: str) -> list[WispEvent]:
+            events: list[WispEvent] = []
+            with anyio.fail_after(10):
+                while True:
+                    event = await anext(stream)
+                    events.append(event)
+                    if isinstance(event, RpcCommandFinished) and event.command_id == command_id:
+                        assert event.ok, event.error
+                        return events
+
+        try:
+            if choice == "codemode":
+                command_id = await controller.set_codemode("automatic")
+            elif choice == "subagents":
+                command_id = await controller.set_subagents(False)
+            else:
+                command_id = await controller.set_subagent_model(None)
+            await finished(command_id)
+            events = await finished(await controller.reload())
+            report = next(e for e in events if isinstance(e, RpcSettingsReloaded))
+            assert field in report.overridden
+            if choice == "codemode":
+                events = await finished(await controller.get_codemode())
+                snapshot = next(e for e in events if isinstance(e, RpcCodemodeReported))
+                assert snapshot.codemode.setting == "automatic"
+            else:
+                events = await finished(await controller.get_subagents())
+                snapshot = next(e for e in events if isinstance(e, RpcSubagentsReported))
+                if choice == "subagents":
+                    assert snapshot.subagents.enabled is False
+                else:
+                    assert snapshot.subagents.model is None
+        finally:
+            await controller.aclose()
+
+    anyio.run(scenario)

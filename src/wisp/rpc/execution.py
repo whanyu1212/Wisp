@@ -751,7 +751,12 @@ class RpcCommandExecutor:
                 "Change codemode after the current operation finishes"
             )
             return _RpcDispatchResult(running_command=running_command)
-        handle_rpc_codemode_command(command, agent=self.agent, write_event=self.write_event)
+        handle_rpc_codemode_command(
+            command,
+            agent=self.agent,
+            write_event=self.write_event,
+            configure_overrides=self.configure_overrides,
+        )
         return _RpcDispatchResult(running_command=running_command)
 
     def _dispatch_subagents(
@@ -765,7 +770,12 @@ class RpcCommandExecutor:
                 "Change subagents after the current operation finishes"
             )
             return _RpcDispatchResult(running_command=running_command)
-        handle_rpc_subagents_command(command, agent=self.agent, write_event=self.write_event)
+        handle_rpc_subagents_command(
+            command,
+            agent=self.agent,
+            write_event=self.write_event,
+            configure_overrides=self.configure_overrides,
+        )
         return _RpcDispatchResult(running_command=running_command)
 
     def _dispatch_commands(
