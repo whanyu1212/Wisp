@@ -1692,6 +1692,33 @@
       "title": "ReconnectMcpCommand",
       "type": "object"
     },
+    "ReloadCommand": {
+      "additionalProperties": false,
+      "description": "Reload supported file-based settings only when the host is idle.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "ReloadCommandId"
+        },
+        "type": {
+          "const": "reload",
+          "default": "reload",
+          "title": "ReloadCommandType",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "ReloadCommand",
+      "type": "object"
+    },
     "RemoveMcpServerCommand": {
       "additionalProperties": false,
       "description": "Remove an MCP server from the user settings, then restart MCP servers.",
@@ -2398,6 +2425,7 @@
       "preview_mcp_snippet": "#/$defs/PreviewMcpSnippetCommand",
       "prompt": "#/$defs/PromptCommand",
       "reconnect_mcp": "#/$defs/ReconnectMcpCommand",
+      "reload": "#/$defs/ReloadCommand",
       "remove_mcp_server": "#/$defs/RemoveMcpServerCommand",
       "select_session": "#/$defs/SelectSessionCommand",
       "set_codemode": "#/$defs/SetCodemodeCommand",
@@ -2580,6 +2608,9 @@
     },
     {
       "$ref": "#/$defs/ConfigureCommand"
+    },
+    {
+      "$ref": "#/$defs/ReloadCommand"
     },
     {
       "$ref": "#/$defs/ChangeDirectoryCommand"

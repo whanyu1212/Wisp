@@ -39,7 +39,11 @@ project may add `./.wisp/settings.json`, applied only after you trust the projec
 }
 ```
 
-Malformed settings files are skipped with a warning, never fatal.
+At startup, malformed settings files are skipped with a warning rather than making Wisp unusable.
+Manual [`/reload`](../guide/tui/commands.md#reloading-settings) is stricter: it rejects malformed or
+unreadable files and keeps the live configuration. Supported settings apply only while idle;
+explicit session choices and CLI/environment precedence are preserved. The reload report names
+changed startup-only settings that still require a restart, without printing their values.
 
 `wake_on_process_exit` lets a background process that stops while the session is idle start a run
 by itself. Left unset, it is on in the CLI and TUI and off for in-process SDK hosts.

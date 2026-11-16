@@ -3552,6 +3552,10 @@ impl LiveUi {
                 self.dispatch(UiAction::Search(enabled), writer, limit)
                     .await
             }
+            Command::Reload => {
+                self.editor.clear();
+                self.dispatch(UiAction::ReloadSettings, writer, limit).await
+            }
             Command::ChangeDirectory(path) => {
                 self.editor.clear();
                 self.dispatch(UiAction::ChangeDirectory(path), writer, limit)

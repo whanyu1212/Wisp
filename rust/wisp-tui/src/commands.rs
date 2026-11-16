@@ -24,6 +24,7 @@ use wisp_protocol::{
 
 pub(crate) enum Command {
     Help,
+    Reload,
     Init,
     History,
     UpdateGuidance,
@@ -60,6 +61,7 @@ pub(crate) enum Command {
 fn usage(name: &str) -> Option<&'static str> {
     Some(match name {
         "help" => "/help",
+        "reload" => "/reload",
         "init" => "/init",
         "history" => "/history",
         "update" => "/update [check|install]",
@@ -163,13 +165,14 @@ fn canonical_name<'a>(
 fn parse_command(canonical: &str, tail: &str, syntax: &str) -> Command {
     match canonical {
         "diff" | "help" | "init" | "history" | "plan" | "build" | "quit" | "skills" | "mcp"
-        | "queue" | "ps"
+        | "queue" | "ps" | "reload"
             if !tail.trim().is_empty() =>
         {
             Command::Invalid(format!("Usage: {syntax}"))
         }
         "diff" => Command::Diff,
         "help" => Command::Help,
+        "reload" => Command::Reload,
         "init" => Command::Init,
         "history" => Command::History,
         "queue" => Command::Queue,
@@ -868,6 +871,16 @@ pub(crate) mod tests {
         );
         assert_eq!(parsed("/codemode never"), Ok(Some(CodemodeSetting::Never)));
         assert_eq!(parsed("/codemode sometimes"), Err(()));
+    }
+
+    #[test]
+    fn reload_is_a_no_argument_command() {
+        assert!(matches!(classify("/reload", None), Some(Command::Reload)));
+        assert!(matches!(classify("/RELOAD", None), Some(Command::Reload)));
+        assert!(matches!(
+            classify("/reload now", None),
+            Some(Command::Invalid(_))
+        ));
     }
 
     #[test]

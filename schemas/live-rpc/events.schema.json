@@ -315,6 +315,93 @@
       "title": "CodemodeState",
       "type": "object"
     },
+    "CodingSessionState": {
+      "additionalProperties": false,
+      "description": "Read-only in-memory configuration and queue summary.",
+      "properties": {
+        "auto_compaction_enabled": {
+          "title": "Auto Compaction Enabled",
+          "type": "boolean"
+        },
+        "effort": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Effort"
+        },
+        "follow_up_mode": {
+          "enum": [
+            "one_at_a_time",
+            "all"
+          ],
+          "title": "Follow Up Mode",
+          "type": "string"
+        },
+        "mode": {
+          "$ref": "#/$defs/AgentMode",
+          "default": "build"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "pending_follow_up_count": {
+          "minimum": 0,
+          "title": "Pending Follow Up Count",
+          "type": "integer"
+        },
+        "pending_steering_count": {
+          "minimum": 0,
+          "title": "Pending Steering Count",
+          "type": "integer"
+        },
+        "provider": {
+          "title": "Provider",
+          "type": "string"
+        },
+        "steering_mode": {
+          "enum": [
+            "one_at_a_time",
+            "all"
+          ],
+          "title": "Steering Mode",
+          "type": "string"
+        },
+        "web_search": {
+          "default": false,
+          "title": "Web Search",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "provider",
+        "model",
+        "mode",
+        "effort",
+        "auto_compaction_enabled",
+        "web_search",
+        "steering_mode",
+        "follow_up_mode",
+        "pending_steering_count",
+        "pending_follow_up_count"
+      ],
+      "title": "CodingSessionState",
+      "type": "object"
+    },
     "CompactionCompleted": {
       "additionalProperties": false,
       "allOf": [
@@ -2448,6 +2535,12 @@
       ],
       "title": "QueueUpdated",
       "type": "object"
+    },
+    "ReloadSettingName": {
+      "maxLength": 64,
+      "minLength": 1,
+      "pattern": "^[a-z_]+$",
+      "type": "string"
     },
     "RpcCodemodeReported": {
       "additionalProperties": false,
@@ -5876,6 +5969,78 @@
       "title": "RpcSessionsReported",
       "type": "object"
     },
+    "RpcSettingsReloaded": {
+      "additionalProperties": false,
+      "description": "Reload summary with public session state, never credentials or raw settings.",
+      "properties": {
+        "applied": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ReloadSettingName"
+          },
+          "maxItems": 32,
+          "title": "Applied",
+          "type": "array"
+        },
+        "command_id": {
+          "title": "Command Id",
+          "type": "string"
+        },
+        "overridden": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ReloadSettingName"
+          },
+          "maxItems": 32,
+          "title": "Overridden",
+          "type": "array"
+        },
+        "restart_required": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ReloadSettingName"
+          },
+          "maxItems": 32,
+          "title": "Restart Required",
+          "type": "array"
+        },
+        "state": {
+          "$ref": "#/$defs/CodingSessionState"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "rpc.settings.reloaded",
+          "default": "rpc.settings.reloaded",
+          "title": "Type",
+          "type": "string"
+        },
+        "unchanged": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ReloadSettingName"
+          },
+          "maxItems": 32,
+          "title": "Unchanged",
+          "type": "array"
+        }
+      },
+      "required": [
+        "type",
+        "timestamp",
+        "state",
+        "command_id",
+        "applied",
+        "unchanged",
+        "overridden",
+        "restart_required"
+      ],
+      "title": "RpcSettingsReloaded",
+      "type": "object"
+    },
     "RpcSkillCatalogEntry": {
       "additionalProperties": false,
       "description": "One model-free skill descriptor returned to RPC frontends.",
@@ -8918,6 +9083,7 @@
       "rpc.session.tree.navigated": "#/$defs/RpcSessionTreeNavigated",
       "rpc.session.tree.unreverted": "#/$defs/RpcSessionTreeUnreverted",
       "rpc.sessions": "#/$defs/RpcSessionsReported",
+      "rpc.settings.reloaded": "#/$defs/RpcSettingsReloaded",
       "rpc.skills": "#/$defs/RpcSkillsReported",
       "rpc.state": "#/$defs/RpcStateReported",
       "rpc.subagents": "#/$defs/RpcSubagentsReported",
@@ -9050,6 +9216,9 @@
     },
     {
       "$ref": "#/$defs/RpcSubagentsReported"
+    },
+    {
+      "$ref": "#/$defs/RpcSettingsReloaded"
     },
     {
       "$ref": "#/$defs/RpcProcessesReported"
@@ -9721,6 +9890,31 @@
       "sessions": [],
       "timestamp": "2026-01-02T03:04:05Z",
       "type": "rpc.sessions"
+    },
+    "rpc.settings.reloaded": {
+      "applied": [
+        "web_search"
+      ],
+      "command_id": "reload-1",
+      "overridden": [],
+      "restart_required": [
+        "mcp_servers"
+      ],
+      "state": {
+        "auto_compaction_enabled": true,
+        "effort": null,
+        "follow_up_mode": "one_at_a_time",
+        "mode": "build",
+        "model": "fixture-model",
+        "pending_follow_up_count": 0,
+        "pending_steering_count": 0,
+        "provider": "fixture",
+        "steering_mode": "one_at_a_time",
+        "web_search": false
+      },
+      "timestamp": "2026-01-02T03:04:05Z",
+      "type": "rpc.settings.reloaded",
+      "unchanged": []
     },
     "rpc.skills": {
       "catalog": {

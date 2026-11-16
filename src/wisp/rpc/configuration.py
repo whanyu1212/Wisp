@@ -16,6 +16,7 @@ from wisp.coding import (
     resolve_coding_session_configuration,
 )
 from wisp.config.runtime import WispConfig
+from wisp.config.settings import ResolvedSettings
 from wisp.events import ProjectConfigApplied
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.registry import ProviderRegistry
@@ -34,7 +35,13 @@ class _ConfigOverrides:
     session_dir: Path | None = None
     auth_path: Path | None = None
 
-    def build(self, *, trusted: bool, project_dir: Path | None = None) -> WispConfig:
+    def build(
+        self,
+        *,
+        trusted: bool,
+        project_dir: Path | None = None,
+        settings: ResolvedSettings | None = None,
+    ) -> WispConfig:
         return WispConfig.from_env(
             provider=self.provider,
             model=self.model,
@@ -42,6 +49,7 @@ class _ConfigOverrides:
             auth_path=self.auth_path,
             project_dir=project_dir,
             trusted=trusted,
+            settings=settings,
         )
 
 
@@ -57,6 +65,11 @@ class _RpcConfigureOverrides:
     auto_compaction_enabled: bool | None = None
     has_auto_compaction_enabled: bool = False
     web_search: bool | None = None
+    codemode: bool | None = None
+    has_codemode: bool = False
+    subagents: bool | None = None
+    subagent_model: str | None = None
+    has_subagent_model: bool = False
 
     def effective_provider(self, default: str) -> str:
         return self.provider or default

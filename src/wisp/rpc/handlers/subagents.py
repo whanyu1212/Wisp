@@ -12,6 +12,7 @@ from wisp.rpc.commands import (
     SetSubagentModelCommand,
     SetSubagentsCommand,
 )
+from wisp.rpc.configuration import _RpcConfigureOverrides
 from wisp.rpc.lifecycle import RpcCommandLifecycle, RpcEventWriter
 from wisp.tools.subagent import SUBAGENT_MAX_TASKS, SUBAGENT_REPORT_MAX_BYTES
 
@@ -21,6 +22,7 @@ def handle_rpc_subagents_command(
     *,
     agent: CodingSession,
     write_event: RpcEventWriter,
+    configure_overrides: _RpcConfigureOverrides | None = None,
 ) -> None:
     """Report the subagents settings, first applying and saving a new one.
 
@@ -34,11 +36,15 @@ def handle_rpc_subagents_command(
             The inspection or change.
         agent (CodingSession): The session whose settings are read or changed.
         write_event (RpcEventWriter): Writes the snapshot and lifecycle events.
+        configure_overrides (_RpcConfigureOverrides | None): Retains explicit session
+            choices across file reloads when supplied by the command host.
     """
 
     lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
     if isinstance(command, SetSubagentsCommand):
         agent.subagents = command.enabled
+        if configure_overrides is not None:
+            configure_overrides.subagents = agent.subagents
         if not try_persist_user_subagents(agent.subagents):
             write_event(
                 ErrorEvent(message="Subagents setting applied for this session; could not save it.")
@@ -51,6 +57,9 @@ def handle_rpc_subagents_command(
             )
             return
         agent.subagent_model = command.model
+        if configure_overrides is not None:
+            configure_overrides.subagent_model = agent.subagent_model
+            configure_overrides.has_subagent_model = True
         if not try_persist_user_subagent_model(agent.subagent_model):
             write_event(
                 ErrorEvent(message="Subagent model applied for this session; could not save it.")

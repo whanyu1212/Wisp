@@ -160,8 +160,12 @@ class WispConfig(BaseModel):
         openai_compatible: OpenAICompatibleSettings | None = None,
         project_dir: Path | None = None,
         trusted: bool = False,
+        settings: ResolvedSettings | None = None,
     ) -> WispConfig:
         """Build config from environment, settings files, and explicit overrides.
+
+        ``settings`` may supply a validated file-layer snapshot, such as an atomic
+        reload candidate, instead of reading the files again.
 
         Precedence, highest to lowest: explicit argument > environment variable >
         project ``./.wisp/settings.json`` > user ``~/.wisp/settings.json`` >
@@ -223,7 +227,8 @@ class WispConfig(BaseModel):
         ``auto``, finds them on demand only for a large catalog.
         """
 
-        settings = resolve_settings(project_dir=project_dir, trust_project=trusted)
+        if settings is None:
+            settings = resolve_settings(project_dir=project_dir, trust_project=trusted)
         compatible_override = openai_compatible or _openai_compatible_from_env()
 
         provider_override = _first_non_empty(provider, os.environ.get("WISP_PROVIDER"))

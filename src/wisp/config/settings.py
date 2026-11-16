@@ -259,6 +259,7 @@ def resolve_settings(
     project_dir: Path | None = None,
     home_dir: Path | None = None,
     trust_project: bool = False,
+    strict: bool = False,
 ) -> ResolvedSettings:
     """Resolve the file-based settings layers into a single merged view.
 
@@ -276,6 +277,10 @@ def resolve_settings(
     user layer contributes. Trust is decided *before* this is called (from the
     global store / real-env ``WISP_TRUST``), never from a project-controlled source.
 
+    ``strict=True`` rejects invalid or unreadable files rather than warning and
+    dropping their layer; use it when preparing a reload that must keep the current
+    configuration on error. Missing files still contribute defaults.
+
     It defaults to ``False`` (fail-closed): a caller that has not resolved trust must
     not accidentally ingest project settings. Production config construction passes an
     explicit decision via :meth:`wisp.config.WispConfig.from_env`.
@@ -285,13 +290,14 @@ def resolve_settings(
     project = project_dir if project_dir is not None else Path.cwd()
 
     user_file = (home / ".wisp" / PROJECT_SETTINGS_FILENAME).expanduser()
-    user_settings = _load_settings_file(user_file, secure_permissions=True)
+    loader = _load_settings_file_strict if strict else _load_settings_file
+    user_settings = loader(user_file, secure_permissions=True)
 
     # An untrusted project contributes nothing: skip its settings file entirely so a
     # cloned repo cannot inject provider/model/session_dir/auth_path. This is
     # fail-closed — an undecided project is treated as untrusted here.
     project_settings = (
-        _load_settings_file(
+        loader(
             project / PROJECT_SETTINGS_DIRNAME / PROJECT_SETTINGS_FILENAME,
             ignored_fields=_USER_ONLY_SETTINGS_FIELDS,
         )
@@ -628,6 +634,42 @@ def _ensure_private_directory(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
     if os.name == "posix":
         path.chmod(0o700)
+
+
+def _load_settings_file_strict(
+    path: Path,
+    *,
+    ignored_fields: frozenset[str] = frozenset(),
+    secure_permissions: bool = False,
+) -> WispSettings:
+    """Read a reload candidate without falling back from malformed settings.
+
+    Args:
+        path (Path): File to read; a missing file contributes defaults.
+        ignored_fields (frozenset[str]): Fields this layer cannot control.
+        secure_permissions (bool): Require private permissions for the user file.
+
+    Returns:
+        WispSettings: Validated settings, without modifying the live configuration.
+
+    Raises:
+        SettingsDocumentError: When an existing file cannot be read or validated.
+            Errors name the file but never include setting values.
+    """
+    try:
+        if secure_permissions and os.name == "posix" and path.exists():
+            path.chmod(0o600)
+            path.parent.chmod(0o700)
+        data = read_settings_document(path)
+        if data is None:
+            return WispSettings()
+        return WispSettings.model_validate(
+            {key: value for key, value in data.items() if key not in ignored_fields}
+        )
+    except (OSError, UnicodeError, SettingsDocumentError, ValidationError):
+        raise SettingsDocumentError(
+            f"Cannot reload invalid or unreadable settings: {path}"
+        ) from None
 
 
 def _load_settings_file(

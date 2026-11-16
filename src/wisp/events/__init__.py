@@ -71,6 +71,7 @@ from wisp.events.rpc import (
     PermissionMode,
     PermissionState,
     ProjectFilesInvalidated,
+    ReloadSettingName,
     RpcCodemodeReported,
     RpcCommandArgument,
     RpcCommandDescriptor,
@@ -109,6 +110,7 @@ from wisp.events.rpc import (
     RpcProjectFile,
     RpcProjectFilesReported,
     RpcProviderId,
+    RpcSettingsReloaded,
     RpcSkillCatalogEntry,
     RpcSkillCatalogSnapshot,
     RpcSkillDiagnostic,
@@ -361,6 +363,8 @@ __all__ = [
     "RpcProcessesReported",
     "RpcStateReported",
     "RpcSubagentsReported",
+    "RpcSettingsReloaded",
+    "ReloadSettingName",
     "RpcWorkspaceReported",
     "RpcStateSnapshot",
     "RunOutcome",
@@ -445,6 +449,7 @@ KnownWispEvent = TypeAliasType(
         | RpcPermissionsReported
         | RpcCodemodeReported
         | RpcSubagentsReported
+        | RpcSettingsReloaded
         | RpcProcessesReported
         | RpcProcessOutputReported
         | RpcCommandsReported

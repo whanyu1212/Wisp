@@ -7,6 +7,7 @@ from wisp.config.runtime import codemode_from_env
 from wisp.config.settings import try_persist_user_codemode
 from wisp.events import CodemodeSetting, CodemodeState, ErrorEvent, RpcCodemodeReported
 from wisp.rpc.commands import GetCodemodeCommand, SetCodemodeCommand
+from wisp.rpc.configuration import _RpcConfigureOverrides
 from wisp.rpc.lifecycle import RpcCommandLifecycle, RpcEventWriter
 
 # The session and the settings file hold the setting as an optional boolean.
@@ -25,6 +26,7 @@ def handle_rpc_codemode_command(
     *,
     agent: CodingSession,
     write_event: RpcEventWriter,
+    configure_overrides: _RpcConfigureOverrides | None = None,
 ) -> None:
     """Report the codemode setting, first applying and saving a new one.
 
@@ -36,11 +38,16 @@ def handle_rpc_codemode_command(
         command (GetCodemodeCommand | SetCodemodeCommand): The inspection or change.
         agent (CodingSession): The session whose setting is read or changed.
         write_event (RpcEventWriter): Writes the snapshot and lifecycle events.
+        configure_overrides (_RpcConfigureOverrides | None): Retains explicit session
+            choices across file reloads when supplied by the command host.
     """
 
     lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
     if isinstance(command, SetCodemodeCommand):
         agent.codemode = _CODEMODE_FOR_SETTING[command.setting]
+        if configure_overrides is not None:
+            configure_overrides.codemode = agent.codemode
+            configure_overrides.has_codemode = True
         if not try_persist_user_codemode(agent.codemode):
             write_event(
                 ErrorEvent(message="Codemode setting applied for this session; could not save it.")

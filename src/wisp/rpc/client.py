@@ -70,6 +70,7 @@ from wisp.rpc.commands import (
     PreviewMcpSnippetCommand,
     PromptCommand,
     ReconnectMcpCommand,
+    ReloadCommand,
     RemoveMcpServerCommand,
     RpcCommand,
     SelectSessionCommand,
@@ -273,6 +274,20 @@ class RpcController:
 
         selected_id = command_id or self._command_id_factory("subagents")
         await self._transport.send(SetSubagentModelCommand(id=selected_id, model=model))
+        return selected_id
+
+    async def reload(self, *, command_id: str | None = None) -> str:
+        """Reload supported settings files while idle, preserving explicit choices.
+
+        Args:
+            command_id (str | None): Identifier for matching the reload response.
+
+        Returns:
+            str: Submitted identifier. ``rpc.settings.reloaded`` reports changes;
+                a busy host or invalid candidate fails without applying changes.
+        """
+        selected_id = command_id or self._command_id_factory("reload")
+        await self._transport.send(ReloadCommand(id=selected_id))
         return selected_id
 
     async def change_directory(self, path: str, *, command_id: str | None = None) -> str:

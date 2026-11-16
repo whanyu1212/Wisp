@@ -10,6 +10,17 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
+## Unreleased
+
+- `/reload` manually reloads supported user/trusted-project settings while the session is idle.
+  Provider/model/effort, context reserve, automatic compaction, web search, codemode, and subagent
+  settings can change without restarting. Explicit session choices and CLI/environment precedence
+  are retained. Invalid or unreadable settings keep the active configuration; MCP, credentials,
+  safety policy, storage, connection/retry settings, process waking, and keybindings remain
+  restart-only. The shared RPC/SDK `reload` command reports `rpc.settings.reloaded`, including
+  field-name change categories and public session state, without exposing raw settings or secrets.
+  Sessions retain schema version 6; no code, instruction, or environment-file hot reload is added.
+
 <!-- Keeps links to the pre-release "0.11.0 — Unreleased" heading working. -->
 <a id="0110--unreleased"></a>
 

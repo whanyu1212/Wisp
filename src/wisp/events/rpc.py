@@ -418,6 +418,24 @@ class RpcConnectionCatalogSnapshot(BaseModel):
         return self
 
 
+ReloadSettingName = TypeAliasType(
+    "ReloadSettingName",
+    Annotated[str, Field(min_length=1, max_length=64, pattern=r"^[a-z_]+$")],
+)
+
+
+class RpcSettingsReloaded(WispEvent):
+    """Reload summary with public session state, never credentials or raw settings."""
+
+    type: Literal["rpc.settings.reloaded"] = "rpc.settings.reloaded"
+    state: CodingSessionState
+    command_id: str
+    applied: tuple[ReloadSettingName, ...] = Field(default=(), max_length=32)
+    unchanged: tuple[ReloadSettingName, ...] = Field(default=(), max_length=32)
+    overridden: tuple[ReloadSettingName, ...] = Field(default=(), max_length=32)
+    restart_required: tuple[ReloadSettingName, ...] = Field(default=(), max_length=32)
+
+
 class RpcCommandStarted(WispEvent):
     type: Literal["rpc.command.started"] = "rpc.command.started"
     command_id: str

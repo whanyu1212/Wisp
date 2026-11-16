@@ -12,6 +12,7 @@ from typing_extensions import TypeAliasType
 
 from wisp.coding import CodingSession
 from wisp.coding.session import DirectoryChangeError
+from wisp.config.settings import SettingsDocumentError
 from wisp.events import RpcPermissionsReported, WispEvent
 from wisp.rpc.commands import (
     AddMcpServerCommand,
@@ -58,6 +59,7 @@ from wisp.rpc.commands import (
     ProcessWakeCommand,
     PromptCommand,
     ReconnectMcpCommand,
+    ReloadCommand,
     RemoveMcpServerCommand,
     SelectSessionCommand,
     SetCodemodeCommand,
@@ -86,6 +88,7 @@ from wisp.rpc.handlers.processes import (
     start_cancel_process_command,
 )
 from wisp.rpc.handlers.project_files import ProjectFilesPublisher, RpcProjectFiles
+from wisp.rpc.handlers.reload import RpcSettingsReloader
 from wisp.rpc.session.process_exits import background_processes
 from wisp.rpc.working_directory import DirectoryMove, directory_move_events
 from wisp.runtime.api import WispRuntime
@@ -194,7 +197,9 @@ class RpcCommandExecutor:
         mcp_servers: RpcMcpServers | None = None,
         outbound_frame_limit: int | None = None,
         change_directory: DirectoryChanger | None = None,
+        settings_reloader: RpcSettingsReloader | None = None,
     ) -> None:
+        self.settings_reloader = settings_reloader
         self.change_directory = change_directory
         self.project_files = project_files
         self.mcp_servers = mcp_servers
@@ -222,6 +227,9 @@ class RpcCommandExecutor:
         running_command: _RpcRunningCommand | None,
     ) -> _RpcDispatchResult:
         known = command.known
+        if isinstance(known, ReloadCommand):
+            self.coordinator.running_command = running_command
+            return await self._dispatch_reload(known, running_command)
         if isinstance(known, ConfigureCommand):
             self.coordinator.running_command = running_command
             return self._dispatch_configure(
@@ -888,6 +896,36 @@ class RpcCommandExecutor:
             runtime=self.runtime,
             write_event=self.write_event,
         )
+        return _RpcDispatchResult(running_command=running_command)
+
+    async def _dispatch_reload(
+        self,
+        command: ReloadCommand,
+        running_command: _RpcRunningCommand | None,
+    ) -> _RpcDispatchResult:
+        lifecycle = RpcCommandLifecycle.for_command(command, write_event=self.write_event)
+        if running_command is not None or self.agent.busy or self.runtime.mcp_connecting:
+            lifecycle.fail("Settings reload is idle-only; wait for active work to finish")
+        elif self.settings_reloader is None:
+            lifecycle.fail("File-based settings reload is unavailable for this host")
+        else:
+            try:
+                report = await self.settings_reloader.reload(
+                    agent=self.agent,
+                    runtime=self.runtime,
+                    command_id=lifecycle.command_id,
+                )
+            except SettingsDocumentError as exc:
+                lifecycle.fail(str(exc))
+            except Exception:
+                # Config values can hold secrets: never stringify arbitrary validator
+                # or provider errors. All preparation failed before the commit.
+                lifecycle.fail(
+                    "Settings reload failed; check settings. Current configuration kept."
+                )
+            else:
+                self.write_event(report)
+                lifecycle.finish()
         return _RpcDispatchResult(running_command=running_command)
 
     def _dispatch_configure(
