@@ -45,8 +45,9 @@ cargo test --workspace --all-features
 ```
 
 Documentation-only changes don't need the application test suite. Run `uv run pytest tests/docs`
-and, from `site/`, `npm ci`, `npm test`, `npm run check`, `npm run format:check`, `npm run build`,
-and `npm run test:browser` (install Chromium with `npm exec playwright install chromium`).
+and, from `site/`, `npm ci`, `npm test`, `npm run check`, `npm run format:check`, and
+`npm run verify:browser` (install Chromium with `npm exec playwright install chromium`). The browser
+verification command rebuilds first; use `npm run test:browser` only against an unchanged build.
 See [`site/README.md`](site/README.md) for the pinned Node toolchain, source layout, and deployment
 checks. GitHub Pages publishes the Astro build under the `/Wisp/` base path.
 

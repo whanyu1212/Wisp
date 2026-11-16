@@ -132,7 +132,19 @@ def test_default_prompt_asks_for_evidence_backed_verification(
     assert "the project's instructions" in prompt
     assert "Do not weaken, delete, or bypass valid tests" in prompt
     assert "If a check cannot run, report the exact reason" in prompt
-    assert "Exit code 0 means success" in prompt
+    assert (
+        "Before testing generated output, rebuild it after source edits or branch switches"
+        in prompt
+    )
+    assert "Inspect actual generated metadata and rendered geometry" in prompt
+    assert "Preserve the checked command's exit status" in prompt
+    assert "Read a diagnostic log only if it exists" in prompt
+    assert "do not let a missing log mask the original failure" in prompt
+    assert "Exit code 0 means command execution succeeded" in prompt
+    assert "interpret other exit codes using the command's documented meaning" in prompt
+    assert "defaulting to failure" in prompt
+    assert "A successful status query is not proof that its reported checks passed" in prompt
+    assert "Pending checks are not passes" in prompt
     assert "A timeout or interrupted command is inconclusive, never a pass" in prompt
     assert "checks that passed, failed, timed out, or were not run" in prompt
     assert "remaining blockers, assumptions, or uncertainty" in prompt
