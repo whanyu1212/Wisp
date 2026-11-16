@@ -1,5 +1,22 @@
 # Documentation TUI captures
 
+## Real-session screenshots
+
+The landing page uses three user-supplied screenshots of Wisp in Ember:
+
+| Master | Size | Crop and use |
+| --- | --- | --- |
+| `tui-session-welcome.png` | 1780 × 1000 | November 14, 2026 welcome panel; window chrome, sidebar, tip, and composer omitted; homepage hero |
+| `tui-session-editing.png` | 2568 × 1496 | November 14, 2026 documentation-editing session; window chrome removed; inline diffs and side panel |
+| `tui-session-approval.png` | 1856 × 340 | November 16, 2026 session; cropped to the command approval prompt, omitting the empty transcript area |
+
+These are actual session pixels, not synthetic fixtures. The welcome screen shows Wisp 0.10.0;
+these screenshots illustrate the UI rather than claiming to show the latest release. Site captions
+identify their real-session provenance. The synthetic regeneration command below does not overwrite
+them. Review any replacement for private content before publishing.
+
+## Synthetic captures
+
 These are static captures of Wisp's **production TUI draw path**, rendered from deterministic,
 synthetic fixtures, not a live user's terminal or a claim that an MCP connection ran. No credentials,
 private project content, real tool execution, or external service access is involved. The visible
@@ -13,7 +30,7 @@ Refresh them after a visible TUI interaction or rendering change.
 
 | Master | Fixture | What it shows |
 | --- | --- | --- |
-| `tui-showcase.png` | `showcase` | A finished turn with tool rows and an inline diff beside the docked side panel; the homepage hero |
+| `tui-showcase.png` | `showcase` | A finished turn with tool rows and an inline diff beside the docked side panel; retained synthetic showcase |
 | `tui-welcome.png` | `welcome` | The welcome screen and its Braille mascot; source for the README banner, not shown on the site |
 | `tui-diff-previews.png` | `diff-previews` | Inline edit/write cards, added/removed lines, bounded previews |
 | `tui-approval.png` | `approval` | A command approval gate with no default selection |

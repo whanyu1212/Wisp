@@ -10,8 +10,9 @@ tracked image files have identical bytes, so link to the existing file instead o
 | `assets/apple-touch-icon.png` | 180 × 180 | iOS home-screen icon linked by the Astro document layout |
 | `assets/tui-ember-session-reference.png` | 2254 × 1236 | Reference screenshot of a TUI session in the Ember theme, which the synthetic captures were modeled on; nothing links it, and the banner script reads it |
 
-Documentation UI captures live in [`docs/`](docs/README.md), with their synthetic-data provenance
-and regeneration commands. Each master is stored once; Astro generates responsive derivatives.
+Documentation UI captures live in [`docs/`](docs/README.md), with real-session screenshot provenance
+and synthetic-fixture regeneration commands. Each master is stored once; Astro generates responsive
+derivatives.
 
 ## Rules
 
