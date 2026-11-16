@@ -10,10 +10,10 @@ import sessionApproval from "../../../assets/docs/tui-session-approval.png";
 export const tuiCaptures = {
   sessionWelcome: {
     image: sessionWelcome,
-    alt: "Wisp welcome screen with the Braille mascot and shortcuts for resuming a session, browsing commands, and mentioning a project file.",
+    alt: "Wisp welcome screen with the Braille mascot, session shortcuts, prompt composer, and side panel showing context, MCP servers, skills, and changed files.",
     caption:
       "Start a task in your terminal, resume a session, or browse the available commands.",
-    provenance: "Real session screenshot · cropped to the welcome panel.",
+    provenance: "Real session screenshot · full interface.",
   },
   sessionEditing: {
     image: sessionEditing,
@@ -24,10 +24,11 @@ export const tuiCaptures = {
   },
   sessionApproval: {
     image: sessionApproval,
-    alt: "Wisp command approval for git status --short, offering allow once, allow bash for this session, YOLO for this session, or deny.",
+    alt: "Wisp session awaiting approval for git status --short, with the conversation, side panel, and choices to allow once, allow bash for this session, enable YOLO for this session, or deny.",
     caption:
       "Inspect the proposed command and choose whether to allow it once, allow a broader scope for the session, or deny it.",
-    provenance: "Real session screenshot · cropped to the approval prompt.",
+    provenance:
+      "Real session screenshot · zoomed view; full session available in the image link.",
   },
   showcase: {
     image: showcase,

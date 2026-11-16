@@ -20,7 +20,12 @@ const provenance =
     : "Production TUI renderer · synthetic demo data · static capture.";
 ---
 
-<figure class="tui-capture">
+<figure
+  class:list={[
+    "tui-capture",
+    { "tui-capture-approval": capture === "sessionApproval" },
+  ]}
+>
   <a href={image.src} aria-label={`Open full-size capture: ${alt}`}>
     <Image
       src={image}

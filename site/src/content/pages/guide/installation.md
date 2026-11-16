@@ -16,6 +16,11 @@ Wisp is published on PyPI as [`wisp-ai`](https://pypi.org/project/wisp-ai/), ins
 command, and requires Python 3.11 or newer. Wisp supports Linux and macOS; Windows remains
 best-effort until it has dedicated CI coverage.
 
+Python 3.11+ is supported; Python 3.12 is recommended for installation. The explicit
+`--python 3.12` selects a compatible interpreter up front and avoids the
+[native-wheel selection issue](#the-tui-does-not-start-after-installing) when uv's default Python
+is older than 3.11. It is not a Python 3.12-only requirement.
+
 Install the latest release:
 
 ```bash

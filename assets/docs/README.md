@@ -6,14 +6,16 @@ The landing page uses three user-supplied screenshots of Wisp in Ember:
 
 | Master | Size | Crop and use |
 | --- | --- | --- |
-| `tui-session-welcome.png` | 1780 × 1000 | November 14, 2026 welcome panel; window chrome, sidebar, tip, and composer omitted; homepage hero |
+| `tui-session-welcome.png` | 2592 × 1502 | Original November 14, 2026 welcome screenshot; full interface including sidebar and composer; homepage hero capped at 1040 CSS pixels |
 | `tui-session-editing.png` | 2568 × 1496 | November 14, 2026 documentation-editing session; window chrome removed; inline diffs and side panel |
-| `tui-session-approval.png` | 1856 × 340 | November 16, 2026 session; cropped to the command approval prompt, omitting the empty transcript area |
+| `tui-session-approval.png` | 2718 × 1528 | Original November 16, 2026 session; CSS shows a gentle left-aligned close-up while retaining the conversation and part of the sidebar; full screenshot in the image link |
 
 These are actual session pixels, not synthetic fixtures. The welcome screen shows Wisp 0.10.0;
 these screenshots illustrate the UI rather than claiming to show the latest release. Site captions
 identify their real-session provenance. The synthetic regeneration command below does not overwrite
-them. Review any replacement for private content before publishing.
+them. The welcome and approval masters retain every pixel of the supplied originals: adjust display
+framing in CSS rather than cropping these source files in place. Review any replacement for private
+content before publishing.
 
 ## Synthetic captures
 
