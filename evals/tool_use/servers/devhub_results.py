@@ -8,7 +8,8 @@ Wisp or the MCP SDK.
 
 from __future__ import annotations
 
-from typing import TypedDict
+# Pydantic, which builds the output schemas, rejects `typing.TypedDict` before 3.12.
+from typing_extensions import TypedDict
 
 
 class Issue(TypedDict):
