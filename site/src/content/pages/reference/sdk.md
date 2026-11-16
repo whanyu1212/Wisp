@@ -515,7 +515,9 @@ See [Configuration](configuration.md) for every persisted field and precedence r
   the package also exports provider event and tool-call types. The structural provider protocol is
   not currently a supported package export, and arbitrary provider injection into `InProcessWisp`
   is not yet public; both belong to [#402](https://github.com/whanyu1212/Wisp/issues/402).
-- `wisp.tools.Tool`, `ToolContext`, and `ToolResult` are the core custom-tool contracts. Tool
+- `wisp.tools.Tool`, `ToolContext`, and `ToolResult` are the core custom-tool contracts.
+  `ToolResult.structured` is an optional JSON value beside the text, which only a codemode script
+  of a tool with an `output_schema` receives; the model, events and sessions see the text. Tool
   registration is demonstrated in the
   [static extension example](https://github.com/whanyu1212/Wisp/tree/main/examples/extensions).
 

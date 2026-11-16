@@ -64,6 +64,7 @@ def _definition(
     *,
     description: str | None = "Search remote records",
     input_schema: dict[str, object] | None = None,
+    output_schema: dict[str, object] | None = None,
     annotations: ToolAnnotations | None = None,
 ) -> McpToolDefinition:
     return McpToolDefinition(
@@ -72,6 +73,7 @@ def _definition(
         inputSchema=(
             input_schema if input_schema is not None else {"type": "object", "properties": {}}
         ),
+        outputSchema=output_schema,
         annotations=annotations,
     )
 
@@ -93,6 +95,45 @@ def test_adapt_mcp_tool_exposes_provider_spec_and_default_safety() -> None:
     assert adapted.safety == "command"
     assert registry.specs()[0].name == adapted.name
     assert registry.specs()[0].input_schema == adapted.input_schema
+
+
+@pytest.mark.parametrize(
+    ("output_schema", "kept"),
+    [
+        (None, None),
+        ({"type": "object", "properties": {"id": {"type": "integer"}}}, True),
+        # Not an object, or not a valid schema: the tool still works, returning text.
+        ({"type": "array"}, None),
+        ({"type": "object", "properties": {"id": {"type": 7}}}, None),
+    ],
+    ids=["none", "object", "not-object", "invalid"],
+)
+def test_output_schema_kept_only_when_valid(
+    output_schema: dict[str, object] | None, kept: bool | None
+) -> None:
+    adapted = adapt_mcp_tool(
+        server=_server(),
+        tool=_definition(output_schema=output_schema),
+        client=ScriptedMcpClient(),
+    )
+
+    assert adapted.output_schema == (output_schema if kept else None)
+
+
+def test_structured_content_kept_beside_text(tmp_path: Path) -> None:
+    """The text is what the model reads; the structured content rides along for scripts."""
+
+    client = ScriptedMcpClient(
+        CallToolResult(
+            content=[TextContent(type="text", text='{"id": 7}')],
+            structuredContent={"id": 7},
+        )
+    )
+    adapted = adapt_mcp_tool(server=_server(), tool=_definition(), client=client)
+
+    result = anyio.run(lambda: adapted.run({}, ToolContext(cwd=tmp_path)))
+
+    assert (result.text, result.structured) == ('{"id": 7}', {"id": 7})
 
 
 @pytest.mark.parametrize("safety", ["read", "mutating", "command"])

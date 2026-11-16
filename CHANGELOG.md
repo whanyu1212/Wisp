@@ -14,6 +14,16 @@ this policy.
 
 ### Tools
 
+- An MCP tool that declares an output schema returns its structured result to a codemode script
+  as a typed dict instead of text, so a script no longer parses JSON, and one that reads a field
+  the schema lacks fails its type check before it runs. The codemode description names those
+  tools and their fields, and `mcp_describe` shows a tool's output schema and what a script
+  receives. A schema that only
+  wraps a `result` field, as the MCP Python SDK writes for every tool, returns that value, and
+  one wrapping a string still returns text, so those tools behave as before. Direct calls and
+  subagents still read the text, and the structured result reaches no event or session. A call
+  whose structured result is missing, not JSON or over 512 KiB fails. `ToolResult` gains an
+  optional `structured` value for this. (HY-512)
 - `gather_settled` hands back an error as a failed tool call only when its `<tool> failed: …`
   message names one of the run's own tools. Before, any identifier counted, so a script's own
   `RuntimeError("parse failed: …")` came back as a result instead of ending the script. A script

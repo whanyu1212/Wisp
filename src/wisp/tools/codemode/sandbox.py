@@ -19,7 +19,7 @@ from typing import Literal
 import anyio
 from typing_extensions import TypeAliasType
 
-ScriptFunction = TypeAliasType("ScriptFunction", Callable[..., Awaitable[str]])
+ScriptFunction = TypeAliasType("ScriptFunction", Callable[..., Awaitable[object]])
 ScriptFailure = TypeAliasType(
     "ScriptFailure",
     Literal["unavailable", "internal", "syntax", "type", "runtime", "limit", "timeout"],
@@ -169,7 +169,7 @@ class _ScriptCalls:
     def guarded(self, function: ScriptFunction) -> ScriptFunction:
         """Wrap ``function`` so a call still running when the script ends is cancelled."""
 
-        async def call(*args: object, **kwargs: object) -> str:
+        async def call(*args: object, **kwargs: object) -> object:
             if self._ended:
                 raise RuntimeError("The script has ended")
             with anyio.CancelScope() as scope:

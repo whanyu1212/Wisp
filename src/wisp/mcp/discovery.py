@@ -19,6 +19,7 @@ from typing import Protocol, runtime_checkable
 
 from wisp.tool_types import ToolSafety
 from wisp.tools.base import Tool, ToolArguments, ToolInputSchema, ToolPromptMetadata
+from wisp.tools.codemode.result_types import script_receives
 from wisp.tools.context import ToolContext
 from wisp.tools.result import ToolError, ToolResult
 from wisp.tools.truncation import truncate_text
@@ -299,15 +300,22 @@ class McpDescribeTool:
                 retryable=True,
                 recovery_hint=f"Find the tool's name with {MCP_SEARCH}.",
             )
-        text = "\n".join(
-            [
-                f"{entry.name} (server {entry.server}"
-                f"{', disconnected' if not entry.connected else ''})",
-                entry.tool.description,
-                "Input schema: "
-                + json.dumps(entry.tool.input_schema, ensure_ascii=False, separators=(",", ":")),
-            ]
-        )
+        lines = [
+            f"{entry.name} (server {entry.server}"
+            f"{', disconnected' if not entry.connected else ''})",
+            entry.tool.description,
+            "Input schema: "
+            + json.dumps(entry.tool.input_schema, ensure_ascii=False, separators=(",", ":")),
+        ]
+        output_schema = getattr(entry.tool, "output_schema", None)
+        if isinstance(output_schema, dict):
+            lines.append(
+                "Output schema: "
+                + json.dumps(output_schema, ensure_ascii=False, separators=(",", ":"))
+            )
+            if (receives := script_receives(entry.name, output_schema)) is not None:
+                lines.append(receives)
+        text = "\n".join(lines)
         return _bounded(text, context)
 
 
