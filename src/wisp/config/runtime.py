@@ -70,7 +70,7 @@ class WispConfig(BaseModel):
     # the frontend, which waking is on for in the CLI and TUI and off in-process.
     wake_on_process_exit: bool | None = None
     # The experimental codemode tool, which needs the `codemode` extra: True or False
-    # when set, None to offer it when the run finds a read-only MCP tool on demand.
+    # when set, None to offer it when a script may call one of the run's MCP tools.
     codemode: bool | None = None
     # Offer the `spawn_agent` tool, which hands a read-only task to a subagent.
     subagents: bool = DEFAULT_SUBAGENTS_ENABLED

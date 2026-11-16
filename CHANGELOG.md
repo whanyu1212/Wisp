@@ -10,7 +10,19 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## Unreleased
+## 0.11.0 — Unreleased
+
+0.11.0 is a minor release on 0.10.1 about codemode and the terminal UI's view of background
+processes. Codemode scripts read up to 512 KiB of each tool result, get an MCP tool's structured
+result as a typed dict, and keep the calls that succeeded with `gather_settled`. With `codemode`
+unset, codemode is offered whenever a script may call one of the run's MCP tools, sent directly
+or found on demand. `/mcp` shows which tools are read-only and can mark those a server hints are
+read-only. A strip under the composer lists running background processes, and the side panel
+shows a process's output in place. That adds three commands, `get_processes`,
+`get_process_output` and `mark_mcp_tools_read_only`, two events, `rpc.processes` and
+`rpc.process_output`, and required fields in `rpc.codemode` and the MCP server snapshots. Sessions
+keep `schema_version` 6, so 0.10.1 opens sessions 0.11.0 wrote; no handshake, settings,
+credential, or trust format changes. The backend and frontend must come from the same release.
 
 ### Tools
 
@@ -130,8 +142,8 @@ this policy.
   among `tool_names`, in the same order, that the server's `tool_safety` marked `"read"` when it
   last started, and `read_only_hint_tool_names`: those the server itself said were read-only and
   `tool_safety` left unset.
-- `mark_mcp_tools_read_only` (`RpcClient.mark_mcp_tools_read_only`) adds a server's hinted tools
-  to its user-level `tool_safety` as `"read"`, then restarts MCP servers. It saves nothing unless
+- `mark_mcp_tools_read_only` (`RpcController.mark_mcp_tools_read_only`) adds a server's hinted
+  tools to its user-level `tool_safety` as `"read"`, then restarts MCP servers. It saves nothing unless
   every named tool is still hinted by the running server, none has a `tool_safety` entry, and the
   saved server is still the one that started.
 

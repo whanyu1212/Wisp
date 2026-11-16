@@ -116,6 +116,33 @@ with `write_constraint`, under the exception below. Tool behavior changes are li
 `bash` runs commands in bash rather than `/bin/sh`, and that the read-only file tools follow
 symbolic links whose targets stay inside the workspace.
 
+## Wisp 0.11 compatibility
+
+0.11.0 reads every session 0.10.x wrote, and 0.10.1 opens sessions 0.11.0 wrote. The session
+`schema_version` stays 6, and nothing new is persisted: a codemode script's structured results
+reach no event or session.
+
+Settings, credential, and trust formats are unchanged. Marking a server's hinted tools read-only
+in `/mcp` adds `"read"` entries to that server's user-level `tool_safety`, which earlier releases
+read as before. A `tui_keybindings` entry for the new `panel.background` action is rejected by
+0.10.x as an unknown action.
+
+Commands and events gain members and fields:
+
+- the `get_processes`, `get_process_output` and `mark_mcp_tools_read_only` commands;
+- the `rpc.processes` and `rpc.process_output` events;
+- `mcp_tools` and `scriptable_mcp_tools` in `rpc.codemode`;
+- `read_only_tool_names` and `read_only_hint_tool_names` in MCP server snapshots.
+
+All of them are listed in the [changelog](https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md).
+A 0.10 reader rejects them, so the backend and every frontend must be the same release, and
+external RPC clients should use the 0.11.0 schema bundle.
+
+The supported Python API gains `RpcController.get_processes()`, `get_process_output()` and
+`mark_mcp_tools_read_only()`, and `ToolResult` gains an optional `structured` value.
+With `WispConfig.codemode` left at `None`, codemode is now offered whenever a script may call one
+of the run's MCP tools, not only when they are found on demand.
+
 ## Wisp 0.10 compatibility
 
 0.10.0 reads every session 0.9.x wrote, and 0.9.2 opens sessions 0.10.0 wrote. The session
