@@ -11,7 +11,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::context_split::{Split, abbreviated};
-use crate::git_diff_view::EditCard;
 use crate::keybindings::{Action as KeyAction, Bindings};
 use crate::reducer::UiState;
 use crate::reducer::git_diff::{GitDiff, GitDiffEdit, GitDiffSnapshot};
@@ -160,9 +159,6 @@ struct Cursor {
 pub(crate) enum Target {
     /// `/diff`, at this file when one is named.
     Diff(Option<String>),
-    /// The card of the session's latest edit or write call on a file, or `/diff` at
-    /// the file when that card is not in the transcript.
-    Edit(EditCard),
     Queue,
     Mcp,
     Skills,
@@ -739,8 +735,7 @@ struct FileRow {
     /// Whether line counts are known: an untracked file, or one Git could not read,
     /// shows none.
     counted: bool,
-    /// The session's latest edit or write call on the file; `None` when the file
-    /// changed only outside this session.
+    /// The session's latest recorded edit or write call on the file, if known.
     edit: Option<GitDiffEdit>,
 }
 
@@ -914,11 +909,10 @@ pub(crate) fn render(
     rows.action(0, PanelAction::Open(Target::Diff(None)));
     if let Some(summary) = &panel.files {
         for (index, file) in summary.rows.iter().enumerate() {
-            let target = match &file.edit {
-                Some(edit) => Target::Edit(EditCard::of(edit, &file.git_path)),
-                None => Target::Diff(Some(file.git_path.clone())),
-            };
-            rows.action(index + 1, PanelAction::Open(target));
+            rows.action(
+                index + 1,
+                PanelAction::Open(Target::Diff(Some(file.git_path.clone()))),
+            );
         }
         if summary.snapshot.files.len() > MAX_FILE_ROWS
             || (summary.rows.is_empty() && summary.snapshot.truncated)
@@ -1534,12 +1528,9 @@ fn file_lines(
             '?' => palette.muted,
             _ => palette.warning,
         });
-        // Once Wisp edited anything, every row gets the ◆ column, and a file it did
-        // not edit reads as muted with no counts: it changed outside this session.
-        let external = by_wisp > 0 && row.edit.is_none();
-        let counts = if external {
-            vec![Span::styled("not from Wisp", muted)]
-        } else if row.counted {
+        // The marker identifies a recorded edit; missing records do not establish
+        // who changed a file (for example, a shell command can edit it).
+        let counts = if row.counted {
             let mut counts = vec![Span::styled(
                 format!("+{}", row.additions),
                 Style::default().fg(palette.addition),
@@ -1565,13 +1556,8 @@ fn file_lines(
                 None => Span::raw("  "),
             });
         }
-        if external {
-            path.push(Span::styled(format!("{} ", row.status), muted));
-            path.push(Span::styled(clip_path(&row.path, path_room), muted));
-        } else {
-            path.push(Span::styled(format!("{} ", row.status), status_style));
-            path.push(Span::raw(clip_path(&row.path, path_room)));
-        }
+        path.push(Span::styled(format!("{} ", row.status), status_style));
+        path.push(Span::raw(clip_path(&row.path, path_room)));
         lines.push(spread(path, counts, width));
     }
     if count > MAX_FILE_ROWS {
@@ -1583,10 +1569,10 @@ fn file_lines(
     if partial {
         lines.push(Line::styled("partial: some files omitted", muted));
     }
-    // Only the overlay takes keys, so only it offers the jump.
+    // Only the overlay takes keys, so only it names Enter.
     if overlay && by_wisp > 0 {
         lines.push(spread(
-            vec![Span::styled("Enter jumps to the edit", muted)],
+            vec![Span::styled("Enter opens diff", muted)],
             vec![Span::styled("/diff", palette.keycap())],
             width,
         ));
@@ -2531,23 +2517,24 @@ mod tests {
         assert!(panel.contains("2 · /diff"), "{panel}");
         assert!(panel.contains("◆ M src/lib.rs"), "{panel}");
         assert!(panel.contains("  M src/other.rs"), "{panel}");
-        assert!(panel.contains("not from Wisp"), "{panel}");
+        let other = panel
+            .lines()
+            .find(|line| line.contains("src/other.rs"))
+            .unwrap();
+        assert!(other.contains("+1 −1"), "{other}");
+        assert!(!panel.contains("not from Wisp"), "{panel}");
         assert!(
             !panel.contains("Enter jumps"),
             "the docked panel takes no keys"
         );
-        assert!(overlay_text(&state).contains("Enter jumps to the edit"));
-        // Enter on the ◆ file jumps to its edit; on the other, it opens /diff.
+        assert!(overlay_text(&state).contains("Enter opens diff"));
+        // Every file opens its diff, including files with recorded edits.
         let mut panel = overlay(&state);
         focus_section(&mut panel, &state, Section::Files);
         panel.key(KeyCode::Down, &state);
         assert_eq!(
             panel.key(KeyCode::Enter, &state),
-            OverlayKey::Open(Target::Edit(EditCard {
-                call_id: "edit-1".into(),
-                entry_id: String::new(),
-                path: "src/lib.rs".into(),
-            }))
+            OverlayKey::Open(Target::Diff(Some("src/lib.rs".into())))
         );
         panel.key(KeyCode::Down, &state);
         assert_eq!(

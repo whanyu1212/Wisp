@@ -168,6 +168,7 @@ impl GitDiffView {
             {
                 self.selected = position;
                 self.active = self.rows[position].file.expect("a file row");
+                self.tree_focus = false;
             }
         }
     }
@@ -253,6 +254,7 @@ impl GitDiffView {
         // Only moving in the tree gives up the file `/diff` was opened at; switching
         // focus or changing how the diff reads keeps it for the snapshot on its way.
         if self.tree_focus
+            && !self.rows.is_empty()
             && matches!(
                 key,
                 KeyCode::Up
@@ -518,7 +520,7 @@ impl GitDiffView {
             right.extend(counts(added, deleted, palette));
             right.push(Span::styled(" · ", dim));
             match self.edited_by_wisp() {
-                0 => right.push(Span::styled("no Wisp edits this session", muted)),
+                0 => right.push(Span::styled("no recorded edits this session", muted)),
                 edited => right.extend([
                     Span::styled("◆", Style::default().fg(palette.primary)),
                     Span::styled(format!(" {edited} edited by Wisp"), muted),
@@ -635,7 +637,7 @@ impl GitDiffView {
             shown.resize(rows, Line::default());
             shown.push(Line::from(vec![
                 Span::styled(" ◆", Style::default().fg(palette.primary)),
-                Span::styled(" changed by a Wisp edit in this session", dim),
+                Span::styled(" recorded edit in this session", dim),
             ]));
         }
         shown
@@ -723,7 +725,7 @@ impl GitDiffView {
                 Span::styled(format!(" ({})", files.len()), dim),
             ];
             if by_wisp > 0 && !edited {
-                left.push(Span::styled(" · not from this session", dim));
+                left.push(Span::styled(" · no recorded edits", dim));
             }
             let (added, deleted) = self.totals(files);
             (left, counts(added, deleted, palette))
@@ -832,7 +834,7 @@ impl GitDiffView {
                     Span::styled(" · Enter jumps to the card", dim),
                 ]
             }
-            // The tree's folder labels and legend say what is not Wisp's.
+            // No recorded edit to name; the diff remains available.
             None => Vec::new(),
         };
         frame.render_widget(
@@ -1075,6 +1077,20 @@ mod tests {
     }
 
     #[test]
+    fn opened_file_shows_narrow_diff() {
+        let state = state_of(vec![
+            changed("a.rs", "first old\n", "first new\n"),
+            changed("b.rs", "target old\n", "target new\n"),
+        ]);
+        let mut view = GitDiffView::opened_at(Some("b.rs".into()));
+        let text = screen(&mut view, &state, &Transcript::default(), 80, 24);
+        assert!(text.contains("target old"), "{text}");
+        assert!(text.contains("target new"), "{text}");
+        assert!(!text.contains("first old"), "{text}");
+        assert!(text.contains("focus: diff"), "{text}");
+    }
+
+    #[test]
     fn opened_file_survives_refresh() {
         let snapshot = |generation| {
             Some(Arc::new(GitDiffSnapshot {
@@ -1102,7 +1118,13 @@ mod tests {
         let mut view = GitDiffView::opened_at(Some("b.rs".into()));
         state.snapshot = None;
         view.sync(&state);
-        for key in [KeyCode::Char('s'), KeyCode::Char('c'), KeyCode::Down] {
+        for key in [
+            KeyCode::Char('s'),
+            KeyCode::Char('c'),
+            KeyCode::Tab,
+            KeyCode::Down,
+            KeyCode::Enter,
+        ] {
             view.key(key);
         }
         state.snapshot = snapshot(4);
@@ -1110,6 +1132,7 @@ mod tests {
         assert_eq!(view.rows[view.selected].key, "b.rs");
         // Once the user moves in the tree, a later snapshot no longer pulls the
         // selection back.
+        view.key(KeyCode::Tab);
         view.key(KeyCode::Down);
         state.snapshot = snapshot(5);
         view.sync(&state);
@@ -1262,21 +1285,14 @@ mod tests {
         assert!(text.contains("◆ 1 edited by Wisp"), "{text}");
         assert!(text.contains("  ◆ M codex.py"), "{text}");
         assert!(text.contains("    M retry.py"), "{text}");
-        assert!(
-            text.contains("▾ site/ (1) · not from this session"),
-            "{text}"
-        );
+        assert!(text.contains("▾ site/ (1) · no recorded edits"), "{text}");
         assert!(!text.contains("src/ (2) ·"), "{text}");
         assert!(
             text.contains("◆ edited in turn 2 by Edit · Enter jumps to the card"),
             "{text}"
         );
-        assert!(
-            text.contains(" ◆ changed by a Wisp edit in this session"),
-            "{text}"
-        );
+        assert!(text.contains(" ◆ recorded edit in this session"), "{text}");
         // In the diff pane, Enter on a ◆ file names its latest edit's card.
-        view.key(KeyCode::Tab);
         assert_eq!(
             view.key(KeyCode::Enter),
             Some(EditCard {

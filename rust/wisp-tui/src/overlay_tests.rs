@@ -1119,6 +1119,92 @@ fn edited_snapshot() -> std::sync::Arc<reducer::git_diff::GitDiffSnapshot> {
 }
 
 #[tokio::test]
+async fn changed_file_click_shows_diff() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+
+    for (width, retained_card) in [(80, false), (160, true)] {
+        let (writer, mut receiver) = mpsc::channel(16);
+        let mut ui = base();
+        ui.mouse_enabled = true;
+        if retained_card {
+            finished_edit(&mut ui, "edit-1");
+        }
+        let mut snapshot = (*edited_snapshot()).clone();
+        snapshot.files[0].before = "old contents\n".into();
+        snapshot.files[0].after = "new contents\n".into();
+        let snapshot = std::sync::Arc::new(snapshot);
+        ui.state.git_diff.snapshot = Some(snapshot.clone());
+        ui.state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        ui.state.view_status = ViewStatus::Running;
+        let active_command = ui.state.current_command.clone();
+        let draft = ui.editor.text().to_owned();
+        let mut terminal = Terminal::new(TestBackend::new(width, 40)).unwrap();
+        draw(&mut ui, &mut terminal);
+        if !ui.side_panel.docked() {
+            ui.side_panel.focus();
+            draw(&mut ui, &mut terminal);
+        }
+        let buffer = terminal.backend().buffer();
+        let panel = if ui.side_panel.docked() {
+            ui.side_panel.split(buffer.area).1
+        } else {
+            side_panel::overlay_area(buffer.area)
+        };
+        let row = (panel.y..panel.bottom())
+            .find(|row| {
+                (panel.x..panel.right())
+                    .map(|column| buffer[(column, *row)].symbol())
+                    .collect::<String>()
+                    .contains("src/lib.rs")
+            })
+            .expect("changed file row");
+        ui.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: panel.x + 4,
+                row,
+                modifiers: KeyModifiers::NONE,
+            },
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ui.active_overlay(), Some(OverlayKind::GitDiff));
+        assert!(ui.notice.is_none(), "{:?}", ui.notice);
+        assert_eq!(ui.editor.text(), draft);
+        assert_eq!(ui.state.current_command, active_command);
+        // Opening the view requests a fresh snapshot; render its correlated result.
+        let request = command(&mut receiver);
+        assert_eq!(request["type"], "get_git_diff");
+        let command_id = request["id"].as_str().unwrap().to_owned();
+        for event in [
+            BackendEvent::GitDiffReported {
+                command_id: command_id.clone(),
+                snapshot: Ok(snapshot),
+            },
+            BackendEvent::CommandFinished {
+                command_id,
+                command_type: "get_git_diff".into(),
+                ok: true,
+                error: None,
+            },
+        ] {
+            ui.dispatch(UiAction::BackendEvent(event), &writer, 8192)
+                .await
+                .unwrap();
+        }
+        draw(&mut ui, &mut terminal);
+        let shown = text(terminal.backend().buffer());
+        assert!(shown.contains("old contents"), "{shown}");
+        assert!(shown.contains("new contents"), "{shown}");
+    }
+}
+
+#[tokio::test]
 async fn diff_enter_jumps_to_card() {
     let (writer, _receiver) = mpsc::channel(16);
     let mut terminal = Terminal::new(TestBackend::new(160, 32)).unwrap();
@@ -1161,12 +1247,12 @@ async fn missing_card_opens_diff() {
     let (writer, _receiver) = mpsc::channel(16);
     let mut ui = base();
     ui.state.git_diff.snapshot = Some(edited_snapshot());
-    ui.open_from_panel(
-        side_panel::Target::Edit(git_diff_view::EditCard {
+    ui.jump_to_edit(
+        git_diff_view::EditCard {
             call_id: "gone".into(),
             entry_id: String::new(),
             path: "src/lib.rs".into(),
-        }),
+        },
         &writer,
         8192,
     )
@@ -1243,12 +1329,12 @@ async fn jump_opens_folded_group() {
     let (_, members) = card_run(&ui.state.transcript, card).expect("edits group");
     assert!(!ui.transcript_row_cache.fold().is_run_expanded(&members));
     draw(&mut ui, &mut terminal);
-    ui.open_from_panel(
-        side_panel::Target::Edit(git_diff_view::EditCard {
+    ui.jump_to_edit(
+        git_diff_view::EditCard {
             call_id: "edit-1".into(),
             entry_id: String::new(),
             path: "src/lib.rs".into(),
-        }),
+        },
         &writer,
         8192,
     )
@@ -1344,12 +1430,12 @@ async fn jump_follows_result_entry() {
     let first = finished_edit(&mut ui, "edit-a");
     let second = finished_edit(&mut ui, "edit-b");
     ui.state.transcript.add_live_origin(second, "entry-b");
-    ui.open_from_panel(
-        side_panel::Target::Edit(git_diff_view::EditCard {
+    ui.jump_to_edit(
+        git_diff_view::EditCard {
             call_id: "edit-a".into(),
             entry_id: "entry-b".into(),
             path: "src/lib.rs".into(),
-        }),
+        },
         &writer,
         8192,
     )
