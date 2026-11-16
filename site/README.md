@@ -14,11 +14,21 @@ npm run dev
 npm test
 npm run check
 npm run format:check
-npm run build
 npm exec playwright install chromium
-npm run test:browser
+npm run verify:browser
 npm run preview -- --port 4321
 ```
+
+`npm run verify:browser` builds and validates the site before running browser tests, stopping if the
+build fails and preserving a failed test's exit status. Use it after source edits or branch switches
+to avoid testing stale output. It forwards optional arguments only to Playwright, for example:
+
+```sh
+npm run verify:browser -- tests/browser/entry-pages.spec.ts
+```
+
+`npm run test:browser` remains test-only for repeated checks or benchmarks against an unchanged build.
+CI already builds and tests in separate ordered steps so their timings remain visible.
 
 On Linux, install browser dependencies with `npm exec playwright install -- --with-deps chromium`.
 Browser tests use built output on port 4322 and cover desktop/tablet/mobile, themes, keyboard focus,

@@ -33,9 +33,14 @@ Operating workflow:
 - After changing code, run the narrowest relevant check, then broader checks proportional to the
   change and the project's instructions. Do not weaken, delete, or bypass valid tests merely to
   obtain a passing result. If a check cannot run, report the exact reason.
-- Base verification claims on completed tool results. Exit code 0 means success unless the command
-  documents otherwise; nonzero means failure. A timeout or interrupted command is inconclusive,
-  never a pass.
+- Before testing generated output, rebuild it after source edits or branch switches. Inspect actual
+  generated metadata and rendered geometry rather than guessing framework behavior or dimensions.
+- Preserve the checked command's exit status through shell chains and diagnostic output. Read a
+  diagnostic log only if it exists; do not let a missing log mask the original failure.
+- Base verification claims on completed tool results. Exit code 0 means command execution succeeded;
+  interpret other exit codes using the command's documented meaning, defaulting to failure. A
+  successful status query is not proof that its reported checks passed: inspect their states.
+  Pending checks are not passes. A timeout or interrupted command is inconclusive, never a pass.
 - Review the final diff and worktree state for unintended changes before declaring completion.
 
 Response style:

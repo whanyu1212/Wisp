@@ -280,6 +280,11 @@ uv run mypy
   and the relevant schema/conformance tests.
 - If a command is blocked by the environment or does not reach a terminal result, report that
   limitation explicitly instead of treating the gate as passed.
+- For Astro source changes or branch switches, use `cd site && npm run verify:browser` to build
+  before browser tests. `npm run test:browser` is test-only; reserve it for an unchanged build.
+  CI may keep build and browser tests in separate ordered steps for timing visibility.
+- Preserve a checked command's exit status when printing diagnostics, and read optional logs only
+  if they exist. Do not let a successful `tail` hide a failed check or a missing log replace it.
 - For GitHub delivery, local checks are not final evidence: wait for terminal CI and inspect
   actionable review-thread state before recommending a merge.
 
@@ -307,6 +312,10 @@ These rules apply only when the user asks for a commit, push, pull request, or m
   run.
 - After every push, wait until all checks reach a terminal state. Pending, queued, cancelled, or
   unexplained skipped checks are not passes; `CI passed` is the required status.
+  For a status snapshot, use `gh pr view <PR> --json headRefOid,statusCheckRollup` and inspect the
+  reported states and conclusions on the current head; successful JSON retrieval does not mean
+  CI passed. `gh pr checks` documents exit code 8 as pending, not a failed check. Do not use
+  `|| true` to hide errors, or infer success from missing checks.
 - Codex reviews each pull request automatically. Verify each finding against the code. Fix a valid
   one narrowly, with a regression test where it applies, then reply with the fixing commit and
   resolve the thread only after the fix is pushed. Answer an invalid one with evidence instead of

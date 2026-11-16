@@ -14,6 +14,7 @@
     "build": "astro build && pagefind --site dist && node --import tsx scripts/check-output.ts",
     "preview": "astro preview --host 127.0.0.1",
     "test:browser": "playwright test",
+    "verify:browser": "npm run build && npm run test:browser --",
     "format:check": "prettier --check src scripts tests astro.config.mjs playwright.config.ts package.json tsconfig.json README.md",
     "test:deployed": "node --import tsx scripts/smoke-deployed.ts"
   },
