@@ -467,7 +467,9 @@ def test_in_process_sdk_shutdown_cancels_backpressured_stream(
         await controller.prompt("burst", command_id="prompt-1")
 
         event_output = controller._in_process_transport._event_output
-        with anyio.fail_after(1):
+        # Setup, not the behavior under test: streaming hundreds of events can take
+        # over a second on a loaded machine, so this only catches a run that stalls.
+        with anyio.fail_after(10):
             while event_output._buffered_event_count() < sdk_module._STREAM_EVENT_BUFFER_CAPACITY:
                 await anyio.sleep(0.01)
         with anyio.fail_after(0.5):
