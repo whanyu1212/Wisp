@@ -207,8 +207,8 @@ pub struct GitDiffFile {
     pub before: String,
     pub after: String,
     pub notice: String,
-    /// The session's own edit and write calls on this file, oldest first. Empty when
-    /// every change came from outside this session.
+    /// Recorded edit and write calls on this file, oldest first. Shell changes and
+    /// older history can lack these records, so an empty list does not prove origin.
     #[serde(default)]
     pub edits: Vec<GitDiffEdit>,
 }

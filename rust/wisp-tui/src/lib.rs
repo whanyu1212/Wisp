@@ -1444,9 +1444,27 @@ impl LiveUi {
                 after_entry_id: Some(_)
             }
         );
-        if let Some(notice) =
-            self.reduced_action_frame_limit_notice(&action, "session command", limit)?
-        {
+        let frame_limit_notice =
+            match self.reduced_action_frame_limit_notice(&action, "session command", limit) {
+                Err(Error::Reducer(
+                    error @ (reducer::ReduceError::PromptAlreadyActive(_)
+                    | reducer::ReduceError::SessionOperationActive),
+                )) if !startup => {
+                    // Busy user actions are recoverable; startup failures still stop startup.
+                    self.notice = Some(
+                        if matches!(error, reducer::ReduceError::PromptAlreadyActive(_)) {
+                            "Wait for the current run to finish before using session commands."
+                        } else {
+                            "Wait for the current session operation to finish."
+                        }
+                        .into(),
+                    );
+                    self.render_pending = true;
+                    return Ok(LoopControl::Continue);
+                }
+                result => result?,
+            };
+        if let Some(notice) = frame_limit_notice {
             if startup {
                 return Err(Error::FrameTooLarge { limit });
             }
@@ -4088,7 +4106,6 @@ impl LiveUi {
                 self.dispatch(UiAction::SetGitDiffOpen(true), writer, limit)
                     .await
             }
-            side_panel::Target::Edit(card) => self.jump_to_edit(card, writer, limit).await,
             side_panel::Target::Queue => {
                 self.queue_view = Some(queue_view::QueueView::default());
                 self.dispatch(UiAction::RefreshQueueState, writer, limit)
@@ -10954,6 +10971,155 @@ mod tests {
         assert!(picker.state.selected_session.is_none());
         assert!(picker.state.session_operation.is_none());
         assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn recent_turns_preserves_running_chat() {
+        use crossterm::event::{MouseButton, MouseEventKind};
+
+        let mut ui = LiveUi {
+            mouse_enabled: true,
+            ..LiveUi::default()
+        };
+        ui.state.selected_session = Some(reducer::SessionIdentity {
+            session_id: "active".into(),
+            session_path: "/sessions/active.jsonl".into(),
+            session_name: None,
+        });
+        ui.state.transcript.append_prompt("previous turn".into());
+        ui.state
+            .transcript
+            .complete_message(1, "previous reply".into());
+        ui.state.transcript.append_prompt("working turn".into());
+        ui.state.transcript.start_message(2);
+        ui.state.current_command = Some(ActiveCommand {
+            id: "prompt-1".into(),
+            command_type: ActiveCommandType::Prompt,
+        });
+        ui.state.view_status = ViewStatus::Running;
+        ui.state.interaction_status = InteractionStatus::Running;
+        ui.editor.insert_paste("keep this draft");
+        let command = ui.state.current_command.clone();
+        let (writer, mut receiver) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut terminal = Terminal::new(TestBackend::new(200, 60)).unwrap();
+        ui.draw(
+            &mut terminal,
+            &ConnectionInfo {
+                backend_version: "0.11.0".into(),
+            },
+        )
+        .unwrap();
+        let buffer = terminal.backend().buffer();
+        let row = (0..buffer.area.height)
+            .find(|row| {
+                (0..buffer.area.width)
+                    .map(|column| buffer[(column, *row)].symbol())
+                    .collect::<String>()
+                    .contains("Recent turns")
+            })
+            .expect("recent turns row");
+        let panel = ui.side_panel.split(buffer.area).1;
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: panel.x + 4,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(
+            ui.handle_mouse(click, &writer, MAX_APPLICATION_FRAME_BYTES)
+                .await
+                .unwrap(),
+            LoopControl::Continue
+        );
+        assert_eq!(
+            ui.notice.as_deref(),
+            Some("Wait for the current run to finish before using session commands.")
+        );
+        assert_eq!(ui.state.current_command, command);
+        assert!(ui.state.session_operation.is_none());
+        assert!(!ui.state.cancel_requested);
+        assert_eq!(ui.editor.text(), "keep this draft");
+        assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
+
+        ui.dispatch(
+            UiAction::BackendEvent(BackendEvent::MessageDelta {
+                turn: 2,
+                delta: "still working".into(),
+                content_kind: reducer::MessageContentKind::Text,
+            }),
+            &writer,
+            MAX_APPLICATION_FRAME_BYTES,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ui.state.current_command, command);
+        assert!(
+            ui.state
+                .transcript
+                .entries()
+                .iter()
+                .any(|entry| entry.display_content().contains("still working"))
+        );
+
+        ui.state.current_command = None;
+        ui.handle_mouse(click, &writer, MAX_APPLICATION_FRAME_BYTES)
+            .await
+            .unwrap();
+        let WriterMessage::Frame { payload, .. } = receiver.try_recv().unwrap() else {
+            panic!("tree request expected");
+        };
+        let request: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(request["type"], "get_session_tree");
+        assert!(ui.notice.is_none());
+        assert_eq!(ui.editor.text(), "keep this draft");
+    }
+
+    #[tokio::test]
+    async fn session_commands_tolerate_busy_operations() {
+        let mut ui = LiveUi::default();
+        ui.state.selected_session = Some(reducer::SessionIdentity {
+            session_id: "active".into(),
+            session_path: "/sessions/active.jsonl".into(),
+            session_name: None,
+        });
+        ui.state.session_operation = Some(reducer::SessionOperation::LoadingTree {
+            command_id: "tree-1".into(),
+            after_entry_id: None,
+            page: None,
+            completion: None,
+        });
+        ui.editor.insert_paste("keep this draft");
+        let (writer, mut receiver) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        assert_eq!(
+            ui.open_from_panel(
+                side_panel::Target::Tree,
+                &writer,
+                MAX_APPLICATION_FRAME_BYTES
+            )
+            .await
+            .unwrap(),
+            LoopControl::Continue
+        );
+        assert_eq!(
+            ui.notice.as_deref(),
+            Some("Wait for the current session operation to finish.")
+        );
+        assert_eq!(ui.editor.text(), "keep this draft");
+        assert!(matches!(
+            &ui.state.session_operation,
+            Some(reducer::SessionOperation::LoadingTree { command_id, .. }) if command_id == "tree-1"
+        ));
+        assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
+
+        assert!(matches!(
+            ui.dispatch_session_action(
+                UiAction::StartupHydration,
+                &writer,
+                MAX_APPLICATION_FRAME_BYTES
+            )
+            .await,
+            Err(Error::Reducer(reducer::ReduceError::SessionOperationActive))
+        ));
     }
 
     #[tokio::test]
