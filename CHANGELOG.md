@@ -10,7 +10,14 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## Unreleased
+## 0.12.0 — Unreleased
+
+0.12.0 adds `/reload` for supported settings while a session is idle, preserves the cause of
+compaction failures, and fixes recent-turn navigation and changed-file diffs in the terminal UI.
+The shared RPC/SDK contract gains the `reload` command and `rpc.settings.reloaded` event.
+Session files keep `schema_version` 6; the backend and every frontend must use the same release.
+
+### Settings and Python API
 
 - `/reload` manually reloads supported user/trusted-project settings while the session is idle.
   Provider/model/effort, context reserve, automatic compaction, web search, codemode, and subagent
@@ -20,6 +27,30 @@ this policy.
   restart-only. The shared RPC/SDK `reload` command reports `rpc.settings.reloaded`, including
   field-name change categories and public session state, without exposing raw settings or secrets.
   Sessions retain schema version 6; no code, instruction, or environment-file hot reload is added.
+- `RpcController.reload()` exposes the same operation to Python clients. Reload reports the
+  effective model when the setting uses a provider's default, and refreshes the TUI's codemode
+  state when the side panel or `/codemode` picker is open. An explicit codemode or subagent
+  choice survives reload even when it equals the current file setting. (#1048, #1051)
+
+### Compaction
+
+- A failed compaction summary keeps the provider's error message and diagnostics instead
+  of replacing them with a generic incomplete-summary error. Connection failures remain
+  distinguishable from cancellation and other compaction failures. (#1049)
+
+### Terminal UI
+
+- Clicking Recent turns while a run is active reports a recoverable busy notice instead of
+  crashing the TUI, preserving the active command and draft. (#1050)
+- Changed-file cards request the selected file's diff directly, even when its transcript card
+  is unavailable. Diff labels distinguish recorded edits from files with no recorded edits,
+  instead of claiming that unrecorded changes came from outside the session. (#1050)
+
+### Documentation and verification
+
+- The website shows real session screenshots, restores their surrounding context, and clarifies
+  Python installation. Browser checks rebuild first; CI runs isolated browser tests across four
+  workers. (#1044–#1047)
 
 <!-- Keeps links to the pre-release "0.11.0 — Unreleased" heading working. -->
 <a id="0110--unreleased"></a>
