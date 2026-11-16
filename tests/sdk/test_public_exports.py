@@ -93,6 +93,7 @@ _EXPECTED_RPC_EXPORTS = {
     "SetMcpServerEnabledCommand",
     "MarkMcpToolsReadOnlyCommand",
     "ReconnectMcpCommand",
+    "ReloadCommand",
     "LoginMcpServerCommand",
     "LogoutMcpServerCommand",
     "PreviewMcpSnippetCommand",

@@ -23,6 +23,7 @@ from typing_extensions import TypeAliasType
 from wisp.coding import CodingSession, resolve_coding_session_configuration
 from wisp.coding.prompt import resolve_project_context_root
 from wisp.config.runtime import WispConfig
+from wisp.config.settings import resolve_settings
 from wisp.events import (
     ErrorEvent,
     McpStatusUpdated,
@@ -57,6 +58,7 @@ from wisp.rpc.execution import (
 from wisp.rpc.handlers.inspection import rpc_skill_catalog_snapshot, rpc_workspace_report
 from wisp.rpc.handlers.mcp import RpcMcpServers, RpcToolSelection, rpc_mcp_status_snapshot
 from wisp.rpc.handlers.project_files import RpcProjectFiles
+from wisp.rpc.handlers.reload import RpcSettingsReloader
 from wisp.rpc.session.process_exits import ProcessExitNotices
 from wisp.rpc.working_directory import (
     DirectoryMove,
@@ -653,7 +655,9 @@ class RpcHost:
         tool_selection: RpcToolSelection | None = None,
         working_directory: RpcWorkingDirectory | None = None,
         process_exits: ProcessExitNotices | None = None,
+        settings_reloader: RpcSettingsReloader | None = None,
     ) -> None:
+        self.settings_reloader = settings_reloader
         self.working_directory = working_directory
         self._process_exits = process_exits
         self.runtime = runtime
@@ -929,7 +933,18 @@ class RpcHost:
             completion_event_renderer=render_completion_events,
             queued_message_rejection=CodingSession.queued_message_rejection,
         )
+        settings_reloader = None
+        if config_overrides is not None:
+            reload_settings = await anyio.to_thread.run_sync(
+                partial(
+                    resolve_settings, project_dir=project_context_root, trust_project=agent.trusted
+                )
+            )
+            settings_reloader = RpcSettingsReloader(
+                project_configuration, reload_settings.tui_keybindings
+            )
         host = cls(
+            settings_reloader=settings_reloader,
             runtime=runtime,
             sessions=sessions,
             agent=agent,
@@ -1005,6 +1020,7 @@ class RpcHost:
                 defer_until_after_flush=after_flush.append,
                 outbound_frame_limit=self._outbound_frame_limit,
                 change_directory=self._change_directory,
+                settings_reloader=self.settings_reloader,
             )
             try:
                 result = await executor.dispatch_parsed(command, running_command)

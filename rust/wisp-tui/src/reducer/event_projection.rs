@@ -88,6 +88,19 @@ impl BackendEvent {
         let value = event.to_value()?;
         let event_type = string_field(&value, "<unknown>", "type")?;
         match event_type.as_str() {
+            "rpc.settings.reloaded" => {
+                let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
+                let report = serde_json::from_value(value.clone()).map_err(|_| {
+                    EventProjectionError::InvalidField {
+                        event_type: event_type.clone(),
+                        field: "state",
+                    }
+                })?;
+                return Ok(Self::SettingsReloaded {
+                    command_id,
+                    report: Box::new(report),
+                });
+            }
             "rpc.subagents" => {
                 let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
                 let subagents = discovery_report(&value["subagents"], || {

@@ -28,6 +28,7 @@ pub(crate) mod git_diff;
 mod model_selection;
 pub(crate) mod project_files;
 pub mod queue_management;
+mod reload;
 mod session_catalog;
 mod working_directory;
 use model_selection::ModelOperation;
@@ -813,6 +814,7 @@ pub struct UiState {
     search_change: Option<(String, bool)>,
     /// The pending `/cd` command's id.
     directory_change: Option<String>,
+    settings_reload: Option<(String, Option<Box<reload::ReloadReport>>)>,
     mode_change: Option<PendingModeChange>,
     pub last_session: Option<String>,
     pub selected_session: Option<SessionIdentity>,
@@ -919,6 +921,7 @@ impl UiState {
             search_read: None,
             search_change: None,
             directory_change: None,
+            settings_reload: None,
             mode_change: None,
             last_session: None,
             selected_session: None,
@@ -1139,6 +1142,7 @@ pub enum CommandKind {
     GetState,
     Configure,
     ChangeDirectory,
+    Reload,
     CancelProcess,
     BackgroundToolCall,
     GetProcesses,
@@ -1189,6 +1193,7 @@ impl CommandKind {
             Self::GetState => "get_state",
             Self::Configure => "configure",
             Self::ChangeDirectory => "change_directory",
+            Self::Reload => "reload",
             Self::CancelProcess => "cancel_process",
             Self::BackgroundToolCall => "background_tool_call",
             Self::GetProcesses => "get_processes",
@@ -1352,6 +1357,10 @@ pub enum BackendEvent {
         request_id: String,
         project_path: String,
     },
+    SettingsReloaded {
+        command_id: String,
+        report: Box<reload::ReloadReport>,
+    },
     ProjectConfigApplied {
         provider: String,
         model: Option<String>,
@@ -1507,6 +1516,7 @@ pub enum UiAction {
     ConfigureAutoCompaction(bool),
     Search(Option<bool>),
     ChangeDirectory(String),
+    ReloadSettings,
     /// `/kill`: stop a background process, by its `/ps` number or its id.
     StopBackgroundProcess(String),
     /// Move the newest running foreground shell command to the background.
@@ -1711,6 +1721,7 @@ pub fn reduce(
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ReduceError> {
     let mut effects = match action {
+        UiAction::ReloadSettings => Ok(reload::start(state, ids)?),
         UiAction::LoadSkills => Ok(discovery::load_skills(state, ids)?),
         UiAction::LoadMcpStatus => Ok(discovery::load_mcp(state, ids)?),
         UiAction::PreviewMcpSnippet(snippet) => {
@@ -5465,6 +5476,7 @@ fn handle_backend_event(
         }
         BackendEvent::MessageDelta { .. }
         | BackendEvent::ToolExecutionEnded { .. }
+        | BackendEvent::SettingsReloaded { .. }
         | BackendEvent::Other { .. } => Ok(Vec::new()),
         BackendEvent::MessageCompleted {
             turn,
@@ -5770,6 +5782,9 @@ fn observe_backend_event(
         return Ok(Some(effects));
     }
     // Before discovery, which drops a permissions report it did not ask for.
+    if let Some(effects) = reload::observe(state, event, ids)? {
+        return Ok(Some(effects));
+    }
     if let Some(effects) = working_directory::observe(state, event) {
         return Ok(Some(effects));
     }

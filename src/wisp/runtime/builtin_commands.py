@@ -107,6 +107,13 @@ def builtin_command_descriptors() -> tuple[CommandDescriptor, ...]:
             order=28,
         ),
         CommandDescriptor(
+            name="reload",
+            title="Reload settings",
+            description="Reload supported settings files while idle; report restart-only changes",
+            category=CommandCategory.configuration,
+            order=28,
+        ),
+        CommandDescriptor(
             name="permissions",
             title="Permissions",
             description="View or save this project's permission mode",

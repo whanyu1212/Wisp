@@ -154,6 +154,7 @@ request. Completion and results arrive through `events()`.
 | `init` | `(*, command_id: str \| None = None)` | Initialize project guidance |
 | `compact` | `(instructions: str \| None = None, *, command_id: str \| None = None)` | Compaction events |
 | `configure` | `(*, provider=None, model=None, effort=None, clear_effort=False, auto_compaction_enabled=None, mode=None, command_id=None)` | Configuration events and terminal status |
+| `reload` | `(*, command_id: str \| None = None)` | Idle-only file-settings reload; `RpcSettingsReloaded` lists applied, unchanged, overridden, and restart-required fields and the public session state. Invalid settings keep the current configuration; explicit-config embedded hosts cannot reload file settings |
 | `get_model_catalog` | `(*, command_id: str \| None = None)` | `RpcModelCatalogReported` |
 | `get_connection_catalog` | `(*, command_id: str \| None = None)` | `RpcConnectionCatalogReported` |
 | `store_api_key` | `(provider: str, api_key: str, *, command_id: str \| None = None)` | Terminal `RpcCommandFinished`; refreshed `RpcConnectionCatalogReported` when available |

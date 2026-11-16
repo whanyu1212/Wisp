@@ -699,6 +699,11 @@ pub mod commands {
             deserialize(serde_json::json!({"type": "get_project_files", "id": id}))
         }
 
+        /// Reload supported file settings only when the backend is idle.
+        pub fn reload(id: &str) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({"type": "reload", "id": id}))
+        }
+
         /// Read current runtime state without becoming the active command.
         pub fn get_state(id: &str) -> Result<Self, super::ProtocolDecodeError> {
             deserialize(serde_json::json!({"type": "get_state", "id": id}))

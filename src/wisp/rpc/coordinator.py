@@ -560,6 +560,14 @@ class RpcCoordinator:
             return False
         selected_type = command.command_type
         running = self.running_command
+        if selected_type == "reload" and (
+            running is not None
+            or self.auxiliary_commands
+            or self.queued_commands
+            or self.pending_prompt_queue_commands
+        ):
+            await reject(command, "Settings reload is idle-only; wait for active work to finish")
+            return False
         if selected_type == "shutdown":
             self._cancel_discovery()
         if selected_type in {"get_project_files", "get_git_diff"} and (

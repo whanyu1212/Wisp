@@ -51,6 +51,25 @@ until a fresh catalog succeeds.
 
 
 
+## Reloading settings
+
+Edit `~/.wisp/settings.json` or your trusted project's `.wisp/settings.json`, then run `/reload`
+while Wisp is idle. It reports **Applied**, **Unchanged**, **Retained session choices**, and
+**Restart required** fields. A busy session rejects reload immediately rather than applying it
+later. Invalid or unreadable settings leave the active configuration unchanged; a missing settings
+file restores that layer's defaults.
+
+Reload supports provider, model, effort, context reserve, automatic compaction, web search,
+codemode, and subagent settings. Explicit choices made in this session (for example `/model`,
+`/codemode`, or `/subagents`) survive reload. CLI and process-environment values retain their normal
+precedence, and project settings are still ignored until that project is trusted.
+
+Credentials/auth paths, session storage, protected paths, retry and provider-connection settings,
+MCP connections/exposure, process-wake policy, and TUI keybindings require a restart. Reload never
+runs an edited MCP command or changes trust/approval grants. Use `/mcp` reconnect to explicitly
+reload MCP connections. `/reload` does not reload source code, built-in instructions, skills,
+project instruction files, `.env`, or environment changes made in another shell.
+
 ## Permissions
 
 Unlike print mode, **the TUI exposes the full tool registry by default**. Mutating and
@@ -120,6 +139,7 @@ Adding or enabling a server needs confirmation; reconnecting clears per-tool ses
 /provider [name]                          show or switch provider (resets model to default)
 /model [provider::model] [effort|-]       switch model and optional reasoning effort
 /search [on|off]                          show or toggle provider-native web search
+/reload                                   reload supported settings files while idle
 /new                                      start a fresh session and clear the screen
 /resume [session-id]                      browse or resume a persisted session
 /name <display name> | /name --clear      name the current session or clear its name

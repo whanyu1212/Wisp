@@ -753,6 +753,12 @@ class ShutdownCommand(RpcCommandModel):
     type: Literal["shutdown"] = "shutdown"
 
 
+class ReloadCommand(RpcCommandModel):
+    """Reload supported file-based settings only when the host is idle."""
+
+    type: Literal["reload"] = "reload"
+
+
 class ConfigureCommand(RpcCommandModel):
     """Update configuration in sequence, rejecting unresolved model-provider ambiguity."""
 
@@ -869,6 +875,7 @@ RpcCommand = TypeAliasType(
         | TrustCommand
         | ShutdownCommand
         | ConfigureCommand
+        | ReloadCommand
         | ChangeDirectoryCommand,
         Field(discriminator="type"),
     ],
