@@ -94,6 +94,9 @@ pub(super) fn observe(
                 report.state.effort,
                 ids,
             )?;
+            if discovery::codemode_followed(state) {
+                effects.extend(discovery::codemode(state, None, ids)?);
+            }
             effects.push(UiEffect::Notice(bounded_session_text(
                 &summary.join(" "),
                 SESSION_NOTICE_MAX_BYTES,
@@ -179,6 +182,51 @@ mod tests {
         assert!(text.contains("Restart required: mcp_servers"));
         assert!(text.contains("Retained session choices: effort"));
         assert!(state.context.stats_stale);
+    }
+
+    #[test]
+    fn successful_reload_refreshes_followed_codemode() {
+        for (panel_visible, picker_open) in [(true, false), (false, true), (false, false)] {
+            let mut state = UiState::unconfigured();
+            state.side_panel_visible = panel_visible;
+            state.codemode_picker_open = picker_open;
+            let mut ids = Ids::default();
+            reduce(&mut state, UiAction::ReloadSettings, &mut ids).unwrap();
+            event(&mut state, &mut ids, report("reload-1"));
+            let effects = event(&mut state, &mut ids, finished(true));
+            let read = effects.iter().find_map(|effect| match effect {
+                UiEffect::SendCommand(command) => {
+                    let value = serde_json::to_value(command).unwrap();
+                    (value["type"] == "get_codemode").then_some(value)
+                }
+                _ => None,
+            });
+            assert_eq!(read.is_some(), panel_visible || picker_open);
+            if let Some(read) = read {
+                let id = read["id"].as_str().unwrap();
+                event(
+                    &mut state,
+                    &mut ids,
+                    serde_json::json!({
+                        "type":"rpc.codemode", "command_id":id,
+                        "codemode": {"setting":"never", "available":true, "offered":false,
+                            "env_setting":null, "mcp_tools":0, "scriptable_mcp_tools":0}
+                    }),
+                );
+                event(
+                    &mut state,
+                    &mut ids,
+                    serde_json::json!({
+                        "type":"rpc.command.finished", "command_id":id,
+                        "command_type":"get_codemode", "ok":true, "error":null
+                    }),
+                );
+                assert_eq!(
+                    state.codemode.snapshot.as_ref().unwrap().setting,
+                    wisp_protocol::commands::CodemodeSetting::Never
+                );
+            }
+        }
     }
 
     #[test]

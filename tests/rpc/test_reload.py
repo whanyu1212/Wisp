@@ -288,10 +288,11 @@ def test_missing_settings_restore_defaults_and_bad_provider_rolls_back(tmp_path:
                 provider="fake", session_dir=tmp_path / "sessions"
             )
             fixture.user_file.unlink()
-            await fixture.reloader.reload(
+            report = await fixture.reloader.reload(
                 agent=fixture.agent, runtime=fixture.runtime, command_id="r"
             )
             assert fixture.agent.model is None
+            assert report.state.model == fixture.agent.state_snapshot().model == "fake"
             assert resolve_settings(strict=True).model is None
             fixture.reloader.project.config_overrides = _ConfigOverrides(
                 session_dir=tmp_path / "sessions"

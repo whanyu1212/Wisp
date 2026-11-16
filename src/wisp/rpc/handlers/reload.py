@@ -209,7 +209,7 @@ class RpcSettingsReloader:
             state=agent.state_snapshot(None).model_copy(
                 update={
                     "provider": provider.name,
-                    "model": model,
+                    "model": model or provider.default_model,
                     "effort": effort,
                     "auto_compaction_enabled": configuration.auto_compaction_enabled,
                     "web_search": configuration.web_search,
