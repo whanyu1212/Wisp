@@ -28,8 +28,8 @@ AgentMode = TypeAliasType("AgentMode", Literal["build", "plan"])
 
 DEFAULT_AGENT_MODE: AgentMode = "build"
 
-# When a run offers the codemode tool: "automatic" when it finds a read-only MCP tool on demand,
-# or "always" or "never". Saved as the user setting ``codemode`` (unset, true or false).
+# When a run offers the codemode tool: "automatic" when a script may call one of its MCP
+# tools, or "always" or "never". Saved as the user setting ``codemode`` (unset, true or false).
 CodemodeSetting = TypeAliasType("CodemodeSetting", Literal["automatic", "always", "never"])
 
 MAX_RPC_MODEL_CATALOG_PROVIDERS = 128
@@ -470,10 +470,6 @@ class CodemodeState(BaseModel):
     # sending its MCP tools directly cannot call by name.
     mcp_tools: int = Field(ge=0)
     scriptable_mcp_tools: int = Field(ge=0)
-    # Whether a run started now would find its MCP tools on demand. Automatic
-    # codemode needs it: with the tools sent directly it stays off, however many
-    # are read-only.
-    mcp_found_on_demand: bool
 
 
 class RpcCodemodeReported(WispEvent):

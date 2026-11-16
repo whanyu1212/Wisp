@@ -354,23 +354,22 @@ The following table assumes the extra is installed and the run has eligible read
 
 | `mcp_tool_exposure` | `codemode` omitted or `null` (automatic) | `codemode: true` | `codemode: false` |
 |---|---|---|---|
-| `auto` | Offered only when this run chooses on-demand discovery and a script may call one of its MCP tools | Offered | Not offered |
+| `auto` | Offered when a script may call one of this run's MCP tools, whichever way it sends them | Offered | Not offered |
 | `on_demand` | Offered when this run's on-demand MCP catalog has a tool a script may call | Offered | Not offered |
-| `direct` | Not offered | Offered | Not offered |
+| `direct` | Offered when one of this run's MCP tools is one a script may call by name | Offered | Not offered |
 
 A script may call an MCP tool only when its server's `tool_safety` marks it `"read"`; every other
-MCP tool is treated as a command. In automatic mode the built-in read tools are not enough: a
-catalog with no `"read"` tool would have every script call to it refused, so codemode is left
-out. Mark the read-only tools in [`tool_safety`](#settings-and-tool-safety) to get it, or set
+MCP tool is treated as a command. Sent directly, a tool must also be callable by its name: its
+name and parameters must be Python identifiers. In automatic mode the built-in read tools are not
+enough: a run with no MCP tool a script may call leaves codemode out, since the evals measured its
+gains on MCP work and none on the built-in tools alone. Mark the read-only tools in [`tool_safety`](#settings-and-tool-safety) to get it, or set
 `codemode: true` to script the built-in tools alone.
 
 Both settings are user-only. `WISP_MCP_TOOL_EXPOSURE` and `WISP_CODEMODE` override their settings-file
 values at startup. In the TUI, `/codemode` shows the setting, extra availability, whether the
-next prompt would offer the tool, and how many of its MCP tools a script can call. When
-automatic is off because the run sends its MCP tools directly, it says so: it turns on only when
-the run finds them on demand, with `"mcp_tool_exposure": "on_demand"`, or under the default
-`auto` once the servers' tool schemas grow past its threshold. It updates when MCP servers connect or change and after each
-prompt. Choose automatic, always, or never there. `/codemode always` and
+next prompt would offer the tool, and how many of its MCP tools a script can call; automatic
+mode turns on when that count is above zero. It updates when MCP servers connect or change and
+after each prompt. Choose automatic, always, or never there. `/codemode always` and
 `/codemode never` apply those choices directly. Settings changes affect the next prompt, not a script
 already running. RPC/SDK clients use `get_codemode` and `set_codemode` for the same information.
 
@@ -471,7 +470,7 @@ MCP tool returns JSON or has Python-compatible parameters.
 
 | Symptom | Check or next step |
 |---|---|
-| Codemode is missing | Check the installed extra, `/codemode`, environment overrides, and the discovery mode for this run. Automatic mode does not offer it for a small catalog sent directly, or for a catalog with no tool marked `"read"` in `tool_safety`. |
+| Codemode is missing | Check the installed extra, `/codemode`, and environment overrides. Automatic mode does not offer it when no MCP tool is marked `"read"` in `tool_safety`, or, with tools sent directly, when none of those has a name and parameters that are Python identifiers. |
 | A tool is missing or not read-only | Check tool selection, plan mode, the exact `tool_safety` remote name, and reconnect after changes. Otherwise call it normally; do not loosen safety just to make the script work. |
 | A write or command call is refused | Expected: scripts cannot call non-read tools, even under YOLO, `--yes`, a session grant, or through `mcp_call`. Use a normal direct call or top-level `mcp_call`, under its usual approval policy. |
 | A read tool requires confirmation | A script cannot open an approval prompt. Without an existing applicable grant, a confirmation-required call fails. |

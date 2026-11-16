@@ -286,10 +286,6 @@
           ],
           "default": null
         },
-        "mcp_found_on_demand": {
-          "title": "Mcp Found On Demand",
-          "type": "boolean"
-        },
         "mcp_tools": {
           "minimum": 0,
           "title": "Mcp Tools",
@@ -314,8 +310,7 @@
         "offered",
         "env_setting",
         "mcp_tools",
-        "scriptable_mcp_tools",
-        "mcp_found_on_demand"
+        "scriptable_mcp_tools"
       ],
       "title": "CodemodeState",
       "type": "object"
@@ -9371,7 +9366,6 @@
       "codemode": {
         "available": true,
         "env_setting": null,
-        "mcp_found_on_demand": true,
         "mcp_tools": 12,
         "offered": false,
         "scriptable_mcp_tools": 0,

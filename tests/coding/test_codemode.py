@@ -192,22 +192,59 @@ def test_offered_only_when_on(tmp_path: Path, enabled: bool) -> None:
     ("codemode", "exposure", "offered"),
     [
         (None, "on_demand", True),
-        (None, "direct", False),
-        # The default exposure keeps a small catalog direct, so no codemode either.
-        (None, "auto", False),
+        (None, "direct", True),
+        # The default exposure keeps a small catalog direct, which offers it too.
+        (None, "auto", True),
         (False, "on_demand", False),
         (True, "direct", True),
     ],
     ids=["auto-on-demand", "auto-direct", "auto-small-catalog", "off-on-demand", "on-direct"],
 )
-def test_automatic_with_on_demand(
+def test_automatic_with_mcp_tools(
     tmp_path: Path, codemode: bool | None, exposure: McpToolExposure, offered: bool
 ) -> None:
-    """Unset, codemode is offered when the run finds its MCP tools on demand."""
+    """Unset, codemode is offered when a script may call one of the run's MCP tools."""
 
     _, provider = _run(tmp_path, _Tools(), [], codemode=codemode, exposure=exposure)
 
     assert (CODEMODE in {tool.name for tool in provider.calls[0].tools}) is offered
+
+
+@pytest.mark.parametrize(
+    ("query", "allowed"),
+    [
+        # Only built-in read tools: the evals found no gain there.
+        (None, None),
+        # Sent directly, an MCP tool a script cannot call by name does not count.
+        (_McpTool("mcp__db__query-rows"), None),
+        (_McpTool("mcp__db__query", input_schema={"properties": {"from": {}}}), None),
+        # Nor does one the policy keeps from the run.
+        (_McpTool("mcp__db__query"), {"lookup"}),
+    ],
+    ids=["builtins-only", "uncallable-name", "uncallable-parameter", "policy-removed"],
+)
+def test_automatic_needs_callable_mcp(
+    tmp_path: Path, query: _Tool | None, allowed: set[str] | None
+) -> None:
+    """Unset, the built-in read tools alone do not offer codemode; set, they do."""
+
+    tools = _Tools()
+    registry = ToolRegistry()
+    registry.register(tools.lookup)
+    if query is not None:
+        registry.register(query)
+    session = CodingSession(
+        provider=ScriptedProvider([_done()]),
+        sessions=JsonlSessionStore(tmp_path / "sessions"),
+        tool_registry=registry,
+        tool_context=ToolContext(cwd=tmp_path),
+        mcp_tool_exposure="direct",
+        **({} if allowed is None else {"tool_policy": ToolPolicy.allow_tool_names(allowed)}),
+    )
+
+    assert session.codemode_offered() is False
+    session.codemode = True
+    assert session.codemode_offered() is True
 
 
 def test_older_schema_drafts_scriptable(tmp_path: Path) -> None:
@@ -307,7 +344,8 @@ def test_not_offered_without_monty(
     ("codemode", "exposure", "mcp_safety", "offered"),
     [
         (True, "direct", "read", True),
-        (None, "direct", "read", False),
+        (None, "direct", "read", True),
+        (None, "direct", "command", False),
         (None, "on_demand", "read", True),
         (False, "on_demand", "read", False),
         # Unset, the built-in read tools are not enough: with no MCP tool a script
@@ -339,7 +377,7 @@ def test_offered_matches_the_run(
 
     predicted = session.codemode_offered()
     scriptable, _ = session.scriptable_mcp_tools()
-    if codemode is None and exposure == "on_demand":
+    if codemode is None:
         # The count a frontend shows must agree with why automatic mode is on or off.
         assert (scriptable > 0) is offered
 
@@ -408,47 +446,6 @@ def test_direct_counts_callable_names(
     assert session.scriptable_mcp_tools() == (scriptable, 3)
 
 
-@pytest.mark.parametrize(
-    ("exposure", "threshold", "allowed", "on_demand"),
-    [
-        ("on_demand", None, None, True),
-        ("direct", None, None, False),
-        ("auto", None, None, False),
-        # `auto` finds a catalog on demand once its schemas reach the threshold.
-        ("auto", 0, None, True),
-        # A run the policy leaves no MCP tool has nothing to find.
-        ("on_demand", None, {"lookup"}, False),
-    ],
-    ids=["on-demand", "direct", "auto-small-catalog", "auto-large-catalog", "no-mcp-tools"],
-)
-def test_reports_mcp_found_on_demand(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    exposure: McpToolExposure,
-    threshold: int | None,
-    allowed: set[str] | None,
-    on_demand: bool,
-) -> None:
-    """The snapshot says whether MCP tools are found on demand, as a run would decide."""
-
-    if threshold is not None:
-        monkeypatch.setattr("wisp.coding.session.AUTO_ON_DEMAND_SCHEMA_TOKENS", threshold)
-    session = CodingSession(
-        provider=ScriptedProvider([]),
-        sessions=JsonlSessionStore(tmp_path / "sessions"),
-        tool_registry=_Tools().registry(),
-        tool_context=ToolContext(cwd=tmp_path),
-        mcp_tool_exposure=exposure,
-        **({} if allowed is None else {"tool_policy": ToolPolicy.allow_tool_names(allowed)}),
-    )
-    assert session.tool_registry is not None
-    before = session.tool_registry.names()
-
-    # Asked twice: working it out registers nothing on the session itself.
-    assert [session.mcp_found_on_demand() for _ in range(2)] == [on_demand, on_demand]
-    assert session.tool_registry.names() == before
-
-
 def test_policy_limits_counted_tools(tmp_path: Path) -> None:
     """A tool the policy keeps from the run is not one of its MCP tools."""
 
@@ -469,7 +466,6 @@ def test_no_registry_counts_no_mcp_tools(tmp_path: Path) -> None:
     )
 
     assert session.scriptable_mcp_tools() == (0, 0)
-    assert session.mcp_found_on_demand() is False
 
 
 def test_script_is_safe_to_replay(tmp_path: Path) -> None:

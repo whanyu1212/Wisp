@@ -111,8 +111,8 @@ async def _run(
     settings: dict[str, object],
     approval: ToolApprovalPolicy | None = None,
 ) -> list[WispEvent]:
-    servers = WispSettings.model_validate(settings).mcp_servers or ()
-    runtime = await build_runtime(mcp_servers=servers)
+    user_settings = WispSettings.model_validate(settings)
+    runtime = await build_runtime(mcp_servers=user_settings.mcp_servers or ())
     try:
         session = CodingSession(
             provider=_ScriptedModel(steps),
@@ -120,7 +120,8 @@ async def _run(
             tool_registry=select_tools(runtime.tools, allowed_tools=tuple(tools)),
             tool_context=ToolContext(cwd=tmp_path),
             tool_approval_policy=approval or ToolApprovalPolicy.approve_all(),
-            mcp_tool_exposure=WispSettings.model_validate(settings).mcp_tool_exposure or "direct",
+            mcp_tool_exposure=user_settings.mcp_tool_exposure or "direct",
+            codemode=user_settings.codemode,
         )
         return [event async for event in session.run("go")]
     finally:
@@ -210,7 +211,9 @@ def test_mcp_tool_found_and_called(tmp_path: Path) -> None:
         return _tool_call(name, {"sku": REORDER_SKU, "warehouse": "Lisbon"})
 
     steps = [call_policy, _answer(str(REORDER_POINT))]
-    settings = mcp_settings(task, sys.executable)
+    # Off, as the runner writes it for a run without codemode: unset, a read-only MCP
+    # tool would add the codemode tool beside it.
+    settings = {**mcp_settings(task, sys.executable), "codemode": False}
 
     events = anyio.run(
         lambda: _run(

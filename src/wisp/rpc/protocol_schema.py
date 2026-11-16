@@ -604,7 +604,6 @@ _EVENT_FIXTURE_VALUES: dict[str, dict[str, object]] = {
             "offered": False,
             "mcp_tools": 12,
             "scriptable_mcp_tools": 0,
-            "mcp_found_on_demand": True,
         },
     },
     "rpc.subagents": {

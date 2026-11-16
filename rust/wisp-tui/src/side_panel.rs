@@ -1119,7 +1119,7 @@ fn header_lines(
 
 /// Whether the next prompt offers codemode, and which setting decides it. The
 /// automatic setting has no row while it leaves codemode off, which is the usual case
-/// without read-only MCP tools found on demand.
+/// when no MCP tool is one a script may call.
 fn codemode_line(state: &UiState, width: usize, palette: Palette) -> Option<Line<'static>> {
     let snapshot = state.codemode.snapshot.as_deref()?;
     let setting = crate::discovery_view::codemode_label(snapshot.setting);
@@ -2174,7 +2174,6 @@ mod tests {
                 env_setting: None,
                 mcp_tools: 0,
                 scriptable_mcp_tools: 0,
-                mcp_found_on_demand: true,
             }));
             let text = codemode_line(&state, 44, Palette::default()).map(|line| {
                 line.spans

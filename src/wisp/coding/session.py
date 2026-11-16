@@ -143,6 +143,7 @@ from wisp.mcp.discovery import (
     DISCOVERY_PROMPT,
     DISCOVERY_TOOL_NAMES,
     McpCatalog,
+    McpCatalogTool,
     catalog_guidance,
     discovery_tools,
 )
@@ -2346,23 +2347,6 @@ class CodingSession:
         )
         return scriptable, len(mcp_tools)
 
-    def mcp_found_on_demand(self) -> bool:
-        """Report whether a run started now would find its MCP tools on demand.
-
-        Worked out as a run would, after mode, policy and the `mcp_tool_exposure`
-        setting, without starting one. Automatic codemode is offered only then.
-
-        Returns:
-            bool: True when the run would offer the discovery tools in place of its
-            MCP tools; False when it sends them directly or has none.
-        """
-
-        registry = self._operation_tool_registry()
-        if registry is None:
-            return False
-        _, catalog = self._apply_mcp_exposure(self._effective_tools(registry), registry)
-        return catalog is not None
-
     def _codemode_tool(
         self,
         offered: tuple[ToolSpec, ...],
@@ -2386,22 +2370,23 @@ class CodingSession:
             catalog (McpCatalog | None): The MCP tools found on demand this run, or
                 None when exposure is direct.
 
-        Unset (``self.codemode`` None), codemode is offered only when the run found
-        its MCP tools on demand and a script may call at least one of them: scripts
-        save the most there, by calling catalog tools without a turn each to look
-        them up. An MCP tool is read-only only where its server's `tool_safety` says
-        so, so a catalog with none would have every script call to it refused.
+        Unset (``self.codemode`` None), codemode is offered only when a script may
+        call at least one of the run's MCP tools, found on demand or sent directly:
+        the evals measured its gains on MCP work, and found none on built-in tools
+        alone. An MCP tool is read-only only where its server's `tool_safety` says
+        so, and one sent directly must be callable by its name, so a run whose MCP
+        tools are none of these would have every script call to them refused.
 
         Returns:
             CodemodeTool | None: The registered tool, or None when codemode is off,
-            or automatic and the run found no read-only MCP tool on demand, when the
-            run has no registry, or when no read-only tool is offered.
+            or automatic and a script could call none of the run's MCP tools, when
+            the run has no registry, or when no read-only tool is offered.
         """
 
         automatic = self.codemode is None
         if registry is None or CODEMODE in registry.names():
             return None
-        if self.codemode is False or (automatic and catalog is None):
+        if self.codemode is False:
             return None
         if not codemode_available():
             # Offering a tool that can only fail would cost the model a turn. Only an
@@ -2420,7 +2405,12 @@ class CodingSession:
             for entry in (catalog.entries if catalog is not None else ())
             if entry.tool.safety == "read"
         ]
-        if not discoverable and (automatic or not scriptable):
+        scriptable_mcp = discoverable or [
+            tool
+            for tool in scriptable
+            if isinstance(tool, McpCatalogTool) and callable_by_name(tool)
+        ]
+        if not (scriptable_mcp if automatic else discoverable or scriptable):
             return None
         call_ids = itertools.count(1)
 

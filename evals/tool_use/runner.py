@@ -600,7 +600,7 @@ def _run_wisp(
         else {}
     )
     # A user-only setting, like the MCP servers, and always written: unset, Wisp offers
-    # codemode whenever it finds MCP tools on demand. Scripts may call the task's
+    # codemode whenever a script may call one of the run's MCP tools. Scripts may call the task's
     # read-only tools, which include every MCP tool, all marked read-only above.
     settings["codemode"] = context.codemode != "off"
     settings_path = home / ".wisp" / "settings.json"

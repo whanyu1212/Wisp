@@ -6404,7 +6404,6 @@ mod tests {
             env_setting: None,
             mcp_tools: 0,
             scriptable_mcp_tools: 0,
-            mcp_found_on_demand: false,
         }
     }
 
@@ -6942,7 +6941,6 @@ mod tests {
             env_setting: None,
             mcp_tools: 0,
             scriptable_mcp_tools: 0,
-            mcp_found_on_demand: true,
         };
         reduce(
             &mut state,
