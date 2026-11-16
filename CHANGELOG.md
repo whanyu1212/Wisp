@@ -14,6 +14,12 @@ this policy.
 
 ### Tools
 
+- Automatic codemode is offered whenever a script may call one of a run's MCP tools, sent
+  directly or found on demand. Before, it needed on-demand discovery, so a small catalog sent
+  directly, the default `auto` exposure's choice, never got it, though the evals showed the same
+  accuracy gain for weaker models there (luna 15 → 24 of 25 orchestration runs). A run with only
+  built-in tools still goes without, where the evals found no gain. A tool sent directly counts
+  only when its name and parameters are Python identifiers. (HY-431)
 - An MCP tool that declares an output schema returns its structured result to a codemode script
   as a typed dict instead of text, so a script no longer parses JSON, and one that reads a field
   the schema lacks fails its type check before it runs. The codemode description names those
@@ -36,9 +42,9 @@ this policy.
 - Automatic codemode is no longer offered when none of a run's MCP tools can be called from a
   script. An MCP tool is read-only only where its server's `tool_safety` marks it `"read"`, so on
   a server with no such entries every call a script made to it was refused, and the model paid
-  for the tool's description and a failed script before falling back to direct calls. Runs whose
-  on-demand catalog has a `"read"` tool are offered codemode as before, and `"codemode": true`
-  still offers it for the built-in read tools alone. (HY-510)
+  for the tool's description and a failed script before falling back to direct calls. A run with
+  a `"read"` MCP tool a script can call is offered codemode, and `"codemode": true` still offers
+  it for the built-in read tools alone. (HY-510)
 - Codemode scripts get `await gather_settled(...)`, which runs calls at once like
   `asyncio.gather` and returns every outcome in order, with a failed call's `RuntimeError` in
   place of its result. Under `gather` one failed call ended the script, the results of the calls
@@ -71,11 +77,8 @@ this policy.
 
 ### TUI
 
-- `/codemode` says when automatic mode is off because the next prompt sends its MCP tools
-  directly, not found on demand. Before, it showed "Off" beside a count of scriptable tools above
-  zero, and marking more tools read-only would not have turned it on. It also updates when MCP
-  servers connect or a prompt ends with the side panel hidden, so a picker opened during the
-  startup MCP connect shows its count without being reopened. (HY-545)
+- `/codemode` updates when MCP servers connect or a prompt ends with the side panel hidden, so a
+  picker opened during the startup MCP connect shows its count without being reopened. (HY-545)
 - `/mcp` shows how many of each server's tools are read-only, such as
   `connected · 12 tools, 3 read-only`, and its details mark each read-only tool. Only those can be
   called from a codemode script, by a subagent or in plan mode, and `tool_safety` is what marks
@@ -88,9 +91,8 @@ this policy.
   and a tool the server adds or re-hints later starts unmarked. (HY-510)
 - `/codemode` says how many of the next prompt's MCP tools a script can call, such as
   `Scripts can call 0 of 12 MCP tools (tool_safety "read").`, and flags it when the answer is
-  none. With none, automatic mode leaves codemode off even when the tools are found on demand,
-  and scripts fail against those servers under `always`. The automatic choice now reads "with
-  on-demand MCP tools marked read", since it needs both. (HY-510)
+  none. With none, automatic mode leaves codemode off, and scripts fail against those servers
+  under `always`. The automatic choice now reads "with MCP tools marked read". (HY-510)
 - While background processes run, a strip under the composer shows how many and their commands,
   even when the side panel is hidden or the terminal is too narrow to dock it. Down from an empty
   composer, a click on the strip, or `/ps` focuses the side panel on the first process, where
@@ -108,8 +110,6 @@ this policy.
 
 ### Event contract
 
-- `CodemodeState`, in `rpc.codemode`, gains `mcp_found_on_demand`: whether a run started now
-  would find its MCP tools on demand, which automatic codemode needs.
 - `CodemodeState`, in `rpc.codemode`, gains `mcp_tools`, the MCP tools a run started now may use,
   and `scriptable_mcp_tools`, how many of them a script may call: those marked `"read"`, less
   any a run that sends its MCP tools directly cannot call by name. Both are required, so the

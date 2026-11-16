@@ -70,13 +70,13 @@ is not saved. These choices do not change project trust or protected paths. In t
 folder above it, YOLO applies for the session only and the panel says so; Ask is still saved.
 
 Use `/codemode` to choose when runs offer the [codemode](../mcp.md#mcp-with-codemode)
-tool: automatic (when a run finds its MCP tools on demand and a script may call one of them), always, or never. `/codemode always`
+tool: automatic (when a script may call one of a run's MCP tools), always, or never. `/codemode always`
 and the other settings apply one directly. The panel docks above the composer like
 `/permissions`, marks the current setting, and says whether the next prompt offers the tool.
 When the session has MCP tools, it also says how many of them a script can call, and flags it
 when that is none. A script can call only tools marked `"read"` in their server's `tool_safety`,
-so mark a server's read-only tools there to change the count. Automatic mode also needs the run
-to find its MCP tools on demand, so a count above zero does not by itself turn codemode on.
+so mark a server's read-only tools there to change the count; automatic mode turns on when it is
+above zero.
 Choose with `1`–`3`, or highlight with `↑`/`↓` and press `Enter`. The choice applies from the
 next prompt and is saved as the user `codemode` setting in `~/.wisp/settings.json`, so it
 survives restarts; wait for the current operation to finish before changing it. `WISP_CODEMODE`

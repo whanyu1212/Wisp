@@ -59,5 +59,4 @@ def _snapshot(agent: CodingSession) -> CodemodeState:
         env_setting=None if env_codemode is None else _SETTING_FOR_CODEMODE[env_codemode],
         mcp_tools=mcp_tools,
         scriptable_mcp_tools=scriptable_mcp_tools,
-        mcp_found_on_demand=agent.mcp_found_on_demand(),
     )
