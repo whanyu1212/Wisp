@@ -135,7 +135,8 @@ class ScriptUse:
         reasons (Counter[str]): The failures by reason, from each run's
             `script_failures`. Runs recorded before that field add nothing here,
             so these can add up to less than ``failed``.
-        calls (int): Tool calls the scripts made, finished or failed.
+        calls (int): Tool calls the scripts made, finished or failed, in runs that
+            recorded ``failed_calls``.
         failed_calls (int): The part of ``calls`` that failed scripts made before
             they failed: what retrying them repeats.
         calls_recorded (bool): Whether any run recorded ``failed_calls``; older
@@ -320,10 +321,13 @@ def build_report(
             use.scripts += scripts
             use.failed += _int(row.get("failed_scripts", 0))
             use.reasons.update(_counts(row.get("script_failures", {})))
-            failed_calls = _int(row.get("failed_script_calls", 0))
-            use.calls += _int(row.get("nested_calls", 0)) + failed_calls
-            use.failed_calls += failed_calls
-            use.calls_recorded |= "failed_script_calls" in row
+            # Only runs that recorded failed calls count on either side of the share,
+            # so older runs' finished calls never dilute it.
+            if "failed_script_calls" in row:
+                failed_calls = _int(row["failed_script_calls"])
+                use.calls += _int(row.get("nested_calls", 0)) + failed_calls
+                use.failed_calls += failed_calls
+                use.calls_recorded = True
     return report
 
 

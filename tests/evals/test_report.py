@@ -232,8 +232,9 @@ def test_script_failures_listed() -> None:
         nested_calls=8,
         failed_script_calls=6,
     )
-    # Recorded before failures were named.
-    rows[2].update(scripts=1, failed_scripts=1)
+    # Recorded before failures were named or their calls counted: its finished
+    # calls stay out of the share, whose failed part it never recorded.
+    rows[2].update(scripts=1, failed_scripts=1, nested_calls=100)
 
     table = render_markdown(build_report(rows))
 
