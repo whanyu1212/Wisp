@@ -23,7 +23,11 @@ npm run preview -- --port 4321
 On Linux, install browser dependencies with `npm exec playwright install -- --with-deps chromium`.
 Browser tests use built output on port 4322 and cover desktop/tablet/mobile, themes, keyboard focus,
 no-JavaScript reading, redirects, images, diagrams, and the real search index. Failure traces go in
-ignored `test-results/`. The existing Mermaid lazy-chunk size warning does not prevent a build.
+ignored `test-results/`. Tests run in isolated browser contexts and may run concurrently within a
+file. CI uses four workers; local runs keep two to leave room for other development work. To compare
+worker counts on the same build, run `npm run test:browser -- --workers=2` and
+`npm run test:browser -- --workers=4`. Keep all viewport projects and zero retries when benchmarking.
+The existing Mermaid lazy-chunk size warning does not prevent a build.
 
 From the repository root, also run `uv run pytest tests/docs tests/repository/test_images.py`.
 These tests retain curriculum checkpoints, executable SDK examples, API/reference drift checks,
