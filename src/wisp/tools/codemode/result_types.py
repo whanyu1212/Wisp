@@ -183,7 +183,12 @@ class _Builder:
 
     def _dict(self, schema: Mapping[str, object], depth: int) -> str:
         properties = _properties(schema)
-        if not properties or len(self.declarations) >= _MAX_DICTS:
+        # A schema that explicitly admits other keys cannot be a closed `TypedDict`
+        # without rejecting keys a valid result may carry.
+        admits_other_keys = "patternProperties" in schema or schema.get(
+            "additionalProperties", False
+        ) not in (False, None)
+        if not properties or admits_other_keys or len(self.declarations) >= _MAX_DICTS:
             return "dict[str, Any]"
         name = self._name()
         # Reserved before the fields are translated, so nested dicts number after it.

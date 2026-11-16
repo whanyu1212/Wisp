@@ -108,8 +108,25 @@ def test_declared_names_avoid_taken_ones() -> None:
             "NotRequired[list[Any]]",
         ),
         ({"type": "array", "items": [{"type": "string"}]}, "NotRequired[list[Any]]"),
+        # Other keys are valid, so a closed `TypedDict` would reject them.
+        (
+            {
+                "type": "object",
+                "properties": {"x": {"type": "integer"}},
+                "additionalProperties": {"type": "integer"},
+            },
+            "NotRequired[dict[str, Any]]",
+        ),
+        (
+            {
+                "type": "object",
+                "properties": {"x": {"type": "integer"}},
+                "patternProperties": {"^y": {"type": "integer"}},
+            },
+            "NotRequired[dict[str, Any]]",
+        ),
     ],
-    ids=["untyped-object", "prefix-items", "draft-4-tuple"],
+    ids=["untyped-object", "prefix-items", "draft-4-tuple", "additional", "pattern"],
 )
 def test_loose_schemas_promise_any(field: dict[str, object], annotation: str) -> None:
     schema = {"type": "object", "properties": {"f": field}}
@@ -118,6 +135,32 @@ def test_loose_schemas_promise_any(field: dict[str, object], annotation: str) ->
 
     assert returns is not None
     assert returns.declarations[0] == f"t_result = TypedDict('t_result', {{'f': {annotation}}})"
+
+
+def test_closed_object_stays_typed() -> None:
+    schema = {
+        "type": "object",
+        "properties": {"x": {"type": "integer"}},
+        "additionalProperties": False,
+    }
+
+    returns = result_type("t", schema, taken=frozenset())
+
+    assert returns is not None
+    assert returns.annotation == "t_result"
+
+
+def test_open_result_is_plain_dict() -> None:
+    schema = {
+        "type": "object",
+        "properties": {"fixed": {"type": "integer"}},
+        "additionalProperties": True,
+    }
+
+    returns = result_type("t", schema, taken=frozenset())
+
+    assert returns is not None
+    assert (returns.annotation, returns.declarations) == ("dict[str, Any]", ())
 
 
 def test_odd_required_and_long_names_tolerated() -> None:
