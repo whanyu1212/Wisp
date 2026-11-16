@@ -13,6 +13,7 @@ from wisp.agent.tool_contracts import ToolExecutionEvent
 from wisp.events import (
     BillableTokenUsage,
     ContextBudget,
+    ErrorEvent,
     MessageCompleted,
     TokenUsage,
     TurnCompleted,
@@ -634,6 +635,7 @@ async def _summarize_compaction_once(
     )
     completions: list[MessageCompleted] = []
     terminal_turn: TurnCompleted | None = None
+    failure_message: str | None = None
     try:
         async for event in run_agent_loop(
             AgentLoopConfig(
@@ -651,6 +653,11 @@ async def _summarize_compaction_once(
                 completions.append(event)
             elif isinstance(event, TurnCompleted):
                 terminal_turn = event
+            elif isinstance(event, ErrorEvent):
+                failure_message = event.message
+        # Drain the loop through its terminal and cleanup before reporting failure.
+        if failure_message is not None:
+            raise CompactionSummaryError(f"Compaction summary failed: {failure_message}")
     except CompactionSummaryError as exc:
         if completions and exc.usage is None and exc.cost is None:
             raise _summary_error(str(exc), completions[-1]) from exc
