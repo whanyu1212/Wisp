@@ -16,7 +16,16 @@ from dataclasses import replace
 from typing import TypeVar
 
 from evals.tool_use.servers import devhub_repos
-from evals.tool_use.servers.model import Arguments, Catalog, CatalogTool, Parameter
+from evals.tool_use.servers import devhub_results as results
+from evals.tool_use.servers.model import (
+    Arguments,
+    Catalog,
+    CatalogTool,
+    Parameter,
+    Reply,
+    Structured,
+    structured_tool,
+)
 
 T = TypeVar("T")
 
@@ -78,7 +87,7 @@ def _is_triage_repo(arguments: Arguments) -> bool:
     return _repo(arguments) == (TRIAGE_OWNER, TRIAGE_REPO)
 
 
-def _list_issues(arguments: Arguments) -> str:
+def _list_issues(arguments: Arguments) -> Reply:
     if not _is_triage_repo(arguments):
         return _missing_repo(arguments)
     state = str(arguments.get("state") or "open").lower()
@@ -95,26 +104,23 @@ def _list_issues(arguments: Arguments) -> str:
         else (lambda issue: issue[0])
     )
     matches.sort(key=by, reverse=arguments.get("direction") != "asc")
-    rows = [
-        f"#{number} [{issue_state}] {title} — labels: {', '.join(issue_labels)}; "
-        f"{comments} comments"
-        for number, issue_state, issue_labels, comments, title in _page(matches, arguments)
-    ]
-    return "\n".join(rows) or "No issues match."
+    return devhub_repos.issues_reply([_issue(issue) for issue in _page(matches, arguments)])
 
 
-def _get_issue(arguments: Arguments) -> str:
+def _get_issue(arguments: Arguments) -> Reply:
     number = _int(arguments.get("issue_number"))
-    for issue_number, state, labels, comments, title in _ISSUES:
-        if _is_triage_repo(arguments) and number == issue_number:
-            return (
-                f"#{issue_number} {title}\nstate: {state}\nlabels: {', '.join(labels)}\n"
-                f"comments: {comments}\nopened by: dana-k"
-            )
-    return f"Issue #{number} not found."
+    for issue in _ISSUES:
+        if _is_triage_repo(arguments) and number == issue[0]:
+            return devhub_repos.issue_reply(_issue(issue), "dana-k")
+    return Reply(f"Issue #{number} not found.", None)
 
 
-def _list_pulls(arguments: Arguments) -> str:
+def _issue(issue: tuple[int, str, tuple[str, ...], int, str]) -> devhub_repos.IssueRecord:
+    number, state, labels, comments, title = issue
+    return devhub_repos.IssueRecord(number, state, labels, comments, title)
+
+
+def _list_pulls(arguments: Arguments) -> Reply:
     if not _is_triage_repo(arguments):
         return _missing_repo(arguments)
     state = str(arguments.get("state") or "open").lower()
@@ -123,46 +129,62 @@ def _list_pulls(arguments: Arguments) -> str:
         key=lambda pull: pull[0],
         reverse=arguments.get("direction") != "asc",
     )
-    rows = [
-        f"#{number} [{pull_state}] {title}"
-        for number, pull_state, title, _body in _page(matches, arguments)
-    ]
-    return "\n".join(rows) or "No pull requests match."
+    pulls = _page(matches, arguments)
+    return Reply(
+        "\n".join(f"#{number} [{state}] {title}" for number, state, title, _body in pulls)
+        or "No pull requests match.",
+        results.PullRequestList(
+            pull_requests=[
+                results.PullRequest(number=number, state=state, title=title)
+                for number, state, title, _body in pulls
+            ]
+        ),
+    )
 
 
-def _get_pull(arguments: Arguments) -> str:
+def _get_pull(arguments: Arguments) -> Reply:
     number = _int(arguments.get("pull_number"))
     for pull_number, state, title, body in _PULLS:
         if _is_triage_repo(arguments) and number == pull_number:
-            return f"#{pull_number} {title}\nstate: {state}\nbase: main\n\n{body}"
-    return f"Pull request #{number} not found."
+            return Reply(
+                f"#{pull_number} {title}\nstate: {state}\nbase: main\n\n{body}",
+                results.PullRequestDetail(
+                    number=pull_number, state=state, title=title, base="main", body=body
+                ),
+            )
+    return Reply(f"Pull request #{number} not found.", None)
 
 
-def _search(arguments: Arguments) -> str:
+def _search(arguments: Arguments) -> Reply:
     query = str(arguments.get("query", "")).lower()
     filters = arguments.get("filters")
     state = str(filters.get("state", "")).lower() if isinstance(filters, dict) else ""
-    rows = [
-        f"pull request #{number} [{pull_state}] {title}"
+    found = [
+        results.SearchResult(kind="pull_request", number=number, state=pull_state, title=title)
         for number, pull_state, title, body in _PULLS
         if query
         and (query in body.lower() or query in title.lower())
         and (not state or state == pull_state)
     ]
-    rows += [
-        f"issue #{number} [{issue_state}] {title}"
+    found += [
+        results.SearchResult(kind="issue", number=number, state=issue_state, title=title)
         for number, issue_state, _labels, _comments, title in _ISSUES
         if query and query in title.lower() and (not state or state == issue_state)
     ]
-    return "\n".join(rows) or "No results."
+    rows = [
+        f"{result['kind'].replace('_', ' ')} #{result['number']} [{result['state']}] "
+        f"{result['title']}"
+        for result in found
+    ]
+    return Reply("\n".join(rows) or "No results.", results.SearchResults(results=found))
 
 
-def _check_runs(arguments: Arguments) -> str:
+def _check_runs(arguments: Arguments) -> Reply:
     number = _int(arguments.get("pull_number"))
     checks = _CHECKS.get(number) if number is not None and _is_triage_repo(arguments) else None
-    if checks is None:
-        return "build: success\nunit-tests: success\nlint: success"
-    return "\n".join(f"{name}: {conclusion}" for name, conclusion in checks)
+    return devhub_repos.check_runs_reply(
+        checks or (("build", "success"), ("unit-tests", "success"), ("lint", "success"))
+    )
 
 
 def _int(value: object) -> int | None:
@@ -179,10 +201,11 @@ def _page(items: list[T], arguments: Arguments) -> list[T]:
     return items[start : start + max(min(per_page, 100), 1)]
 
 
-def _missing_repo(arguments: Arguments) -> str:
+def _missing_repo(arguments: Arguments) -> Reply:
     owner, repo = _repo(arguments)
-    return (
-        f"Repository {owner}/{repo} not found. Pass the owner and the repository name separately."
+    return Reply(
+        f"Repository {owner}/{repo} not found. Pass the owner and the repository name separately.",
+        None,
     )
 
 
@@ -253,12 +276,13 @@ def _number(name: str, what: str) -> Parameter:
 
 # The tools the triage task needs, described as a real server would.
 _TASK_TOOLS = (
-    CatalogTool(
+    structured_tool(
         "list_issues",
         "List issues in a repository. Pull requests are not included. Results can be "
         "filtered by state and labels and are sorted by creation time unless `sort` is "
         "given; each result shows the issue's number, state, title, labels and comment count.",
         _list_issues,
+        results.IssueList,
         (
             _OWNER,
             _REPO,
@@ -273,18 +297,20 @@ _TASK_TOOLS = (
             *_PAGING,
         ),
     ),
-    CatalogTool(
+    structured_tool(
         "get_issue",
         "Get one issue by its number, with its state, labels, comment count and author. "
         "Use list_issues or search to find the number.",
         _get_issue,
+        results.IssueDetail,
         (_OWNER, _REPO, _number("issue_number", "issue")),
     ),
-    CatalogTool(
+    structured_tool(
         "list_pull_requests",
         "List pull requests in a repository by state. Each result shows the number, "
         "state and title; get_pull_request returns a pull request's description.",
         _list_pulls,
+        results.PullRequestList,
         (
             _OWNER,
             _REPO,
@@ -294,29 +320,32 @@ _TASK_TOOLS = (
             *_PAGING,
         ),
     ),
-    CatalogTool(
+    structured_tool(
         "get_pull_request",
         "Get one pull request by its number, with its state, base branch and description. "
         'The description often names the issues it fixes, as in "Fixes #123".',
         _get_pull,
+        results.PullRequestDetail,
         (_OWNER, _REPO, _number("pull_number", "pull request")),
     ),
-    CatalogTool(
+    structured_tool(
         "search_issues_and_pull_requests",
         "Search issue and pull request titles and descriptions across repositories. "
         "Matches are case-insensitive substrings of the query.",
         _search,
+        results.SearchResults,
         (
             Parameter("query", description='The text to search for, such as "#123" or a phrase.'),
             _DATE_RANGE,
             *_PAGING,
         ),
     ),
-    CatalogTool(
+    structured_tool(
         "list_check_runs_for_pull_request",
         "List the checks that ran on a pull request's latest commit, each with its "
         "conclusion: success, failure, cancelled or skipped.",
         _check_runs,
+        results.CheckRunList,
         (_OWNER, _REPO, _number("pull_number", "pull request"), *_PAGING),
     ),
 )
@@ -522,16 +551,27 @@ def _with_repositories(tool: CatalogTool) -> CatalogTool:
     which are prompt text the existing baselines were measured with.
     """
 
-    responder = devhub_repos.RESPONDERS.get(tool.name)
-    if responder is None:
+    entry = devhub_repos.RESPONDERS.get(tool.name)
+    if entry is None:
         return tool
-    fallback = tool.respond
+    responder, result_type = entry
+    # A decoy answers other repositories in text only, so for them a structured
+    # server reports a failed call, as a real API does for a repository it lacks.
+    fallback = (
+        tool.structured.reply
+        if tool.structured is not None
+        else lambda arguments: Reply(tool.respond(arguments), None)
+    )
 
-    def respond(arguments: Arguments) -> str:
+    def reply(arguments: Arguments) -> Reply:
         answer = responder(arguments)
         return fallback(arguments) if answer is None else answer
 
-    return replace(tool, respond=respond)
+    return replace(
+        tool,
+        respond=lambda arguments: reply(arguments).text,
+        structured=Structured(reply, result_type),
+    )
 
 
 DEVHUB = Catalog(

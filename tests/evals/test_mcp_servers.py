@@ -8,7 +8,7 @@ from pathlib import Path
 import anyio
 import pytest
 
-from evals.tool_use.runner import mcp_settings, mcp_tool_names
+from evals.tool_use.runner import McpResults, mcp_settings, mcp_tool_names
 from evals.tool_use.servers.catalogs import (
     CATALOGS,
     INVOICE_ID,
@@ -21,6 +21,7 @@ from evals.tool_use.task_definitions import Task, select_tasks
 from wisp.config.settings import WispSettings
 from wisp.runtime.extensions import build_runtime
 from wisp.tools.context import ToolContext
+from wisp.tools.result import ToolResult
 
 _MCP_TASKS = select_tasks(tags=["mcp"])
 
@@ -126,3 +127,33 @@ def test_devhub_is_a_large_catalog() -> None:
     names = CATALOGS["devhub"].tool_names
 
     assert len(names) == len(set(names)) >= 90
+
+
+@pytest.mark.process
+def test_structured_results_through_wisp(tmp_path: Path) -> None:
+    """A structured server adds the tool's own value; the text is unchanged.
+
+    A text server's tools still carry the MCP SDK's output schema for a string,
+    whose value is the text wrapped in `result`, which codemode returns as text.
+    """
+
+    task = next(task for task in _MCP_TASKS if task.id == "mcp-triage")
+    arguments = {"owner": "acme", "repo": "web", "pull_number": 418}
+
+    async def call(results: McpResults) -> ToolResult:
+        settings = mcp_settings(task, sys.executable, results=results)
+        servers = WispSettings.model_validate(settings).mcp_servers
+        runtime = await build_runtime(mcp_servers=servers or ())
+        try:
+            tool = runtime.tools.get("mcp__devhub__list_check_runs_for_pull_request")
+            return await tool.run(arguments, ToolContext(cwd=tmp_path))
+        finally:
+            await runtime.aclose()
+
+    text = anyio.run(call, "text")
+    structured = anyio.run(call, "structured")
+
+    assert structured.text == text.text
+    assert text.structured == {"result": text.text}
+    assert isinstance(structured.structured, dict)
+    assert {"name": "e2e-safari", "conclusion": "failure"} in structured.structured["check_runs"]

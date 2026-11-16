@@ -38,6 +38,35 @@ class Parameter:
 
 
 @dataclass(frozen=True, slots=True)
+class Reply:
+    """A tool's answer as text, and as the structured value it stands for.
+
+    Attributes:
+        text (str): What every server sends, structured or not.
+        value (Mapping[str, object] | None): The same answer as data, or None when
+            the answer is an error, such as an unknown repository, which a server
+            with an output schema reports as a failed call.
+    """
+
+    text: str
+    value: Mapping[str, object] | None
+
+
+@dataclass(frozen=True, slots=True)
+class Structured:
+    """How a tool answers when its server declares output schemas.
+
+    Attributes:
+        reply (Callable[[Arguments], Reply]): The answer for the tool's arguments;
+            its text is always what the tool's `respond` returns.
+        result_type (type): The `TypedDict` its output schema is built from.
+    """
+
+    reply: Callable[[Arguments], Reply]
+    result_type: type
+
+
+@dataclass(frozen=True, slots=True)
 class CatalogTool:
     """One tool a synthetic server offers.
 
@@ -47,12 +76,33 @@ class CatalogTool:
         respond (Callable[[Arguments], str]): The tool's answer for its arguments.
         parameters (tuple[Parameter, ...] | None): The tool's own parameters, or
             None to take its catalog's shared ones.
+        structured (Structured | None): Its structured answer, for a server started
+            to return them; None for a tool that only ever answers in text.
     """
 
     name: str
     description: str
     respond: Callable[[Arguments], str]
     parameters: tuple[Parameter, ...] | None = None
+    structured: Structured | None = None
+
+
+def structured_tool(
+    name: str,
+    description: str,
+    reply: Callable[[Arguments], Reply],
+    result_type: type,
+    parameters: tuple[Parameter, ...] | None = None,
+) -> CatalogTool:
+    """A tool whose text answer is the text of its structured one, so the two agree."""
+
+    return CatalogTool(
+        name,
+        description,
+        lambda arguments: reply(arguments).text,
+        parameters,
+        Structured(reply, result_type),
+    )
 
 
 @dataclass(frozen=True, slots=True)

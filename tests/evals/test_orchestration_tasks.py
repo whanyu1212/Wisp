@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -169,3 +170,75 @@ def test_alerts_only_for_answer() -> None:
 )
 def test_verifier_traps(tmp_path: Path, task_id: str, answer: str, passes: bool) -> None:
     assert _verifies(_TASKS[task_id], tmp_path, answer) is passes
+
+
+def test_task_tools_answer_structured() -> None:
+    structured = {name for name, tool in _TOOLS.items() if tool.structured is not None}
+
+    assert structured == {
+        "list_issues",
+        "get_issue",
+        "list_pull_requests",
+        "get_pull_request",
+        "search_issues_and_pull_requests",
+        "list_check_runs_for_pull_request",
+        "list_workflow_runs",
+        "get_commits",
+        "list_reviews",
+        "list_dependabot_alerts",
+    }
+
+
+def _value(tool: str, arguments: dict[str, object]) -> Any:
+    # The value is JSON-shaped data, read here the way a script reads it.
+    structured = _TOOLS[tool].structured
+    assert structured is not None
+    reply = structured.reply(arguments)
+    assert reply.text == _TOOLS[tool].respond(arguments) and reply.value is not None
+    return reply.value
+
+
+def test_structured_values_give_answers() -> None:
+    """Each task is solvable from the values alone, the way a script reads them."""
+
+    pages = [_value("list_pull_requests", {**_API, "page": page}) for page in (1, 2)]
+    failing = [
+        pull["number"]
+        for page in pages
+        for pull in page["pull_requests"]
+        if {"name": "lint", "conclusion": "failure"}
+        in _value("list_check_runs_for_pull_request", {**_API, "pull_number": pull["number"]})[
+            "check_runs"
+        ]
+    ]
+    assert sorted(failing) == list(devhub_repos.LINT_FAILURES)
+    runs = _value("list_workflow_runs", {**_API, "per_page": 100})["workflow_runs"]
+    failed = next(
+        run
+        for run in runs
+        if (run["workflow"], run["branch"], run["conclusion"]) == ("deploy", "main", "failure")
+    )
+    commit = _value("get_commits", {**_API, "id": failed["commit"]})
+    assert commit["message"].startswith(f"Merge pull request #{devhub_repos.DEPLOY_PULL} ")
+    reviews = _value("list_reviews", {**_API, "pull_number": devhub_repos.DEPLOY_PULL})
+    approved = [review["user"] for review in reviews["reviews"] if review["state"] == "approved"]
+    assert approved == [devhub_repos.DEPLOY_APPROVER]
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        ("list_issues", {"owner": "acme", "repo": "nope"}),
+        ("get_pull_request", {**_API, "pull_number": 9999}),
+        ("get_commits", {"owner": "acme", "repo": "web", "id": "1234567"}),
+    ],
+    ids=["unknown-repo", "unknown-pull", "decoy-repo"],
+)
+def test_structured_errors_have_no_value(tool: str, arguments: dict[str, object]) -> None:
+    structured = _TOOLS[tool].structured
+    assert structured is not None
+
+    reply = structured.reply(arguments)
+
+    assert reply.value is None
+    assert reply.text == _TOOLS[tool].respond(arguments)

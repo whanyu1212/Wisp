@@ -39,6 +39,10 @@ from wisp.mcp.tool import mcp_tool_name
 # Whether runs offer the experimental codemode tool, and in which language.
 Codemode = TypeAliasType("Codemode", Literal["off", "python"])
 CODEMODES: tuple[Codemode, ...] = ("off", "python")
+# What the synthetic MCP servers' task tools return: text only, or their structured
+# result too, under an output schema.
+McpResults = TypeAliasType("McpResults", Literal["text", "structured"])
+MCP_RESULTS: tuple[McpResults, ...] = ("text", "structured")
 RunStatus = TypeAliasType("RunStatus", Literal["passed", "failed", "errored"])
 
 DEADLINE_EXIT_CODE = 124
@@ -153,6 +157,8 @@ class RunContext:
             either by catalog size (`auto`, Wisp's default).
         codemode (Codemode): Whether runs offer the codemode tool (`python`) or
             not (`off`).
+        mcp_results (McpResults): Whether the synthetic MCP servers' task tools
+            return only text (`text`) or their structured result too (`structured`).
     """
 
     build: Build
@@ -161,6 +167,7 @@ class RunContext:
     python: str = sys.executable
     mcp_tool_exposure: McpToolExposure = "direct"
     codemode: Codemode = "off"
+    mcp_results: McpResults = "text"
 
 
 @dataclass(slots=True)
@@ -211,6 +218,7 @@ class RunRow:
     nested_calls: int = 0
     cache_write_tokens: int = 0
     script_failures: dict[str, int] = field(default_factory=dict)
+    mcp_results: McpResults = "text"
 
 
 @dataclass(slots=True)
@@ -276,7 +284,10 @@ def run_environment(
 
 
 def mcp_settings(
-    task: Task, python: str, exposure: McpToolExposure = "direct"
+    task: Task,
+    python: str,
+    exposure: McpToolExposure = "direct",
+    results: McpResults = "text",
 ) -> dict[str, object]:
     """Return the user settings that start a task's synthetic MCP servers.
 
@@ -288,6 +299,7 @@ def mcp_settings(
         task (Task): The task whose `mcp_servers` to start.
         python (str): The interpreter that runs each server; it needs the MCP SDK.
         exposure (McpToolExposure): How the servers' tools reach the model.
+        results (McpResults): Whether the servers return structured results.
 
     Returns:
         dict[str, object]: The contents of `~/.wisp/settings.json`.
@@ -298,7 +310,12 @@ def mcp_settings(
         "mcp_servers": {
             name: {
                 "command": python,
-                "args": ["-m", "evals.tool_use.servers.serve", name],
+                "args": [
+                    "-m",
+                    "evals.tool_use.servers.serve",
+                    name,
+                    *(["--structured"] if results == "structured" else []),
+                ],
                 "env": {"PYTHONPATH": str(REPO_ROOT)},
                 "tool_safety": dict.fromkeys(CATALOGS[name].tool_names, "read"),
             }
@@ -577,7 +594,7 @@ def _run_wisp(
     for tool in (*definition.tools, *mcp_tool_names(task)):
         command += ["--allow-tool", tool]
     settings: dict[str, object] = (
-        mcp_settings(task, context.python, context.mcp_tool_exposure)
+        mcp_settings(task, context.python, context.mcp_tool_exposure, context.mcp_results)
         if definition.mcp_servers
         else {}
     )
@@ -766,4 +783,5 @@ def _row(
         nested_calls=measured.nested_calls,
         cache_write_tokens=measured.cache_write_tokens,
         script_failures=dict(measured.script_failures),
+        mcp_results=context.mcp_results,
     )

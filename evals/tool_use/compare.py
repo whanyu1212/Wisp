@@ -55,6 +55,7 @@ BASELINE_FIELDS = (
     "failed_scripts",
     "script_failures",
     "nested_calls",
+    "mcp_results",
 )
 SUITE_FIELDS = (
     "models",
@@ -67,6 +68,7 @@ SUITE_FIELDS = (
     "finished_at",
     "mcp_tool_exposure",
     "codemode",
+    "mcp_results",
 )
 
 # Two-sided 95% critical values of Student's t for 1 to 30 degrees of freedom.
