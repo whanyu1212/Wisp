@@ -10,7 +10,10 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.11.0 — Unreleased
+<!-- Keeps links to the pre-release "0.11.0 — Unreleased" heading working. -->
+<a id="0110--unreleased"></a>
+
+## 0.11.0 — 2026-11-16
 
 0.11.0 is a minor release on 0.10.1 about codemode and the terminal UI's view of background
 processes. Codemode scripts read up to 512 KiB of each tool result, get an MCP tool's structured
