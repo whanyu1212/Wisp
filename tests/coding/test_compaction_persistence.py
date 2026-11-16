@@ -32,6 +32,7 @@ from wisp.providers.base import ToolCallResult, ToolSpec
 from wisp.providers.events import (
     ProviderEvent,
     ProviderResponseCompleted,
+    ProviderResponseFailed,
     ProviderResponseStarted,
     ProviderToolCallCompleted,
     ProviderUsage,
@@ -350,12 +351,46 @@ def test_repairs_interrupted_tools_before_compaction(tmp_path: Path) -> None:
     ]
 
 
-def test_summary_failure_emits_failure_and_appends_no_compaction(
+@pytest.mark.parametrize(
+    ("responses", "error"),
+    [
+        pytest.param(
+            [ProviderResponseStarted(model="model"), ProviderResponseCompleted(content="  ")],
+            "Compaction summary was blank",
+            id="blank-summary",
+        ),
+        pytest.param(
+            [ProviderResponseFailed(message="Connection failed before streaming")],
+            "Compaction summary failed: Connection failed before streaming",
+            id="opening-failure",
+        ),
+        pytest.param(
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseFailed(message="Connection lost during streaming"),
+            ],
+            "Compaction summary failed: Connection lost during streaming",
+            id="empty-stream-failure",
+        ),
+        pytest.param(
+            [
+                ProviderResponseStarted(model="model"),
+                ProviderResponseFailed(
+                    message="Connection lost during streaming",
+                    partial_content=VALID_COMPACTION_SUMMARY,
+                ),
+            ],
+            "Compaction summary failed: Connection lost during streaming",
+            id="partial-summary-failure",
+        ),
+    ],
+)
+def test_summary_failure_keeps_context(
     tmp_path: Path,
+    responses: list[ProviderEvent],
+    error: str,
 ) -> None:
-    provider = ScriptedProvider(
-        [[ProviderResponseStarted(model="model"), ProviderResponseCompleted(content="  ")]]
-    )
+    provider = ScriptedProvider([responses])
     store = JsonlSessionStore(tmp_path)
     session = store.create()
 
@@ -364,9 +399,10 @@ def test_summary_failure_emits_failure_and_appends_no_compaction(
         await _append_turn(session, "two")
         agent = CodingSession(provider=provider, sessions=store)
         events: list[WispEvent] = []
-        with pytest.raises(CompactionSummaryError, match="was blank"):
+        with pytest.raises(CompactionSummaryError) as raised:
             async for event in agent.compact(session):
                 events.append(event)
+        assert str(raised.value) == error
         return events
 
     events = anyio.run(run)
@@ -377,12 +413,19 @@ def test_summary_failure_emits_failure_and_appends_no_compaction(
         "compaction.completed",
     ]
     assert isinstance(events[1], ErrorEvent)
+    assert events[1].message == error
     failed = events[2]
     assert isinstance(failed, CompactionCompleted)
     assert failed.outcome == "failed"
     assert failed.compaction_id is None
-    assert failed.error == "Compaction summary was blank"
+    assert failed.error == error
     assert not any(entry.kind == "compaction" for entry in session.read_entries())
+    assert [message.content for message in session.read_context_messages()] == [
+        "question one",
+        "answer one",
+        "question two",
+        "answer two",
+    ]
 
 
 def test_summary_tool_call_failure_persists_accounting(tmp_path: Path) -> None:
