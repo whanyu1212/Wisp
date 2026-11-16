@@ -55,8 +55,8 @@ const introductions: Record<string, { title: string; summary: string }> = {
       themes={{ light: "github-light-high-contrast", dark: "github-dark" }}
     />
     <p class="install-note">
-      Python 3.11+. Native TUI wheels: macOS arm64 and Linux x86_64 (glibc
-      2.28+).{" "}
+      Python 3.11+ supported; 3.12 recommended for installation. Native TUI
+      wheels: macOS arm64 and Linux x86_64 (glibc 2.28+).{" "}
       <a href={href("guide/installation.html")}>Other installations →</a>
     </p>
   </section>
@@ -65,7 +65,7 @@ const introductions: Record<string, { title: string; summary: string }> = {
   <TuiCapture
     capture="sessionWelcome"
     eager
-    sizes="(max-width: 1380px) calc(100vw - 40px), 1324px"
+    sizes="(max-width: 760px) calc(100vw - 40px), (max-width: 1096px) calc(100vw - 56px), 1040px"
   />
 </div>
 <section class="home-section" aria-labelledby="choose-a-starting-point">

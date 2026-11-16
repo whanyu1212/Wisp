@@ -717,6 +717,13 @@ svg {
   width: 100%;
   border-bottom: 1px solid var(--rule);
 }
+/* Focus the approval pane without discarding the transcript or original image. */
+.tui-capture-approval img {
+  aspect-ratio: 3 / 2;
+  height: auto;
+  object-fit: cover;
+  object-position: left bottom;
+}
 .tui-capture figcaption {
   padding: 10px 14px;
   font-size: 12.5px;
@@ -792,6 +799,10 @@ svg {
 .home-install {
   padding-left: 32px;
   border-left: 1px solid var(--rule);
+}
+.home-showcase {
+  max-width: 1040px;
+  margin-inline: auto;
 }
 .home-showcase .tui-capture {
   margin: 0;
