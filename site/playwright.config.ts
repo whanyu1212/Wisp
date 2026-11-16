@@ -5,7 +5,9 @@ export default defineConfig({
   outputDir: "./test-results",
   forbidOnly: !!process.env.CI,
   retries: 0,
-  workers: 2,
+  // Each test has its own browser context; schedule tests, not whole files.
+  fullyParallel: true,
+  workers: process.env.CI ? 4 : 2,
   use: {
     baseURL: "http://127.0.0.1:4322/Wisp/",
     trace: "retain-on-failure",
