@@ -28,6 +28,7 @@ from evals.tool_use.credentials import (
 from evals.tool_use.report import build_report, load_rows, render_markdown
 from evals.tool_use.runner import (
     CODEMODES,
+    MCP_RESULTS,
     Budget,
     ModelSpec,
     RunContext,
@@ -71,6 +72,13 @@ def main(argv: list[str] | None = None) -> int:
         choices=CODEMODES,
         default="off",
         help="offer the experimental codemode tool, in this language (default: off)",
+    )
+    run.add_argument(
+        "--mcp-results",
+        choices=MCP_RESULTS,
+        default="text",
+        help="whether the synthetic MCP servers' task tools also return structured "
+        "results, under an output schema (default: text)",
     )
 
     runs_help = "a results folder, its runs.jsonl, or a baseline .json file"
@@ -159,6 +167,7 @@ def _run(args: argparse.Namespace) -> int:
         results_dir=results_dir,
         mcp_tool_exposure=args.mcp_tool_exposure,
         codemode=args.codemode,
+        mcp_results=args.mcp_results,
     )
     runs_path = results_dir / "runs.jsonl"
     print(
@@ -188,6 +197,7 @@ def _run(args: argparse.Namespace) -> int:
         "credential_sources": dict(credentials.sources),
         "mcp_tool_exposure": args.mcp_tool_exposure,
         "codemode": args.codemode,
+        "mcp_results": args.mcp_results,
         "stopped_for_budget": result.stopped_for_budget,
         "skipped_runs": result.skipped_runs,
         "finished_at": datetime.now(UTC).isoformat(),

@@ -39,6 +39,7 @@ uv run python -m evals.tool_use report evals/tool_use/results/<timestamp>
 | `--results` | Output folder (default: a new timestamped folder under `results/`) |
 | `--mcp-tool-exposure` | `direct` (default) sends every MCP tool's definition; `on_demand` gives the model `mcp_search`, `mcp_describe` and `mcp_call` instead; `auto`, Wisp's own default, picks one by catalog size |
 | `--codemode` | `off` (default), or `python` to offer the experimental `codemode` tool; rows then also count `scripts`, `failed_scripts`, `nested_calls` and why scripts failed (`script_failures`) |
+| `--mcp-results` | `text` (default), or `structured` to have the devhub task tools declare an output schema and return their result as data beside the same text, so a codemode script receives a typed dict. Every other tool, and every answer's text, is the same in both; an answer that is an error, such as an unknown repository, becomes a failed call |
 
 Runs happen in rounds: one repetition of every task and model per round. The budget is checked
 before each round, so a stopped suite has the same number of runs for every pairing.

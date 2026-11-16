@@ -18,7 +18,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TypeVar
 
-from evals.tool_use.servers.model import Arguments
+from evals.tool_use.servers import devhub_results as results
+from evals.tool_use.servers.model import Arguments, Reply
 
 T = TypeVar("T")
 
@@ -129,43 +130,67 @@ def _checks(number: int) -> tuple[tuple[str, str], ...]:
     return tuple(checks)
 
 
-def list_pull_requests(arguments: Arguments) -> str | None:
+def list_pull_requests(arguments: Arguments) -> Reply | None:
     if not _is_api(arguments):
         return None
     state = str(arguments.get("state") or "open").lower()
     numbers = {"open": OPEN_PULLS, "closed": CLOSED_PULLS}.get(state, OPEN_PULLS + CLOSED_PULLS)
     ordered = sorted(numbers, reverse=arguments.get("direction") != "asc")
-    rows = [
-        f"#{pull.number} [{pull.state}] {pull.title}"
-        for pull in (_pull(number) for number in _page(ordered, arguments))
-    ]
-    return "\n".join(rows) or "No pull requests match."
+    pulls = [_pull(number) for number in _page(ordered, arguments)]
+    rows = [f"#{pull.number} [{pull.state}] {pull.title}" for pull in pulls]
+    return Reply(
+        "\n".join(rows) or "No pull requests match.",
+        results.PullRequestList(
+            pull_requests=[
+                results.PullRequest(number=pull.number, state=pull.state, title=pull.title)
+                for pull in pulls
+            ]
+        ),
+    )
 
 
-def get_pull_request(arguments: Arguments) -> str | None:
+def get_pull_request(arguments: Arguments) -> Reply | None:
     if not _is_api(arguments):
         return None
     number = _int(arguments.get("pull_number"))
     if number not in OPEN_PULLS + CLOSED_PULLS:
-        return f"Pull request #{number} not found."
+        return Reply(f"Pull request #{number} not found.", None)
     pull = _pull(number)
-    return f"#{pull.number} {pull.title}\nstate: {pull.state}\nbase: main\n\n{pull.body}"
+    return Reply(
+        f"#{pull.number} {pull.title}\nstate: {pull.state}\nbase: main\n\n{pull.body}",
+        results.PullRequestDetail(
+            number=pull.number, state=pull.state, title=pull.title, base="main", body=pull.body
+        ),
+    )
 
 
-def list_check_runs(arguments: Arguments) -> str | None:
+def list_check_runs(arguments: Arguments) -> Reply | None:
     if not _is_api(arguments):
         return None
     number = _int(arguments.get("pull_number"))
     if number not in OPEN_PULLS + CLOSED_PULLS:
-        return f"Pull request #{number} not found."
-    return "\n".join(f"{name}: {conclusion}" for name, conclusion in _checks(number))
+        return Reply(f"Pull request #{number} not found.", None)
+    return check_runs_reply(_checks(number))
+
+
+def check_runs_reply(checks: Sequence[tuple[str, str]]) -> Reply:
+    """A pull request's checks, as both devhub repositories list them."""
+
+    return Reply(
+        "\n".join(f"{name}: {conclusion}" for name, conclusion in checks),
+        results.CheckRunList(
+            check_runs=[
+                results.CheckRun(name=name, conclusion=conclusion) for name, conclusion in checks
+            ]
+        ),
+    )
 
 
 # --- mcp-flaky-comments: total comments on open issues labelled `flaky` -------------
 
 
 @dataclass(frozen=True, slots=True)
-class _Issue:
+class IssueRecord:
     number: int
     state: str
     labels: tuple[str, ...]
@@ -173,7 +198,7 @@ class _Issue:
     title: str
 
 
-def _issue(number: int) -> _Issue:
+def _issue(number: int) -> IssueRecord:
     digest = _digest("issue", number)
     labels: list[str] = []
     if digest[1] % 5 < 3:
@@ -182,7 +207,7 @@ def _issue(number: int) -> _Issue:
         # A label that contains `flaky` without being it.
         labels.append("flaky-infra")
     labels.append(_pick(("api", "billing", "auth", "ci"), "issue-area", number))
-    return _Issue(
+    return IssueRecord(
         number=number,
         state="closed" if digest[0] % 5 == 0 else "open",
         labels=tuple(labels),
@@ -211,7 +236,7 @@ OPEN_FLAKY_ISSUES = tuple(
 )
 
 
-def list_issues(arguments: Arguments) -> str | None:
+def list_issues(arguments: Arguments) -> Reply | None:
     if not _is_api(arguments):
         return None
     state = str(arguments.get("state") or "open").lower()
@@ -222,32 +247,58 @@ def list_issues(arguments: Arguments) -> str | None:
         for issue in _ISSUES
         if (state == "all" or issue.state == state) and wanted <= set(issue.labels)
     ]
-    by: Callable[[_Issue], int] = (
+    by: Callable[[IssueRecord], int] = (
         (lambda issue: issue.comments)
         if arguments.get("sort") == "comments"
         else (lambda issue: issue.number)
     )
     matches.sort(key=by, reverse=arguments.get("direction") != "asc")
+    return issues_reply(_page(matches, arguments))
+
+
+def issues_reply(issues: Sequence[IssueRecord]) -> Reply:
+    """A page of issues, as both devhub repositories list them."""
+
     rows = [
         f"#{issue.number} [{issue.state}] {issue.title} — labels: {', '.join(issue.labels)}; "
         f"{issue.comments} comments"
-        for issue in _page(matches, arguments)
+        for issue in issues
     ]
-    return "\n".join(rows) or "No issues match."
+    return Reply(
+        "\n".join(rows) or "No issues match.",
+        results.IssueList(issues=[_issue_value(issue) for issue in issues]),
+    )
 
 
-def get_issue(arguments: Arguments) -> str | None:
+def issue_reply(issue: IssueRecord, opened_by: str) -> Reply:
+    """One issue, as both devhub repositories show it."""
+
+    return Reply(
+        f"#{issue.number} {issue.title}\nstate: {issue.state}\n"
+        f"labels: {', '.join(issue.labels)}\ncomments: {issue.comments}\nopened by: "
+        f"{opened_by}",
+        results.IssueDetail(**_issue_value(issue), opened_by=opened_by),
+    )
+
+
+def _issue_value(issue: IssueRecord) -> results.Issue:
+    return results.Issue(
+        number=issue.number,
+        state=issue.state,
+        title=issue.title,
+        labels=list(issue.labels),
+        comments=issue.comments,
+    )
+
+
+def get_issue(arguments: Arguments) -> Reply | None:
     if not _is_api(arguments):
         return None
     number = _int(arguments.get("issue_number"))
     issue = next((issue for issue in _ISSUES if issue.number == number), None)
     if issue is None:
-        return f"Issue #{number} not found."
-    return (
-        f"#{issue.number} {issue.title}\nstate: {issue.state}\n"
-        f"labels: {', '.join(issue.labels)}\ncomments: {issue.comments}\nopened by: "
-        f"{_pick(_PEOPLE, 'issue-author', issue.number)}"
-    )
+        return Reply(f"Issue #{number} not found.", None)
+    return issue_reply(issue, _pick(_PEOPLE, "issue-author", issue.number))
 
 
 # --- mcp-deploy-chain: run, then commit, then pull request, then its approval -------
@@ -327,7 +378,7 @@ def _commit_author(run: _Run) -> str:
     return _pick(_PEOPLE, "commit-author", run.commit)
 
 
-def list_workflow_runs(arguments: Arguments) -> str | None:
+def list_workflow_runs(arguments: Arguments) -> Reply | None:
     if not _is_api(arguments):
         return None
     filters = _filters(arguments)
@@ -342,15 +393,31 @@ def list_workflow_runs(arguments: Arguments) -> str | None:
         and (not filters.get("until") or run.started < filters["until"])
         and (not filters.get("author") or _commit_author(run) == filters["author"])
     ]
+    runs = _page(matches, arguments)
     rows = [
         f"run {run.id} · {run.workflow} · {run.branch} · {run.conclusion} · "
         f"commit {run.commit} · started {run.started}"
-        for run in _page(matches, arguments)
+        for run in runs
     ]
-    return "\n".join(rows) or "No workflow runs match."
+    return Reply(
+        "\n".join(rows) or "No workflow runs match.",
+        results.WorkflowRunList(
+            workflow_runs=[
+                results.WorkflowRun(
+                    id=run.id,
+                    workflow=run.workflow,
+                    branch=run.branch,
+                    conclusion=run.conclusion,
+                    commit=run.commit,
+                    started=run.started,
+                )
+                for run in runs
+            ]
+        ),
+    )
 
 
-def get_commit(arguments: Arguments) -> str | None:
+def get_commit(arguments: Arguments) -> Reply | None:
     if not _is_api(arguments):
         return None
     wanted = str(arguments.get("id", "")).strip().lower()
@@ -358,27 +425,39 @@ def get_commit(arguments: Arguments) -> str | None:
         (run for run in _RUNS if len(wanted) >= 7 and run.commit.startswith(wanted[:7])), None
     )
     if run is None:
-        return f"Commit {wanted} not found in {API_OWNER}/{API_REPO}."
+        return Reply(f"Commit {wanted} not found in {API_OWNER}/{API_REPO}.", None)
     if run.merged_pull is not None:
         topic = _pull(run.merged_pull).title.split(" ", 1)[1].replace(" ", "-")
         message = f"Merge pull request #{run.merged_pull} from acme/{topic}"
     else:
         message = f"Update the {_pick(_TOPICS, 'commit-topic', run.commit)} code"
-    return f"commit {run.commit}\nauthor: {_commit_author(run)}\nbranch: {run.branch}\n\n{message}"
+    author = _commit_author(run)
+    return Reply(
+        f"commit {run.commit}\nauthor: {author}\nbranch: {run.branch}\n\n{message}",
+        results.Commit(sha=run.commit, author=author, branch=run.branch, message=message),
+    )
 
 
-def list_reviews(arguments: Arguments) -> str | None:
+def list_reviews(arguments: Arguments) -> Reply | None:
     if not _is_api(arguments):
         return None
     number = _int(arguments.get("pull_number"))
     if number not in OPEN_PULLS + CLOSED_PULLS:
-        return f"Pull request #{number} not found."
+        return Reply(f"Pull request #{number} not found.", None)
     reviews = _REVIEWS.get(number, ((_pick(_PEOPLE, "reviewer", number), "approved"),))
-    rows = [
-        f"review {number * 10 + index} by {login}: {state}"
-        for index, (login, state) in enumerate(reviews, start=1)
-    ]
-    return "\n".join(_page(rows, arguments))
+    page = _page(
+        [
+            results.Review(id=number * 10 + index, user=login, state=state)
+            for index, (login, state) in enumerate(reviews, start=1)
+        ],
+        arguments,
+    )
+    return Reply(
+        "\n".join(
+            f"review {review['id']} by {review['user']}: {review['state']}" for review in page
+        ),
+        results.ReviewList(reviews=list(page)),
+    )
 
 
 # --- mcp-service-alerts: services from a local file, alerts from each repository ----
@@ -451,32 +530,51 @@ def _alerts(service: str) -> tuple[tuple[str, str, str, str, str], ...]:
     return tuple(alerts)
 
 
-def list_dependabot_alerts(arguments: Arguments) -> str | None:
+def list_dependabot_alerts(arguments: Arguments) -> Reply | None:
     owner, repo = _repo(arguments)
     if owner != API_OWNER or (repo not in SERVICES and repo not in _PLANTED_ALERTS):
         return None
     state = str(arguments.get("state") or "open").lower()
     ecosystem = str(arguments.get("ecosystem") or "").strip().lower()
+    alerts = _page(
+        [
+            results.DependabotAlert(
+                number=index,
+                state=alert_state,
+                severity=severity,
+                package=package,
+                ecosystem=package_ecosystem,
+                summary=summary,
+            )
+            for index, (alert_state, severity, package, package_ecosystem, summary) in enumerate(
+                _alerts(repo), start=1
+            )
+            if (state == "all" or alert_state == state)
+            and (not ecosystem or package_ecosystem == ecosystem)
+        ],
+        arguments,
+    )
     rows = [
-        f"alert {index} [{alert_state}] {severity} · {package} ({package_ecosystem}) · {summary}"
-        for index, (alert_state, severity, package, package_ecosystem, summary) in enumerate(
-            _alerts(repo), start=1
-        )
-        if (state == "all" or alert_state == state)
-        and (not ecosystem or package_ecosystem == ecosystem)
+        f"alert {alert['number']} [{alert['state']}] {alert['severity']} · {alert['package']} "
+        f"({alert['ecosystem']}) · {alert['summary']}"
+        for alert in alerts
     ]
-    return "\n".join(_page(rows, arguments)) or f"No dependency alerts for {owner}/{repo}."
+    return Reply(
+        "\n".join(rows) or f"No dependency alerts for {owner}/{repo}.",
+        results.DependabotAlertList(alerts=list(alerts)),
+    )
 
 
-# The tools these repositories answer, by devhub tool name.
-RESPONDERS: dict[str, Callable[[Arguments], str | None]] = {
-    "list_pull_requests": list_pull_requests,
-    "get_pull_request": get_pull_request,
-    "list_check_runs_for_pull_request": list_check_runs,
-    "list_issues": list_issues,
-    "get_issue": get_issue,
-    "list_workflow_runs": list_workflow_runs,
-    "get_commits": get_commit,
-    "list_reviews": list_reviews,
-    "list_dependabot_alerts": list_dependabot_alerts,
+# The tools these repositories answer, by devhub tool name, with the type of their
+# structured result.
+RESPONDERS: dict[str, tuple[Callable[[Arguments], Reply | None], type]] = {
+    "list_pull_requests": (list_pull_requests, results.PullRequestList),
+    "get_pull_request": (get_pull_request, results.PullRequestDetail),
+    "list_check_runs_for_pull_request": (list_check_runs, results.CheckRunList),
+    "list_issues": (list_issues, results.IssueList),
+    "get_issue": (get_issue, results.IssueDetail),
+    "list_workflow_runs": (list_workflow_runs, results.WorkflowRunList),
+    "get_commits": (get_commit, results.Commit),
+    "list_reviews": (list_reviews, results.ReviewList),
+    "list_dependabot_alerts": (list_dependabot_alerts, results.DependabotAlertList),
 }

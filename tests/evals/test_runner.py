@@ -14,6 +14,7 @@ from evals.tool_use.metrics import RunMetrics, measure, parse_events
 from evals.tool_use.runner import (
     Budget,
     Build,
+    McpResults,
     ModelSpec,
     RunContext,
     RunRow,
@@ -375,6 +376,16 @@ def test_mcp_settings_carry_exposure(tmp_path: Path) -> None:
 
     assert settings["mcp_tool_exposure"] == "on_demand"
     assert list(settings["mcp_servers"]) == ["billing"]  # type: ignore[call-overload]
+
+
+@pytest.mark.parametrize(("results", "flag"), [("text", []), ("structured", ["--structured"])])
+def test_mcp_settings_carry_results(tmp_path: Path, results: McpResults, flag: list[str]) -> None:
+    task = _task(tmp_path, extra='mcp_servers = ["billing"]\n')
+
+    settings = mcp_settings(task, "python", results=results)
+
+    server = settings["mcp_servers"]["billing"]  # type: ignore[index]
+    assert server["args"] == ["-m", "evals.tool_use.servers.serve", "billing", *flag]
 
 
 _BILLING_TOOLS = ("mcp__billing__get_invoice", "mcp__billing__get_invoice_customer")
