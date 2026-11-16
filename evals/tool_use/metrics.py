@@ -21,6 +21,7 @@ from wisp.events import (
     RunSetup,
     ToolExecutionEnded,
     ToolExecutionStarted,
+    ToolNestedCallStarted,
     ToolResultReady,
     wisp_event_from_json,
 )
@@ -72,6 +73,9 @@ class RunMetrics:
         script_failures (Counter[str]): Those failures by reason, as
             `script_failure_reason` names them. They add up to ``failed_scripts``.
         nested_calls (int): Tool calls the scripts that finished made.
+        failed_script_calls (int): Tool calls the failed scripts made before they
+            failed, counted from their `tool.nested.started` events. With
+            ``nested_calls`` it gives the share of script calls a retry repeats.
     """
 
     setup: RunSetup | None = None
@@ -96,6 +100,7 @@ class RunMetrics:
     failed_scripts: int = 0
     script_failures: Counter[str] = field(default_factory=Counter)
     nested_calls: int = 0
+    failed_script_calls: int = 0
 
     @property
     def last_error(self) -> str | None:
@@ -132,6 +137,8 @@ def measure(events: Iterable[KnownWispEvent]) -> RunMetrics:
     """Summarize a run's events into `RunMetrics`."""
 
     metrics = RunMetrics()
+    # Calls made so far, by the script or subagent call that made them.
+    nested_by_parent: Counter[str] = Counter()
     for event in events:
         if isinstance(event, AgentStarted):
             metrics.setup = event.setup
@@ -155,6 +162,9 @@ def measure(events: Iterable[KnownWispEvent]) -> RunMetrics:
             if event.name == CODEMODE:
                 metrics.failed_scripts += 1
                 metrics.script_failures[script_failure_reason(event)] += 1
+                metrics.failed_script_calls += nested_by_parent[event.call_id]
+        elif isinstance(event, ToolNestedCallStarted):
+            nested_by_parent[event.parent_call_id] += 1
         elif isinstance(event, ToolExecutionEnded) and event.name == CODEMODE:
             match = _NESTED_CALLS.match(event.summary or "")
             metrics.nested_calls += int(match.group(1)) if match else 0

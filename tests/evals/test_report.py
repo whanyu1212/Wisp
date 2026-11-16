@@ -218,15 +218,35 @@ def test_missing_cache_writes_warned() -> None:
 
 def test_script_failures_listed() -> None:
     rows = [_row("a", "passed", rep=rep) for rep in (1, 2, 3)]
-    rows[0].update(scripts=3, failed_scripts=2, script_failures={"type: unresolved-reference": 2})
-    rows[1].update(scripts=2, failed_scripts=1, script_failures={"runtime: ValueError": 1})
-    # Recorded before failures were named.
-    rows[2].update(scripts=1, failed_scripts=1)
+    rows[0].update(
+        scripts=3,
+        failed_scripts=2,
+        script_failures={"type: unresolved-reference": 2},
+        nested_calls=6,
+        failed_script_calls=0,
+    )
+    rows[1].update(
+        scripts=2,
+        failed_scripts=1,
+        script_failures={"runtime: ValueError": 1},
+        nested_calls=8,
+        failed_script_calls=6,
+    )
+    # Recorded before failures were named or their calls counted: its finished
+    # calls stay out of the share, whose failed part it never recorded.
+    rows[2].update(scripts=1, failed_scripts=1, nested_calls=100)
 
     table = render_markdown(build_report(rows))
 
     assert (
         "| openai::m | 6 | 4 | type: unresolved-reference (2), runtime: ValueError (1), "
-        "not recorded (1) |"
+        "not recorded (1) | 6 of 20 (30%) |"
     ) in table
     assert "Scripts" not in render_markdown(build_report([_row("a", "passed", rep=1)]))
+
+
+def test_failed_calls_not_recorded() -> None:
+    row = _row("a", "passed", rep=1)
+    row.update(scripts=1, failed_scripts=1, nested_calls=3)
+
+    assert "| not recorded |" in render_markdown(build_report([row]))
