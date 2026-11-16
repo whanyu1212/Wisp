@@ -116,6 +116,22 @@ with `write_constraint`, under the exception below. Tool behavior changes are li
 `bash` runs commands in bash rather than `/bin/sh`, and that the read-only file tools follow
 symbolic links whose targets stay inside the workspace.
 
+## Wisp 0.12 compatibility
+
+0.12.0 keeps session `schema_version` 6 and the existing event-envelope format. Settings,
+credentials and trust formats are unchanged. The new reload report is an RPC reply, not a new
+durable session entry. There is no session-format migration in this release.
+
+The RPC contract gains the `reload` command and `rpc.settings.reloaded` event; the Python API
+gains `RpcController.reload()`. A 0.11 reader rejects the new command/event. The backend and
+every frontend must be the same release, and external RPC clients should use the 0.12.0 schema
+bundle.
+
+`/reload` changes only supported settings while idle and retains explicit session, CLI and
+environment overrides. It does not change settings-file syntax, credentials or trust policy.
+Returning to 0.11.0 removes the command; restart that release to apply settings. See the
+[0.12.0 release checklist](../maintainers/releases/0.12.0-release.md) for rollback acceptance.
+
 ## Wisp 0.11 compatibility
 
 0.11.0 reads every session 0.10.x wrote, and 0.10.1 opens sessions 0.11.0 wrote. The session
