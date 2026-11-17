@@ -41,6 +41,7 @@ from wisp.runtime.extensions import build_runtime
 from wisp.sessions.jsonl import JsonlSessionStore
 from wisp.tools.approval import ToolApprovalPolicy
 from wisp.tools.context import ToolContext
+from wisp.tools.seen_files import SeenFiles
 from wisp.tools.selection import select_tools
 
 _CALL_NUMBERS = itertools.count(1)
@@ -118,7 +119,7 @@ async def _run(
             provider=_ScriptedModel(steps),
             sessions=JsonlSessionStore(tmp_path / "sessions"),
             tool_registry=select_tools(runtime.tools, allowed_tools=tuple(tools)),
-            tool_context=ToolContext(cwd=tmp_path),
+            tool_context=ToolContext(cwd=tmp_path, seen_files=SeenFiles()),
             tool_approval_policy=approval or ToolApprovalPolicy.approve_all(),
             mcp_tool_exposure=user_settings.mcp_tool_exposure or "direct",
             codemode=user_settings.codemode,
@@ -198,6 +199,42 @@ def test_failed_edit_recovers(tmp_path: Path) -> None:
     text = handlers.read_text(encoding="utf-8")
     assert text.count("timeout=30") == 1 and text.endswith("timeout=90)\n")
     assert _outcome(events) == "completed"
+
+
+def test_read_bounds_recovery_uses_the_reported_file_length(tmp_path: Path) -> None:
+    (tmp_path / "short.py").write_text("value = 1\n")
+    steps = [
+        _call("read", path="short.py", offset=800),
+        _call("read", path="short.py", offset=1, limit=1),
+        _answer("The current file has one line."),
+    ]
+    events = anyio.run(lambda: _run(tmp_path, steps, tools=["read"], settings={}))
+    rejected, recovered = _results(events)
+    assert rejected.failure_code == "invalid_arguments"
+    assert rejected.recovery_hint == "Use an offset from 1 to 1."
+    assert not recovered.is_error and recovered.output.startswith("value = 1")
+
+
+@pytest.mark.process
+def test_formatter_requires_a_new_read_before_editing(tmp_path: Path) -> None:
+    (tmp_path / "worker.py").write_text("value = 1\n")
+    code = "from pathlib import Path; Path('worker.py').write_text('value = (1)\\n')"
+    edit = {"oldText": "value = (1)", "newText": "value = (3)"}
+    steps = [
+        _call("read", path="worker.py"),
+        _call("bash", command=f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"),
+        _call("edit", path="worker.py", edits=[edit]),
+        _call("read", path="worker.py"),
+        _call("edit", path="worker.py", edits=[edit]),
+        _answer("Updated the formatted file."),
+    ]
+    events = anyio.run(lambda: _run(tmp_path, steps, tools=["read", "bash", "edit"], settings={}))
+    _read, formatted, rejected, _reread, fixed = _results(events)
+    assert formatted.exit_code == 0
+    assert rejected.is_error and rejected.failure_code == "stale_input"
+    assert rejected.recovery_hint is not None and "Read the file again" in rejected.recovery_hint
+    assert not fixed.is_error
+    assert (tmp_path / "worker.py").read_text() == "value = (3)\n"
 
 
 @pytest.mark.parametrize("fails", [False, True], ids=["success", "partial-failure"])

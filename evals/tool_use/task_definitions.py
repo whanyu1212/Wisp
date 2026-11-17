@@ -28,6 +28,7 @@ Tag = TypeAliasType(
         "orchestration",
         "scale",
         "scenario",
+        "discipline",
     ],
 )
 ToolName = TypeAliasType(

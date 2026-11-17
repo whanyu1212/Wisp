@@ -69,6 +69,7 @@ def _run(
         "catalog_sha256": None,
         "scenario_steps_completed": None,
         "scenario_steps_expected": None,
+        "project_guidance_sha256": None,
     }
 
 
@@ -170,12 +171,19 @@ def test_uncounted_cache_writes_marked() -> None:
     assert not compare_runs([older], [older]).pairs[0].cache_writes_uncounted
 
 
-def test_baseline_keeps_listed_fields(tmp_path: Path) -> None:
+@pytest.mark.parametrize("guidance_hash", [None, "a" * 64])
+def test_baseline_keeps_listed_fields(tmp_path: Path, guidance_hash: str | None) -> None:
+    row = _run("a", 4)
+    row["project_guidance_sha256"] = guidance_hash
     document = baseline_document(
-        [_run("a", 4)],
+        [row],
         label="current-tools",
         date="2026-11-08",
-        suite={"reps": 3, "credential_sources": {"openai": "environment"}},
+        suite={
+            "reps": 3,
+            "credential_sources": {"openai": "environment"},
+            "project_guidance_sha256": guidance_hash,
+        },
     )
     path = tmp_path / "baselines" / "2026-11-08-current-tools.json"
 
@@ -183,7 +191,11 @@ def test_baseline_keeps_listed_fields(tmp_path: Path) -> None:
 
     (run,) = load_rows(path)
     assert tuple(sorted(run)) == tuple(sorted(BASELINE_FIELDS))
-    assert json.loads(path.read_text(encoding="utf-8"))["suite"] == {"reps": 3}
+    assert run["project_guidance_sha256"] == guidance_hash
+    assert json.loads(path.read_text(encoding="utf-8"))["suite"] == {
+        "reps": 3,
+        "project_guidance_sha256": guidance_hash,
+    }
     with pytest.raises(FileExistsError):
         write_baseline(path, document)
     with pytest.raises(ValueError, match="at least one run"):

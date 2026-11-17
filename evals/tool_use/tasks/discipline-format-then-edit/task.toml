@@ -1,0 +1,12 @@
+id = "discipline-format-then-edit"
+title = "Read again after a formatter changes a previously read file"
+tags = ["discipline", "edit"]
+opt_in = true
+prompt = "First read worker.py, then run python format_source.py. After formatting, change attempts() to return 3 while preserving the formatter's parentheses. Run the unit tests. Do not change the formatter or tests."
+verify = "{python} {task}/verify.py"
+tools = ["read", "edit", "write", "bash", "find", "grep", "ls"]
+timeout_seconds = 180
+max_tool_iterations = 15
+[checks]
+max_tool_errors = 0
+uses_tool = "bash"

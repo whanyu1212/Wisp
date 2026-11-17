@@ -26,7 +26,7 @@ from wisp.events import (
     WispEvent,
 )
 from wisp.rpc.errors import RpcOutputAlreadyReportedError
-from wisp.tool_presentation import tool_result_status
+from wisp.tool_presentation import tool_failure_reason, tool_result_status
 
 from .types import OutputMode
 
@@ -135,7 +135,14 @@ def _print_event_line(event: WispEvent) -> str | None:
             process_state=event.process_state,
         )
         glyph = _PRINT_TOOL_GLYPHS[presentation_status]
-        return f"{glyph} tool {event.name}: {_format_event_output(event.output)}"
+        failure_reason = tool_failure_reason(
+            event.is_error,
+            event.exit_code,
+            failure_code=event.failure_code,
+            process_state=event.process_state,
+        )
+        label = f" [{failure_reason}]" if failure_reason is not None else ""
+        return f"{glyph} tool {event.name}{label}: {_format_event_output(event.output)}"
     if isinstance(event, SessionSaved):
         return f"session saved: {event.path}"
     return None

@@ -64,6 +64,7 @@ BASELINE_FIELDS = (
     "catalog_sha256",
     "scenario_steps_completed",
     "scenario_steps_expected",
+    "project_guidance_sha256",
 )
 SUITE_FIELDS = (
     "models",
@@ -79,6 +80,7 @@ SUITE_FIELDS = (
     "codemode_presentation",
     "mcp_results",
     "effort",
+    "project_guidance_sha256",
 )
 
 # Two-sided 95% critical values of Student's t for 1 to 30 degrees of freedom.

@@ -597,7 +597,10 @@ def test_print_mode_renders_denied_tool_events_to_stderr(
     assert '→ tool danger {"path": "file.txt"}' in result.stderr
     assert "? approval required for danger (mutating)" in result.stderr
     assert "! denied danger: Tool danger requires approval before execution" in result.stderr
-    assert "✗ tool danger: Tool danger requires approval before execution" in result.stderr
+    assert (
+        "✗ tool danger [Approval denied]: Tool danger requires approval before execution"
+        in result.stderr
+    )
     assert "session saved:" in result.stderr
     assert "changed file.txt" not in result.stderr
 
@@ -633,12 +636,12 @@ def test_print_mode_skips_approval_events_for_preapproved_tools(
 
 
 def test_print_event_line_uses_shared_tool_result_status() -> None:
-    states: tuple[tuple[ManagedProcessState, str], ...] = (
-        ("failed", "✗"),
-        ("timed_out", "✗"),
-        ("cancelled", "⊘"),
+    states: tuple[tuple[ManagedProcessState, str, str], ...] = (
+        ("failed", "✗", " [Process failed]"),
+        ("timed_out", "✗", " [Timed out]"),
+        ("cancelled", "⊘", ""),
     )
-    for process_state, glyph in states:
+    for process_state, glyph, reason in states:
         assert (
             _print_event_line(
                 ToolResultReady(
@@ -649,7 +652,7 @@ def test_print_event_line_uses_shared_tool_result_status() -> None:
                     process_state=process_state,
                 )
             )
-            == f"{glyph} tool bash: Process proc-1 {process_state}"
+            == f"{glyph} tool bash{reason}: Process proc-1 {process_state}"
         )
 
     assert (
@@ -662,7 +665,7 @@ def test_print_event_line_uses_shared_tool_result_status() -> None:
                 exit_code=2,
             )
         )
-        == "✗ tool bash: Command exited with code 2"
+        == "✗ tool bash [Command exited 2]: Command exited with code 2"
     )
 
 

@@ -1,0 +1,156 @@
+[
+  {
+    "is_error": true,
+    "exit_code": null,
+    "failure_code": "approval_denied",
+    "process_state": null,
+    "expected": "Approval denied"
+  },
+  {
+    "is_error": true,
+    "exit_code": null,
+    "failure_code": "internal_error",
+    "process_state": null,
+    "expected": "Tool execution error"
+  },
+  {
+    "is_error": true,
+    "exit_code": null,
+    "failure_code": "invalid_arguments",
+    "process_state": null,
+    "expected": "Invalid arguments"
+  },
+  {
+    "is_error": true,
+    "exit_code": null,
+    "failure_code": "invalid_pattern",
+    "process_state": null,
+    "expected": "Invalid search pattern"
+  },
+  {
+    "is_error": true,
+    "exit_code": null,
+    "failure_code": "invalid_result",
+    "process_state": null,
+    "expected": "Invalid tool result"
+  },
+  {
+    "is_error": true,
+    "exit_code": null,
+    "failure_code": "not_found",
+    "process_state": null,
+    "expected": "Path or resource not found"
+  },
+  {
+    "is_error": true,
+    "exit_code": null,
+    "failure_code": "path_outside_workspace",
+    "process_state": null,
+    "expected": "Path outside workspace"
+  },
+  {
+    "is_error": true,
+    "exit_code": null,
+    "failure_code": "policy_denied",
+    "process_state": null,
+    "expected": "Blocked by policy"
+  },
+  {
+    "is_error": true,
+    "exit_code": null,
+    "failure_code": "stale_input",
+    "process_state": null,
+    "expected": "Stale input"
+  },
+  {
+    "is_error": true,
+    "exit_code": null,
+    "failure_code": "timeout",
+    "process_state": null,
+    "expected": "Timed out"
+  },
+  {
+    "is_error": true,
+    "exit_code": null,
+    "failure_code": "unknown_tool",
+    "process_state": null,
+    "expected": "Unknown tool"
+  },
+  {
+    "is_error": false,
+    "exit_code": null,
+    "failure_code": null,
+    "process_state": null,
+    "expected": null
+  },
+  {
+    "is_error": false,
+    "exit_code": 0,
+    "failure_code": null,
+    "process_state": "completed",
+    "expected": null
+  },
+  {
+    "is_error": false,
+    "exit_code": null,
+    "failure_code": null,
+    "process_state": "running",
+    "expected": null
+  },
+  {
+    "is_error": false,
+    "exit_code": 101,
+    "failure_code": null,
+    "process_state": "completed",
+    "expected": "Command exited 101"
+  },
+  {
+    "is_error": false,
+    "exit_code": -9,
+    "failure_code": null,
+    "process_state": null,
+    "expected": "Command exited -9"
+  },
+  {
+    "is_error": false,
+    "exit_code": null,
+    "failure_code": null,
+    "process_state": "failed",
+    "expected": "Process failed"
+  },
+  {
+    "is_error": false,
+    "exit_code": 124,
+    "failure_code": null,
+    "process_state": "timed_out",
+    "expected": "Timed out"
+  },
+  {
+    "is_error": true,
+    "exit_code": 1,
+    "failure_code": "invalid_arguments",
+    "process_state": "failed",
+    "expected": "Invalid arguments"
+  },
+  {
+    "is_error": true,
+    "exit_code": 1,
+    "failure_code": "timeout",
+    "process_state": "cancelled",
+    "expected": null
+  },
+  {
+    "is_error": false,
+    "exit_code": 0,
+    "failure_code": "stale_input",
+    "process_state": null,
+    "expected": null
+  },
+  {
+    "is_error": true,
+    "exit_code": null,
+    "failure_code": null,
+    "process_state": null,
+    "expected": "Tool reported an error"
+  }
+]
