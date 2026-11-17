@@ -433,3 +433,27 @@ def test_mcp_setup_problem(
     found = _mcp_setup_problem(task, metrics, exposure)  # type: ignore[arg-type]
 
     assert found is None if problem is None else problem in (found or "")
+
+
+@pytest.mark.parametrize("exposure", ["direct", "on_demand", "auto"])
+@pytest.mark.parametrize("missing", [None, "tool_search", "tool_describe"])
+def test_only_presentation_setup(tmp_path: Path, exposure: str, missing: str | None) -> None:
+    task = _task(tmp_path, extra='mcp_servers = ["billing"]\n')
+    offered = tuple(
+        name for name in ("codemode", "tool_search", "tool_describe") if name != missing
+    )
+    metrics = RunMetrics(
+        setup=RunSetup(tool_names=offered, tools_sha256="0" * 64, instructions_sha256="1" * 64)
+    )
+    problem = _mcp_setup_problem(task, metrics, exposure, "codemode_only")  # type: ignore[arg-type]
+    assert problem is None if missing is None else missing in (problem or "")
+    metrics.errors.append(_UNAVAILABLE)
+    assert _mcp_setup_problem(task, metrics, exposure, "codemode_only") == _UNAVAILABLE  # type: ignore[arg-type]
+
+
+def test_only_unavailable_fallback(tmp_path: Path) -> None:
+    task = _task(tmp_path, extra='mcp_servers = ["billing"]\n')
+    metrics = RunMetrics(
+        setup=RunSetup(tool_names=_DISCOVERY, tools_sha256="0" * 64, instructions_sha256="1" * 64)
+    )
+    assert _mcp_setup_problem(task, metrics, "on_demand", "codemode_only") is None

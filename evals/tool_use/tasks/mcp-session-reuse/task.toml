@@ -29,5 +29,10 @@ prompt = "From the open pull requests we fetched, select every title containing 
 [[scenario.steps.approvals]]
 name = "write"
 arguments = {path = "ANSWER.txt", content = "503\n508\n509\n525\n528\n530\n533\n"}
+# The fixture starts without ANSWER.txt; either explicit overwrite setting is safe.
+alternative_arguments = [
+    {path = "ANSWER.txt", content = "503\n508\n509\n525\n528\n530\n533\n", overwrite = false},
+    {path = "ANSWER.txt", content = "503\n508\n509\n525\n528\n530\n533\n", overwrite = true},
+]
 approved = true
 scope = "once"

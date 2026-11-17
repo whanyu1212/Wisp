@@ -118,8 +118,10 @@ class _ScenarioDriver:
         matches = (
             decision is not None
             and decision.name == (event.target or event.name)
-            and json.dumps(decision.arguments, sort_keys=True)
-            == json.dumps(event.arguments, sort_keys=True)
+            and any(
+                json.dumps(arguments, sort_keys=True) == json.dumps(event.arguments, sort_keys=True)
+                for arguments in (decision.arguments, *decision.alternative_arguments)
+            )
             and (decision.scope != "tool_session" or event.grants_allowed)
         )
         if not matches:
