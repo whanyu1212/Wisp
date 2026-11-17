@@ -116,6 +116,27 @@ with `write_constraint`, under the exception below. Tool behavior changes are li
 `bash` runs commands in bash rather than `/bin/sh`, and that the read-only file tools follow
 symbolic links whose targets stay inside the workspace.
 
+## Wisp 0.13 compatibility
+
+0.13.0 reads existing 0.12.0 sessions. Session `schema_version` remains 6 and the event-envelope
+format remains 1. Successful codemode scripts that change saved state persist an optional
+`codemode_state` field with their tool result. Older entries omit it and remain readable.
+
+**Downgrade limit:** 0.12.0 rejects entries containing `codemode_state` as an unknown field.
+Keep a backup of sessions before upgrading if you may need to return to 0.12.0. Do not remove
+state fields to force a downgrade: later script results may depend on that state. Unchanged
+schema stamps do not imply reverse compatibility.
+
+The `set_codemode` RPC command gains an optional presentation selection, and `rpc.codemode`
+reports configured and effective presentation. The backend and every frontend must be the same
+release; external RPC clients should use the 0.13.0 schema bundle. The new user-level
+`codemode_presentation` setting defaults to `direct_and_codemode`; `codemode_only` is opt-in.
+Credentials and trust formats are unchanged.
+
+Saved JSON state survives restart, branching and compaction; output references only last for the
+process lifetime. A failed script does not commit staged state, but completed external effects
+are not rolled back. See the [0.13.0 release checklist](../maintainers/releases/0.13.0-release.md).
+
 ## Wisp 0.12 compatibility
 
 0.12.0 keeps session `schema_version` 6 and the existing event-envelope format. Settings,

@@ -10,7 +10,48 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.12.0 — Unreleased
+## 0.13.0 — Unreleased
+
+0.13.0 expands codemode into complete tool workflows, with durable script state, recoverable
+text output, unified discovery and per-child-call policy enforcement. Direct tools plus codemode
+remain the default presentation. The backend and every frontend must use the same release.
+
+### Codemode
+
+- Scripts can store JSON state and reuse it after restart, branching or compaction. State commits
+  with a successful script result; a failed or cancelled script does not commit staged state.
+  External effects from completed child calls are not rolled back. (#1055)
+- Large text results can be recovered through output references and `read_output` during the
+  process lifetime. Image results and durable output artifacts remain deferred. (#1056)
+- Unified discovery exposes eligible built-in and MCP tools with schemas and call guidance.
+  Scripts can perform file, shell and MCP workflows through the same policy and approval
+  boundaries as direct calls. Child calls retain audit records, mutations are serialized, and
+  cancellation cleans up foreground work. Subagents remain separate. (#1057–#1059)
+- Tool availability and presentation are separate settings. `direct_and_codemode` remains the
+  default; `codemode_only` is opt-in and falls back to direct tools when codemode is unavailable.
+  User settings, reload, RPC, SDK and TUI reports share the same effective presentation. (#1060)
+- Prompts clarify tool return contracts, discovery, imports and reuse of saved state before
+  refetching. (#1062)
+
+### Compatibility and evaluation
+
+- Session schema 6 gains optional `codemode_state` on successful codemode result entries.
+  0.13 reads existing 0.12 sessions, but 0.12 rejects entries containing this new field.
+  Back up sessions before upgrading if downgrade is required; unchanged schema stamps do not
+  guarantee reverse compatibility. The RPC codemode command/report gains presentation fields.
+- Evaluation includes deterministic scenarios and live comparisons of direct-plus-codemode,
+  codemode-only and codemode-off. The final 36-run clarification evaluation passed 12/12 tasks
+  in each codemode arm and 11/12 with codemode off; all 12 saved-state continuation checks passed.
+  One codemode-only script recovered from a missing `asyncio` import. These bounded
+  runs support the unchanged default, not a general performance claim or default switch.
+  See the [evaluation report](https://github.com/whanyu1212/Wisp/blob/main/evals/tool_use/reports/2026-11-17-clarification-rerun.md).
+  Broader provider/repetition coverage, images, durable output artifacts and model helpers remain
+  future work. (#1053, #1054, #1061, #1062)
+
+<!-- Keeps links to the pre-release "0.12.0 — Unreleased" heading working. -->
+<a id="0120--unreleased"></a>
+
+## 0.12.0 — 2026-11-16
 
 0.12.0 adds `/reload` for supported settings while a session is idle, preserves the cause of
 compaction failures, and fixes recent-turn navigation and changed-file diffs in the terminal UI.
