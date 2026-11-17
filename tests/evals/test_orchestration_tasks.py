@@ -36,6 +36,7 @@ def test_tasks_are_opt_in() -> None:
         "mcp-flaky-comments",
         "mcp-deploy-chain",
         "mcp-service-alerts",
+        "mcp-large-result-filter",
     }
     assert all(task.definition.opt_in for task in _TASKS.values())
 

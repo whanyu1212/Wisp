@@ -1,0 +1,10 @@
+id = "mcp-large-result-filter"
+title = "Filter release decisions from a large paginated MCP result"
+tags = ["mcp", "orchestration", "long-output"]
+prompt = "In acme/release-audit, which open issues have both the exact release-gate label and region:eu-west label, and an audit title ending in decision=block? Write every matching issue number to ANSWER.txt, one per line."
+verify = "{python} {task}/verify.py"
+timeout_seconds = 600
+max_tool_iterations = 35
+tools = ["write", "read", "ls"]
+mcp_servers = ["devhub"]
+opt_in = true

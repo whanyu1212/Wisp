@@ -247,6 +247,16 @@ pay for them: select them with `--tags orchestration`.
 | `mcp-flaky-comments` | Adding up the comments on 127 issues across two pages of 100 |
 | `mcp-deploy-chain` | Run, then its commit, then the pull request it merged, then that pull request's reviews |
 | `mcp-service-alerts` | A local list of 20 services, then one alerts call for each |
+| `mcp-large-result-filter` | Filter release decisions from ~77 KB default pages, with required evidence beyond the model-facing cap; direct calls can recover through smaller pages |
+
+The large-result task covers HY-511. It uses `acme/release-audit` without changing the
+existing catalog definitions or other repositories' answers. A default page places a required
+match at byte 69,740, beyond the 50 KB model-facing cap but within codemode's 512 KiB internal
+limit. Ten-record pages fit below 50 KB, so the same task remains solvable without codemode.
+The verifier requires all three matching issues and rejects closed issues, the wrong region,
+and a similar but nonmatching label. The prompt does not require a script.
+The [2026-11-17 HY-511 report](reports/2026-11-17-hy511.md) records GPT/Claude results,
+trace evidence, budgets, reproducible commands and limitations.
 
 Commands run with `bash -c` in the run's folder. `{python}` becomes the runner's interpreter and
 `{task}` the task's own folder, so a verifier script can live beside `task.toml`, out of the
