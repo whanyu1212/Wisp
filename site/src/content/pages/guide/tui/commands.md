@@ -36,6 +36,12 @@ The effort control stays within the model panel's border. Use `Enter` to apply, 
 runtime. Closing after submitting a selection does not cancel its application. The picker requires
 at least 30 columns and 8 rows; a smaller terminal cannot apply a hidden selection.
 
+The model and session pickers share a dialog frame with banded, bold selections, quiet descriptions
+and right-aligned tags. Click a row to highlight it, then click the footer's `Enter` hint to apply
+that painted choice; the other visible footer hints work like their named keys. Hints that do not
+fit are omitted whole rather than clipped, without changing the keyboard shortcuts. Short dialogs
+use compact rows when needed to keep the selected model, effort control and notices visible.
+
 For direct selection, use `/model <model> [effort|-]` or
 `/model <provider>::<model> [effort|-]`. Custom model names pass through to the backend. `-` clears
 an explicit effort. `/provider <name>` switches providers and restores that provider's defaults;

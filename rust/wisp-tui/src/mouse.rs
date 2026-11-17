@@ -336,6 +336,7 @@ pub(crate) struct Frame {
     pub panel_border: Option<Rect>,
     pub popup: Option<Rect>,
     pub rows: Rows,
+    pub dialog_controls: crate::dialog::Controls,
 }
 
 impl LiveUi {
@@ -518,6 +519,12 @@ impl LiveUi {
                     }
                     return Ok(control);
                 } else if self.rendered_overlay == Some(kind) {
+                    if let Some(key) = frame.dialog_controls.key_at(event.column, event.row) {
+                        // Use the exact same loading, selection and paint guards as keys.
+                        return self
+                            .handle_focused_input(Input::Key(key), writer, limit)
+                            .await;
+                    }
                     if let Some(index) = frame.rows.hit(event) {
                         if self.select_mouse_row(kind, index) {
                             if kind == OverlayKind::Queue {

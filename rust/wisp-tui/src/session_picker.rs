@@ -1,18 +1,13 @@
 //! Searchable persisted sessions; backend pages and painted identities are authoritative.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::{
-    Frame,
-    layout::{Constraint, Direction, Layout, Rect},
-    style::Style,
-    text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph},
-};
+use ratatui::{Frame, layout::Rect, widgets::Paragraph};
 use tokio::time::{Duration, Instant};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
+    dialog::{self, Dialog, Hint, PickerRow},
     mouse::Rows,
     reducer::{CatalogNavigation, SessionSummary},
     theme::Palette,
@@ -292,24 +287,73 @@ impl SessionPicker {
     }
 }
 
-pub fn render(frame: &mut Frame<'_>, area: Rect, picker: &SessionPicker, palette: Palette) -> Rows {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(2),
-            Constraint::Length(2),
-        ])
-        .split(area);
-    frame.render_widget(
-        Paragraph::new(terminal_row(
-            &format!("Search: {}", picker.query),
-            chunks[0].width as usize,
-        )),
-        chunks[0],
-    );
-    let height = usize::from(chunks[1].height.saturating_sub(2)).max(1);
-    let width = usize::from(chunks[1].width.saturating_sub(2)).max(1);
+pub fn render(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    picker: &SessionPicker,
+    palette: Palette,
+) -> dialog::Rendered {
+    let key = |code, modifiers| KeyEvent::new(code, modifiers);
+    let compact = area.width < 60;
+    let mut hints = vec![Hint {
+        label: "Esc",
+        description: "close",
+        key: key(KeyCode::Esc, KeyModifiers::NONE),
+    }];
+    if !picker.selecting {
+        hints.extend([
+            Hint {
+                label: "Enter",
+                description: "select",
+                key: key(KeyCode::Enter, KeyModifiers::NONE),
+            },
+            Hint {
+                label: "↑",
+                description: "prev",
+                key: key(KeyCode::Up, KeyModifiers::NONE),
+            },
+            Hint {
+                label: "↓",
+                description: "next",
+                key: key(KeyCode::Down, KeyModifiers::NONE),
+            },
+            Hint {
+                label: if compact { "^R" } else { "Ctrl+R" },
+                description: "refresh",
+                key: key(KeyCode::Char('r'), KeyModifiers::CONTROL),
+            },
+            Hint {
+                label: if compact { "^Y" } else { "Ctrl+Y" },
+                description: "retry",
+                key: key(KeyCode::Char('y'), KeyModifiers::CONTROL),
+            },
+        ]);
+        if picker.navigation.previous_cursor.is_some() {
+            hints.push(Hint {
+                label: if compact { "^←" } else { "Ctrl+←" },
+                description: "page",
+                key: key(KeyCode::Left, KeyModifiers::CONTROL),
+            });
+        }
+        if picker.navigation.next_cursor.is_some() {
+            hints.push(Hint {
+                label: if compact { "^→" } else { "Ctrl+→" },
+                description: "page",
+                key: key(KeyCode::Right, KeyModifiers::CONTROL),
+            });
+        }
+    }
+    let filter = format!("/ Search: {}", picker.query);
+    let layout = Dialog {
+        title: "resume session",
+        tabs: &[],
+        filter: Some(&filter),
+        hints: &hints,
+    }
+    .render(frame, area, palette);
+    let content = layout.body;
+    let row_height = if content.height >= 2 { 2 } else { 1 };
+    let height = usize::from(content.height / row_height);
     let start = picker
         .selected()
         .map(|i| i.saturating_sub(height.saturating_sub(1)))
@@ -325,82 +369,51 @@ pub fn render(frame: &mut Frame<'_>, area: Rect, picker: &SessionPicker, palette
     } else {
         None
     };
-    let lines = if let Some(status) = status {
-        vec![Line::raw(terminal_row(status, width))]
+    if let Some(status) = status {
+        frame.render_widget(
+            Paragraph::new(terminal_row(status, usize::from(content.width))),
+            content,
+        );
     } else {
-        picker
-            .sessions
-            .iter()
-            .enumerate()
-            .skip(start)
-            .take(height)
-            .map(|(index, session)| {
-                let content = terminal_row(
-                    &format!(
-                        "{} [{}] {} · {} entries · {}",
-                        if picker.selected() == Some(index) {
-                            ">"
-                        } else {
-                            " "
-                        },
-                        session.session_id.chars().take(12).collect::<String>(),
-                        session.name.as_deref().unwrap_or("Unnamed"),
-                        session.entry_count,
-                        session.updated_at
-                    ),
-                    width,
-                );
-                Line::from(Span::styled(
-                    content,
-                    if picker.selected() == Some(index) {
-                        palette.selection()
-                    } else {
-                        Style::default()
-                    },
-                ))
-            })
-            .collect()
-    };
-    frame.render_widget(
-        Paragraph::new(Text::from(lines)).block(
-            Block::default()
-                .title(" resume session ")
-                .border_style(palette.border())
-                .borders(Borders::ALL),
-        ),
-        chunks[1],
-    );
-    let hints = if area.width < 60 {
-        "↑↓ move · Enter · Esc\n^←/→ page ^R fresh ^Y retry".to_owned()
-    } else {
-        format!(
-            "↑/↓ move · Enter select · Esc close\nCtrl+←/→ page · Ctrl+R refresh · Ctrl+Y retry{}{}",
-            if picker.navigation.previous_cursor.is_some() {
-                " · prev"
-            } else {
-                ""
-            },
-            if picker.navigation.next_cursor.is_some() {
-                " · next"
-            } else {
-                ""
+        for (index, session) in picker.sessions.iter().enumerate().skip(start).take(height) {
+            let description = format!(
+                "[{}] · {}",
+                session.session_id.chars().take(12).collect::<String>(),
+                session.updated_at
+            );
+            let tag = format!("{} entries", session.entry_count);
+            PickerRow {
+                label: session.name.as_deref().unwrap_or("Unnamed"),
+                description: Some(&description),
+                tag: Some(&tag),
+                selected: picker.selected() == Some(index),
+                muted: false,
             }
-        )
-    };
-    frame.render_widget(
-        Paragraph::new(hints).style(Style::default().fg(palette.muted)),
-        chunks[2],
-    );
-    Rows::new(
-        chunks[1].inner(ratatui::layout::Margin::new(1, 1)),
-        start,
-        if status.is_none() {
-            picker.sessions.len()
-        } else {
-            0
-        },
-        1,
-    )
+            .render(
+                frame,
+                Rect::new(
+                    content.x,
+                    content.y + (index - start) as u16 * row_height,
+                    content.width,
+                    row_height,
+                ),
+                palette,
+            );
+        }
+    }
+    dialog::Rendered {
+        rows: Rows::new(
+            content,
+            start,
+            if status.is_none() {
+                picker.sessions.len()
+            } else {
+                0
+            },
+            row_height,
+        ),
+        controls: layout.controls,
+    }
 }
 
 pub(crate) fn terminal_row(content: &str, width: usize) -> String {

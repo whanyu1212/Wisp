@@ -60,6 +60,19 @@ fn row_point(ui: &LiveUi, index: usize) -> (u16, u16) {
     panic!("row {index} is not fully painted");
 }
 
+fn dialog_key_point(ui: &LiveUi, key: KeyEvent) -> (u16, u16) {
+    let frame = ui.mouse_frame.as_ref().expect("painted frame");
+    let area = frame.popup.expect("painted dialog");
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            if frame.dialog_controls.key_at(x, y) == Some(key) {
+                return (x, y);
+            }
+        }
+    }
+    panic!("dialog key {key:?} is not visible");
+}
+
 fn row_text(buffer: &Buffer, y: u16) -> String {
     (0..buffer.area.width)
         .map(|x| buffer[(x, y)].symbol())
@@ -884,6 +897,156 @@ async fn wheel_crosses_session_tree_page_boundary_without_jumping_ordinary_rows(
     assert_eq!(ui.editor.text(), "draft");
 }
 
+#[tokio::test]
+async fn dialog_model_footer_uses_the_current_painted_selection_and_apply_lock() {
+    let (writer, mut receiver) = mpsc::channel(16);
+    let mut ui = ui("draft");
+    ui.state = UiState::new("alpha".into(), None, None);
+    let mut picker = ModelPicker::loading();
+    picker.update_catalog(model_picker::tests::catalog());
+    ui.model_picker = Some(picker);
+    draw(&mut ui, 80, 24);
+    let (enter_x, enter_y) =
+        dialog_key_point(&ui, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let (x, y) = row_point(&ui, 2);
+    ui.handle_input(click(x, y), &writer, 8192).await.unwrap();
+    ui.handle_input(click(enter_x, enter_y), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(
+        receiver.try_recv().is_err(),
+        "a new choice must be painted first"
+    );
+    draw(&mut ui, 80, 24);
+    let (x, y) = dialog_key_point(&ui, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    ui.handle_input(click(x, y), &writer, 8192).await.unwrap();
+    let configured = command(&mut receiver);
+    assert_eq!(configured["type"], "configure");
+    assert_eq!(configured["provider"], "alpha");
+    assert_eq!(configured["model"], "two");
+    assert!(ui.state.model_configuration_active());
+    draw(&mut ui, 80, 24);
+    assert!(ui.mouse_frame.as_ref().unwrap().rows.is_empty());
+    let (x, y) = dialog_key_point(&ui, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    ui.handle_input(click(x, y), &writer, 8192).await.unwrap();
+    assert!(ui.model_picker.is_none());
+    assert!(
+        ui.state.model_configuration_active(),
+        "close never cancels configuration"
+    );
+    assert_eq!(ui.editor.text(), "draft");
+    assert!(receiver.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn dialog_session_footer_selects_only_after_the_row_has_been_painted() {
+    let (writer, mut receiver) = mpsc::channel(16);
+    let mut ui = ui("draft");
+    ui.state = UiState::new("fake".into(), None, None);
+    ui.session_picker = Some(SessionPicker::new(
+        (0..2)
+            .map(|index| reducer::SessionSummary {
+                session_id: format!("session-{index}"),
+                session_path: format!("/session-{index}.jsonl"),
+                name: Some(format!("Session {index}")),
+                updated_at: "now".into(),
+                entry_count: 1,
+            })
+            .collect(),
+        None,
+    ));
+    draw(&mut ui, 80, 24);
+    let (enter_x, enter_y) =
+        dialog_key_point(&ui, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let (x, y) = row_point(&ui, 1);
+    ui.handle_input(click(x, y + 1), &writer, 8192)
+        .await
+        .unwrap();
+    ui.handle_input(click(enter_x, enter_y), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(receiver.try_recv().is_err());
+    draw(&mut ui, 80, 24);
+    let (x, y) = dialog_key_point(&ui, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    ui.handle_input(click(x, y), &writer, 8192).await.unwrap();
+    let selected = command(&mut receiver);
+    assert_eq!(selected["type"], "select_session");
+    assert_eq!(selected["session_id"], "session-1");
+    assert_eq!(ui.editor.text(), "draft");
+}
+
+#[tokio::test]
+async fn dialog_footer_targets_retire_on_resize_and_catalog_refresh() {
+    let (writer, mut receiver) = mpsc::channel(16);
+    let mut ui = ui("draft");
+    ui.state = UiState::new("alpha".into(), None, None);
+    let mut picker = ModelPicker::loading();
+    picker.update_catalog(model_picker::tests::catalog());
+    ui.model_picker = Some(picker);
+    draw(&mut ui, 80, 24);
+    let (x, y) = dialog_key_point(&ui, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    ui.handle_input(Input::Redraw, &writer, 8192).await.unwrap();
+    ui.handle_input(click(x, y), &writer, 8192).await.unwrap();
+    assert!(receiver.try_recv().is_err());
+    draw(&mut ui, 80, 24);
+    let (x, y) = dialog_key_point(&ui, KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+    ui.handle_input(click(x, y), &writer, 8192).await.unwrap();
+    assert_eq!(command(&mut receiver)["type"], "get_model_catalog");
+    ui.handle_input(click(x, y), &writer, 8192).await.unwrap();
+    assert!(
+        receiver.try_recv().is_err(),
+        "refresh invalidates the painted controls"
+    );
+    draw(&mut ui, 80, 24);
+    let (x, y) = dialog_key_point(&ui, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    ui.handle_input(click(x, y), &writer, 8192).await.unwrap();
+    assert!(receiver.try_recv().is_err(), "loading cannot apply a model");
+    assert_eq!(ui.editor.text(), "draft");
+}
+
+#[tokio::test]
+async fn dialog_footer_cannot_click_through_help_or_a_buffered_trust_request() {
+    let (writer, mut receiver) = mpsc::channel(16);
+    let mut ui = ui("draft");
+    ui.state = UiState::new("alpha".into(), None, None);
+    let mut picker = ModelPicker::loading();
+    picker.update_catalog(model_picker::tests::catalog());
+    ui.model_picker = Some(picker);
+    draw(&mut ui, 80, 24);
+    let (x, y) = dialog_key_point(&ui, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    ui.handle_input(
+        Input::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL)),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    ui.handle_input(click(x, y), &writer, 8192).await.unwrap();
+    assert!(receiver.try_recv().is_err());
+    ui.handle_input(key(KeyCode::Esc), &writer, 8192)
+        .await
+        .unwrap();
+    draw(&mut ui, 80, 24);
+    let (x, y) = dialog_key_point(&ui, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let (sender, mut events) = mpsc::channel(16);
+    sender
+        .send(QueuedEvent {
+            event: BackendEvent::TrustRequested {
+                request_id: "trust".into(),
+                project_path: "/project".into(),
+            },
+            _wire_bytes: Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap(),
+        })
+        .await
+        .unwrap();
+    ui.handle_received_input(click(x, y), &mut events, &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.state.pending_trust_request_id.as_deref(), Some("trust"));
+    assert!(receiver.try_recv().is_err());
+    assert_eq!(ui.editor.text(), "draft");
+}
+
 #[test]
 fn model_apply_lock_publishes_no_mouse_targets_and_rejects_selection() {
     let mut picker = ModelPicker::loading();
@@ -898,7 +1061,8 @@ fn model_apply_lock_publishes_no_mouse_targets_and_rejects_selection() {
     terminal
         .draw(|frame| {
             rows =
-                model_picker::render(frame, frame.area(), &picker, true, None, Palette::default());
+                model_picker::render(frame, frame.area(), &picker, true, None, Palette::default())
+                    .rows;
         })
         .unwrap();
     for y in 0..24 {
