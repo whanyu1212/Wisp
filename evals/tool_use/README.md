@@ -264,3 +264,104 @@ model's reach. To check that the model left a file alone, compare it with the fi
 (`cmp -s {task}/repo/FILE FILE`), not with `HEAD`, which the model can move by committing. Keep
 fixtures standard-library only so runs need no installs, and make `verify` reject plausible wrong
 fixes, not only accept the right one.
+
+## Session and approval scenarios (HY-547 / HY-546)
+
+An opt-in task may replace `prompt` with a typed `scenario`. It uses the same fixtures,
+verifier, credentials, budgets, reports and baselines as one-prompt tasks. The runner starts
+`wisp --mode rpc` through the SDK's version-checked JSONL transport. Scenario runs never
+use `--yes`; decisions below respond to actual approval requests from the command host.
+
+```toml
+opt_in = true
+# Keep id, title, tags, verify, tools and resource limits as in an ordinary task.
+[[scenario.steps]]
+type = "prompt"
+prompt = "Write exactly hello followed by a newline to ANSWER.txt using write."
+[[scenario.steps.approvals]]
+name = "write"
+arguments = {path = "ANSWER.txt", content = "hello\n"}
+approved = true
+scope = "once"
+
+[[scenario.steps]]
+type = "checkpoint"
+name = "saved"
+[[scenario.steps]]
+type = "prompt"
+prompt = "Acknowledge this follow-up."
+[[scenario.steps]]
+type = "navigate"
+checkpoint = "saved"
+[[scenario.steps]]
+type = "resume"
+```
+
+- `prompt`: run a user prompt to completion. Its optional approval decisions are ordered
+  and must match the effective tool name and exact JSON arguments. A denied decision has
+  `approved = false` and no scope. Allowed scopes are `once` and `tool_session`; a session
+  grant can suppress later requests, so list only the requests expected to occur.
+- `checkpoint`: record the current session and active leaf under a unique name.
+- `navigate`: select an earlier checkpoint in the same session and verify the active leaf.
+  This changes conversation history, not filesystem contents; it does not undo tool effects.
+- `resume`: close the backend, start a fresh process, explicitly select the prior session
+  and verify its active leaf. It does not rerun preceding prompts.
+- `compact`: optionally supply `instructions`. Require an actual successful
+  `compaction.completed` event, not merely command acknowledgement. Wisp requires at least
+  two complete user turns on the selected branch before compaction.
+
+Missing decisions, unexpected or mismatched requests, unsuccessful commands, wrong answers
+and incomplete steps prevent a pass. Unexpected requests are denied and the scenario stops.
+Transport errors remain infrastructure errors. The task timeout covers the complete scenario,
+including startup, approvals and restarts; `max_tool_iterations` remains a per-prompt bound.
+The outer runner retains its process-group cleanup after exit or deadline. This is process
+cleanup, not an OS sandbox for untrusted commands.
+
+`scenario-config.json` records the steps and backend command without credential values;
+`scenario-result.json` records completed steps and failures. `events.jsonl` includes all
+observed RPC and model events across restarts. Usage includes every prompt and compaction;
+turns are summed across prompt runs. Result rows and sanitized baselines retain step counts,
+requested effort and SHA-256 fingerprints for task definitions, fixture files and synthetic
+MCP server sources. Raw event traces and configuration stay in git-ignored results folders.
+
+Use `--effort` to pin the model's reasoning effort rather than relying on a provider default.
+An omitted effort is recorded as null. Use a single supported effort per comparison; do not
+pool runs with different effective settings. The runner still checks budgets between rounds,
+so a complete multi-step round can overshoot a threshold. Estimate that round before paid runs.
+
+### First scenario and acceptance
+
+`session-branch-recall` gives a codeword, creates a conflicting conversation branch, returns
+to the original branch, restarts, compacts, and requests one approved write of the remembered
+word. Its verifier requires the original codeword exactly. The primary metric is whole-scenario
+success: all transitions and approval expectations must pass and `ANSWER.txt` must be correct.
+Costs, latency, script adoption/errors and repeated calls are secondary metrics. A correct file
+cannot compensate for a failed earlier transition or an unexpected approval.
+
+```bash
+uv run python -m evals.tool_use run --tasks session-branch-recall \
+  --models openai-codex::gpt-6.1-sol --effort medium --reps 3 --workers 1 \
+  --budget-usd 5 --budget-tokens 1000000 --codemode off
+```
+
+This PR establishes deterministic foundation coverage, not a paid performance baseline for new
+capabilities. HY-511's saved GPT/Claude baselines remain evidence for single-prompt, read-only
+orchestration; they do not establish state persistence or interactive approval correctness.
+Run fresh controls and candidates for each future capability on the same scenario/fixture
+fingerprints, model/provider/effort, permissions and output limits. Current evaluation model
+scope is GPT and Claude; Gemini is excluded.
+
+### Capability boundary
+
+| Capability | Current foundation / evidence | Future work |
+|---|---|---|
+| Read-only composition, structured results, large bounded results | Existing codemode tests and HY-511 GPT/Claude baselines | Targeted regressions as capabilities change |
+| Multiple prompts, backend resume and branch selection | RPC scenario steps and deterministic tests | Saved script-state reuse and isolation checks |
+| Explicit compaction | Require successful compaction and verify subsequent history | Preserve future script state through compaction |
+| Approve once, deny, session grants | Scripted decisions exercised against the shared RPC host | Codemode inner-action approval and cancellation scenarios |
+| Mutating tools inside scripts | Still prohibited by the existing read-only executor | Separate codemode policy boundary before exposing mutations |
+| Persistent store/load, recoverable script artifacts, image/model helpers | Not implemented by this foundation | HY-546 capability slices and dedicated acceptance metrics |
+
+Windows, interactive TUI approval UX and paid-model reliability are not established by the
+foundation tests. Keep deterministic CI coverage small; live comparisons and stress sweeps
+remain opt-in.

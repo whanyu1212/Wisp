@@ -50,6 +50,7 @@ def main(argv: list[str] | None = None) -> int:
 
     run = commands.add_parser("run", help="run tasks against models and write runs.jsonl")
     run.add_argument("--models", required=True, help="comma-separated provider::model list")
+    run.add_argument("--effort", help="explicit model reasoning effort, recorded with the setup")
     run.add_argument("--reps", type=int, default=3, help="repetitions of each task and model")
     run.add_argument("--tasks", default="", help="comma-separated task ids (default: all)")
     run.add_argument("--tags", default="", help="comma-separated tags; any of them matches")
@@ -168,6 +169,7 @@ def _run(args: argparse.Namespace) -> int:
         mcp_tool_exposure=args.mcp_tool_exposure,
         codemode=args.codemode,
         mcp_results=args.mcp_results,
+        effort=args.effort,
     )
     runs_path = results_dir / "runs.jsonl"
     print(
@@ -198,6 +200,7 @@ def _run(args: argparse.Namespace) -> int:
         "mcp_tool_exposure": args.mcp_tool_exposure,
         "codemode": args.codemode,
         "mcp_results": args.mcp_results,
+        "effort": args.effort,
         "stopped_for_budget": result.stopped_for_budget,
         "skipped_runs": result.skipped_runs,
         "finished_at": datetime.now(UTC).isoformat(),

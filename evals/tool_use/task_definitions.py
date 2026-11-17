@@ -6,11 +6,12 @@ import tomllib
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from typing_extensions import TypeAliasType
 
+from evals.tool_use.scenario import Scenario
 from evals.tool_use.servers.catalogs import CATALOGS
 
 TASKS_DIR = Path(__file__).parent / "tasks"
@@ -18,7 +19,15 @@ TASKS_DIR = Path(__file__).parent / "tasks"
 Tag = TypeAliasType(
     "Tag",
     Literal[
-        "general", "long-output", "edit", "mcp", "mcp-sweep", "multi-read", "orchestration", "scale"
+        "general",
+        "long-output",
+        "edit",
+        "mcp",
+        "mcp-sweep",
+        "multi-read",
+        "orchestration",
+        "scale",
+        "scenario",
     ],
 )
 ToolName = TypeAliasType(
@@ -53,7 +62,8 @@ class TaskDefinition(BaseModel):
         id (str): Unique task name; it must match the task's folder name.
         title (str): One line saying what the task asks for.
         tags (tuple[Tag, ...]): Areas the task measures, used to select tasks.
-        prompt (str): What the user types to Wisp.
+        prompt (str | None): A single prompt, mutually exclusive with scenario.
+        scenario (Scenario | None): Explicit RPC steps for an opt-in session evaluation.
         setup (str | None): Runs after the fixture is copied and committed.
         verify (str): Runs after Wisp exits; exit status 0 means the task passed.
         checks (TaskChecks): Event assertions a passing run must also meet.
@@ -73,7 +83,8 @@ class TaskDefinition(BaseModel):
     id: str = Field(pattern=r"^[a-z0-9]+(-[a-z0-9]+)*$")
     title: str = Field(min_length=1)
     tags: tuple[Tag, ...] = Field(min_length=1)
-    prompt: str = Field(min_length=1)
+    prompt: str | None = Field(default=None, min_length=1)
+    scenario: Scenario | None = None
     setup: str | None = None
     verify: str = Field(min_length=1)
     checks: TaskChecks = TaskChecks()
@@ -82,6 +93,14 @@ class TaskDefinition(BaseModel):
     tools: tuple[ToolName, ...] = Field(min_length=1)
     mcp_servers: tuple[str, ...] = ()
     opt_in: bool = False
+
+    @model_validator(mode="after")
+    def _execution_mode(self) -> Self:
+        if (self.prompt is None) == (self.scenario is None):
+            raise ValueError("provide exactly one of prompt or scenario")
+        if self.scenario is not None and not self.opt_in:
+            raise ValueError("scenario tasks must be opt_in")
+        return self
 
     @field_validator("mcp_servers")
     @classmethod

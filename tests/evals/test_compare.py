@@ -62,6 +62,12 @@ def _run(
         "nested_calls": 0,
         "failed_script_calls": 0,
         "mcp_results": "text",
+        "effort": "medium",
+        "task_sha256": "task",
+        "fixture_sha256": "fixture",
+        "catalog_sha256": None,
+        "scenario_steps_completed": None,
+        "scenario_steps_expected": None,
     }
 
 
