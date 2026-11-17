@@ -5474,8 +5474,14 @@ fn handle_backend_event(
             state.transcript.observe_search(turn, search);
             Ok(vec![UiEffect::RequestRender])
         }
+        BackendEvent::ToolExecutionEnded { call_id } => {
+            Ok(if clear_settled_child_approval(state, &call_id) {
+                vec![UiEffect::RequestRender]
+            } else {
+                Vec::new()
+            })
+        }
         BackendEvent::MessageDelta { .. }
-        | BackendEvent::ToolExecutionEnded { .. }
         | BackendEvent::SettingsReloaded { .. }
         | BackendEvent::Other { .. } => Ok(Vec::new()),
         BackendEvent::MessageCompleted {
@@ -5525,6 +5531,14 @@ fn handle_backend_event(
             state
                 .transcript
                 .observe_approval_resolved(&call_id, approved, reason.as_deref());
+            if state
+                .pending_approval
+                .as_ref()
+                .is_some_and(|pending| bounded_identity(&pending.call_id) == call_id)
+            {
+                state.pending_approval = None;
+                restore_active_or_idle(state);
+            }
             Ok(vec![UiEffect::RequestRender])
         }
         BackendEvent::ToolExecutionProgress { call_id, progress } => {
@@ -5567,6 +5581,7 @@ fn handle_backend_event(
         }
         BackendEvent::ToolResult(result) => {
             let call_id = result.call_id.clone();
+            clear_settled_child_approval(state, &call_id);
             let target = state.transcript.observe_tool_result(*result.clone());
             state.transcript.resolve_history_call(target, &call_id);
             background_processes::observe_tool_result(state, &result);
@@ -5878,6 +5893,7 @@ fn observe_message_origin(
             .transcript
             .complete_message_with_cost(*turn, content.clone(), cost.clone()),
         BackendEvent::ToolResult(input) => {
+            clear_settled_child_approval(state, &input.call_id);
             let target = state.transcript.observe_tool_result(*input.clone());
             state
                 .transcript
@@ -5886,6 +5902,7 @@ fn observe_message_origin(
             Some(target)
         }
         BackendEvent::ToolExecutionEnded { call_id } => {
+            clear_settled_child_approval(state, call_id);
             state.transcript.tool_entry_for_call(call_id)
         }
         BackendEvent::QueueMessageInjected { .. } => {
@@ -5953,6 +5970,20 @@ fn finish_run(state: &mut UiState, totals: crate::transcript::RunTotals) -> Vec<
     }
 }
 
+/// Dismisses a child's approval if its parent settled before resolution arrived.
+fn clear_settled_child_approval(state: &mut UiState, parent_call_id: &str) -> bool {
+    if !state.pending_approval.as_ref().is_some_and(|pending| {
+        state
+            .transcript
+            .has_live_script_child(parent_call_id, &pending.call_id)
+    }) {
+        return false;
+    }
+    state.pending_approval = None;
+    restore_active_or_idle(state);
+    true
+}
+
 /// Waits for the user's approval, or rejects the call at once when the user has
 /// already asked to cancel the run.
 fn request_tool_approval(
@@ -5960,12 +5991,14 @@ fn request_tool_approval(
     pending: PendingApproval,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
-    state.transcript.observe_approval_requested(ToolCallInput {
-        call_id: bounded_identity(&pending.call_id),
-        name: pending.name.clone(),
-        arguments: pending.arguments.clone(),
-        detail_source: pending.detail_source.clone(),
-    });
+    if !state.transcript.has_live_script_call(&pending.call_id) {
+        state.transcript.observe_approval_requested(ToolCallInput {
+            call_id: bounded_identity(&pending.call_id),
+            name: pending.name.clone(),
+            arguments: pending.arguments.clone(),
+            detail_source: pending.detail_source.clone(),
+        });
+    }
     if state.cancel_requested {
         let id = ids.next_id(CommandKind::Approval);
         let command = WispTypedClientRpcCommands::approval(
@@ -8676,6 +8709,254 @@ mod tests {
     }
 
     #[test]
+    fn child_approvals_preserve_parent_card() {
+        use crate::script_card::{ScriptCall, ScriptCallState};
+        use crate::tool_cards::ToolStatus;
+
+        for (approved, user_decision, reason) in [
+            (true, true, None),
+            (false, true, Some("denied")),
+            (false, false, Some("cancelled")),
+            (false, false, Some("approval timed out")),
+        ] {
+            let mut state = UiState::new("fake".into(), None, None);
+            state.current_command = Some(ActiveCommand {
+                id: "prompt-1".into(),
+                command_type: ActiveCommandType::Prompt,
+            });
+            let mut ids = DeterministicIds::default();
+            let parent = state.transcript.observe_tool_call(ToolCallInput {
+                call_id: bounded_identity("script"),
+                name: "codemode".into(),
+                arguments: serde_json::json!({"code": "tools.read(path='file')"}),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+            });
+            reduce(
+                &mut state,
+                UiAction::BackendEvent(BackendEvent::ScriptCallStarted {
+                    parent_call_id: bounded_identity("script"),
+                    call_id: "child".into(),
+                    tool: "read".into(),
+                    arguments: serde_json::json!({"path": "file"}),
+                }),
+                &mut ids,
+            )
+            .unwrap();
+            reduce(
+                &mut state,
+                UiAction::BackendEvent(BackendEvent::ToolApprovalRequested(PendingApproval {
+                    call_id: "child".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path": "file"}),
+                    detail_source: crate::tool_detail::ToolDetailSource::None,
+                    safety: "read".into(),
+                    grants_allowed: true,
+                    session_only_yolo: false,
+                })),
+                &mut ids,
+            )
+            .unwrap();
+            assert_eq!(state.transcript.entries().len(), 1);
+            assert_eq!(state.pending_approval.as_ref().unwrap().call_id, "child");
+            assert_eq!(state.view_status, ViewStatus::WaitingForApproval);
+            assert_eq!(
+                state
+                    .transcript
+                    .entry(parent)
+                    .unwrap()
+                    .tool_card()
+                    .unwrap()
+                    .status,
+                ToolStatus::Requested
+            );
+            if user_decision {
+                let effects = reduce(
+                    &mut state,
+                    UiAction::ApprovalDecision {
+                        call_id: "child".into(),
+                        approved,
+                        reason: reason.map(str::to_owned),
+                        scope: None,
+                    },
+                    &mut ids,
+                )
+                .unwrap();
+                let command = command_value(&effects[0]).unwrap();
+                assert_eq!(command["call_id"], "child");
+                assert_eq!(command["approved"], approved);
+            }
+            reduce(
+                &mut state,
+                UiAction::BackendEvent(BackendEvent::ToolApprovalResolved {
+                    call_id: bounded_identity("child"),
+                    name: "read".into(),
+                    approved,
+                    reason: reason.map(str::to_owned),
+                }),
+                &mut ids,
+            )
+            .unwrap();
+            assert!(state.pending_approval.is_none());
+            assert_eq!(state.view_status, ViewStatus::Running);
+            assert_eq!(state.interaction_status, InteractionStatus::Running);
+            assert!(state.current_command.is_some());
+            let child_state = if approved {
+                ScriptCallState::Done
+            } else {
+                ScriptCallState::Failed
+            };
+            reduce(
+                &mut state,
+                UiAction::BackendEvent(BackendEvent::ScriptCallEnded {
+                    parent_call_id: bounded_identity("script"),
+                    call: ScriptCall {
+                        call_id: "child".into(),
+                        tool: "read".into(),
+                        arguments: serde_json::json!({"path": "file"}),
+                        state: child_state,
+                        error: reason.map(str::to_owned),
+                        duration_ms: Some(1),
+                    },
+                }),
+                &mut ids,
+            )
+            .unwrap();
+            assert_eq!(state.transcript.entries().len(), 1);
+            assert!(
+                state
+                    .transcript
+                    .tool_entry_for_call(&bounded_identity("child"))
+                    .is_none()
+            );
+            let card = state.transcript.entry(parent).unwrap().tool_card().unwrap();
+            assert_eq!(card.status, ToolStatus::Requested);
+            assert_eq!(card.script.as_ref().unwrap().calls[0].state, child_state);
+        }
+    }
+
+    #[test]
+    fn parent_settlement_dismisses_child_approval() {
+        for persisted in [false, true] {
+            for execution_ended in [false, true] {
+                for matching_parent in [false, true] {
+                    let mut state = UiState::new("fake".into(), None, None);
+                    state.current_command = Some(ActiveCommand {
+                        id: "prompt-1".into(),
+                        command_type: ActiveCommandType::Prompt,
+                    });
+                    let mut ids = DeterministicIds::default();
+                    state.transcript.observe_tool_call(ToolCallInput {
+                        call_id: bounded_identity("script"),
+                        name: "codemode".into(),
+                        arguments: serde_json::json!({"code": "tools.read(path='file')"}),
+                        detail_source: crate::tool_detail::ToolDetailSource::None,
+                    });
+                    state
+                        .transcript
+                        .observe_script_call(&bounded_identity("script"), |script| {
+                            script.call_started(
+                                "child",
+                                "read",
+                                serde_json::json!({"path": "file"}),
+                            )
+                        });
+                    reduce(
+                        &mut state,
+                        UiAction::BackendEvent(BackendEvent::ToolApprovalRequested(
+                            PendingApproval {
+                                call_id: "child".into(),
+                                name: "read".into(),
+                                arguments: serde_json::json!({"path": "file"}),
+                                detail_source: crate::tool_detail::ToolDetailSource::None,
+                                safety: "read".into(),
+                                grants_allowed: true,
+                                session_only_yolo: false,
+                            },
+                        )),
+                        &mut ids,
+                    )
+                    .unwrap();
+                    let parent_call_id = if matching_parent { "script" } else { "other" };
+                    let event = if execution_ended {
+                        BackendEvent::ToolExecutionEnded {
+                            call_id: bounded_identity(parent_call_id),
+                        }
+                    } else {
+                        BackendEvent::from_projection_value(&serde_json::json!({
+                            "type": "tool.result", "message_entry_id": null,
+                            "call_id": parent_call_id, "name": "codemode",
+                            "output": "script cancelled", "is_error": true,
+                            "nested_calls": [], "nested_calls_omitted": 0
+                        }))
+                        .unwrap()
+                    };
+                    let event = if persisted {
+                        BackendEvent::MessageOrigin {
+                            entry_id: "result-entry".into(),
+                            tool_call_ids: Vec::new(),
+                            event: Box::new(event),
+                        }
+                    } else {
+                        event
+                    };
+                    reduce(&mut state, UiAction::BackendEvent(event), &mut ids).unwrap();
+
+                    assert_eq!(state.pending_approval.is_none(), matching_parent);
+                    if matching_parent {
+                        assert_eq!(state.view_status, ViewStatus::Running);
+                        assert_eq!(state.interaction_status, InteractionStatus::Running);
+                        assert_eq!(state.transcript.entries().len(), 1);
+                    } else {
+                        assert_eq!(state.pending_approval.as_ref().unwrap().call_id, "child");
+                        assert_eq!(state.view_status, ViewStatus::WaitingForApproval);
+                        assert_eq!(
+                            state.interaction_status,
+                            InteractionStatus::WaitingForApproval
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unrelated_resolution_preserves_pending_approval() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::ToolApprovalRequested(PendingApproval {
+                call_id: "current".into(),
+                name: "read".into(),
+                arguments: serde_json::json!({"path": "file"}),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+                safety: "read".into(),
+                grants_allowed: true,
+                session_only_yolo: false,
+            })),
+            &mut ids,
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::ToolApprovalResolved {
+                call_id: bounded_identity("previous"),
+                name: "read".into(),
+                approved: false,
+                reason: Some("late cancellation".into()),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(state.pending_approval.as_ref().unwrap().call_id, "current");
+        assert_eq!(state.view_status, ViewStatus::WaitingForApproval);
+        assert_eq!(
+            state.interaction_status,
+            InteractionStatus::WaitingForApproval
+        );
+    }
+
+    #[test]
     fn reducer_updates_one_card_across_approval_call_and_result() {
         use crate::tool_cards::ToolStatus;
 
@@ -8740,6 +9021,9 @@ mod tests {
         .unwrap();
 
         assert_eq!(state.transcript.entries().len(), 2);
+        assert!(state.pending_approval.is_none());
+        assert_eq!(state.view_status, ViewStatus::Running);
+        assert_eq!(state.interaction_status, InteractionStatus::Running);
         let card = state.transcript.entries()[1].tool_card().unwrap();
         assert_eq!(card.status, ToolStatus::Done);
         assert_eq!(card.detail, "Read README.md");

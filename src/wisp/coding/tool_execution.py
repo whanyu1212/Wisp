@@ -6,11 +6,12 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import aclosing
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import cast
+from typing import Literal, cast
 
 import anyio
 from pydantic import ValidationError
@@ -202,8 +203,8 @@ class _ScriptCallLog:
     a result stays bounded however many calls its limits allow. When the script or
     subagent ends the log closes: a call still unfinished is recorded then, as one
     that was ended before it finished, and nothing a call does later is recorded
-    or published. Closing waits for nothing, so the result never depends on how
-    fast a cancelled tool stops.
+    or published. Closing does not wait for tools to stop. The owner joins only
+    bounded approval cleanup before publishing its terminal event.
 
     A subagent's model responses are recorded here too, so its result accounts for
     them however the subagent ended.
@@ -215,6 +216,7 @@ class _ScriptCallLog:
     omitted: int = 0
     closed: bool = False
     model_usage: list[ModelResponseUsage] = field(default_factory=list)
+    approvals: dict[anyio.CancelScope, anyio.Event] = field(default_factory=dict)
     _count: int = 0
     _recorded: dict[int, NestedToolCall] = field(default_factory=dict)
     _unfinished: dict[int, tuple[NestedToolCall, float]] = field(default_factory=dict)
@@ -257,6 +259,16 @@ class _ScriptCallLog:
             duration_ms = round((time.monotonic() - started) * 1000)
             self._recorded[index] = call.model_copy(update={"duration_ms": duration_ms})
         self._unfinished.clear()
+
+    async def finish_approvals(self) -> None:
+        """Cancel owned approvals and join their bounded cleanup before the parent ends."""
+
+        pending = tuple(self.approvals.items())
+        for scope, _ in pending:
+            scope.cancel()
+        with anyio.CancelScope(shield=True):
+            for _, finished in pending:
+                await finished.wait()
 
     def calls(self) -> tuple[NestedToolCall, ...]:
         return tuple(self._recorded[index] for index in sorted(self._recorded))
@@ -369,6 +381,8 @@ class ConfiguredToolExecutor:
         # Nested calls a script makes concurrently take turns through this, unless
         # their tool is parallel-safe; those run at most as many at once as in a batch.
         self._nested_serial_lock = anyio.Lock()
+        # Frontends show one approval at a time, including parallel script children.
+        self._nested_approval_lock = anyio.Lock()
         self._nested_parallel_limit = anyio.CapacityLimiter(_MAX_PARALLEL_NESTED_CALLS)
         # What each `spawn_agent` call's subagents spent, by call id, until the
         # session has saved the call's result. A call that is cancelled never
@@ -409,6 +423,7 @@ class ConfiguredToolExecutor:
             mcp_catalog=self._mcp_catalog,
         )
         executor._nested_serial_lock = self._nested_serial_lock
+        executor._nested_approval_lock = self._nested_approval_lock
         executor._nested_parallel_limit = self._nested_parallel_limit
         return executor
 
@@ -496,44 +511,11 @@ class ConfiguredToolExecutor:
             if self._approval_policy.requires_approval(tool) and not self._approval_policy.approves(
                 tool
             ):
-                # The approval shows the call exactly as the model made it; for a
-                # proxied call that names the target, so the user sees what runs.
-                approval_arguments = dict(tool_call.arguments)
-                self._approval_policy.prepare_approval(
-                    tool,
-                    call_id=tool_call.call_id,
-                    arguments=approval_arguments,
-                )
-                approval_resolved = False
-                try:
-                    yield ToolApprovalRequested(
-                        call_id=tool_call.call_id,
-                        name=tool_call.name,
-                        target=target,
-                        arguments=approval_arguments,
-                        safety=tool.safety,
-                        grants_allowed=not confirms_every_call(tool),
-                        session_only_yolo=self._approval_policy.session_only_yolo,
-                    )
-                    decision = await self._approval_policy.await_approval(
-                        tool,
-                        call_id=tool_call.call_id,
-                        arguments=approval_arguments,
-                    )
-                    approval_resolved = True
-                    yield ToolApprovalResolved(
-                        call_id=tool_call.call_id,
-                        name=tool_call.name,
-                        target=target,
-                        approved=decision.approved,
-                        reason=decision.reason,
-                    )
-                finally:
-                    if not approval_resolved:
-                        self._approval_policy.cancel_approval(
-                            call_id=tool_call.call_id,
-                            reason="Agent run cancelled",
-                        )
+                async with aclosing(self._approval_events(tool_call, tool, target)) as approvals:
+                    async for event in approvals:
+                        yield event
+                        if isinstance(event, ToolApprovalResolved):
+                            decision = event
                 if decision.approved:
                     yield self._prepare_tool(tool_call, tool, arguments, target=target)
                     return
@@ -546,6 +528,42 @@ class ConfiguredToolExecutor:
                 return
 
         yield self._prepare_outcome(tool_call, outcome, target=self.resolve_target(tool_call))
+
+    async def _approval_events(
+        self, tool_call: ToolCall, tool: Tool, target: str | None
+    ) -> AsyncGenerator[ToolApprovalRequested | ToolApprovalResolved, None]:
+        """Prepare, publish and settle one approval, cancelling abandoned requests."""
+
+        # Keep the proxy and its arguments visible while approval policy sees the target.
+        arguments = dict(tool_call.arguments)
+        self._approval_policy.prepare_approval(tool, call_id=tool_call.call_id, arguments=arguments)
+        resolved = False
+        try:
+            yield ToolApprovalRequested(
+                call_id=tool_call.call_id,
+                name=tool_call.name,
+                target=target,
+                arguments=arguments,
+                safety=tool.safety,
+                grants_allowed=not confirms_every_call(tool),
+                session_only_yolo=self._approval_policy.session_only_yolo,
+            )
+            decision = await self._approval_policy.await_approval(
+                tool, call_id=tool_call.call_id, arguments=arguments
+            )
+            resolved = True
+            yield ToolApprovalResolved(
+                call_id=tool_call.call_id,
+                name=tool_call.name,
+                target=target,
+                approved=decision.approved,
+                reason=decision.reason,
+            )
+        finally:
+            if not resolved:
+                self._approval_policy.cancel_approval(
+                    call_id=tool_call.call_id, reason="Agent run cancelled"
+                )
 
     def _check_call(self, tool_call: ToolCall) -> _CheckedCall | _ToolRunOutcome:
         """Find the tool a call runs and run every check that comes before approval.
@@ -574,7 +592,7 @@ class ConfiguredToolExecutor:
     async def run_nested(
         self, tool_call: ToolCall, *, result_limits: ResultLimits | None = None
     ) -> NestedCallResult:
-        """Run a call a codemode script made, under the same policy as a direct call.
+        """Run a read-only nested call without requesting new approval.
 
         The call passes every check a direct call does, and the tool that runs must
         be read-only. It never asks the user: a call that would need approval fails
@@ -605,10 +623,40 @@ class ConfiguredToolExecutor:
                 finishes.
         """
 
+        return await self._run_nested(tool_call, result_limits, origin="subagent")
+
+    async def run_codemode(
+        self, tool_call: ToolCall, *, result_limits: ResultLimits | None = None
+    ) -> NestedCallResult:
+        """Run a script's child with its own approval, independently of the wrapper.
+
+        Script eligibility remains read-only. Unlike subagents, scripts can request
+        approval through the live event sink. A missing or failed sink never grants
+        execution. Cancellation clears the request before the child finishes.
+
+        Args:
+            tool_call (ToolCall): The child call, with its own unique identity.
+            result_limits (ResultLimits | None): Optional script-facing output budget.
+
+        Returns:
+            NestedCallResult: The result or the reason this child was refused.
+        """
+
+        return await self._run_nested(tool_call, result_limits, origin="codemode")
+
+    async def _run_nested(
+        self,
+        tool_call: ToolCall,
+        result_limits: ResultLimits | None,
+        *,
+        origin: Literal["codemode", "subagent"],
+    ) -> NestedCallResult:
+        """Record a child around its policy checks, approval and execution."""
+
         log = _SCRIPT_CALLS.get()
         if log is None:
             return _nested_result(
-                await self._nested_outcome(tool_call, result_limits), result_limits
+                await self._nested_outcome(tool_call, result_limits, origin=origin), result_limits
             )
         target = self.resolve_target(tool_call)
         arguments = _recorded_arguments(tool_call.arguments)
@@ -643,7 +691,7 @@ class ConfiguredToolExecutor:
                     arguments=arguments,
                 ),
             )
-            outcome = await self._nested_outcome(tool_call, result_limits)
+            outcome = await self._nested_outcome(tool_call, result_limits, origin=origin)
         except anyio.get_cancelled_exc_class():
             # Recorded without waiting: nothing may be published once the script ended.
             log.record(index, recorded(ended_first))
@@ -656,7 +704,11 @@ class ConfiguredToolExecutor:
         return _nested_result(outcome, result_limits)
 
     async def _nested_outcome(
-        self, tool_call: ToolCall, result_limits: ResultLimits | None
+        self,
+        tool_call: ToolCall,
+        result_limits: ResultLimits | None,
+        *,
+        origin: Literal["codemode", "subagent"],
     ) -> _ToolRunOutcome:
         """Check and run one nested call, or explain why it may not run."""
 
@@ -683,11 +735,16 @@ class ConfiguredToolExecutor:
         if self._approval_policy.requires_approval(tool) and not self._approval_policy.approves(
             tool
         ):
-            return _failure_outcome(
-                f"{tool.name} needs approval, which a script or a subagent cannot ask for. "
-                "Call it directly instead.",
-                failure_code="approval_denied",
-            )
+            if origin == "subagent":
+                return _failure_outcome(
+                    f"{tool.name} needs approval, which a subagent cannot ask for. "
+                    "Call it directly instead.",
+                    failure_code="approval_denied",
+                )
+            async with self._nested_approval_lock:
+                denied = await self._approve_codemode_call(tool_call, tool, target)
+            if denied is not None:
+                return denied
         name = target or tool_call.name
         parallel_safe = (
             self._registry.execution_metadata_for(name).parallel_safe
@@ -711,6 +768,79 @@ class ConfiguredToolExecutor:
                 nested=True,
                 context=context,
             )
+
+    async def _approve_codemode_call(
+        self, tool_call: ToolCall, tool: Tool, target: str | None
+    ) -> _ToolRunOutcome | None:
+        """Deliver a child's approval reliably; clear it when its script is interrupted."""
+
+        if self._approval_policy.approves(tool):
+            return None
+        if self._progress_sink is None:
+            return _failure_outcome(
+                f"{tool.name} needs approval; no live approval channel is available. "
+                "Call it directly instead.",
+                failure_code="approval_denied",
+            )
+        log = _SCRIPT_CALLS.get()
+        if log is not None and log.closed:
+            return _failure_outcome("The script has ended", failure_code="approval_denied")
+        with anyio.CancelScope() as scope:
+            finished = anyio.Event()
+            if log is not None:
+                log.approvals[scope] = finished
+            try:
+                return await self._request_codemode_approval(
+                    tool_call, tool, target, self._progress_sink
+                )
+            finally:
+                finished.set()
+                if log is not None:
+                    log.approvals.pop(scope, None)
+        return _failure_outcome("The script has ended", failure_code="approval_denied")
+
+    async def _request_codemode_approval(
+        self, tool_call: ToolCall, tool: Tool, target: str | None, sink: LiveEventSink
+    ) -> _ToolRunOutcome | None:
+        """Forward one child approval and clear its prompt on an interrupted delivery."""
+
+        settled = False
+        try:
+            async with aclosing(self._approval_events(tool_call, tool, target)) as approvals:
+                async for event in approvals:
+                    # Approval delivery is required, unlike best-effort progress.
+                    await sink(event)
+                    if isinstance(event, ToolApprovalResolved):
+                        settled = True
+                        if not event.approved:
+                            return _failure_outcome(
+                                event.reason or "Tool execution was not approved",
+                                failure_code="approval_denied",
+                            )
+            return None
+        except Exception:  # noqa: BLE001 - translate approval-channel failure at the tool boundary
+            _logger.exception("Could not deliver codemode approval %s", tool_call.call_id)
+            return _failure_outcome(
+                f"Could not complete approval for {tool.name}; the child tool was not run.",
+                failure_code="approval_denied",
+            )
+        finally:
+            if not settled:
+                # A script timeout need not end the run. Clear its approval panel
+                # before returning, without letting a stalled frontend prevent cleanup.
+                try:
+                    with anyio.move_on_after(1, shield=True):
+                        await sink(
+                            ToolApprovalResolved(
+                                call_id=tool_call.call_id,
+                                name=tool_call.name,
+                                target=target,
+                                approved=False,
+                                reason="Codemode child ended before approval completed",
+                            )
+                        )
+                except Exception:  # noqa: BLE001 - preserve the original failure or cancellation
+                    _logger.exception("Could not clear codemode approval %s", tool_call.call_id)
 
     async def _publish_nested(self, log: _ScriptCallLog, event: WispEvent) -> None:
         """Publish a nested call's event live; best effort, never once its script ended."""
@@ -805,6 +935,7 @@ class ConfiguredToolExecutor:
                 # after it.
                 log.close()
                 _SCRIPT_CALLS.reset(token)
+                await log.finish_approvals()
                 if log.model_usage:
                     self._unsaved_model_usage[tool_call.call_id] = tuple(log.model_usage)
             outcome = replace(
