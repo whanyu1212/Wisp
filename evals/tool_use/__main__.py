@@ -75,6 +75,12 @@ def main(argv: list[str] | None = None) -> int:
         help="offer the experimental codemode tool, in this language (default: off)",
     )
     run.add_argument(
+        "--codemode-presentation",
+        choices=("direct_and_codemode", "codemode_only"),
+        default="direct_and_codemode",
+        help="model-facing tools when codemode is offered (default: direct_and_codemode)",
+    )
+    run.add_argument(
         "--mcp-results",
         choices=MCP_RESULTS,
         default="text",
@@ -168,6 +174,7 @@ def _run(args: argparse.Namespace) -> int:
         results_dir=results_dir,
         mcp_tool_exposure=args.mcp_tool_exposure,
         codemode=args.codemode,
+        codemode_presentation=args.codemode_presentation,
         mcp_results=args.mcp_results,
         effort=args.effort,
     )
@@ -199,6 +206,7 @@ def _run(args: argparse.Namespace) -> int:
         "credential_sources": dict(credentials.sources),
         "mcp_tool_exposure": args.mcp_tool_exposure,
         "codemode": args.codemode,
+        "codemode_presentation": args.codemode_presentation,
         "mcp_results": args.mcp_results,
         "effort": args.effort,
         "stopped_for_budget": result.stopped_for_budget,

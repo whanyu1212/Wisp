@@ -9,7 +9,7 @@ import anyio
 from wisp.coding import CodingSession, CodingSessionConfiguration
 from wisp.config.runtime import WispConfig
 from wisp.config.settings import ResolvedSettings, resolve_settings
-from wisp.events import RpcModelSelectionSnapshot, RpcSettingsReloaded
+from wisp.events import CodemodePresentation, RpcModelSelectionSnapshot, RpcSettingsReloaded
 from wisp.providers.catalog import startup_effort
 from wisp.rpc.configuration import RpcProjectConfiguration
 from wisp.runtime.api import WispRuntime
@@ -24,6 +24,7 @@ LIVE_RELOAD_FIELDS = (
     "auto_compaction_enabled",
     "web_search",
     "codemode",
+    "codemode_presentation",
     "subagents",
     "subagent_model",
 )
@@ -33,6 +34,7 @@ LIVE_RELOAD_FIELDS = (
 class _ReloadPlan:
     configuration: CodingSessionConfiguration
     codemode: bool | None
+    codemode_presentation: CodemodePresentation
     subagents: bool
     subagent_model: str | None
     active_config: WispConfig
@@ -94,6 +96,7 @@ class RpcSettingsReloader:
         # No await or fallible preparation below: a prompt cannot observe a partial reload.
         agent.reconfigure(plan.configuration)
         agent.codemode = plan.codemode
+        agent.codemode_presentation = plan.codemode_presentation
         agent.subagents = plan.subagents
         agent.subagent_model = plan.subagent_model
         self.project.active_config = plan.active_config
@@ -143,6 +146,11 @@ class RpcSettingsReloader:
             web_search=config.web_search if choices.web_search is None else choices.web_search,
         )
         codemode = choices.codemode if choices.has_codemode else config.codemode
+        codemode_presentation = (
+            choices.codemode_presentation
+            if choices.codemode_presentation is not None
+            else config.codemode_presentation
+        )
         subagents = config.subagents if choices.subagents is None else choices.subagents
         subagent_model = (
             choices.subagent_model if choices.has_subagent_model else config.subagent_model
@@ -161,6 +169,7 @@ class RpcSettingsReloader:
             "auto_compaction_enabled": choices.has_auto_compaction_enabled,
             "web_search": choices.web_search is not None,
             "codemode": choices.has_codemode,
+            "codemode_presentation": choices.codemode_presentation is not None,
             "subagents": choices.subagents is not None,
             "subagent_model": choices.has_subagent_model,
         }
@@ -172,6 +181,7 @@ class RpcSettingsReloader:
             "auto_compaction_enabled": current.auto_compaction_enabled,
             "web_search": current.web_search,
             "codemode": agent.codemode,
+            "codemode_presentation": agent.codemode_presentation,
             "subagents": agent.subagents,
             "subagent_model": agent.subagent_model,
         }
@@ -183,6 +193,7 @@ class RpcSettingsReloader:
             "auto_compaction_enabled": configuration.auto_compaction_enabled,
             "web_search": configuration.web_search,
             "codemode": codemode,
+            "codemode_presentation": codemode_presentation,
             "subagents": subagents,
             "subagent_model": subagent_model,
         }
@@ -232,5 +243,11 @@ class RpcSettingsReloader:
             update={name: getattr(config, name) for name in LIVE_RELOAD_FIELDS}
         )
         return _ReloadPlan(
-            configuration, codemode, subagents, subagent_model, active_config, report
+            configuration,
+            codemode,
+            codemode_presentation,
+            subagents,
+            subagent_model,
+            active_config,
+            report,
         )

@@ -346,6 +346,29 @@ def test_config_leaves_codemode_automatic_unless_set(
     assert WispConfig.from_env(session_dir=tmp_path, codemode=True).codemode is True
 
 
+def test_codemode_presentation_precedence(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    settings_path = Path.home() / ".wisp" / "settings.json"
+    settings_path.parent.mkdir(parents=True)
+    assert WispConfig.from_env(session_dir=tmp_path).codemode_presentation == "direct_and_codemode"
+
+    settings_path.write_text('{"codemode_presentation": "codemode_only"}', encoding="utf-8")
+    assert WispConfig.from_env(session_dir=tmp_path).codemode_presentation == "codemode_only"
+
+    monkeypatch.setenv("WISP_CODEMODE_PRESENTATION", "direct_and_codemode")
+    assert WispConfig.from_env(session_dir=tmp_path).codemode_presentation == "direct_and_codemode"
+    config = WispConfig.from_env(session_dir=tmp_path, codemode_presentation="codemode_only")
+    assert config.codemode_presentation == "codemode_only"
+
+
+@pytest.mark.parametrize("value", ["", "only", "true"])
+def test_invalid_presentation_environment(
+    tmp_path: Path, monkeypatch: MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("WISP_CODEMODE_PRESENTATION", value)
+    with pytest.raises(ValueError, match="WISP_CODEMODE_PRESENTATION"):
+        WispConfig.from_env(session_dir=tmp_path)
+
+
 def test_wake_left_to_frontend(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
     """Unset, waking is None so the frontend picks; settings, env and overrides decide."""
 

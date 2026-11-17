@@ -11,7 +11,7 @@ _TUI_DOCS = DOCS_SRC_DIR / "guide" / "tui"
 def test_slash_command_table_matches_rust_usage() -> None:
     source = (_TUI_SRC / "commands.rs").read_text(encoding="utf-8")
     usage = source.split("fn usage(", 1)[1].split("pub(crate) fn classify", 1)[0]
-    registered = re.findall(r'"\w+" => "(/[^"\n]+)"', usage)
+    registered = re.findall(r'"\w+" =>\s*(?:\{\s*)?"(/[^"\n]+)"', usage)
     assert registered, "Rust usage declarations must be found before comparing docs"
 
     document = (_TUI_DOCS / "commands.md").read_text(encoding="utf-8")

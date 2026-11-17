@@ -39,6 +39,7 @@ uv run python -m evals.tool_use report evals/tool_use/results/<timestamp>
 | `--results` | Output folder (default: a new timestamped folder under `results/`) |
 | `--mcp-tool-exposure` | `direct` (default) sends every MCP tool's definition; `on_demand` gives the model `mcp_search`, `mcp_describe` and `mcp_call` instead; `auto`, Wisp's own default, picks one by catalog size |
 | `--codemode` | `off` (default), or `python` to offer the experimental `codemode` tool; rows then also count `scripts`, `failed_scripts`, `nested_calls` and why scripts failed (`script_failures`) |
+| `--codemode-presentation` | `direct_and_codemode` (default) or `codemode_only`; recorded in suite, run, and baseline metadata. Pair with `--codemode python` to compare presentations |
 | `--mcp-results` | `text` (default), or `structured` to have the devhub task tools declare an output schema and return their result as data beside the same text, so a codemode script receives a typed dict. Every other tool, and every answer's text, is the same in both; an answer that is an error, such as an unknown repository, becomes a failed call |
 
 Runs happen in rounds: one repetition of every task and model per round. The budget is checked
@@ -429,3 +430,28 @@ token savings, latency improvements, or parity with Pi. No live model comparison
 was run for this slice. Presentation modes and default rollout decisions still need
 their separate controlled comparisons. Process tests need normal OS process access;
 a sandbox that blocks `ps` cannot verify process-tree cleanup.
+
+
+## Presentation rollout gate
+
+Presentation remains opt-in; the default is `direct_and_codemode`. Deterministic tests compare
+both presentations using real scripts and the same tools, including deferred guidance, fallback,
+and request-schema accounting. They establish behavior, not model adoption or efficiency.
+
+For a live comparison, hold commit, tasks, model, effort, MCP exposure, result format, and repetition
+count fixed; change only `--codemode-presentation`. Use separate result folders and explicit budgets:
+
+```bash
+uv run python -m evals.tool_use run --models openai::gpt-6.1-sol --tags orchestration \
+  --codemode python --codemode-presentation direct_and_codemode --reps 3 \
+  --budget-usd 5 --results /tmp/wisp-presentation-direct
+uv run python -m evals.tool_use run --models openai::gpt-6.1-sol --tags orchestration \
+  --codemode python --codemode-presentation codemode_only --reps 3 \
+  --budget-usd 5 --results /tmp/wisp-presentation-only
+uv run python -m evals.tool_use compare /tmp/wisp-presentation-direct /tmp/wisp-presentation-only
+```
+
+Compare success and error rates first, then complete-run tokens, latency, tool calls, script
+failures, and cost. Include local mutation/recovery and MCP tasks before proposing a new default.
+Image delivery and subagent delegation are unavailable in codemode-only, so their tasks must not be
+counted as equivalent capabilities. No live-model results are claimed for this presentation change.

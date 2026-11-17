@@ -56,6 +56,7 @@ def _run(
         "error": None,
         "credential_source": "stored",
         "codemode": "off",
+        "codemode_presentation": "direct_and_codemode",
         "scripts": 0,
         "failed_scripts": 0,
         "script_failures": {},

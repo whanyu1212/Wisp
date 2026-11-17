@@ -652,6 +652,7 @@ async def _run_print_with_runtime(
         project_context_root=project_context_root,
         mcp_tool_exposure=config.mcp_tool_exposure,
         codemode=config.codemode,
+        codemode_presentation=config.codemode_presentation,
         subagents=config.subagents,
         subagent_model=config.subagent_model,
         mcp_server_connected=runtime.mcp_server_connected,

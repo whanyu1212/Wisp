@@ -101,6 +101,7 @@ def test_reload_applies_live_fields_and_keeps_tools_paths_and_trust(tmp_path: Pa
                 auto_compaction_enabled=False,
                 web_search=True,
                 codemode=True,
+                codemode_presentation="codemode_only",
                 subagents=True,
             )
             report = await fixture.reloader.reload(
@@ -110,6 +111,7 @@ def test_reload_applies_live_fields_and_keeps_tools_paths_and_trust(tmp_path: Pa
             assert agent.context_reserve_tokens == 4096
             assert not agent.auto_compaction_enabled
             assert agent.web_search and agent.codemode and agent.subagents
+            assert agent.codemode_presentation == "codemode_only"
             assert agent.tool_context is context and agent.tools is tools
             assert agent.trusted
             assert set(report.applied) == {
@@ -118,6 +120,7 @@ def test_reload_applies_live_fields_and_keeps_tools_paths_and_trust(tmp_path: Pa
                 "auto_compaction_enabled",
                 "web_search",
                 "codemode",
+                "codemode_presentation",
                 "subagents",
             }
             assert report.state.model == "after" and report.state.web_search
@@ -205,6 +208,7 @@ def test_session_choices_survive_reload(tmp_path: Path) -> None:
             choices.has_auto_compaction_enabled = True
             choices.codemode = None
             choices.has_codemode = True
+            choices.codemode_presentation = "codemode_only"
             choices.subagents = False
             choices.has_subagent_model = True
             fixture.save(
@@ -222,6 +226,7 @@ def test_session_choices_survive_reload(tmp_path: Path) -> None:
             assert fixture.agent.provider.name == "fake" and fixture.agent.model == "chosen"
             assert fixture.agent.web_search and not fixture.agent.auto_compaction_enabled
             assert fixture.agent.codemode is None and not fixture.agent.subagents
+            assert fixture.agent.codemode_presentation == "codemode_only"
             assert fixture.agent.subagent_model is None
             assert {
                 "provider",
@@ -229,6 +234,7 @@ def test_session_choices_survive_reload(tmp_path: Path) -> None:
                 "web_search",
                 "auto_compaction_enabled",
                 "codemode",
+                "codemode_presentation",
                 "subagents",
                 "subagent_model",
             } <= set(report.overridden)
@@ -521,6 +527,12 @@ def test_project_refresh_cannot_hide_startup_only_changes(tmp_path: Path) -> Non
     ("choice", "variable", "value", "field"),
     [
         ("codemode", "WISP_CODEMODE", "1", "codemode"),
+        (
+            "presentation",
+            "WISP_CODEMODE_PRESENTATION",
+            "direct_and_codemode",
+            "codemode_presentation",
+        ),
         ("subagents", "WISP_SUBAGENTS", "1", "subagents"),
         ("subagent_model", "WISP_SUBAGENT_MODEL", "fake", "subagent_model"),
     ],
@@ -561,6 +573,10 @@ def test_explicit_rpc_choices_survive_reload_over_environment_defaults(
         try:
             if choice == "codemode":
                 command_id = await controller.set_codemode("automatic")
+            elif choice == "presentation":
+                command_id = await controller.set_codemode(
+                    "automatic", presentation="codemode_only"
+                )
             elif choice == "subagents":
                 command_id = await controller.set_subagents(False)
             else:
@@ -569,10 +585,12 @@ def test_explicit_rpc_choices_survive_reload_over_environment_defaults(
             events = await finished(await controller.reload())
             report = next(e for e in events if isinstance(e, RpcSettingsReloaded))
             assert field in report.overridden
-            if choice == "codemode":
+            if choice in {"codemode", "presentation"}:
                 events = await finished(await controller.get_codemode())
                 snapshot = next(e for e in events if isinstance(e, RpcCodemodeReported))
                 assert snapshot.codemode.setting == "automatic"
+                if choice == "presentation":
+                    assert snapshot.codemode.presentation == "codemode_only"
             else:
                 events = await finished(await controller.get_subagents())
                 snapshot = next(e for e in events if isinstance(e, RpcSubagentsReported))

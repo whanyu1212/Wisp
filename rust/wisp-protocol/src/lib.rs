@@ -529,6 +529,15 @@ pub mod commands {
         Never,
     }
 
+    /// Which tools the model sees when codemode is offered.
+    #[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize, Eq, PartialEq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum CodemodePresentation {
+        #[default]
+        DirectAndCodemode,
+        CodemodeOnly,
+    }
+
     /// Lifetime granted by an approved tool request.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum ApprovalScope {
@@ -654,6 +663,17 @@ pub mod commands {
                 None => serde_json::json!({"type": "get_codemode", "id": id}),
             };
             deserialize(value)
+        }
+        /// Save a presentation while preserving the current availability setting.
+        pub fn codemode_presentation(
+            id: &str,
+            setting: CodemodeSetting,
+            presentation: CodemodePresentation,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({
+                "type": "set_codemode", "id": id, "setting": setting,
+                "presentation": presentation,
+            }))
         }
         /// Read the subagents setting, or turn subagents on or off and save that.
         pub fn subagents(
@@ -1421,6 +1441,12 @@ pub mod events {
     #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq)]
     pub struct CodemodeState {
         pub setting: crate::commands::CodemodeSetting,
+        /// The saved choice of tools presented to the model.
+        #[serde(default)]
+        pub presentation: crate::commands::CodemodePresentation,
+        /// The presentation the next run can use, falling back when codemode-only is unavailable.
+        #[serde(default)]
+        pub effective_presentation: crate::commands::CodemodePresentation,
         /// Whether the backend has the `codemode` extra installed.
         pub available: bool,
         /// Whether a run started now would offer the tool.

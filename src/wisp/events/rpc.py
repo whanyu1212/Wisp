@@ -31,6 +31,9 @@ DEFAULT_AGENT_MODE: AgentMode = "build"
 # When a run offers the codemode tool: "automatic" when a script may call one of its MCP
 # tools, or "always" or "never". Saved as the user setting ``codemode`` (unset, true or false).
 CodemodeSetting = TypeAliasType("CodemodeSetting", Literal["automatic", "always", "never"])
+CodemodePresentation = TypeAliasType(
+    "CodemodePresentation", Literal["direct_and_codemode", "codemode_only"]
+)
 
 MAX_RPC_MODEL_CATALOG_PROVIDERS = 128
 MAX_RPC_CONNECTION_PROVIDERS = 32
@@ -477,6 +480,8 @@ class CodemodeState(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     setting: CodemodeSetting
+    presentation: CodemodePresentation = "direct_and_codemode"
+    effective_presentation: CodemodePresentation = "direct_and_codemode"
     # Whether the `codemode` extra is installed; without it no run offers the tool.
     available: bool
     # Whether a run started now would offer the tool, given its tools and MCP exposure.

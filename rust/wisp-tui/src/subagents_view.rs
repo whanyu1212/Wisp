@@ -550,7 +550,7 @@ fn notes(state: &UiState) -> Vec<(String, bool)> {
         let offered = if snapshot.offered {
             "On for the next prompt."
         } else if snapshot.enabled {
-            "On, but the next prompt has no read-only tool for a subagent to use."
+            "Enabled, but unavailable for the next prompt."
         } else {
             "Off for the next prompt."
         };
@@ -615,6 +615,18 @@ mod tests {
             report_max_bytes: 8000,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn unavailable_subagents_keep_tool_details() {
+        let state = state_with(SubagentsState {
+            offered: false,
+            ..snapshot()
+        });
+        let rendered = draw_full(&mut DiscoveryView::subagents(), &state, 80).join("\n");
+        assert!(rendered.contains("Enabled, but unavailable for the next prompt."));
+        assert!(rendered.contains("read, grep"));
+        assert!(!rendered.contains("has no read-only tool"));
     }
 
     fn state_with(snapshot: SubagentsState) -> UiState {

@@ -368,6 +368,40 @@ pub(super) fn codemode(
     setting: Option<wisp_protocol::commands::CodemodeSetting>,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    change_codemode(state, setting, None, ids)
+}
+
+/// Change presentation using the backend's availability choice, reading it first
+/// when a slash command arrives before the picker has loaded.
+pub(super) fn codemode_presentation(
+    state: &mut UiState,
+    presentation: wisp_protocol::commands::CodemodePresentation,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    if state.exit_requested {
+        return Ok(Vec::new());
+    }
+    if !state.can_select_model() || super::session_sync_pending(state) {
+        return Ok(vec![UiEffect::Notice(
+            "Finish the current operation before changing codemode.".into(),
+        )]);
+    }
+    if let Some(snapshot) = state.codemode.snapshot.as_ref() {
+        return change_codemode(state, Some(snapshot.setting), Some(presentation), ids);
+    }
+    state.pending_codemode_presentation = Some(presentation);
+    if state.codemode.loading() {
+        return Ok(Vec::new());
+    }
+    codemode(state, None, ids)
+}
+
+fn change_codemode(
+    state: &mut UiState,
+    setting: Option<wisp_protocol::commands::CodemodeSetting>,
+    presentation: Option<wisp_protocol::commands::CodemodePresentation>,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
     if state.exit_requested {
         return Ok(Vec::new());
     }
@@ -387,7 +421,12 @@ pub(super) fn codemode(
         )]);
     }
     let id = ids.next_id(CommandKind::Codemode);
-    let command = WispTypedClientRpcCommands::codemode(&id, setting)?;
+    let command = match (setting, presentation) {
+        (Some(setting), Some(presentation)) => {
+            WispTypedClientRpcCommands::codemode_presentation(&id, setting, presentation)?
+        }
+        _ => WispTypedClientRpcCommands::codemode(&id, setting)?,
+    };
     if setting.is_some() {
         state.codemode.start_change(id);
     } else {
@@ -485,10 +524,19 @@ pub(super) fn read_codemode_again(
     state: &mut UiState,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
-    if state.codemode.loading() || !std::mem::take(&mut state.codemode.read_again) {
+    if state.codemode.loading() {
         return Ok(Vec::new());
     }
-    codemode(state, None, ids)
+    if let Some(presentation) = state.pending_codemode_presentation.take()
+        && state.codemode.error.is_none()
+        && state.codemode.snapshot.is_some()
+    {
+        return codemode_presentation(state, presentation, ids);
+    }
+    if std::mem::take(&mut state.codemode.read_again) {
+        return codemode(state, None, ids);
+    }
+    Ok(Vec::new())
 }
 
 /// Send the permission read that was asked for while another request was in flight,

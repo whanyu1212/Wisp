@@ -75,6 +75,7 @@ pub(super) fn observe(
             };
             state.context.invalidate();
             state.codemode = Default::default();
+            state.pending_codemode_presentation = None;
             state.subagents = Default::default();
             let mut summary = vec!["Settings reloaded.".to_owned()];
             for (label, fields) in [

@@ -51,6 +51,7 @@ BASELINE_FIELDS = (
     "proxied_errors",
     "proxied_argument_errors",
     "codemode",
+    "codemode_presentation",
     "scripts",
     "failed_scripts",
     "script_failures",
@@ -75,6 +76,7 @@ SUITE_FIELDS = (
     "finished_at",
     "mcp_tool_exposure",
     "codemode",
+    "codemode_presentation",
     "mcp_results",
     "effort",
 )

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Self
+from typing import TYPE_CHECKING, Any, Literal, Self
 
 from pydantic import (
     BaseModel,
@@ -36,6 +36,10 @@ from wisp.retry import RetryPolicy
 from wisp.trust.permissions import permissions_directory
 from wisp.validation import redact_validation_error_inputs
 
+if TYPE_CHECKING:
+    from wisp.events import CodemodePresentation
+
+
 DEFAULT_PROVIDER = "openai-codex"
 DEFAULT_CONTEXT_RESERVE_TOKENS = 16_384
 DEFAULT_AUTO_COMPACTION_ENABLED = True
@@ -45,6 +49,7 @@ OPENAI_COMPATIBLE_CONFIG_ENV = "WISP_OPENAI_COMPATIBLE_CONFIG"
 _DEFAULT_AUTH_PATH = Path("~/.wisp/auth.json")
 _DEFAULT_SESSION_DIR = Path("~/.wisp/sessions")
 _CODEMODE_ENV = "WISP_CODEMODE"
+_CODEMODE_PRESENTATION_ENV = "WISP_CODEMODE_PRESENTATION"
 _SUBAGENTS_ENV = "WISP_SUBAGENTS"
 _SUBAGENT_MODEL_ENV = "WISP_SUBAGENT_MODEL"
 
@@ -72,6 +77,7 @@ class WispConfig(BaseModel):
     # The experimental codemode tool, which needs the `codemode` extra: True or False
     # when set, None to offer it when a script may call one of the run's MCP tools.
     codemode: bool | None = None
+    codemode_presentation: Literal["direct_and_codemode", "codemode_only"] = "direct_and_codemode"
     # Offer the `spawn_agent` tool, which hands a read-only task to a subagent.
     subagents: bool = DEFAULT_SUBAGENTS_ENABLED
     # The model a subagent that starts fresh uses, on the session's provider. None
@@ -153,6 +159,7 @@ class WispConfig(BaseModel):
         web_search: bool | None = None,
         wake_on_process_exit: bool | None = None,
         codemode: bool | None = None,
+        codemode_presentation: CodemodePresentation | None = None,
         subagents: bool | None = None,
         subagent_model: str | None = None,
         mcp_servers: tuple[McpServerConfig, ...] | None = None,
@@ -209,6 +216,10 @@ class WispConfig(BaseModel):
         tools. Unset, it resolves to None: the tool is offered whenever a run finds
         eligible MCP tools, where scripts help most; true or false always or
         never offers it.
+
+        ``codemode_presentation`` (``WISP_CODEMODE_PRESENTATION``) is user-only.
+        ``direct_and_codemode`` offers direct tools alongside codemode;
+        ``codemode_only`` presents eligible tools through codemode when offered.
 
         ``subagents`` (``WISP_SUBAGENTS``) is user-only, because a subagent's model
         calls are billed to the user's provider account. It offers the `spawn_agent`
@@ -331,6 +342,13 @@ class WispConfig(BaseModel):
                 else _resolve_optional_bool(
                     os.environ.get(_CODEMODE_ENV), settings.codemode, name=_CODEMODE_ENV
                 )
+            ),
+            codemode_presentation=(
+                codemode_presentation
+                if codemode_presentation is not None
+                else codemode_presentation_from_env()
+                or settings.codemode_presentation
+                or "direct_and_codemode"
             ),
             subagents=(
                 subagents
@@ -461,6 +479,28 @@ def codemode_from_env() -> bool | None:
         ValueError: If the variable is set to something other than a boolean word.
     """
     return _resolve_optional_bool(os.environ.get(_CODEMODE_ENV), None, name=_CODEMODE_ENV)
+
+
+def codemode_presentation_from_env() -> CodemodePresentation | None:
+    """Read the user presentation override from the environment.
+
+    Returns:
+        CodemodePresentation | None: The presentation, or None when unset.
+
+    Raises:
+        ValueError: If the variable names an unsupported presentation.
+    """
+    value = os.environ.get(_CODEMODE_PRESENTATION_ENV)
+    if value is None:
+        return None
+    normalized = value.strip().casefold()
+    if normalized == "direct_and_codemode":
+        return "direct_and_codemode"
+    if normalized == "codemode_only":
+        return "codemode_only"
+    raise ValueError(
+        f"{_CODEMODE_PRESENTATION_ENV} must be one of: direct_and_codemode, codemode_only"
+    )
 
 
 def subagents_from_env() -> bool | None:

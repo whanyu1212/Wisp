@@ -375,6 +375,39 @@ already running. RPC/SDK clients use `get_codemode` and `set_codemode` for the s
 **Offered does not mean used.** The model chooses whether to call codemode. A single lookup often
 needs no script; a script can combine dependent lookups, calculations, edits, and tests.
 
+### Choose the presentation
+
+Availability and presentation are separate user settings. `codemode` still decides whether the
+script tool is offered. `codemode_presentation` decides which schemas the model sees when it is:
+
+| Presentation | Model-facing tools |
+|---|---|
+| `direct_and_codemode` (default) | Direct tools, discovery, and codemode; optional subagent delegation remains available |
+| `codemode_only` | `codemode` and its `tool_search` / `tool_describe` discovery tools |
+
+For a local workflow, set `{"codemode": true, "codemode_presentation": "codemode_only"}` in your
+user settings. `WISP_CODEMODE_PRESENTATION` overrides the saved presentation at startup. In the
+TUI use `/codemode presentation codemode_only`, or choose presentation in `/codemode`; switch back
+with `/codemode presentation direct_and_codemode`. RPC/SDK clients can pass
+`presentation="codemode_only"` to `set_codemode("always", ...)`. Omitting presentation preserves it.
+Changes apply to the next run and survive settings reload.
+
+Codemode-only hides direct schemas and their prompt guidance; `tool_describe` supplies the target's
+guidelines, schema, and confirmation requirements before a script calls it. This changes
+presentation, not permissions: tool selection, plan mode, approvals, and protected paths still
+apply to each child. Tools with unscriptable names or arguments cannot be called, and scripts do
+not deliver images. `spawn_agent` is not offered in this mode. Provider-native features such as
+web search remain controlled by their own settings.
+
+If codemode is disabled, unavailable, or has no eligible tools under automatic mode, Wisp retains
+the direct tools. It also retains them if an existing custom tool uses a discovery-reader name,
+so the unified discovery interface cannot be supplied. The picker and RPC snapshot distinguish the selected presentation from the
+effective fallback. Selecting codemode-only does not install the extra or force availability.
+
+The default remains direct-plus-codemode. The eval runner records presentation separately so paired
+runs can compare correctness, tool failures, tokens, latency, and cost before any default change;
+smaller initial schemas alone are not evidence of better complete workflows.
+
 ### Classify MCP tools accurately
 
 MCP tools default to `command` safety, even if their names sound read-only or the server advertises

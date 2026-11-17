@@ -348,12 +348,14 @@ def test_on_demand_run_offered_discovery(tmp_path: Path) -> None:
         ),
     ],
 )
-def test_codemode_run_offers_tool(tmp_path: Path, codemode: str) -> None:
+@pytest.mark.parametrize("presentation", ["direct_and_codemode", "codemode_only"])
+def test_codemode_run_offers_tool(tmp_path: Path, codemode: str, presentation: str) -> None:
     """The setting reaches Wisp even for a task without MCP servers."""
 
     context = dataclasses.replace(
         _context(tmp_path, build=detect_build(_REPO_ROOT)),
         codemode=codemode,  # type: ignore[arg-type]
+        codemode_presentation=presentation,  # type: ignore[arg-type]
     )
 
     row = run_one(_task(tmp_path), ModelSpec("fake", "fake"), 1, context)
@@ -367,6 +369,11 @@ def test_codemode_run_offers_tool(tmp_path: Path, codemode: str) -> None:
     assert setup is not None
     assert ("codemode" in setup.tool_names) is (codemode == "python")
     assert (row.status, row.codemode) == ("passed", codemode)
+    assert row.codemode_presentation == presentation
+    if codemode == "python" and presentation == "codemode_only":
+        assert set(setup.tool_names) == {"codemode", "tool_search", "tool_describe"}
+    else:
+        assert set(setup.tool_names) - {"codemode", "tool_search", "tool_describe"}
 
 
 def test_mcp_settings_carry_exposure(tmp_path: Path) -> None:

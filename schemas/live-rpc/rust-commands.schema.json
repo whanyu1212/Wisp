@@ -415,6 +415,13 @@
       "title": "CloneSessionCommand",
       "type": "object"
     },
+    "CodemodePresentation": {
+      "enum": [
+        "direct_and_codemode",
+        "codemode_only"
+      ],
+      "type": "string"
+    },
     "CodemodeSetting": {
       "enum": [
         "automatic",
@@ -1910,6 +1917,14 @@
             }
           ],
           "title": "SetCodemodeCommandId"
+        },
+        "presentation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CodemodePresentation"
+            }
+          ],
+          "title": "SetCodemodeCommandPresentation"
         },
         "setting": {
           "$ref": "#/$defs/CodemodeSetting",

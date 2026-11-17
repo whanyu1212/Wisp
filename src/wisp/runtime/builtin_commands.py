@@ -125,9 +125,15 @@ def builtin_command_descriptors() -> tuple[CommandDescriptor, ...]:
         CommandDescriptor(
             name="codemode",
             title="Codemode",
-            description="View or save when runs offer the codemode tool",
+            description="View or save codemode availability and tool presentation",
             category=CommandCategory.configuration,
-            arguments=(CommandArgument("setting", "Optional 'automatic', 'always' or 'never'"),),
+            arguments=(
+                CommandArgument(
+                    "setting",
+                    "Optional 'automatic', 'always', 'never', or "
+                    "'presentation direct_and_codemode|codemode_only'",
+                ),
+            ),
             accepts_arguments=True,
             order=28,
         ),

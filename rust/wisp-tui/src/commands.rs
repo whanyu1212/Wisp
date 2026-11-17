@@ -38,6 +38,7 @@ pub(crate) enum Command {
     Mcp,
     Permissions(Option<wisp_protocol::commands::PermissionMode>),
     Codemode(Option<wisp_protocol::commands::CodemodeSetting>),
+    CodemodePresentation(wisp_protocol::commands::CodemodePresentation),
     /// Show the subagents setting, or turn subagents on or off.
     Subagents(Option<bool>),
     /// Choose the model fresh subagents use; `None` clears the choice.
@@ -76,7 +77,9 @@ fn usage(name: &str) -> Option<&'static str> {
         "skills" => "/skills",
         "mcp" => "/mcp",
         "permissions" => "/permissions [ask|yolo]",
-        "codemode" => "/codemode [automatic|always|never]",
+        "codemode" => {
+            "/codemode [automatic|always|never|presentation direct_and_codemode|codemode_only]"
+        }
         "subagents" => "/subagents [on|off|model <name>|model -]",
         "compact" => "/compact [instructions]",
         "quit" => "/quit",
@@ -255,14 +258,20 @@ fn parse_permissions(tail: &str, syntax: &str) -> Command {
 }
 
 fn parse_codemode(tail: &str, syntax: &str) -> Command {
-    use wisp_protocol::commands::CodemodeSetting;
-    Command::Codemode(Some(match tail.trim() {
-        "" => return Command::Codemode(None),
-        "automatic" => CodemodeSetting::Automatic,
-        "always" => CodemodeSetting::Always,
-        "never" => CodemodeSetting::Never,
-        _ => return Command::Invalid(format!("Usage: {syntax}")),
-    }))
+    use wisp_protocol::commands::{CodemodePresentation, CodemodeSetting};
+    match tail.split_whitespace().collect::<Vec<_>>().as_slice() {
+        [] => Command::Codemode(None),
+        ["automatic"] => Command::Codemode(Some(CodemodeSetting::Automatic)),
+        ["always"] => Command::Codemode(Some(CodemodeSetting::Always)),
+        ["never"] => Command::Codemode(Some(CodemodeSetting::Never)),
+        ["presentation", "direct_and_codemode"] => {
+            Command::CodemodePresentation(CodemodePresentation::DirectAndCodemode)
+        }
+        ["presentation", "codemode_only"] => {
+            Command::CodemodePresentation(CodemodePresentation::CodemodeOnly)
+        }
+        _ => Command::Invalid(format!("Usage: {syntax}")),
+    }
 }
 
 fn parse_subagents(tail: &str, syntax: &str) -> Command {
@@ -871,6 +880,31 @@ pub(crate) mod tests {
         );
         assert_eq!(parsed("/codemode never"), Ok(Some(CodemodeSetting::Never)));
         assert_eq!(parsed("/codemode sometimes"), Err(()));
+    }
+
+    #[test]
+    fn codemode_presentation_is_independent() {
+        use wisp_protocol::commands::CodemodePresentation;
+        for (choice, expected) in [
+            (
+                "direct_and_codemode",
+                CodemodePresentation::DirectAndCodemode,
+            ),
+            ("codemode_only", CodemodePresentation::CodemodeOnly),
+        ] {
+            assert!(matches!(
+                classify(&format!("/codemode presentation {choice}"), None),
+                Some(Command::CodemodePresentation(actual)) if actual == expected
+            ));
+        }
+        for invalid in [
+            "/codemode presentation",
+            "/codemode codemode_only",
+            "/codemode presentation always",
+            "/codemode never presentation codemode_only",
+        ] {
+            assert!(matches!(classify(invalid, None), Some(Command::Invalid(_))));
+        }
     }
 
     #[test]

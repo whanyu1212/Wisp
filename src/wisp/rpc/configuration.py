@@ -17,7 +17,7 @@ from wisp.coding import (
 )
 from wisp.config.runtime import WispConfig
 from wisp.config.settings import ResolvedSettings
-from wisp.events import ProjectConfigApplied
+from wisp.events import CodemodePresentation, ProjectConfigApplied
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.registry import ProviderRegistry
 from wisp.skills.lifecycle import discover_skill_catalog
@@ -67,6 +67,7 @@ class _RpcConfigureOverrides:
     web_search: bool | None = None
     codemode: bool | None = None
     has_codemode: bool = False
+    codemode_presentation: CodemodePresentation | None = None
     subagents: bool | None = None
     subagent_model: str | None = None
     has_subagent_model: bool = False

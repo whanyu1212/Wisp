@@ -164,7 +164,7 @@ request. Completion and results arrive through `events()`.
 | `get_permissions` | `(*, command_id: str \| None = None)` | `RpcPermissionsReported` |
 | `set_permissions` | `(mode: PermissionMode, *, command_id: str \| None = None)` | Saved project default, then `RpcPermissionsReported` |
 | `get_codemode` | `(*, command_id: str \| None = None)` | `RpcCodemodeReported` |
-| `set_codemode` | `(setting: CodemodeSetting, *, command_id: str \| None = None)` | Applied from the next run and saved as the user setting, then `RpcCodemodeReported` |
+| `set_codemode` | `(setting: CodemodeSetting, *, presentation: CodemodePresentation \| None = None, command_id: str \| None = None)` | Applied from the next run and saved as the user setting, then `RpcCodemodeReported` |
 | `get_subagents` | `(*, command_id: str \| None = None)` | `RpcSubagentsReported` |
 | `set_subagents` | `(enabled: bool, *, command_id: str \| None = None)` | Applied from the next run and saved as the user setting, then `RpcSubagentsReported` |
 | `set_subagent_model` | `(model: str \| None, *, command_id: str \| None = None)` | The model fresh subagents use, or `None` for the session's; saved as the user setting, then `RpcSubagentsReported`. Fails when the listed provider has no such model |
@@ -285,7 +285,8 @@ Saved defaults apply to future launches in the same canonical project directory.
 commands and may be submitted while a prompt is paused.
 
 `CodemodeSetting` is `"automatic" | "always" | "never"`. `CodemodeState` reports the `setting`,
-whether the `codemode` extra is `available`, whether a run started now would be `offered` the tool,
+the selected `presentation` and `effective_presentation` (which falls back to `direct_and_codemode`
+when codemode is not offered), whether the `codemode` extra is `available`, whether a run started now would be `offered` the tool,
 `env_setting`, the setting `WISP_CODEMODE` gives at startup, and `mcp_tools` with
 `scriptable_mcp_tools`: the MCP tools such a run may use, and how many of them a script may call.
 Those are the tools their server's `tool_safety` marks `"read"`; when the run sends its MCP tools

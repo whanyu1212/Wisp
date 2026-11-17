@@ -864,6 +864,8 @@ pub struct UiState {
     pub(crate) mcp_sign_in: Option<McpSignInState>,
     pub(crate) permissions: discovery::Inspection<wisp_protocol::events::PermissionState>,
     pub(crate) codemode: discovery::Inspection<wisp_protocol::events::CodemodeState>,
+    /// A slash-command presentation choice waiting for the initial availability read.
+    pending_codemode_presentation: Option<wisp_protocol::commands::CodemodePresentation>,
     pub(crate) subagents: discovery::Inspection<wisp_protocol::events::SubagentsState>,
     pub(crate) git_diff: git_diff::GitDiff,
     /// Whether the side panel is on screen, so the changed files stay loaded and
@@ -959,6 +961,7 @@ impl UiState {
             mcp_sign_in: None,
             permissions: discovery::Inspection::default(),
             codemode: discovery::Inspection::default(),
+            pending_codemode_presentation: None,
             subagents: discovery::Inspection::default(),
             project_files: project_files::ProjectFiles::default(),
             git_diff: git_diff::GitDiff::default(),
@@ -1503,6 +1506,8 @@ pub enum UiAction {
     Permissions(Option<wisp_protocol::commands::PermissionMode>),
     /// Read the codemode setting, or apply and save a new one.
     Codemode(Option<wisp_protocol::commands::CodemodeSetting>),
+    /// Save the tool presentation without changing availability.
+    CodemodePresentation(wisp_protocol::commands::CodemodePresentation),
     /// Read the subagents setting, or turn subagents on or off and save that.
     Subagents(Option<bool>),
     /// Choose the model fresh subagents use; `None` clears the choice.
@@ -1731,6 +1736,9 @@ pub fn reduce(
         UiAction::CancelMcpSignIn => Ok(discovery::cancel_mcp_sign_in(state, ids)?),
         UiAction::Permissions(mode) => Ok(discovery::permissions(state, mode, ids)?),
         UiAction::Codemode(setting) => Ok(discovery::codemode(state, setting, ids)?),
+        UiAction::CodemodePresentation(presentation) => {
+            Ok(discovery::codemode_presentation(state, presentation, ids)?)
+        }
         UiAction::Subagents(enabled) => Ok(discovery::subagents(state, enabled, ids)?),
         UiAction::SubagentModel(model) => {
             Ok(discovery::subagent_model(state, model.as_deref(), ids)?)
@@ -1926,6 +1934,7 @@ fn close_transport(state: &mut UiState) -> Vec<UiEffect> {
     state.mcp_preview.close();
     state.permissions.close();
     state.codemode.close();
+    state.pending_codemode_presentation = None;
     state.subagents.close();
     state.project_files.close();
     state.git_diff.close();
@@ -6447,6 +6456,8 @@ mod tests {
     fn codemode_state() -> wisp_protocol::events::CodemodeState {
         wisp_protocol::events::CodemodeState {
             setting: wisp_protocol::commands::CodemodeSetting::Automatic,
+            presentation: Default::default(),
+            effective_presentation: Default::default(),
             available: true,
             offered: false,
             env_setting: None,
@@ -6981,9 +6992,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(sent(&change), ["set_codemode"]);
+        assert!(
+            change
+                .iter()
+                .find_map(command_value)
+                .unwrap()
+                .get("presentation")
+                .is_none()
+        );
         let id = sent_id(&change, "set_codemode");
         let snapshot = wisp_protocol::events::CodemodeState {
             setting: CodemodeSetting::Always,
+            presentation: Default::default(),
+            effective_presentation: Default::default(),
             available: true,
             offered: true,
             env_setting: None,
@@ -7008,6 +7029,93 @@ mod tests {
         .unwrap();
         assert!(!state.codemode.loading());
         assert_eq!(state.codemode.snapshot.as_deref(), Some(&snapshot));
+    }
+
+    #[test]
+    fn presentation_preserves_availability() {
+        use wisp_protocol::commands::{CodemodePresentation, CodemodeSetting};
+        for setting in [
+            CodemodeSetting::Automatic,
+            CodemodeSetting::Always,
+            CodemodeSetting::Never,
+        ] {
+            let mut state = UiState::new("fake".into(), None, None);
+            state.input_ready = true;
+            let mut snapshot = codemode_state();
+            snapshot.setting = setting;
+            state.codemode.snapshot = Some(std::sync::Arc::new(snapshot));
+            let effects = reduce(
+                &mut state,
+                UiAction::CodemodePresentation(CodemodePresentation::CodemodeOnly),
+                &mut DeterministicIds::default(),
+            )
+            .unwrap();
+            let command = effects.iter().find_map(command_value).unwrap();
+            assert_eq!(command["setting"], serde_json::to_value(setting).unwrap());
+            assert_eq!(command["presentation"], "codemode_only");
+        }
+    }
+
+    #[test]
+    fn presentation_reads_availability_first() {
+        use wisp_protocol::commands::{CodemodePresentation, CodemodeSetting};
+        let mut state = UiState::new("fake".into(), None, None);
+        state.input_ready = true;
+        let mut ids = DeterministicIds::default();
+        let effects = reduce(
+            &mut state,
+            UiAction::CodemodePresentation(CodemodePresentation::CodemodeOnly),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(sent(&effects), ["get_codemode"]);
+        let id = sent_id(&effects, "get_codemode");
+        let mut snapshot = codemode_state();
+        snapshot.setting = CodemodeSetting::Never;
+        let reported = reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::CodemodeReported {
+                command_id: id.clone(),
+                codemode: Ok(std::sync::Arc::new(snapshot)),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(sent(&reported).is_empty());
+        let finished = reduce(
+            &mut state,
+            UiAction::BackendEvent(finished(&id, "get_codemode", true)),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(sent(&finished), ["set_codemode"]);
+        let command = finished.iter().find_map(command_value).unwrap();
+        assert_eq!(command["setting"], "never");
+        assert_eq!(command["presentation"], "codemode_only");
+    }
+
+    #[test]
+    fn presentation_read_failure_stops_change() {
+        use wisp_protocol::commands::CodemodePresentation;
+        let mut state = UiState::new("fake".into(), None, None);
+        state.input_ready = true;
+        let mut ids = DeterministicIds::default();
+        let effects = reduce(
+            &mut state,
+            UiAction::CodemodePresentation(CodemodePresentation::CodemodeOnly),
+            &mut ids,
+        )
+        .unwrap();
+        let id = sent_id(&effects, "get_codemode");
+        let effects = reduce(
+            &mut state,
+            UiAction::BackendEvent(finished(&id, "get_codemode", false)),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(sent(&effects).is_empty());
+        assert!(state.pending_codemode_presentation.is_none());
+        assert!(state.codemode.error.is_some());
     }
 
     #[test]

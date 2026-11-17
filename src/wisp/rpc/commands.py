@@ -26,6 +26,7 @@ from wisp.events import (
     MAX_RPC_MODEL_ID_CHARS,
     MAX_RPC_PROVIDER_ID_CHARS,
     AgentMode,
+    CodemodePresentation,
     CodemodeSetting,
     ImagePart,
     PermissionMode,
@@ -219,6 +220,7 @@ class SetCodemodeCommand(RpcCommandModel):
 
     type: Literal["set_codemode"] = "set_codemode"
     setting: CodemodeSetting
+    presentation: CodemodePresentation | None = None
 
 
 class GetSubagentsCommand(RpcCommandModel):
