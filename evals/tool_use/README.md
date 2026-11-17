@@ -311,6 +311,12 @@ type = "resume"
   `compaction.completed` event, not merely command acknowledgement. Wisp requires at least
   two complete user turns on the selected branch before compaction.
 
+Approval matching defaults to an exact target and JSON argument object. A decision may
+list `alternative_arguments`, an array of complete argument objects accepted in addition
+to `arguments`. Each variant is still an exact match, including JSON value types; extra
+fields are rejected. Use explicit variants only where the task permits each operation
+(for example, omitted or boolean `overwrite` for a file absent from the fixture).
+
 Missing decisions, unexpected or mismatched requests, unsuccessful commands, wrong answers
 and incomplete steps prevent a pass. Unexpected requests are denied and the scenario stops.
 Transport errors remain infrastructure errors. The task timeout covers the complete scenario,

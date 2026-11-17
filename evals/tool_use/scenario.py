@@ -19,6 +19,8 @@ class ApprovalDecision(ScenarioModel):
 
     name: str = Field(min_length=1)
     arguments: dict[str, JsonValue]
+    # Each variant is a complete exact argument object, never a partial match.
+    alternative_arguments: tuple[dict[str, JsonValue], ...] = ()
     approved: bool
     scope: Literal["once", "tool_session"] | None = None
 

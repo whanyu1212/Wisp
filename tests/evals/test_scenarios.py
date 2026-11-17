@@ -708,3 +708,46 @@ def test_prompt_iteration_limit_is_task_failure(tmp_path: Path, monkeypatch: Mon
         )
         == "failed"
     )
+
+
+@pytest.mark.parametrize(
+    ("arguments", "accepted"),
+    [
+        ({"path": "ANSWER.txt", "content": "ok\n"}, True),
+        ({"path": "ANSWER.txt", "content": "ok\n", "overwrite": True}, True),
+        ({"path": "ANSWER.txt", "content": "ok\n", "overwrite": False}, True),
+        ({"path": "OTHER.txt", "content": "ok\n"}, False),
+        ({"path": "ANSWER.txt", "content": "wrong"}, False),
+        ({"path": "ANSWER.txt", "content": "ok\n", "overwrite": 1}, False),
+        ({"path": "ANSWER.txt", "content": "ok\n", "extra": True}, False),
+    ],
+)
+def test_explicit_argument_variants(arguments: dict, accepted: bool) -> None:
+    class WriteTransport(_BrokenTransport):
+        async def events(self) -> AsyncIterator[KnownWispEvent]:
+            async for event in super().events():
+                if isinstance(event, ToolApprovalRequested):
+                    yield event.model_copy(update={"target": "write", "arguments": arguments})
+                else:
+                    yield event
+
+    transport = WriteTransport("boolean-approval")
+
+    async def start() -> RpcTransport:
+        return transport
+
+    expected = {"path": "ANSWER.txt", "content": "ok\n"}
+    decision = ApprovalDecision(
+        name="write",
+        arguments=expected,
+        approved=True,
+        alternative_arguments=({**expected, "overwrite": True}, {**expected, "overwrite": False}),
+    )
+    scenario = Scenario(steps=(PromptStep(prompt="write", approvals=(decision,)),))
+    result = anyio.run(execute_scenario, scenario, start, lambda event: None)
+    assert result.error is None
+    assert bool(result.failed_checks) is not accepted
+    approval = transport.commands[-1]
+    assert approval.type == "approval"
+    assert approval.approved is accepted
+    assert approval.scope == ("once" if accepted else None)

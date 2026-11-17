@@ -443,7 +443,9 @@ def run_one(task: Task, model: ModelSpec, rep: int, context: RunContext) -> RunR
         # A server that failed to start drops its tools; that says nothing about the model.
         # Without `agent.started` Wisp failed earlier, and its own error explains why.
         if metrics.setup is not None and runner_error is None:
-            runner_error = _mcp_setup_problem(task, metrics, context.mcp_tool_exposure)
+            runner_error = _mcp_setup_problem(
+                task, metrics, context.mcp_tool_exposure, context.codemode_presentation
+            )
         verify_exit = run_task_command(
             task.definition.verify,
             work,
@@ -692,12 +694,18 @@ def _run_wisp(
     return exit_code, None
 
 
-def _mcp_setup_problem(task: Task, metrics: RunMetrics, exposure: McpToolExposure) -> str | None:
+def _mcp_setup_problem(
+    task: Task,
+    metrics: RunMetrics,
+    exposure: McpToolExposure,
+    presentation: CodemodePresentation = "direct_and_codemode",
+) -> str | None:
     """Say why a run did not get the MCP setup its task needs, or None.
 
     In direct mode every catalog tool must be offered. On demand only the discovery
     tools are offered, so a server that failed shows as Wisp's startup error. Auto
-    offers one set or the other, depending on the catalog's size.
+    offers one set or the other, depending on the catalog's size. When codemode-only
+    is available, unified discovery replaces both surfaces.
     """
 
     if not task.definition.mcp_servers:
@@ -706,17 +714,22 @@ def _mcp_setup_problem(task: Task, metrics: RunMetrics, exposure: McpToolExposur
     if failed:
         return failed[0]
     offered = set(metrics.setup.tool_names) if metrics.setup is not None else set()
-    match exposure:
-        case "direct":
-            expected = mcp_tool_names(task)
-        case "on_demand":
-            expected = DISCOVERY_TOOL_NAMES
-        case "auto":
-            expected = (
-                DISCOVERY_TOOL_NAMES
-                if offered.issuperset(DISCOVERY_TOOL_NAMES)
-                else mcp_tool_names(task)
-            )
+    expected: tuple[str, ...]
+    # Availability can fall back to direct tools even when only mode was requested.
+    if presentation == "codemode_only" and "codemode" in offered:
+        expected = ("tool_search", "tool_describe", "codemode")
+    else:
+        match exposure:
+            case "direct":
+                expected = mcp_tool_names(task)
+            case "on_demand":
+                expected = DISCOVERY_TOOL_NAMES
+            case "auto":
+                expected = (
+                    DISCOVERY_TOOL_NAMES
+                    if offered.issuperset(DISCOVERY_TOOL_NAMES)
+                    else mcp_tool_names(task)
+                )
     missing = [name for name in expected if name not in offered]
     if missing:
         return f"run was not offered {len(missing)} MCP tools, such as {missing[0]}"
