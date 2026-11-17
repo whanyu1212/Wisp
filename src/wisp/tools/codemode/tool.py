@@ -24,12 +24,13 @@ from wisp.tools.codemode.calls import (
     NestedCallResult,
     NestedToolCaller,
 )
+from wisp.tools.codemode.output import save_output, with_footer
 from wisp.tools.codemode.result_types import STUB_IMPORTS, ResultType, result_type
 from wisp.tools.codemode.sandbox import ScriptFunction, ScriptLimits, ScriptRun, run_script
 from wisp.tools.codemode.state import ScriptState
 from wisp.tools.context import ToolContext
+from wisp.tools.output_store import OutputStore, SavedOutput, saved_output_notice
 from wisp.tools.result import ToolError, ToolResult
-from wisp.tools.truncation import truncate_text
 
 _JSON_TYPES = {
     "string": "str",
@@ -210,6 +211,7 @@ class CodemodeTool:
         discoverable: Sequence[ScriptableTool] = (),
         limits: ScriptLimits | None = None,
         state: ScriptState | None = None,
+        output_store: OutputStore | None = None,
     ) -> None:
         """Offer ``tools`` to scripts, running each call a script makes with ``call``.
 
@@ -226,6 +228,8 @@ class CodemodeTool:
                 the defaults.
             state (ScriptState | None): Shared transactional JSON state. None uses
                 fresh ephemeral state retained by this tool instance.
+            output_store (OutputStore | None): Shared store exposed by read_output.
+                None leaves truncated output unrecoverable.
         """
 
         taken = _HELPER_NAMES | frozenset(tool.name for tool in (*tools, *discoverable))
@@ -244,6 +248,7 @@ class CodemodeTool:
         self._call = call
         self._limits = limits or ScriptLimits()
         self._state = state if state is not None else ScriptState()
+        self._output_store = output_store
         self.description = _description(listed, self._limits, discoverable=bool(found))
         declarations = [
             declaration
@@ -298,15 +303,23 @@ class CodemodeTool:
                 )
             if run.failure is not None:
                 # The calls already made stand: every tool a script reaches is read-only.
-                raise ToolError(_failure_message(run, log))
+                status = await save_output(run.printed, self._output_store) if run.printed else None
+                notice = saved_output_notice([("script", status)])
+                raise ToolError(_failure_message(run, log, notice))
             body = "\n".join(part for part in (run.printed.rstrip("\n"), run.value) if part)
             # The list of calls is cut last: it says how many failed or came back
             # incomplete, which the model needs most when the script's output is long.
             footer = f"[{log.line()}]"
-            text, truncated = _with_footer(body, footer, context)
+            text, truncated = with_footer(body, footer, context)
+            data: dict[str, object] = {"calls": log.total, "failed_calls": log.failed}
+            if truncated and body:
+                status = await save_output(body, self._output_store)
+                text, _ = with_footer(body, footer, context, status)
+                if isinstance(status, SavedOutput):
+                    data["output_id"] = status.output_id
             result = ToolResult(
                 text=text,
-                data={"calls": log.total, "failed_calls": log.failed},
+                data=data,
                 truncated=truncated,
             )
             transaction.commit()
@@ -341,30 +354,7 @@ class CodemodeTool:
         return call_tool
 
 
-def _with_footer(body: str, footer: str, context: ToolContext) -> tuple[str, bool]:
-    """Fit ``body`` and then ``footer`` within the context's output limits.
-
-    The body is cut first. A cut adds a `[truncated]` line of its own, so two lines
-    are kept free: one for it and one for the footer. When even that does not fit
-    a tiny budget, the footer stands alone.
-
-    Returns:
-        tuple[str, bool]: The text, and whether the body was cut.
-    """
-
-    max_bytes, max_lines = context.max_output_bytes, context.max_output_lines
-    bounded = truncate_text(
-        body,
-        max_bytes=max(0, max_bytes - len(footer.encode("utf-8")) - 1),
-        max_lines=max(0, max_lines - 2),
-    )
-    text = f"{bounded.text}\n{footer}" if bounded.text else footer
-    if len(text.splitlines()) > max_lines or len(text.encode("utf-8")) > max_bytes:
-        return footer, bool(body)
-    return text, bounded.truncated
-
-
-def _failure_message(run: ScriptRun, log: _CallLog) -> str:
+def _failure_message(run: ScriptRun, log: _CallLog, notice: str | None = None) -> str:
     """Describe a failed script: its error, what it printed, and the calls it made.
 
     The list of calls is kept whole and the rest shares what room is left: the error
@@ -376,15 +366,24 @@ def _failure_message(run: ScriptRun, log: _CallLog) -> str:
     heading = f"Script failed ({run.failure}): "
     printed_label = "Printed before it failed:\n"
     calls = f"Calls made before it failed: {log.line(_FAILURE_CALLS_CHARS)}"
-    room = _FAILURE_MESSAGE_CHARS - len(heading) - len(calls) - _SHORTENED_MARKER_CHARS
+    recovery = [notice] if notice else []
+    room = (
+        _FAILURE_MESSAGE_CHARS
+        - len(heading)
+        - len(calls)
+        - len(notice or "")
+        - _SHORTENED_MARKER_CHARS
+        - 4
+    )
     if not run.printed:
-        return "\n".join([heading + _head(run.error or "", room), calls])
+        return "\n".join([heading + _head(run.error or "", room), *recovery, calls])
     error_room = room * 2 // 5
     printed_room = room - error_room - len(printed_label)
     return "\n".join(
         [
             heading + _head(run.error or "", error_room),
             printed_label + _tail(run.printed, printed_room),
+            *recovery,
             calls,
         ]
     )

@@ -36,7 +36,7 @@ class ScriptLimits:
             it waits for tool calls.
         memory_bytes (int): The script's heap.
         max_calls (int): External calls, including tools and state helpers.
-        max_printed_bytes (int): What the script may print.
+        max_printed_bytes (int): Combined UTF-8 print and final-value output retained.
     """
 
     wall_seconds: float = 120.0
@@ -156,7 +156,25 @@ async def run_script(
         return ScriptRun(printed=printed.output, failure="runtime", error=str(exc))
     finally:
         calls.end()
-    return ScriptRun(printed=printed.output, value=_as_text(value))
+    return _bounded_output(printed.output, _as_text(value), limits.max_printed_bytes)
+
+
+def _bounded_output(printed: str, value: str | None, max_bytes: int) -> ScriptRun:
+    """Retain a UTF-8 prefix when prints and the final value exceed the output cap."""
+
+    body = "\n".join(part for part in (printed.rstrip("\n"), value) if part)
+    encoded = body.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return ScriptRun(printed=printed, value=value)
+    return ScriptRun(
+        printed=encoded[:max_bytes].decode("utf-8", errors="ignore"),
+        failure="limit",
+        error=(
+            f"The script produced more than {max_bytes} output bytes. "
+            "Only the retained prefix is recoverable; later output was not saved. "
+            "Filter large results inside the script."
+        ),
+    )
 
 
 class _ScriptCalls:
@@ -203,6 +221,7 @@ def _reached_limit(error: str, limits: ScriptLimits) -> str | None:
     if error.startswith("MemoryError") and error.endswith(f"> {limits.max_printed_bytes} bytes"):
         return (
             f"The script printed more than {limits.max_printed_bytes} bytes. "
+            "Only the retained prefix is recoverable; later output was not saved. "
             "Print less: filter large results in the script."
         )
     if error.startswith("RuntimeError: suspension limit"):

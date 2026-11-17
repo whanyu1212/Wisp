@@ -559,7 +559,9 @@ def test_script_reads_more_than_the_model(
     # list of calls, which says whether a result came back incomplete.
     assert len(output.encode()) <= ToolContext(cwd=tmp_path).max_output_bytes
     counted = " (1 incomplete)" if incomplete else ""
-    assert output.endswith(f"[truncated]\n[1 tool call{counted}: lookup]")
+    assert "[truncated]\n" in output
+    assert "saved-output recovery is unavailable" in output
+    assert output.endswith(f"[1 tool call{counted}: lookup]")
 
 
 @pytest.mark.parametrize(

@@ -202,6 +202,7 @@ from wisp.tools.codemode.calls import CODEMODE, SCRIPT_RESULT_LIMITS, NestedCall
 from wisp.tools.codemode.tool import CODEMODE_PROMPT, CodemodeTool, callable_by_name
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
+from wisp.tools.read_output import ReadOutputTool
 from wisp.tools.result import ToolError
 from wisp.tools.seen_files import SeenFiles
 from wisp.tools.subagent import (
@@ -2432,6 +2433,10 @@ class CodingSession:
             call,
             discoverable=discoverable,
             state=self._script_state.state if self._script_state is not None else None,
+            output_store=next(
+                (tool.output_store for tool in scriptable if isinstance(tool, ReadOutputTool)),
+                None,
+            ),
         )
         registry.register(
             tool,

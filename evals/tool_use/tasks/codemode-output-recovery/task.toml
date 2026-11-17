@@ -1,0 +1,26 @@
+id = "codemode-output-recovery"
+title = "Recover a script report beyond its preview without regenerating it"
+tags = ["scenario", "long-output"]
+verify = "{python} {task}/verify.py"
+tools = ["read_output", "write"]
+opt_in = true
+timeout_seconds = 240
+max_tool_iterations = 12
+
+[checks]
+uses_tool = "read_output"
+max_tool_errors = 0
+
+[[scenario.steps]]
+type = "prompt"
+prompt = "Run this report exactly once using codemode: for n in range(6000): print(f'row {n}: {(n * 7919 + 104729) % 999983}'). Keep its saved output reference for follow-up. Do not create files or store the report in script state. Acknowledge with the reference, without copying the report into your reply."
+
+[[scenario.steps]]
+type = "prompt"
+prompt = "Use read_output to retrieve row 4500 from that saved report. Do not regenerate the report or recalculate the value. Write the entire row followed by a newline to ANSWER.txt using exactly that relative path."
+
+[[scenario.steps.approvals]]
+name = "write"
+arguments = {path = "ANSWER.txt", content = "row 4500: 740824\n"}
+approved = true
+scope = "once"
