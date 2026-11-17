@@ -454,8 +454,8 @@ the run's read-only local tools, but only through their provided functions, not 
 
 An MCP tool that declares an output schema returns its structured result to a script instead of
 text: a dict typed from the schema, so a script that reads a field the schema lacks fails its type
-check before any call runs. Codemode's description lists those tools with their top-level fields,
-and `mcp_describe` shows a catalog tool's output schema and what a script receives. A schema that only wraps one `result`
+check before any call runs. `tool_describe` shows the output schema and what a script receives;
+`mcp_describe` also supports MCP catalog tools. A schema that only wraps one `result`
 field, which the MCP Python SDK writes for a tool returning a plain value, returns that value, and
 one wrapping a string keeps returning text. A call whose structured result is missing, not JSON,
 or over 512 KiB fails like any failed call. Direct calls and subagents still read the text.
@@ -465,6 +465,32 @@ callable by full name. The name and all parameter names must be Python identifie
 For other schemas, use the provided `mcp_call(name=..., arguments=...)` function in the script;
 its resolved target must still be read-only. Inspect the actual schema rather than assuming every
 MCP tool returns JSON or has Python-compatible parameters.
+
+### Finding tools for scripts
+
+When codemode is offered, `tool_search` and `tool_describe` provide one catalog of callable
+read-only built-ins and MCP tools. Search by words in a name, namespace, or description; an
+empty `query` lists the catalog. Results include exact callable names, namespaces, connection
+state, and whether confirmation is required. Use `offset` with the returned `next_offset` to
+continue; `limit` defaults to 8 and permits at most 20 results.
+
+`tool_describe(name=...)` returns the tool's input/output schemas, script return semantics,
+and registered guidance. Both discovery tools return structured dictionaries inside a script.
+Their JSON responses are limited to 16 KiB and the current tool-output budget. Large fields
+are explicitly marked in `omitted_fields`. Follow the supplied `schema_path` (a JSON Pointer,
+such as `/input_schema/properties/path`) to inspect a subtree. Oversized objects and arrays
+return paged child paths; oversized indivisible values report their size and remain omitted.
+
+Listing a tool does not approve it. Selection, read-only restrictions, protected paths, and
+confirmation checks still apply when it executes. Use the returned `callable_name`: entries
+with `invocation: "function"` support direct keyword calls. In on-demand MCP mode, tools with
+non-Python names or parameters use `invocation: "mcp_call"`; pass the discovered target name
+and an `arguments` object to `mcp_call`. That wrapper returns text even if the target declares
+a structured output schema. Existing MCP discovery remains available. If an extension already owns either
+unified discovery name, Wisp preserves that extension and omits the generated pair.
+Fresh subagents keep their existing tool set. Forked subagents retain the parent's schemas
+and catalog to preserve the conversation prefix; their calls still pass through the nested
+read-only executor.
 
 ### Keeping data across scripts
 

@@ -356,6 +356,7 @@ scope is GPT and Claude; Gemini is excluded.
 | Capability | Current foundation / evidence | Future work |
 |---|---|---|
 | Read-only composition, structured results, large bounded results | Existing codemode tests and HY-511 GPT/Claude baselines | Targeted regressions as capabilities change |
+| Unified tool discovery | Bounded local/MCP catalog, explicit schemas and invocation contracts (HY-550) | Broader adoption and schema-cost evaluation |
 | Multiple prompts, backend resume and branch selection | RPC scenarios and transactional script-state reuse/isolation tests (HY-548) | Broader live state workloads |
 | Explicit compaction | Verify subsequent history and retain branch-local script state outside summary text | Broader state workloads |
 | Approve once, deny, session grants | Scripted decisions exercised against the shared RPC host | Codemode inner-action approval and cancellation scenarios |
@@ -389,3 +390,12 @@ its preview using the saved reference. This tests an instructed capability, not 
 adoption or comparative efficiency. Run with `--tasks codemode-output-recovery --codemode python
 --effort medium`. [The pilot report](reports/2026-11-17-output-recovery.md) retains all GPT/Claude
 outcomes, including exact-approval mismatches and an ID-copying error.
+
+### Unified-discovery pilot (HY-550)
+
+`unified-tool-discovery` explicitly asks for local and MCP schema discovery before an
+objective inventory lookup. Use `--tasks unified-tool-discovery --codemode python
+--mcp-tool-exposure on_demand --mcp-results structured --effort medium`.
+[The report](reports/2026-11-17-hy550.md) separates this capability probe from fresh
+off/current/candidate comparisons. Ordinary tasks retained their correctness but used legacy
+discovery and incurred additional schema cost; this is not an efficiency win.
