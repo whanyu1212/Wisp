@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from pydantic import ValidationError
+from pydantic import JsonValue, ValidationError
 
 from wisp.agent.transcript_repair import MissingToolResult, order_tool_result_items
 from wisp.events import SessionDirectoryChanged
@@ -94,6 +95,8 @@ class SessionReplay:
     # Notes for moves after the path's last user message, which the next prompt
     # carries. See ``with_directory_notes``.
     pending_directory_notes: tuple[str, ...] = ()
+    # State follows the active tree path, independently of compacted context rows.
+    codemode_state: dict[str, JsonValue] = field(default_factory=dict)
 
     @property
     def context_entry_ids(self) -> tuple[str, ...]:
@@ -232,6 +235,7 @@ def replay_session_entries(
         path_entry_ids=tuple(entry.id for entry in path),
         cwd=replay.cwd,
         pending_directory_notes=replay.pending_directory_notes,
+        codemode_state=replay.codemode_state,
     )
 
 
@@ -265,6 +269,7 @@ def _replay_session_path(entries: Sequence[SessionTreeEntry]) -> SessionReplay:
     known_context_entry_ids: set[str] = set()
     cwd: Path | None = None
     pending_notes: list[str] = []
+    codemode_state: dict[str, JsonValue] = {}
 
     for entry in entries:
         if isinstance(entry, EventSessionEntry):
@@ -277,6 +282,8 @@ def _replay_session_path(entries: Sequence[SessionTreeEntry]) -> SessionReplay:
                     pending_notes.append(directory_change_note(change.cwd))
             continue
         if isinstance(entry, MessageSessionEntry):
+            if entry.codemode_state is not None:
+                codemode_state = entry.codemode_state
             if entry.message.role == "system":
                 continue
             message = entry.message
@@ -338,6 +345,7 @@ def _replay_session_path(entries: Sequence[SessionTreeEntry]) -> SessionReplay:
         rows=_ordered_context_rows(tuple(rows)),
         cwd=cwd,
         pending_directory_notes=tuple(pending_notes),
+        codemode_state=deepcopy(codemode_state),
     )
 
 

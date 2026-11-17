@@ -344,8 +344,8 @@ uv run python -m evals.tool_use run --tasks session-branch-recall \
   --budget-usd 5 --budget-tokens 1000000 --codemode off
 ```
 
-This PR establishes deterministic foundation coverage, not a paid performance baseline for new
-capabilities. HY-511's saved GPT/Claude baselines remain evidence for single-prompt, read-only
+The HY-547 foundation established deterministic coverage; it did not establish a paid
+performance baseline for new capabilities. HY-511's saved GPT/Claude baselines remain evidence for single-prompt, read-only
 orchestration; they do not establish state persistence or interactive approval correctness.
 Run fresh controls and candidates for each future capability on the same scenario/fixture
 fingerprints, model/provider/effort, permissions and output limits. Current evaluation model
@@ -356,12 +356,27 @@ scope is GPT and Claude; Gemini is excluded.
 | Capability | Current foundation / evidence | Future work |
 |---|---|---|
 | Read-only composition, structured results, large bounded results | Existing codemode tests and HY-511 GPT/Claude baselines | Targeted regressions as capabilities change |
-| Multiple prompts, backend resume and branch selection | RPC scenario steps and deterministic tests | Saved script-state reuse and isolation checks |
-| Explicit compaction | Require successful compaction and verify subsequent history | Preserve future script state through compaction |
+| Multiple prompts, backend resume and branch selection | RPC scenarios and transactional script-state reuse/isolation tests (HY-548) | Broader live state workloads |
+| Explicit compaction | Verify subsequent history and retain branch-local script state outside summary text | Broader state workloads |
 | Approve once, deny, session grants | Scripted decisions exercised against the shared RPC host | Codemode inner-action approval and cancellation scenarios |
 | Mutating tools inside scripts | Still prohibited by the existing read-only executor | Separate codemode policy boundary before exposing mutations |
-| Persistent store/load, recoverable script artifacts, image/model helpers | Not implemented by this foundation | HY-546 capability slices and dedicated acceptance metrics |
+| Persistent store/load/delete | Bounded JSON transactions, durable result snapshots, branch/resume/compaction coverage (HY-548) | Broader workload and quota evaluation |
+| Recoverable script artifacts, image/model helpers | Not implemented | HY-546 capability slices and dedicated acceptance metrics |
 
 Windows, interactive TUI approval UX and paid-model reliability are not established by the
 foundation tests. Keep deterministic CI coverage small; live comparisons and stress sweeps
 remain opt-in.
+
+
+### Persistent-state pilot (HY-548)
+
+`mcp-session-reuse` fetches open pull requests, compacts and restarts the backend, then asks a
+new question about that dataset and requires one exact approved answer file. It allows the
+model to choose direct calls or scripts. Whole-scenario success is primary; retained state and
+post-resume fetch counts distinguish actual reuse from a lucky remembered answer. The task
+uses the existing synthetic `devhub` catalog and requires no new server behavior.
+
+Run with `--tasks mcp-session-reuse --mcp-tool-exposure on_demand --mcp-results structured
+--effort medium`, comparing codemode `off`, the pre-state build with `python`, and the state
+candidate with `python`. Use identical task/catalog fingerprints and provider/model settings.
+[The pilot report](reports/2026-11-17-hy548.md) records outcomes, usage, reproducibility and limits.

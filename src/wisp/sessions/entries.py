@@ -12,6 +12,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    JsonValue,
     TypeAdapter,
     ValidationError,
     field_validator,
@@ -129,11 +130,24 @@ class MessageSessionEntry(SessionTreeEntryBase):
     message: Message
     tool_result: ToolResultPresentationSnapshot | None = None
     repository_status: RepositoryStatusSnapshot | None = None
+    # Full branch-local state committed with a successful codemode result.
+    # None leaves state unchanged; an empty object explicitly clears it.
+    codemode_state: dict[str, JsonValue] | None = None
 
     @model_validator(mode="after")
     def _validate_tool_result(self) -> Self:
         if self.tool_result is not None and self.message.role != "tool":
             raise ValueError("tool-result presentation metadata is valid only on tool messages")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_codemode_state(self) -> Self:
+        if self.codemode_state is not None and (
+            self.message.role != "tool"
+            or self.message.tool_name != "codemode"
+            or self.message.is_error
+        ):
+            raise ValueError("codemode state is valid only on successful codemode results")
         return self
 
     @model_validator(mode="after")

@@ -37,10 +37,11 @@ def test_settings_examples_validate() -> None:
 
 
 @pytest.mark.anyio
-async def test_codemode_example_filters_discoverable_tool_results(tmp_path: Path) -> None:
+@pytest.mark.parametrize("index", [0, 1], ids=["discovery", "state"])
+async def test_codemode_examples_execute(tmp_path: Path, index: int) -> None:
     pytest.importorskip("pydantic_monty")
     examples = re.findall(r"```python\n(.*?)\n```", _GUIDE.read_text(encoding="utf-8"), re.DOTALL)
-    assert len(examples) == 1
+    assert len(examples) == 2
     calls: list[str] = []
 
     async def call(name: str, arguments: Mapping[str, object]) -> NestedCallResult:
@@ -52,8 +53,12 @@ async def test_codemode_example_filters_discoverable_tool_results(tmp_path: Path
         )
 
     tool = CodemodeTool([], call, discoverable=[_InventoryTool()])
-    result = await tool.run({"code": examples[0]}, ToolContext(cwd=tmp_path))
-    assert sorted(calls) == ["A", "B"]
-    answer, summary = result.text.split("\n", 1)
-    assert json.loads(answer) == [["A", 0]]
-    assert summary == "[2 tool calls: mcp__inventory__get_item ×2]"
+    result = await tool.run({"code": examples[index]}, ToolContext(cwd=tmp_path))
+    if index == 0:
+        assert sorted(calls) == ["A", "B"]
+        answer, summary = result.text.split("\n", 1)
+        assert json.loads(answer) == [["A", 0]]
+        assert summary == "[2 tool calls: mcp__inventory__get_item ×2]"
+    else:
+        assert calls == []
+        assert result.text == "['B']\ntrue\n[No tool calls.]"

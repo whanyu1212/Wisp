@@ -466,6 +466,37 @@ For other schemas, use the provided `mcp_call(name=..., arguments=...)` function
 its resolved target must still be read-only. Inspect the actual schema rather than assuming every
 MCP tool returns JSON or has Python-compatible parameters.
 
+### Keeping data across scripts
+
+Codemode provides three async helpers for branch-local JSON data:
+
+```python
+await store("inventory", {"A": 3, "B": 0})
+items = await load("inventory")
+print([name for name, count in items.items() if count == 0])
+await delete("inventory")
+```
+
+A script reads its own staged writes. Changes commit only when the script succeeds and its
+successful tool result is saved; errors, timeouts and cancellation discard staged changes.
+`load` returns a copy and raises `KeyError` for a missing key. `delete` returns whether a key
+existed. Modifying a loaded object does not update storage: call `store` again explicitly.
+The helper names `store`, `load` and `delete` are reserved in scripts.
+
+State follows the selected conversation branch, survives backend restart and compaction, and
+is copied when a session is cloned. Navigating to an earlier point restores that point's state.
+Replay never reruns a tool to rebuild it. State is saved as session metadata, outside the
+model's conversation context; print only the values needed for an answer and mention useful
+keys so later prompts can find them. State is not global memory or a freshness cache: saved
+external data can become stale, and the model must decide when to fetch it again.
+
+Each branch may retain 128 keys, with non-empty names up to 128 UTF-8 bytes. A value is limited
+to 64 KiB and the complete store to 256 KiB, measured as compact UTF-8 JSON including keys.
+Values may nest at most 32 containers. Only JSON values with string object keys and finite
+numbers are accepted. Delete keys to reclaim space; a single over-limit write is rejected.
+These are active-state limits, not a bound on append-only session history: older snapshots
+remain in the audit log. State storage does not enable filesystem writes or mutating tool calls.
+
 ### Why a script cannot call a tool
 
 | Symptom | Check or next step |
