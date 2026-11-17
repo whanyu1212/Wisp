@@ -1540,12 +1540,8 @@ fn tone_style(tone: TranscriptRowTone, palette: Palette) -> Style {
         TranscriptRowTone::Success => Style::default().fg(palette.success),
         TranscriptRowTone::Warning => Style::default().fg(palette.warning),
         TranscriptRowTone::Error => Style::default().fg(palette.error),
-        TranscriptRowTone::DiffAddition => Style::default()
-            .fg(palette.addition)
-            .bg(palette.addition_background),
-        TranscriptRowTone::DiffDeletion => Style::default()
-            .fg(palette.deletion)
-            .bg(palette.deletion_background),
+        TranscriptRowTone::DiffAddition => palette.diff_line(false),
+        TranscriptRowTone::DiffDeletion => palette.diff_line(true),
         TranscriptRowTone::Surface => Style::default().fg(palette.foreground).bg(palette.surface),
         TranscriptRowTone::SurfaceNote => Style::default().fg(palette.muted).bg(palette.surface),
         _ => Style::default().fg(palette.muted),
@@ -2042,12 +2038,8 @@ fn render_detail(
 
 fn detail_line(row: DetailViewRow, palette: Palette) -> Line<'static> {
     let style = match row.kind {
-        DetailRowKind::Addition => Style::default()
-            .fg(palette.addition)
-            .bg(palette.addition_background),
-        DetailRowKind::Deletion => Style::default()
-            .fg(palette.deletion)
-            .bg(palette.deletion_background),
+        DetailRowKind::Addition => palette.diff_line(false),
+        DetailRowKind::Deletion => palette.diff_line(true),
         DetailRowKind::Hunk | DetailRowKind::Header => Style::default()
             .fg(palette.primary)
             .add_modifier(Modifier::BOLD),

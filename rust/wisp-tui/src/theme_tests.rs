@@ -136,6 +136,13 @@ fn catalog_is_ordered_resolvable_and_monochrome_keeps_all_roles_achromatic() {
                 palette.logo_base,
             ]
         };
+        let Color::Rgb(r, g, b) = gray.hover else {
+            panic!("monochrome hover must stay RGB");
+        };
+        assert_eq!(r, g);
+        assert_eq!(g, b);
+        assert_ne!(color.hover, color.panel);
+        assert_ne!(color.hover, color.selected);
         for (index, (original, mono)) in channels(color).into_iter().zip(channels(gray)).enumerate()
         {
             let Color::Rgb(r, g, b) = original else {
@@ -244,6 +251,77 @@ fn selection_reverses_without_bands() {
 }
 
 #[test]
+fn theme_picker_uses_bands_without_moving_labels_or_mouse_targets() {
+    use crate::color_depth::ColorDepth;
+    use crate::theme_picker::ThemePicker;
+    use ratatui::layout::Rect;
+
+    for theme in theme::themes() {
+        for no_color in [false, true] {
+            for depth in [
+                ColorDepth::TrueColor,
+                ColorDepth::Ansi256,
+                ColorDepth::Ansi16,
+            ] {
+                let palette = theme.palette(no_color).for_depth(depth);
+                let mut picker = ThemePicker::new(theme::default_theme());
+                let mut terminal = Terminal::new(TestBackend::new(60, 16)).unwrap();
+                let mut target = None;
+                terminal
+                    .draw(|frame| {
+                        let rows = picker.render(frame, frame.area(), palette, no_color);
+                        target = rows.hit(crossterm::event::MouseEvent {
+                            kind: crossterm::event::MouseEventKind::Down(
+                                crossterm::event::MouseButton::Left,
+                            ),
+                            column: 3,
+                            row: 2,
+                            modifiers: KeyModifiers::NONE,
+                        });
+                        depth.downconvert_buffer(frame.buffer_mut());
+                    })
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                assert_eq!(target, Some(0));
+                assert_eq!(
+                    buffer[(1, 2)].symbol(),
+                    if palette.shows_bands() { " " } else { "›" }
+                );
+                assert_eq!(buffer[(3, 2)].symbol(), "V");
+                for x in 1..59 {
+                    let cell = &buffer[(x, 2)];
+                    assert!(cell.modifier.contains(Modifier::BOLD));
+                    if palette.shows_bands() {
+                        assert_eq!(cell.bg, depth.downconvert(palette.selected));
+                        assert!(!cell.modifier.contains(Modifier::REVERSED));
+                    } else {
+                        assert!(cell.modifier.contains(Modifier::REVERSED));
+                    }
+                }
+                // Applying still requires the currently painted choice.
+                assert!(matches!(
+                    picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+                    crate::theme_picker::ThemePickerAction::None
+                ));
+                assert!(matches!(
+                    picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                    crate::theme_picker::ThemePickerAction::None
+                ));
+                terminal
+                    .draw(|frame| {
+                        picker.render(frame, Rect::new(0, 0, 60, 16), palette, no_color);
+                    })
+                    .unwrap();
+                assert!(matches!(
+                    picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                    crate::theme_picker::ThemePickerAction::Apply(_)
+                ));
+            }
+        }
+    }
+}
+
+#[test]
 fn band_text_stays_readable() {
     use crate::color_depth::ColorDepth;
     for theme in theme::themes() {
@@ -277,6 +355,28 @@ fn band_text_stays_readable() {
             // Text that already reads keeps its colour.
             let foreground = palette.selected_row(Style::default().fg(palette.foreground));
             assert_eq!(foreground.fg, Some(palette.foreground));
+        }
+    }
+}
+
+#[test]
+fn ansi16_diff_pairs_do_not_recolor_plain_text_counts() {
+    use crate::color_depth::ColorDepth;
+
+    for theme in theme::themes() {
+        for no_color in [false, true] {
+            let original = theme.palette(no_color);
+            let palette = original.for_depth(ColorDepth::Ansi16);
+            assert_eq!(palette.addition, original.addition);
+            assert_eq!(palette.deletion, original.deletion);
+            for deletion in [false, true] {
+                let style = palette.diff_line(deletion);
+                if no_color {
+                    assert_eq!(style, original.diff_line(deletion));
+                } else {
+                    assert!(theme::contrast_ratio(style.fg.unwrap(), style.bg.unwrap()) >= 4.5);
+                }
+            }
         }
     }
 }

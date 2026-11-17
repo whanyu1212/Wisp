@@ -702,6 +702,7 @@ mod tests {
                         palette.background,
                         palette.surface,
                         palette.panel,
+                        palette.hover,
                         palette.selected,
                         palette.addition_background,
                         palette.deletion_background,
@@ -723,6 +724,7 @@ mod tests {
                 }
                 let truecolor = palette.for_depth(ColorDepth::TrueColor);
                 assert_eq!(truecolor.surface, palette.surface);
+                assert_eq!(truecolor.hover, palette.hover);
                 assert_eq!(truecolor.selected, palette.selected);
             }
         }
@@ -759,18 +761,25 @@ mod tests {
     #[test]
     fn diff_bands_keep_hue() {
         for theme in crate::theme::themes() {
-            let palette = theme.palette(false);
-            for (band, red) in [
-                (palette.addition_background, false),
-                (palette.deletion_background, true),
+            for depth in [
+                ColorDepth::TrueColor,
+                ColorDepth::Ansi256,
+                ColorDepth::Ansi16,
             ] {
-                let (r, g, b) = shown_rgb(ColorDepth::Ansi256.downconvert(band)).unwrap();
-                let (lead, other) = if red { (r, g) } else { (g, r) };
-                assert!(
-                    lead > other && lead > b,
-                    "{} {band:?} shows as ({r}, {g}, {b})",
-                    theme.name
-                );
+                let palette = theme.palette(false).for_depth(depth);
+                for red in [false, true] {
+                    let style = palette.diff_line(red);
+                    let (text, band) = (style.fg.unwrap(), style.bg.unwrap());
+                    let (r, g, b) = shown_rgb(depth.downconvert(band)).unwrap();
+                    let (lead, other) = if red { (r, g) } else { (g, r) };
+                    assert!(
+                        lead > other && lead > b,
+                        "{} {depth:?} {band:?} shows as ({r}, {g}, {b})",
+                        theme.name
+                    );
+                    let (text, fill) = depth.downconvert_pair(text, band);
+                    assert!(ratio(text, fill) >= 4.5, "{} {depth:?}", theme.name);
+                }
             }
         }
     }
