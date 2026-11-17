@@ -1,0 +1,45 @@
+id = "session-branch-recall"
+title = "Recall the selected branch through backend restart and compaction"
+tags = ["scenario"]
+verify = "{python} {task}/verify.py"
+tools = ["read", "write"]
+opt_in = true
+timeout_seconds = 180
+max_tool_iterations = 12
+
+[[scenario.steps]]
+type = "prompt"
+prompt = "Remember that the release codeword is cerulean. Reply with a brief acknowledgement; do not write any files."
+
+[[scenario.steps]]
+type = "prompt"
+prompt = "We will use that codeword later. Acknowledge briefly without writing files."
+
+[[scenario.steps]]
+type = "checkpoint"
+name = "original"
+
+[[scenario.steps]]
+type = "prompt"
+prompt = "Change the release codeword to crimson. Reply with a brief acknowledgement; do not write any files."
+
+[[scenario.steps]]
+type = "navigate"
+checkpoint = "original"
+
+[[scenario.steps]]
+type = "resume"
+
+[[scenario.steps]]
+type = "compact"
+instructions = "Preserve the release codeword from the active conversation."
+
+[[scenario.steps]]
+type = "prompt"
+prompt = "What release codeword did I give you? Use the write tool with path ANSWER.txt and content containing only that word followed by a newline."
+
+[[scenario.steps.approvals]]
+name = "write"
+arguments = {path = "ANSWER.txt", content = "cerulean\n"}
+approved = true
+scope = "once"

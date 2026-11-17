@@ -9,6 +9,7 @@ for the budget leaves every pairing with the same number of runs.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -30,8 +31,11 @@ from typing_extensions import TypeAliasType
 
 from evals.tool_use.credentials import REPO_ROOT, Credentials
 from evals.tool_use.metrics import RunMetrics, measure, parse_events
+from evals.tool_use.scenario import ScenarioResult
+from evals.tool_use.scenario_driver import ScenarioConfig
 from evals.tool_use.servers.catalogs import CATALOGS
 from evals.tool_use.task_definitions import Task, TaskChecks
+from wisp.events import AgentCompleted
 from wisp.mcp.config import McpToolExposure
 from wisp.mcp.discovery import DISCOVERY_TOOL_NAMES
 from wisp.mcp.tool import mcp_tool_name
@@ -159,6 +163,7 @@ class RunContext:
             not (`off`).
         mcp_results (McpResults): Whether the synthetic MCP servers' task tools
             return only text (`text`) or their structured result too (`structured`).
+        effort (str | None): Explicit provider effort; None keeps the provider default.
     """
 
     build: Build
@@ -168,6 +173,7 @@ class RunContext:
     mcp_tool_exposure: McpToolExposure = "direct"
     codemode: Codemode = "off"
     mcp_results: McpResults = "text"
+    effort: str | None = None
 
 
 @dataclass(slots=True)
@@ -220,6 +226,12 @@ class RunRow:
     cache_write_tokens: int = 0
     script_failures: dict[str, int] = field(default_factory=dict)
     mcp_results: McpResults = "text"
+    effort: str | None = None
+    task_sha256: str = ""
+    fixture_sha256: str = ""
+    catalog_sha256: str | None = None
+    scenario_steps_completed: int | None = None
+    scenario_steps_expected: int | None = None
 
 
 @dataclass(slots=True)
@@ -342,6 +354,7 @@ def classify(
     metrics: RunMetrics,
     verify_exit: int | None,
     failed_checks: Sequence[str],
+    scenario_failed: bool = False,
 ) -> RunStatus:
     """Decide whether a run passed, failed the task, or says nothing about it.
 
@@ -360,6 +373,10 @@ def classify(
             error.startswith(_ITERATION_LIMIT_ERROR) for error in metrics.errors
         )
         return "failed" if hit_limit else "errored"
+    if exit_code == 0 and scenario_failed:
+        # A denied unexpected request stops the backend before agent.completed;
+        # that deliberate assertion failure is not a transport outage.
+        return "failed"
     if metrics.outcome != "completed" or exit_code != 0:
         return "errored"
     if verify_exit != 0 or failed_checks:
@@ -373,6 +390,7 @@ def run_one(task: Task, model: ModelSpec, rep: int, context: RunContext) -> RunR
     run_dir = _run_dir(context, task, model, rep)
     run_dir.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
+    scenario_result: ScenarioResult | None = None
     with tempfile.TemporaryDirectory(prefix="wisp-eval-") as scratch:
         work = Path(scratch) / "work"
         home = Path(scratch) / "home"
@@ -387,7 +405,12 @@ def run_one(task: Task, model: ModelSpec, rep: int, context: RunContext) -> RunR
         exit_code, runner_error = _run_wisp(task, model, work, home, run_dir, context)
         events_text = (run_dir / "events.jsonl").read_text(encoding="utf-8")
         try:
-            metrics = measure(parse_events(events_text.splitlines()))
+            events = parse_events(events_text.splitlines())
+            metrics = measure(events)
+            if task.definition.scenario is not None:
+                metrics.turns = sum(
+                    event.turns for event in events if isinstance(event, AgentCompleted)
+                )
         except ValueError as err:
             return _row(
                 task,
@@ -400,6 +423,19 @@ def run_one(task: Task, model: ModelSpec, rep: int, context: RunContext) -> RunR
                 exit_code=exit_code,
                 error=f"unreadable events: {err}",
             )
+        if task.definition.scenario is not None and runner_error is None:
+            result_path = run_dir / "scenario-result.json"
+            if result_path.is_file():
+                try:
+                    scenario_result = ScenarioResult.model_validate_json(result_path.read_text())
+                except ValueError as err:
+                    runner_error = f"unreadable scenario result: {err}"
+                else:
+                    runner_error = scenario_result.error
+                    if scenario_result.timed_out:
+                        exit_code = DEADLINE_EXIT_CODE
+            else:
+                runner_error = "scenario driver exited without a result"
         # A server that failed to start drops its tools; that says nothing about the model.
         # Without `agent.started` Wisp failed earlier, and its own error explains why.
         if metrics.setup is not None and runner_error is None:
@@ -413,12 +449,21 @@ def run_one(task: Task, model: ModelSpec, rep: int, context: RunContext) -> RunR
             run_dir / "verify.txt",
         )
     failed_checks = evaluate_checks(task.definition.checks, metrics)
+    if scenario_result is not None:
+        failed_checks.extend(scenario_result.failed_checks)
+        scenario = task.definition.scenario
+        if scenario is not None and scenario_result.completed_steps != len(scenario.steps):
+            failed_checks.append(
+                f"completed {scenario_result.completed_steps} of "
+                f"{len(scenario.steps)} scenario steps"
+            )
     status = classify(
         exit_code=exit_code,
         runner_error=runner_error,
         metrics=metrics,
         verify_exit=verify_exit,
         failed_checks=failed_checks,
+        scenario_failed=scenario_result is not None and bool(failed_checks),
     )
     return _row(
         task,
@@ -434,6 +479,7 @@ def run_one(task: Task, model: ModelSpec, rep: int, context: RunContext) -> RunR
         metrics=metrics,
         timed_out=exit_code == DEADLINE_EXIT_CODE,
         error=runner_error or metrics.last_error,
+        scenario_result=scenario_result,
     )
 
 
@@ -573,23 +619,26 @@ def _run_wisp(
     definition = task.definition
     command = [
         str(context.build.wisp),
-        "-p",
-        definition.prompt,
         "--mode",
-        "json",
+        "rpc" if definition.scenario is not None else "json",
         "--provider",
         model.provider,
         "--model",
         model.model,
-        "--yes",
-        "--timeout",
-        f"{definition.timeout_seconds:g}",
         "--max-tool-iterations",
         str(definition.max_tool_iterations),
         "--session-dir",
         # Wisp runs in the task folder, so a relative path would land there and be deleted.
         str((run_dir / "sessions").resolve()),
     ]
+    if definition.prompt is not None:
+        command += [
+            "-p",
+            definition.prompt,
+            "--yes",
+            "--timeout",
+            f"{definition.timeout_seconds:g}",
+        ]
     # MCP tools are selected the same way in both modes; on demand, Wisp offers them
     # through the discovery tools, which exist per run and are never selected by name.
     for tool in (*definition.tools, *mcp_tool_names(task)):
@@ -607,6 +656,20 @@ def _run_wisp(
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings_path.write_text(json.dumps(settings), encoding="utf-8")
     environment = run_environment(home, context.credentials, os.environ)
+    if context.effort is not None:
+        environment["WISP_EFFORT"] = context.effort
+    if definition.scenario is not None:
+        config_path = (run_dir / "scenario-config.json").resolve()
+        config = ScenarioConfig(
+            scenario=definition.scenario,
+            command=tuple(command),
+            cwd=work,
+            timeout_seconds=definition.timeout_seconds,
+            result_path=(run_dir / "scenario-result.json").resolve(),
+        )
+        config_path.write_text(config.model_dump_json(indent=2) + "\n")
+        command = [context.python, "-m", "evals.tool_use.scenario_driver", str(config_path)]
+        environment["PYTHONPATH"] = str(REPO_ROOT)
     with (
         (run_dir / "events.jsonl").open("w", encoding="utf-8") as events,
         (run_dir / "stderr.txt").open("w", encoding="utf-8") as stderr,
@@ -741,6 +804,7 @@ def _row(
     metrics: RunMetrics | None = None,
     timed_out: bool = False,
     error: str | None = None,
+    scenario_result: ScenarioResult | None = None,
 ) -> RunRow:
     measured = metrics or RunMetrics()
     setup = measured.setup
@@ -786,4 +850,31 @@ def _row(
         cache_write_tokens=measured.cache_write_tokens,
         script_failures=dict(measured.script_failures),
         mcp_results=context.mcp_results,
+        effort=context.effort,
+        task_sha256=hashlib.sha256((task.folder / "task.toml").read_bytes()).hexdigest(),
+        fixture_sha256=_directory_digest(task.fixture),
+        catalog_sha256=(
+            _directory_digest(Path(__file__).parent / "servers", pattern="*.py")
+            if task.definition.mcp_servers
+            else None
+        ),
+        scenario_steps_completed=(scenario_result.completed_steps if scenario_result else None),
+        scenario_steps_expected=(
+            len(task.definition.scenario.steps) if task.definition.scenario else None
+        ),
     )
+
+
+def _directory_digest(root: Path, *, pattern: str = "*") -> str:
+    """Fingerprint relative filenames and contents without recording temporary paths."""
+
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob(pattern)):
+        if path.is_file():
+            relative = path.relative_to(root).as_posix().encode()
+            contents = path.read_bytes()
+            digest.update(len(relative).to_bytes(8, "big"))
+            digest.update(relative)
+            digest.update(len(contents).to_bytes(8, "big"))
+            digest.update(contents)
+    return digest.hexdigest()

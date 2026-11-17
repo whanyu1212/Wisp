@@ -57,6 +57,12 @@ BASELINE_FIELDS = (
     "nested_calls",
     "failed_script_calls",
     "mcp_results",
+    "effort",
+    "task_sha256",
+    "fixture_sha256",
+    "catalog_sha256",
+    "scenario_steps_completed",
+    "scenario_steps_expected",
 )
 SUITE_FIELDS = (
     "models",
@@ -70,6 +76,7 @@ SUITE_FIELDS = (
     "mcp_tool_exposure",
     "codemode",
     "mcp_results",
+    "effort",
 )
 
 # Two-sided 95% critical values of Student's t for 1 to 30 degrees of freedom.
