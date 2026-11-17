@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TypeVar
 
+from evals.tool_use.servers import devhub_large_results
 from evals.tool_use.servers import devhub_results as results
 from evals.tool_use.servers.model import Arguments, Reply
 
@@ -237,6 +238,9 @@ OPEN_FLAKY_ISSUES = tuple(
 
 
 def list_issues(arguments: Arguments) -> Reply | None:
+    audit = devhub_large_results.list_issues(arguments)
+    if audit is not None:
+        return audit
     if not _is_api(arguments):
         return None
     state = str(arguments.get("state") or "open").lower()
