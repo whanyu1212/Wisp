@@ -35,7 +35,7 @@ class ScriptLimits:
         compute_seconds (float): The script's own computing, not counting the time
             it waits for tool calls.
         memory_bytes (int): The script's heap.
-        max_calls (int): Tool calls the script may make.
+        max_calls (int): External calls, including tools and state helpers.
         max_printed_bytes (int): What the script may print.
     """
 

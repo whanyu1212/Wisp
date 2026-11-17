@@ -26,6 +26,7 @@ from wisp.tools.codemode.calls import (
 )
 from wisp.tools.codemode.result_types import STUB_IMPORTS, ResultType, result_type
 from wisp.tools.codemode.sandbox import ScriptFunction, ScriptLimits, ScriptRun, run_script
+from wisp.tools.codemode.state import ScriptState
 from wisp.tools.context import ToolContext
 from wisp.tools.result import ToolError, ToolResult
 from wisp.tools.truncation import truncate_text
@@ -38,6 +39,15 @@ _JSON_TYPES = {
     "array": "list[object]",
     "object": "dict[str, object]",
 }
+
+_HELPER_NAMES = frozenset({"store", "load", "delete", "gather_settled", "_asyncio", "_TOOL_NAMES"})
+# A loaded key has no statically known shape. Any lets scripts use ordinary dict
+# and list operations; the host validates strict JSON when a value is stored.
+_STATE_STUBS = """\
+async def store(key: str, value: object) -> None: ...
+async def load(key: str) -> Any: ...
+async def delete(key: str) -> bool: ...
+"""
 
 # A failed script's message stays under the executor's cap on the errors a model is
 # shown (2,000 characters), so that cap never cuts off the list of calls it made.
@@ -199,6 +209,7 @@ class CodemodeTool:
         *,
         discoverable: Sequence[ScriptableTool] = (),
         limits: ScriptLimits | None = None,
+        state: ScriptState | None = None,
     ) -> None:
         """Offer ``tools`` to scripts, running each call a script makes with ``call``.
 
@@ -213,9 +224,11 @@ class CodemodeTool:
                 keeps the description short and the same from run to run.
             limits (ScriptLimits | None): The bounds scripts run under; None uses
                 the defaults.
+            state (ScriptState | None): Shared transactional JSON state. None uses
+                fresh ephemeral state retained by this tool instance.
         """
 
-        taken = frozenset(tool.name for tool in (*tools, *discoverable))
+        taken = _HELPER_NAMES | frozenset(tool.name for tool in (*tools, *discoverable))
         listed = tuple(
             signature for tool in tools if (signature := _signature(tool, taken)) is not None
         )
@@ -230,6 +243,7 @@ class CodemodeTool:
         }
         self._call = call
         self._limits = limits or ScriptLimits()
+        self._state = state if state is not None else ScriptState()
         self.description = _description(listed, self._limits, discoverable=bool(found))
         declarations = [
             declaration
@@ -239,6 +253,7 @@ class CodemodeTool:
         ]
         self._stubs = (
             STUB_IMPORTS
+            + _STATE_STUBS
             + "\n".join((*declarations, *(signature.declaration for signature in self._signatures)))
             + "\n"
         )
@@ -258,35 +273,46 @@ class CodemodeTool:
                 retryable=True,
             )
         log = _CallLog()
-        run = await run_script(
-            code,
-            functions={name: self._function(name, log) for name in self.tool_names},
-            stubs=self._stubs,
-            limits=self._limits,
-            helpers=_helpers(self.tool_names),
-        )
-        if run.failure == "internal":
-            # Wisp's own helpers did not load, so the script never ran: not a
-            # mistake the model can fix by rewriting it.
-            _logger.error("codemode's helpers did not load: %s", run.error)
-            raise ToolError(
-                "codemode could not start: its own setup failed, so no script can run. "
-                "Call the tools directly.",
-                failure_code="internal_error",
+        transaction = self._state.transaction()
+        try:
+            run = await run_script(
+                code,
+                functions={
+                    **{name: self._function(name, log) for name in self.tool_names},
+                    "store": transaction.store,
+                    "load": transaction.load,
+                    "delete": transaction.delete,
+                },
+                stubs=self._stubs,
+                limits=self._limits,
+                helpers=_helpers(self.tool_names),
             )
-        if run.failure is not None:
-            # The calls already made stand: every tool a script reaches is read-only.
-            raise ToolError(_failure_message(run, log))
-        body = "\n".join(part for part in (run.printed.rstrip("\n"), run.value) if part)
-        # The list of calls is cut last: it says how many failed or came back
-        # incomplete, which the model needs most when the script's output is long.
-        footer = f"[{log.line()}]"
-        text, truncated = _with_footer(body, footer, context)
-        return ToolResult(
-            text=text,
-            data={"calls": log.total, "failed_calls": log.failed},
-            truncated=truncated,
-        )
+            if run.failure == "internal":
+                # Wisp's own helpers did not load, so the script never ran: not a
+                # mistake the model can fix by rewriting it.
+                _logger.error("codemode's helpers did not load: %s", run.error)
+                raise ToolError(
+                    "codemode could not start: its own setup failed, so no script can run. "
+                    "Call the tools directly.",
+                    failure_code="internal_error",
+                )
+            if run.failure is not None:
+                # The calls already made stand: every tool a script reaches is read-only.
+                raise ToolError(_failure_message(run, log))
+            body = "\n".join(part for part in (run.printed.rstrip("\n"), run.value) if part)
+            # The list of calls is cut last: it says how many failed or came back
+            # incomplete, which the model needs most when the script's output is long.
+            footer = f"[{log.line()}]"
+            text, truncated = _with_footer(body, footer, context)
+            result = ToolResult(
+                text=text,
+                data={"calls": log.total, "failed_calls": log.failed},
+                truncated=truncated,
+            )
+            transaction.commit()
+            return result
+        finally:
+            transaction.close()
 
     def _function(self, name: str, log: _CallLog) -> ScriptFunction:
         call = self._call
@@ -403,7 +429,7 @@ def _signature(tool: ScriptableTool, taken: frozenset[str]) -> _Signature | None
     names a result type's declarations must not reuse.
     """
 
-    if not _is_identifier(tool.name):
+    if not _is_identifier(tool.name) or tool.name in _HELPER_NAMES:
         return None
     properties = tool.input_schema.get("properties")
     required = tool.input_schema.get("required")
@@ -500,6 +526,13 @@ def _description(
         "dir() and vars(); use comprehensions, f-strings and plain attribute access. "
         "json, re, collections, itertools and math are available. It is type-checked "
         "against the tools' parameters before it runs.",
+        "",
+        "State: `await store(key, value)`, `await load(key)` (KeyError if missing), "
+        "and `await delete(key)` (whether it existed). Values are copied strict JSON. "
+        "Writes commit together only when the script succeeds; failure, timeout or "
+        "cancellation discards them. State lasts across scripts in this session. "
+        "Quotas: 128 keys; non-empty keys up to 128 UTF-8 bytes; values up to 64 KiB "
+        "canonical UTF-8 JSON, 256 KiB total, and 32 nested containers.",
         f"Limits: {limits.max_calls} tool calls, {limits.wall_seconds:g} seconds and "
         f"{_kib(limits.max_printed_bytes)} printed per script.",
         "",

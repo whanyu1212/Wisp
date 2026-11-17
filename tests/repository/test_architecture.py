@@ -51,7 +51,13 @@ _FORBIDDEN_IMPORTS = (
     "wisp.trust",
     "wisp.cli.native_tui",
 )
-_CODING_MODULES = ("compaction.py", "persistence.py", "session.py", "tool_execution.py")
+_CODING_MODULES = (
+    "compaction.py",
+    "persistence.py",
+    "script_state.py",
+    "session.py",
+    "tool_execution.py",
+)
 _CODING_FORBIDDEN_IMPORTS = (
     "wisp.agent.compat",
     "wisp.cli",

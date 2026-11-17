@@ -37,6 +37,7 @@ def test_tasks_are_opt_in() -> None:
         "mcp-deploy-chain",
         "mcp-service-alerts",
         "mcp-large-result-filter",
+        "mcp-session-reuse",
     }
     assert all(task.definition.opt_in for task in _TASKS.values())
 
@@ -243,3 +244,17 @@ def test_structured_errors_have_no_value(tool: str, arguments: dict[str, object]
 
     assert reply.value is None
     assert reply.text == _TOOLS[tool].respond(arguments)
+
+
+def test_session_reuse_answer_matches_data(tmp_path: Path) -> None:
+    task = _TASKS["mcp-session-reuse"]
+    pulls = _value("list_pull_requests", {**_API, "state": "open", "per_page": 100})
+    numbers = sorted(
+        pull["number"] for pull in pulls["pull_requests"] if "refund retries" in pull["title"]
+    )
+    answer = "".join(f"{number}\n" for number in numbers)
+    assert len(pulls["pull_requests"]) == 34
+    assert answer == _answer("mcp-session-reuse")
+    assert _verifies(task, tmp_path, answer)
+    assert not _verifies(task, tmp_path, answer.replace("503\n", ""))
+    assert not _verifies(task, tmp_path, answer + "534\n")

@@ -1,0 +1,33 @@
+id = "mcp-session-reuse"
+title = "Reuse an MCP dataset after session restart and compaction"
+tags = ["mcp", "scenario", "orchestration"]
+verify = "{python} {task}/verify.py"
+tools = ["read", "write"]
+mcp_servers = ["devhub"]
+opt_in = true
+timeout_seconds = 300
+max_tool_iterations = 15
+
+[[scenario.steps]]
+type = "prompt"
+prompt = "Fetch all open pull requests in acme/api, including their numbers and titles. Tell me the total count and keep the complete dataset available for follow-up analysis if possible. If you retain reusable data, mention its handle. Do not dump the rows into your reply or create files yet."
+
+[[scenario.steps]]
+type = "prompt"
+prompt = "We will analyze that dataset next. Acknowledge briefly; no tool calls or files are needed now."
+
+[[scenario.steps]]
+type = "compact"
+
+[[scenario.steps]]
+type = "resume"
+
+[[scenario.steps]]
+type = "prompt"
+prompt = "From the open pull requests we fetched, select every title containing refund retries. Write their numbers in ascending order to ANSWER.txt, one number per line with a final newline. Use write with exactly that relative path. Reuse the retained data when available."
+
+[[scenario.steps.approvals]]
+name = "write"
+arguments = {path = "ANSWER.txt", content = "503\n508\n509\n525\n528\n530\n533\n"}
+approved = true
+scope = "once"

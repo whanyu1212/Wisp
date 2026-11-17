@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Protocol
 
 import anyio
+from pydantic import JsonValue
 
 from wisp.agent.context_budget import (
     build_context_budget,
@@ -83,6 +84,7 @@ from wisp.coding.prompt import (
     read_repository_status,
     scratch_folder_guidance,
 )
+from wisp.coding.script_state import RunScriptState
 from wisp.coding.stats import RunStats, build_session_stats
 from wisp.coding.subagent import (
     FORK_INSTRUCTIONS,
@@ -356,6 +358,7 @@ class _ResumedHistory:
     cwd: Path | None
     # Notes for moves since the last user message, which the prompt carries.
     directory_notes: tuple[str, ...]
+    codemode_state: dict[str, JsonValue]
 
 
 class ImageInputUnsupportedError(ValueError):
@@ -615,6 +618,7 @@ class CodingSession:
         self._cancelled_harness: AgentHarness | None = None
         self._active_session_id: str | None = None
         self._active_persistence: RunPersistence | None = None
+        self._script_state: RunScriptState | None = None
         # Image bytes the active run's tool results and queued messages may still
         # add to its requests: the request budget less the images its history
         # already sends and those its queues hold. Earlier tool images stay in later
@@ -1489,6 +1493,7 @@ class CodingSession:
                     self._cancelled_harness = None
                     self._active_session_id = None
                     self._active_persistence = None
+                    self._script_state = None
                     self._operation_active = False
 
     async def _run(
@@ -1533,6 +1538,7 @@ class CodingSession:
             session, history, reserved_image_bytes=prompt_image_bytes
         )
         history = resumed.messages
+        self._script_state = RunScriptState(resumed.codemode_state)
         self._start_tool_image_allowance(history, reserved_bytes=prompt_image_bytes)
         persistence = RunPersistence(
             session=session,
@@ -1820,6 +1826,7 @@ class CodingSession:
             entry_count=snapshot.entry_count,
             cwd=snapshot.replay.cwd,
             directory_notes=snapshot.replay.pending_directory_notes,
+            codemode_state=snapshot.replay.codemode_state,
         )
 
     def _run_directory_change(
@@ -2420,7 +2427,12 @@ class CodingSession:
             )
             return await executor().run_nested(tool_call, result_limits=SCRIPT_RESULT_LIMITS)
 
-        tool = CodemodeTool(scriptable, call, discoverable=discoverable)
+        tool = CodemodeTool(
+            scriptable,
+            call,
+            discoverable=discoverable,
+            state=self._script_state.state if self._script_state is not None else None,
+        )
         registry.register(
             tool,
             replace=False,
@@ -3852,6 +3864,11 @@ class CodingSession:
             message,
             operation_id=operation_id,
             tool_result=tool_result,
+            codemode_state=(
+                self._script_state.take_result(event)
+                if isinstance(event, ToolExecutionEnded) and self._script_state is not None
+                else None
+            ),
         )
 
     def _queue_message(
@@ -3861,6 +3878,7 @@ class CodingSession:
         *,
         operation_id: str | None = None,
         tool_result: ToolResultPresentationSnapshot | None = None,
+        codemode_state: dict[str, JsonValue] | None = None,
     ) -> str:
         entry = MessageSessionEntry(
             session_id=session.session_id,
@@ -3868,6 +3886,7 @@ class CodingSession:
             operation_id=operation_id,
             created_at=message.created_at,
             tool_result=tool_result,
+            codemode_state=codemode_state,
         )
         persistence = self._active_persistence
         if persistence is None or persistence.session.session_id != session.session_id:
