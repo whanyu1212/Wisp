@@ -41,6 +41,7 @@ from wisp.rpc.commands import (
     ApprovalCommand,
     PromptCommand,
     RpcCommand,
+    SetCodemodeCommand,
     TrustCommand,
     detach_secret_fields,
     rpc_command_from_json,
@@ -508,3 +509,24 @@ def test_image_data_stays_out_of_repr() -> None:
     assert command.images == ("c2VjcmV0LWJ5dGVz",)
     assert "c2VjcmV0LWJ5dGVz" not in repr(command)
     assert "images" not in json.loads(SteerCommand(content="later").to_json_line())
+
+
+@pytest.mark.parametrize("presentation", [None, "codemode_only", "direct_and_codemode"])
+def test_codemode_presentation_round_trip(presentation: str | None) -> None:
+    payload = {"type": "set_codemode", "id": "codemode", "setting": "automatic"}
+    if presentation is not None:
+        payload["presentation"] = presentation
+
+    command = rpc_command_from_json(json.dumps(payload))
+
+    assert isinstance(command, SetCodemodeCommand)
+    assert command.presentation == presentation
+    assert command.setting == "automatic"
+    assert rpc_command_from_json(command.to_json_line()) == command
+
+
+def test_codemode_rejects_invalid_presentation() -> None:
+    with pytest.raises(ValidationError, match="presentation"):
+        rpc_command_from_json(
+            '{"type":"set_codemode","id":"codemode","setting":"always","presentation":"invalid"}'
+        )

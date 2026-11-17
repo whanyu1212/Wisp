@@ -105,6 +105,7 @@ from wisp.events import (
     AgentCompleted,
     AgentMode,
     AgentStarted,
+    CodemodePresentation,
     CodingSessionState,
     CompactionCompleted,
     CompactionReason,
@@ -585,6 +586,7 @@ class CodingSession:
         mcp_tool_exposure: McpToolExposure = DEFAULT_MCP_TOOL_EXPOSURE,
         mcp_server_connected: Callable[[str], bool] | None = None,
         codemode: bool | None = None,
+        codemode_presentation: CodemodePresentation = "direct_and_codemode",
         subagents: bool = False,
         subagent_model: str | None = None,
         process_notices: ProcessNoticeSource | None = None,
@@ -596,6 +598,7 @@ class CodingSession:
         # Offer the experimental codemode tool, which scripts the run's permitted
         # tools: always, never, or (None) whenever the run finds MCP tools on demand.
         self.codemode = codemode
+        self.codemode_presentation = codemode_presentation
         # Offer `spawn_agent`, which hands a read-only task to a subagent.
         self.subagents = subagents
         # The model a subagent that starts fresh should use; see `subagent_model_in_use`.
@@ -691,6 +694,7 @@ class CodingSession:
         mcp_tool_exposure: McpToolExposure = DEFAULT_MCP_TOOL_EXPOSURE,
         mcp_server_connected: Callable[[str], bool] | None = None,
         codemode: bool | None = None,
+        codemode_presentation: CodemodePresentation = "direct_and_codemode",
         subagents: bool = False,
         subagent_model: str | None = None,
         process_notices: ProcessNoticeSource | None = None,
@@ -721,6 +725,7 @@ class CodingSession:
             mcp_tool_exposure=mcp_tool_exposure,
             mcp_server_connected=mcp_server_connected,
             codemode=codemode,
+            codemode_presentation=codemode_presentation,
             subagents=subagents,
             subagent_model=subagent_model,
             process_notices=process_notices,
@@ -2261,8 +2266,9 @@ class CodingSession:
 
         Returns:
             tuple[tuple[ToolSpec, ...], ConfiguredToolExecutor]: The specs offered
-            to the provider and an executor whose policy allows the same tools.
-            Operation names are intersected with the session tool policy,
+            to the provider and an executor enforcing the underlying selected tools.
+            Codemode-only presentation hides direct schemas without removing child
+            execution permissions. Operation names are intersected with the session tool policy,
             because explicit `tools=` specs are not filtered by it.
         """
 
@@ -2308,7 +2314,7 @@ class CodingSession:
             # Like the discovery tools, the script tool joins without widening what
             # anything else may do: each call a script makes is checked as itself.
             added = (*codemode.discovery_tools, codemode)
-            offered_tools = (*offered_tools, *(ToolSpec.from_tool(tool) for tool in added))
+            offered_tools = self._present_codemode_tools(offered_tools, codemode)
             policy = replace(
                 policy, allowed_tools=policy.allowed_tools | {tool.name for tool in added}
             )
@@ -2318,7 +2324,7 @@ class CodingSession:
             self._spawn_agent_tool(
                 subagent_tools, registry, lambda: executor, context=context, session=session
             )
-            if operation_tool_names is None
+            if operation_tool_names is None and not self._uses_codemode_only(codemode)
             else None
         )
         if spawn_agent is not None:
@@ -2336,6 +2342,35 @@ class CodingSession:
             background_requests=self._background_requests,
         )
         return offered_tools, executor
+
+    def _present_codemode_tools(
+        self, direct: tuple[ToolSpec, ...], codemode: CodemodeTool
+    ) -> tuple[ToolSpec, ...]:
+        """Choose model-facing schemas without changing child execution policy."""
+
+        added = tuple(ToolSpec.from_tool(tool) for tool in (*codemode.discovery_tools, codemode))
+        if self._uses_codemode_only(codemode):
+            return added
+        return (*direct, *added)
+
+    def _uses_codemode_only(self, codemode: CodemodeTool | None) -> bool:
+        """Require unified discovery before hiding direct schemas and guidance."""
+
+        return (
+            self.codemode_presentation == "codemode_only"
+            and codemode is not None
+            and bool(codemode.discovery_tools)
+        )
+
+    def codemode_presentation_in_use(self) -> CodemodePresentation:
+        """Report the next run's presentation, including unavailable discovery fallback."""
+
+        if self.codemode_presentation == "direct_and_codemode":
+            return "direct_and_codemode"
+        registry = self._operation_tool_registry()
+        tools, catalog = self._apply_mcp_exposure(self._effective_tools(registry), registry)
+        codemode = self._codemode_tool(tools, registry, _no_executor, catalog)
+        return "codemode_only" if self._uses_codemode_only(codemode) else "direct_and_codemode"
 
     def codemode_offered(self) -> bool:
         """Report whether a run started now would offer the codemode tool.
@@ -2507,6 +2542,9 @@ class CodingSession:
                 ):
                     continue
                 metadata = registry.prompt_metadata_for(candidate.name)
+                guidelines = metadata.guidelines if metadata is not None else ()
+                if metadata is not None and metadata.prompt_snippet:
+                    guidelines = (metadata.prompt_snippet, *guidelines)
                 namespace = "builtin"
                 connected = True
                 if isinstance(candidate, McpCatalogTool):
@@ -2517,7 +2555,7 @@ class CodingSession:
                     DiscoveryEntry(
                         tool=candidate,
                         namespace=namespace,
-                        guidelines=metadata.guidelines if metadata is not None else (),
+                        guidelines=guidelines,
                         requires_confirmation=self.tool_approval_policy.requires_approval(
                             candidate
                         ),
@@ -2543,6 +2581,8 @@ class CodingSession:
             the run would have no read-only tool for a subagent to use.
         """
 
+        if self.codemode_presentation_in_use() == "codemode_only":
+            return False
         registry = self._operation_tool_registry()
         tools, _ = self._apply_mcp_exposure(self._effective_tools(registry), registry)
         return (
@@ -3549,15 +3589,15 @@ class CodingSession:
             stats_codemode = self._codemode_tool(
                 stats_tools, stats_registry, _no_executor, stats_catalog
             )
-            stats_spawn_agent = self._spawn_agent_tool(
-                stats_tools, stats_registry, _no_executor, context=self.tool_context
+            stats_spawn_agent = (
+                self._spawn_agent_tool(
+                    stats_tools, stats_registry, _no_executor, context=self.tool_context
+                )
+                if not self._uses_codemode_only(stats_codemode)
+                else None
             )
             if stats_codemode is not None:
-                stats_tools = (
-                    *stats_tools,
-                    *(ToolSpec.from_tool(tool) for tool in stats_codemode.discovery_tools),
-                    ToolSpec.from_tool(stats_codemode),
-                )
+                stats_tools = self._present_codemode_tools(stats_tools, stats_codemode)
             if stats_spawn_agent is not None:
                 stats_tools = (*stats_tools, ToolSpec.from_tool(stats_spawn_agent))
             prompt = await self._prompt_messages_async(
@@ -3656,11 +3696,18 @@ class CodingSession:
         operation_context = context or self.tool_context
         effective_registry = registry if registry is not None else self.tool_registry
         effective_names = {tool.name for tool in effective_tools}
+        callable_names = set(effective_names)
+        codemode_only = False
+        if effective_registry is not None and CODEMODE in effective_names:
+            script_tool = effective_registry.get(CODEMODE)
+            if isinstance(script_tool, CodemodeTool):
+                callable_names.update(script_tool.tool_names)
+                codemode_only = self._uses_codemode_only(script_tool)
         skill_index = (
             build_skill_index(self.skill_catalog)
             if effective_registry is not None
             and any(
-                type(tool) is SkillTool and tool.name in effective_names
+                type(tool) is SkillTool and tool.name in callable_names
                 for tool in effective_registry.all()
             )
             else ""
@@ -3668,6 +3715,17 @@ class CodingSession:
         # Both prompt paths add the same host guidance, in this order.
         additional_guidance = (
             PromptPart("skills", "skill index", skill_index),
+            PromptPart(
+                "system_prompt",
+                "codemode presentation",
+                "Tool presentation is codemode-only. Discover tools with tool_search and "
+                "tool_describe, including each tool's guidelines, then call them inside "
+                "codemode scripts. Direct tool calls and subagent delegation are not offered. "
+                "Tools that cannot be scripted are unavailable in this presentation. "
+                "Scripts return text or structured data, not images."
+                if codemode_only
+                else "",
+            ),
             PromptPart("project_context", "web search", self._web_search_guidance()),
             PromptPart(
                 "project_context",

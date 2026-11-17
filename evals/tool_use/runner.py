@@ -35,7 +35,7 @@ from evals.tool_use.scenario import ScenarioResult
 from evals.tool_use.scenario_driver import ScenarioConfig
 from evals.tool_use.servers.catalogs import CATALOGS
 from evals.tool_use.task_definitions import Task, TaskChecks
-from wisp.events import AgentCompleted
+from wisp.events import AgentCompleted, CodemodePresentation
 from wisp.mcp.config import McpToolExposure
 from wisp.mcp.discovery import DISCOVERY_TOOL_NAMES
 from wisp.mcp.tool import mcp_tool_name
@@ -161,6 +161,8 @@ class RunContext:
             either by catalog size (`auto`, Wisp's default).
         codemode (Codemode): Whether runs offer the codemode tool (`python`) or
             not (`off`).
+        codemode_presentation (CodemodePresentation): Direct tools beside scripts,
+            or only the script and discovery tools when codemode is offered.
         mcp_results (McpResults): Whether the synthetic MCP servers' task tools
             return only text (`text`) or their structured result too (`structured`).
         effort (str | None): Explicit provider effort; None keeps the provider default.
@@ -172,6 +174,7 @@ class RunContext:
     python: str = sys.executable
     mcp_tool_exposure: McpToolExposure = "direct"
     codemode: Codemode = "off"
+    codemode_presentation: CodemodePresentation = "direct_and_codemode"
     mcp_results: McpResults = "text"
     effort: str | None = None
 
@@ -219,6 +222,7 @@ class RunRow:
     proxied_errors: int = 0
     proxied_argument_errors: int = 0
     codemode: Codemode = "off"
+    codemode_presentation: CodemodePresentation = "direct_and_codemode"
     scripts: int = 0
     failed_scripts: int = 0
     nested_calls: int = 0
@@ -652,6 +656,7 @@ def _run_wisp(
     # codemode whenever a script may call one of the run's MCP tools. Scripts may call the task's
     # read-only tools, which include every MCP tool, all marked read-only above.
     settings["codemode"] = context.codemode != "off"
+    settings["codemode_presentation"] = context.codemode_presentation
     settings_path = home / ".wisp" / "settings.json"
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings_path.write_text(json.dumps(settings), encoding="utf-8")
@@ -843,6 +848,7 @@ def _row(
         proxied_errors=measured.proxied_errors,
         proxied_argument_errors=measured.proxied_argument_errors,
         codemode=context.codemode,
+        codemode_presentation=context.codemode_presentation,
         scripts=measured.scripts,
         failed_scripts=measured.failed_scripts,
         nested_calls=measured.nested_calls,

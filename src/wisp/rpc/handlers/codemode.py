@@ -45,10 +45,14 @@ def handle_rpc_codemode_command(
     lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
     if isinstance(command, SetCodemodeCommand):
         agent.codemode = _CODEMODE_FOR_SETTING[command.setting]
+        if command.presentation is not None:
+            agent.codemode_presentation = command.presentation
         if configure_overrides is not None:
             configure_overrides.codemode = agent.codemode
             configure_overrides.has_codemode = True
-        if not try_persist_user_codemode(agent.codemode):
+            if command.presentation is not None:
+                configure_overrides.codemode_presentation = command.presentation
+        if not try_persist_user_codemode(agent.codemode, presentation=command.presentation):
             write_event(
                 ErrorEvent(message="Codemode setting applied for this session; could not save it.")
             )
@@ -59,10 +63,13 @@ def handle_rpc_codemode_command(
 def _snapshot(agent: CodingSession) -> CodemodeState:
     env_codemode = codemode_from_env()
     scriptable_mcp_tools, mcp_tools = agent.scriptable_mcp_tools()
+    offered = agent.codemode_offered()
     return CodemodeState(
         setting=_SETTING_FOR_CODEMODE[agent.codemode],
         available=codemode_available(),
-        offered=agent.codemode_offered(),
+        offered=offered,
+        presentation=agent.codemode_presentation,
+        effective_presentation=agent.codemode_presentation_in_use(),
         env_setting=None if env_codemode is None else _SETTING_FOR_CODEMODE[env_codemode],
         mcp_tools=mcp_tools,
         scriptable_mcp_tools=scriptable_mcp_tools,

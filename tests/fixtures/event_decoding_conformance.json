@@ -1357,6 +1357,15 @@
    "operation": "remove",
    "path": [
     "codemode",
+    "effective_presentation"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.codemode",
+   "operation": "remove",
+   "path": [
+    "codemode",
     "env_setting"
    ],
    "accepted": true
@@ -1378,6 +1387,15 @@
     "offered"
    ],
    "accepted": false
+  },
+  {
+   "event": "rpc.codemode",
+   "operation": "remove",
+   "path": [
+    "codemode",
+    "presentation"
+   ],
+   "accepted": true
   },
   {
    "event": "rpc.codemode",

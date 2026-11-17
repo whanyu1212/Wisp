@@ -29,7 +29,7 @@ import sys
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Self
+from typing import TYPE_CHECKING, Any, Literal, Self
 from uuid import uuid4
 
 from pydantic import (
@@ -48,6 +48,10 @@ from wisp.openai_compatible import OpenAICompatibleSettings
 from wisp.retry import RetrySettings
 from wisp.validation import redact_validation_error_inputs
 
+if TYPE_CHECKING:
+    from wisp.events import CodemodePresentation
+
+
 GLOBAL_SETTINGS_PATH = Path("~/.wisp/settings.json")
 PROJECT_SETTINGS_DIRNAME = ".wisp"
 PROJECT_SETTINGS_FILENAME = "settings.json"
@@ -62,6 +66,7 @@ _USER_ONLY_SETTINGS_FIELDS = frozenset(
         "web_search",
         "wake_on_process_exit",
         "codemode",
+        "codemode_presentation",
         "subagents",
         "subagent_model",
         "mcp_servers",
@@ -140,6 +145,7 @@ class WispSettings(BaseModel):
     web_search: bool | None = None
     wake_on_process_exit: bool | None = None
     codemode: bool | None = None
+    codemode_presentation: Literal["direct_and_codemode", "codemode_only"] | None = None
     subagents: bool | None = None
     subagent_model: str | None = None
     mcp_servers: tuple[McpServerConfig, ...] | None = Field(
@@ -242,6 +248,7 @@ class ResolvedSettings(BaseModel):
     web_search: bool | None = None
     wake_on_process_exit: bool | None = None
     codemode: bool | None = None
+    codemode_presentation: Literal["direct_and_codemode", "codemode_only"] | None = None
     subagents: bool | None = None
     subagent_model: str | None = None
     mcp_servers: tuple[McpServerConfig, ...] | None = Field(default=None, repr=False)
@@ -345,6 +352,7 @@ def resolve_settings(
         web_search=user_settings.web_search,
         wake_on_process_exit=user_settings.wake_on_process_exit,
         codemode=user_settings.codemode,
+        codemode_presentation=user_settings.codemode_presentation,
         subagents=user_settings.subagents,
         subagent_model=user_settings.subagent_model,
         mcp_servers=user_settings.mcp_servers,
@@ -442,20 +450,30 @@ def try_persist_user_subagent_model(model: str | None, *, home_dir: Path | None 
     )
 
 
-def try_persist_user_codemode(codemode: bool | None, *, home_dir: Path | None = None) -> bool:
+def try_persist_user_codemode(
+    codemode: bool | None,
+    *,
+    presentation: CodemodePresentation | None = None,
+    home_dir: Path | None = None,
+) -> bool:
     """Save the user's codemode setting, keeping every other user setting.
 
     Args:
         codemode (bool | None): True or False to always or never offer the tool, or
             None to remove the key so the automatic default applies.
+        presentation (CodemodePresentation | None): Presentation to save, or None
+            to preserve the saved presentation.
         home_dir (Path | None): User home override, primarily for isolated callers.
 
     Returns:
         bool: Whether the atomic settings update succeeded. Failures also warn;
         unreadable settings are preserved rather than replaced.
     """
+    updates: dict[str, str | bool | None] = {"codemode": codemode}
+    if presentation is not None:
+        updates["codemode_presentation"] = presentation
     return _persist_user_settings(
-        {"codemode": codemode},
+        updates,
         home_dir=home_dir,
         preference="codemode setting",
     )

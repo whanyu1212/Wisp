@@ -24,7 +24,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Padding, Paragraph};
 use unicode_width::UnicodeWidthStr;
-use wisp_protocol::commands::{CodemodeSetting, PermissionMode};
+use wisp_protocol::commands::{CodemodePresentation, CodemodeSetting, PermissionMode};
 use wisp_protocol::events::{McpServerStatus, SessionBranchSummary};
 
 /// The panel's width, its border included: the overlay's width, and the docked
@@ -1117,7 +1117,16 @@ fn header_lines(
 fn codemode_line(state: &UiState, width: usize, palette: Palette) -> Option<Line<'static>> {
     let snapshot = state.codemode.snapshot.as_deref()?;
     let setting = crate::discovery_view::codemode_label(snapshot.setting);
-    let (text, color) = if !snapshot.available && snapshot.setting == CodemodeSetting::Always {
+    let (text, color) = if snapshot.presentation == CodemodePresentation::CodemodeOnly {
+        if snapshot.effective_presentation == CodemodePresentation::CodemodeOnly {
+            (format!("codemode only · {setting}"), palette.muted)
+        } else {
+            (
+                "codemode only · using direct tools".to_owned(),
+                palette.warning,
+            )
+        }
+    } else if !snapshot.available && snapshot.setting == CodemodeSetting::Always {
         (
             format!("codemode {setting} · needs wisp-ai[codemode]"),
             palette.warning,
@@ -2121,6 +2130,41 @@ mod tests {
     }
 
     #[test]
+    fn presentation_row_shows_fallback() {
+        use wisp_protocol::events::CodemodeState;
+        for (effective, expected) in [
+            (
+                CodemodePresentation::CodemodeOnly,
+                "codemode only · automatic",
+            ),
+            (
+                CodemodePresentation::DirectAndCodemode,
+                "codemode only · using direct tools",
+            ),
+        ] {
+            let mut state = UiState::unconfigured();
+            state.codemode.snapshot = Some(Arc::new(CodemodeState {
+                setting: CodemodeSetting::Automatic,
+                presentation: CodemodePresentation::CodemodeOnly,
+                effective_presentation: effective,
+                available: true,
+                offered: effective == CodemodePresentation::CodemodeOnly,
+                env_setting: None,
+                mcp_tools: 0,
+                scriptable_mcp_tools: 0,
+            }));
+            let line = codemode_line(&state, 44, Palette::default()).unwrap();
+            assert_eq!(
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>(),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn codemode_row_names_setting() {
         use wisp_protocol::events::CodemodeState;
         let cases = [
@@ -2155,6 +2199,8 @@ mod tests {
             assert!(codemode_line(&state, 44, Palette::default()).is_none());
             state.codemode.snapshot = Some(Arc::new(CodemodeState {
                 setting,
+                presentation: Default::default(),
+                effective_presentation: Default::default(),
                 available,
                 offered,
                 env_setting: None,

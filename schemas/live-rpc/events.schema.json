@@ -259,6 +259,13 @@
       "title": "BillableTokenUsage",
       "type": "object"
     },
+    "CodemodePresentation": {
+      "enum": [
+        "direct_and_codemode",
+        "codemode_only"
+      ],
+      "type": "string"
+    },
     "CodemodeSetting": {
       "enum": [
         "automatic",
@@ -274,6 +281,10 @@
         "available": {
           "title": "Available",
           "type": "boolean"
+        },
+        "effective_presentation": {
+          "$ref": "#/$defs/CodemodePresentation",
+          "default": "direct_and_codemode"
         },
         "env_setting": {
           "anyOf": [
@@ -295,6 +306,10 @@
           "title": "Offered",
           "type": "boolean"
         },
+        "presentation": {
+          "$ref": "#/$defs/CodemodePresentation",
+          "default": "direct_and_codemode"
+        },
         "scriptable_mcp_tools": {
           "minimum": 0,
           "title": "Scriptable Mcp Tools",
@@ -306,6 +321,8 @@
       },
       "required": [
         "setting",
+        "presentation",
+        "effective_presentation",
         "available",
         "offered",
         "env_setting",
@@ -9534,9 +9551,11 @@
     "rpc.codemode": {
       "codemode": {
         "available": true,
+        "effective_presentation": "direct_and_codemode",
         "env_setting": null,
         "mcp_tools": 12,
         "offered": false,
+        "presentation": "direct_and_codemode",
         "scriptable_mcp_tools": 0,
         "setting": "automatic"
       },

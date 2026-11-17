@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import anyio
+import pytest
 
 from tests.coding.compaction_support import build_model_registry
 from wisp.coding.session import CodingSession
@@ -62,7 +63,10 @@ def _registry() -> ToolRegistry:
     return registry
 
 
-def test_sends_bounded_skill_index_and_tool(tmp_path: Path) -> None:
+@pytest.mark.parametrize("scripted", [False, True])
+def test_sends_bounded_skill_index_and_tool(tmp_path: Path, scripted: bool) -> None:
+    if scripted:
+        pytest.importorskip("pydantic_monty")
     provider = ScriptedProvider(
         [[ProviderResponseStarted(model="scripted"), ProviderResponseCompleted(content="done")]]
     )
@@ -73,6 +77,8 @@ def test_sends_bounded_skill_index_and_tool(tmp_path: Path) -> None:
         tool_registry=_registry(),
         tool_context=ToolContext(cwd=tmp_path),
         skill_catalog=SkillCatalog(entries=(entry,)),
+        codemode=scripted,
+        codemode_presentation="codemode_only",
     )
 
     async def scenario() -> None:
@@ -81,7 +87,9 @@ def test_sends_bounded_skill_index_and_tool(tmp_path: Path) -> None:
     anyio.run(scenario)
 
     request = provider.calls[0]
-    assert tuple(tool.name for tool in request.tools) == ("skill",)
+    assert tuple(tool.name for tool in request.tools) == (
+        ("tool_search", "tool_describe", "codemode") if scripted else ("skill",)
+    )
     skill_messages = [
         message.content for message in request.messages if "[WISP AGENT SKILLS]" in message.content
     ]

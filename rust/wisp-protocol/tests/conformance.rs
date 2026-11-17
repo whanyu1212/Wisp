@@ -959,3 +959,38 @@ fn image_commands_attach_or_omit_images() {
         .is_err()
     );
 }
+
+#[test]
+fn codemode_presentation_preserves_availability() {
+    use commands::{CodemodePresentation, CodemodeSetting, WispTypedClientRpcCommands};
+    for setting in [
+        CodemodeSetting::Automatic,
+        CodemodeSetting::Always,
+        CodemodeSetting::Never,
+    ] {
+        let value = WispTypedClientRpcCommands::codemode("availability", Some(setting))
+            .unwrap()
+            .into_value()
+            .unwrap();
+        assert_eq!(value["setting"], serde_json::to_value(setting).unwrap());
+        assert!(value.get("presentation").is_none());
+        for presentation in [
+            CodemodePresentation::DirectAndCodemode,
+            CodemodePresentation::CodemodeOnly,
+        ] {
+            let value = WispTypedClientRpcCommands::codemode_presentation(
+                "presentation",
+                setting,
+                presentation,
+            )
+            .unwrap()
+            .into_value()
+            .unwrap();
+            assert_eq!(value["setting"], serde_json::to_value(setting).unwrap());
+            assert_eq!(
+                value["presentation"],
+                serde_json::to_value(presentation).unwrap()
+            );
+        }
+    }
+}

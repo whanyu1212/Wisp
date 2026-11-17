@@ -3534,6 +3534,14 @@ impl LiveUi {
                 self.dispatch(UiAction::Codemode(setting), writer, limit)
                     .await
             }
+            Command::CodemodePresentation(presentation) => {
+                self.set_discovery_view(Some(DiscoveryView::codemode()));
+                self.editor.clear();
+                self.notice = None;
+                self.render_pending = true;
+                self.dispatch(UiAction::CodemodePresentation(presentation), writer, limit)
+                    .await
+            }
             Command::Subagents(enabled) => {
                 self.set_discovery_view(Some(DiscoveryView::subagents()));
                 self.editor.clear();

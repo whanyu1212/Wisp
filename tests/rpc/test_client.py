@@ -54,6 +54,7 @@ from wisp.rpc.commands import (
     ApprovalCommand,
     CancelCommand,
     PromptCommand,
+    SetCodemodeCommand,
     ShutdownCommand,
     rpc_command_from_json,
 )
@@ -617,3 +618,19 @@ def test_controller_passes_image_references() -> None:
     (command,) = anyio.run(run).commands
 
     assert getattr(command, "images", None) == (reference, base64.b64encode(b"new").decode())
+
+
+def test_controller_sends_codemode_presentation() -> None:
+    async def run() -> None:
+        transport = RecordingTransport()
+        controller = RpcController(transport)
+
+        await controller.set_codemode("always", presentation="codemode_only", command_id="selected")
+        await controller.set_codemode("never", command_id="unchanged")
+
+        assert transport.commands == [
+            SetCodemodeCommand(id="selected", setting="always", presentation="codemode_only"),
+            SetCodemodeCommand(id="unchanged", setting="never"),
+        ]
+
+    anyio.run(run)

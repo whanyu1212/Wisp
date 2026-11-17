@@ -20,7 +20,7 @@ use ratatui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
-use wisp_protocol::commands::{CodemodeSetting, PermissionMode};
+use wisp_protocol::commands::{CodemodePresentation, CodemodeSetting, PermissionMode};
 use wisp_protocol::events::SkillCatalogSnapshot;
 
 // Returned once per key event and consumed immediately, so its size does not matter;
@@ -111,13 +111,29 @@ const CODEMODE_CHOICES: [(char, &str, CodemodeSetting); 3] = [
     ('3', "Never", CodemodeSetting::Never),
 ];
 
+const PRESENTATION_CHOICES: [(char, &str, CodemodePresentation); 2] = [
+    (
+        '4',
+        "Direct tools + codemode",
+        CodemodePresentation::DirectAndCodemode,
+    ),
+    ('5', "Codemode only", CodemodePresentation::CodemodeOnly),
+];
+const CODEMODE_CHOICE_COUNT: usize = CODEMODE_CHOICES.len() + PRESENTATION_CHOICES.len();
+
 impl DiscoveryView {
     // The scheduler preserves this painted choice while draining a finite event prefix.
     pub fn rendered_selection(&self) -> Option<&str> {
         match self {
             Self::Skills(view) => view.rendered.as_deref(),
             Self::Permissions(view) => view.rendered.map(|index| PERMISSION_CHOICES[index].1),
-            Self::Codemode(view) => view.rendered.map(|index| CODEMODE_CHOICES[index].1),
+            Self::Codemode(view) => view.rendered.map(|index| {
+                if index < CODEMODE_CHOICES.len() {
+                    CODEMODE_CHOICES[index].1
+                } else {
+                    PRESENTATION_CHOICES[index - CODEMODE_CHOICES.len()].1
+                }
+            }),
             Self::Subagents(view) => view.rendered_selection(),
             Self::Mcp(_) => None,
         }
@@ -152,7 +168,7 @@ impl DiscoveryView {
         key.code == KeyCode::Enter
             || (matches!(self, Self::Permissions(_))
                 && matches!(key.code, KeyCode::Char('1' | '2')))
-            || (matches!(self, Self::Codemode(_)) && matches!(key.code, KeyCode::Char('1'..='3')))
+            || (matches!(self, Self::Codemode(_)) && matches!(key.code, KeyCode::Char('1'..='5')))
     }
 
     pub fn invalidate_selection(&mut self) {
@@ -267,12 +283,17 @@ impl DiscoveryView {
             }
             Self::Codemode(view) => {
                 let ready = !state.codemode.loading() && state.codemode.snapshot.is_some();
-                view.choose(key.code, CODEMODE_CHOICES.len(), ready).map_or(
+                view.choose(key.code, CODEMODE_CHOICE_COUNT, ready).map_or(
                     DiscoveryAction::None,
                     |choice| {
-                        DiscoveryAction::Refresh(UiAction::Codemode(Some(
-                            CODEMODE_CHOICES[choice].2,
-                        )))
+                        let action = if choice < CODEMODE_CHOICES.len() {
+                            UiAction::Codemode(Some(CODEMODE_CHOICES[choice].2))
+                        } else {
+                            UiAction::CodemodePresentation(
+                                PRESENTATION_CHOICES[choice - CODEMODE_CHOICES.len()].2,
+                            )
+                        };
+                        DiscoveryAction::Refresh(action)
                     },
                 )
             }
@@ -695,13 +716,23 @@ fn render_codemode(
     let snapshot = state.codemode.snapshot.as_deref();
     let muted = Style::default().fg(palette.muted);
     let warning = Style::default().fg(palette.warning);
-    let mut lines = choice_lines(
+    let mut lines = vec![Line::styled("Availability", muted)];
+    lines.extend(choice_lines(
         &CODEMODE_CHOICES,
         view.selected,
         snapshot.map(|snapshot| snapshot.setting),
         width,
         palette,
-    );
+    ));
+    lines.push(Line::styled("Presentation", muted));
+    lines.extend(choice_lines(
+        &PRESENTATION_CHOICES,
+        view.selected
+            .and_then(|index| index.checked_sub(CODEMODE_CHOICES.len())),
+        snapshot.map(|snapshot| snapshot.presentation),
+        width,
+        palette,
+    ));
     lines.push(Line::default());
     for (text, style) in codemode_notes(state) {
         lines.push(Line::styled(
@@ -710,7 +741,7 @@ fn render_codemode(
         ));
     }
     frame.render_widget(Paragraph::new(lines), inner);
-    view.painted = inner.height >= 3 && inner.width >= 22 && !state.codemode.loading();
+    view.painted = inner.height >= 7 && inner.width >= 22 && !state.codemode.loading();
     view.rendered = if view.painted { view.selected } else { None };
     Rows::default()
 }
@@ -739,6 +770,16 @@ fn codemode_notes(state: &UiState) -> Vec<(String, bool)> {
             let offered = if snapshot.offered { "On" } else { "Off" };
             notes.push((format!("{offered} for the next prompt."), false));
             notes.extend(scriptable_mcp_note(snapshot));
+        }
+        if snapshot.effective_presentation == CodemodePresentation::CodemodeOnly {
+            notes.push(("Scripts cannot return images.".to_owned(), false));
+            notes.push(("Scripts cannot spawn subagents.".to_owned(), false));
+        }
+        if snapshot.presentation != snapshot.effective_presentation {
+            notes.push((
+                "Using direct tools: codemode-only is unavailable.".to_owned(),
+                true,
+            ));
         }
         if let Some(env) = snapshot.env_setting {
             notes.push((
@@ -786,9 +827,9 @@ pub(crate) fn codemode_label(setting: CodemodeSetting) -> &'static str {
 
 /// Rows the docked `/codemode` panel needs for `state`, borders included.
 pub(crate) fn codemode_panel_height(state: &UiState) -> u16 {
-    // Borders, three choices and a gap, then the notes.
+    // Borders, two headings, five choices and a gap, then the notes.
     let notes = u16::try_from(codemode_notes(state).len()).unwrap_or(u16::MAX);
-    6_u16.saturating_add(notes)
+    10_u16.saturating_add(notes)
 }
 
 /// Rows the docked `/permissions` panel needs for `state`, borders included.
@@ -810,10 +851,20 @@ mod tests {
     use wisp_protocol::events::{McpServerSnapshot, McpServerStatus, McpStatusSnapshot};
 
     fn draw(view: &mut DiscoveryView, state: &UiState, width: u16, height: u16) -> String {
+        draw_with_palette(view, state, width, height, Palette::default())
+    }
+
+    fn draw_with_palette(
+        view: &mut DiscoveryView,
+        state: &UiState,
+        width: u16,
+        height: u16,
+        palette: Palette,
+    ) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|frame| {
-                view.render(frame, frame.area(), state, None, Palette::default());
+                view.render(frame, frame.area(), state, None, palette);
             })
             .unwrap();
         terminal
@@ -839,6 +890,8 @@ mod tests {
         ));
         state.codemode.snapshot = Some(Arc::new(wisp_protocol::events::CodemodeState {
             setting: CodemodeSetting::Automatic,
+            presentation: Default::default(),
+            effective_presentation: Default::default(),
             available: false,
             offered: false,
             env_setting: Some(CodemodeSetting::Never),
@@ -859,9 +912,93 @@ mod tests {
         // A number past the choices does nothing.
         draw(&mut view, &state, 72, codemode_panel_height(&state));
         assert!(matches!(
-            view.handle_key(key(KeyCode::Char('4')), &state),
+            view.handle_key(key(KeyCode::Char('6')), &state),
             DiscoveryAction::None
         ));
+    }
+
+    #[test]
+    fn presentation_picker_shows_fallback() {
+        for theme in [crate::theme::default_theme(), crate::theme::paper_theme()] {
+            for width in [39, 144] {
+                let mut state = UiState::unconfigured();
+                state.codemode.snapshot = Some(Arc::new(wisp_protocol::events::CodemodeState {
+                    setting: CodemodeSetting::Never,
+                    presentation: CodemodePresentation::CodemodeOnly,
+                    effective_presentation: CodemodePresentation::DirectAndCodemode,
+                    available: true,
+                    offered: false,
+                    env_setting: None,
+                    mcp_tools: 0,
+                    scriptable_mcp_tools: 0,
+                }));
+                let height = codemode_panel_height(&state);
+                let mut view = DiscoveryView::codemode();
+                let rendered =
+                    draw_with_palette(&mut view, &state, width, height, theme.palette(false));
+                for expected in [
+                    "Availability",
+                    "Presentation",
+                    "Codemode only  current",
+                    "Using direct tools",
+                ] {
+                    assert!(
+                        rendered.contains(expected),
+                        "{} {width}: {expected}",
+                        theme.name
+                    );
+                }
+                assert!(matches!(
+                    view.handle_key(key(KeyCode::Char('4')), &state),
+                    DiscoveryAction::Refresh(UiAction::CodemodePresentation(
+                        CodemodePresentation::DirectAndCodemode
+                    ))
+                ));
+                draw_with_palette(&mut view, &state, width, height, theme.palette(false));
+                assert!(matches!(
+                    view.handle_key(key(KeyCode::Char('5')), &state),
+                    DiscoveryAction::Refresh(UiAction::CodemodePresentation(
+                        CodemodePresentation::CodemodeOnly
+                    ))
+                ));
+                // A clipped panel must not apply an unseen choice.
+                draw_with_palette(&mut view, &state, width, 8, theme.palette(false));
+                assert!(matches!(
+                    view.handle_key(key(KeyCode::Char('5')), &state),
+                    DiscoveryAction::None
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn presentation_limits_follow_effective_choice() {
+        for (offered, active) in [(false, false), (true, true), (true, false)] {
+            let mut state = UiState::unconfigured();
+            state.codemode.snapshot = Some(Arc::new(wisp_protocol::events::CodemodeState {
+                setting: CodemodeSetting::Always,
+                presentation: CodemodePresentation::CodemodeOnly,
+                effective_presentation: if active {
+                    CodemodePresentation::CodemodeOnly
+                } else {
+                    CodemodePresentation::DirectAndCodemode
+                },
+                available: offered,
+                offered,
+                env_setting: None,
+                mcp_tools: 0,
+                scriptable_mcp_tools: 0,
+            }));
+            let rendered = draw(
+                &mut DiscoveryView::codemode(),
+                &state,
+                39,
+                codemode_panel_height(&state),
+            );
+            assert_eq!(rendered.contains("Scripts cannot return images."), active);
+            assert_eq!(rendered.contains("Scripts cannot spawn subagents."), active);
+            assert_eq!(rendered.contains("Using direct tools"), !active);
+        }
     }
 
     #[test]
@@ -899,6 +1036,8 @@ mod tests {
             let mut state = UiState::unconfigured();
             state.codemode.snapshot = Some(Arc::new(wisp_protocol::events::CodemodeState {
                 setting,
+                presentation: Default::default(),
+                effective_presentation: Default::default(),
                 available: true,
                 offered: scriptable_mcp_tools > 0,
                 env_setting: None,

@@ -21,6 +21,7 @@ from wisp.coding.session import CodingSession
 from wisp.coding.tool_execution import ConfiguredToolExecutor
 from wisp.events import (
     AgentMode,
+    CodemodePresentation,
     ToolExecutionEnded,
     ToolExecutionStarted,
     ToolNestedCallEnded,
@@ -43,7 +44,12 @@ from wisp.sessions.entries import session_entry_from_json
 from wisp.sessions.jsonl import JsonlSessionStore
 from wisp.tool_types import ToolSafety
 from wisp.tools.approval import ToolApprovalPolicy
-from wisp.tools.base import ToolArguments, ToolExecutionMetadata, ToolInputSchema
+from wisp.tools.base import (
+    ToolArguments,
+    ToolExecutionMetadata,
+    ToolInputSchema,
+    ToolPromptMetadata,
+)
 from wisp.tools.codemode.calls import (
     CODEMODE,
     SCRIPT_RESULT_LIMITS,
@@ -137,6 +143,7 @@ def _run(
     streams: Sequence[list[ProviderEvent]],
     *,
     codemode: bool | None = True,
+    presentation: CodemodePresentation = "direct_and_codemode",
     mode: AgentMode = "build",
     exposure: McpToolExposure = "direct",
     timeline: list[WispEvent] | None = None,
@@ -152,6 +159,7 @@ def _run(
         tool_approval_policy=ToolApprovalPolicy.require_approval(),
         mcp_tool_exposure=exposure,
         codemode=codemode,
+        codemode_presentation=presentation,
         mode=mode,
     )
 
@@ -507,11 +515,18 @@ def test_on_demand_scripts_call_catalog(tmp_path: Path) -> None:
     assert tools.query.calls == [{"table": "a"}]
 
 
-def test_on_demand_command_needs_approval(tmp_path: Path) -> None:
+@pytest.mark.parametrize("presentation", ["direct_and_codemode", "codemode_only"])
+def test_on_demand_command_needs_approval(
+    tmp_path: Path, presentation: CodemodePresentation
+) -> None:
     tools = _Tools()
 
     events, _ = _run(
-        tmp_path, tools, [_script("await mcp__db__drop(table='users')")], exposure="on_demand"
+        tmp_path,
+        tools,
+        [_script("await mcp__db__drop(table='users')")],
+        exposure="on_demand",
+        presentation=presentation,
     )
 
     assert "requires approval" in _result(events).output
@@ -1726,3 +1741,119 @@ def test_unwrapped_without_result_fails(tmp_path: Path) -> None:
     events, _ = _run(tmp_path, tools, [_script(code)])
 
     assert "its structured result has no `result` field" in _result(events).output
+
+
+@pytest.mark.parametrize("exposure", ["direct", "on_demand"])
+@pytest.mark.parametrize("presentation", ["direct_and_codemode", "codemode_only"])
+def test_presentation_preserves_child_calls(
+    tmp_path: Path, exposure: McpToolExposure, presentation: CodemodePresentation
+) -> None:
+    tools = _Tools()
+    events, provider = _run(
+        tmp_path,
+        tools,
+        [_script('await mcp__db__query(table="users")')],
+        exposure=exposure,
+        presentation=presentation,
+    )
+    names = {tool.name for tool in provider.calls[0].tools}
+    script_tools = {CODEMODE, "tool_search", "tool_describe"}
+    assert names == script_tools if presentation == "codemode_only" else names > script_tools
+    assert not _result(events).is_error
+    assert tools.query.calls == [{"table": "users"}]
+
+
+@pytest.mark.parametrize("enabled", [False, True, None])
+def test_presentation_falls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enabled: bool | None
+) -> None:
+    monkeypatch.setattr("wisp.coding.session.codemode_available", lambda: False)
+    _, provider = _run(tmp_path, _Tools(), [], codemode=enabled, presentation="codemode_only")
+    names = {tool.name for tool in provider.calls[0].tools}
+    assert names == {"mcp__db__query", "mcp__db__drop", "lookup"}
+
+
+@pytest.mark.parametrize("presentation", ["direct_and_codemode", "codemode_only"])
+def test_presentation_defers_guidance(tmp_path: Path, presentation: CodemodePresentation) -> None:
+    registry = ToolRegistry()
+    tool = _Tool("lookup")
+    registry.register(
+        tool,
+        prompt=ToolPromptMetadata(
+            prompt_snippet="Use lookup before editing a table.",
+            guidelines=("Use a scoped table lookup.",),
+        ),
+    )
+    provider = ScriptedProvider(
+        [
+            tool_call_stream(
+                ToolCall(call_id="describe", name="tool_describe", arguments={"name": "lookup"})
+            ),
+            _done(),
+        ]
+    )
+    session = CodingSession(
+        provider=provider,
+        sessions=JsonlSessionStore(tmp_path / "sessions"),
+        tool_registry=registry,
+        tool_context=ToolContext(cwd=tmp_path),
+        codemode=True,
+        codemode_presentation=presentation,
+        subagents=True,
+    )
+    assert session.subagents_offered() is (presentation == "direct_and_codemode")
+
+    async def run() -> list[WispEvent]:
+        stats = await session.get_session_stats()
+        events = [event async for event in session.run("go")]
+        # Stats must count the exact model-facing schema set, including delegation.
+        from wisp.agent.context_budget import estimate_context
+
+        estimate = estimate_context(provider.calls[0].messages, provider.calls[0].tools)
+        assert stats.context.estimate.tool_schema_tokens == estimate.tool_schema_tokens
+        return events
+
+    result = _result(anyio.run(run))
+    assert not result.is_error
+    assert "Use a scoped table lookup." in result.output
+    assert "Use lookup before editing a table." in result.output
+    prompt = "\n".join(message.content for message in provider.calls[0].messages)
+    assert ("Use a scoped table lookup." in prompt) is (presentation == "direct_and_codemode")
+    assert ("spawn_agent" in {tool.name for tool in provider.calls[0].tools}) is (
+        presentation == "direct_and_codemode"
+    )
+
+
+@pytest.mark.parametrize("reserved", ["tool_search", "tool_describe"])
+def test_reader_collision_keeps_schemas(tmp_path: Path, reserved: str) -> None:
+    registry = ToolRegistry()
+    registry.register(_Tool(reserved))
+    registry.register(_Tool("lookup"), prompt=ToolPromptMetadata(prompt_snippet="Lookup guide."))
+    provider = ScriptedProvider([_done()])
+    session = CodingSession(
+        provider=provider,
+        sessions=JsonlSessionStore(tmp_path / "sessions"),
+        tool_registry=registry,
+        tool_context=ToolContext(cwd=tmp_path),
+        codemode=True,
+        codemode_presentation="codemode_only",
+        subagents=True,
+    )
+    assert session.codemode_offered()
+    assert session.codemode_presentation_in_use() == "direct_and_codemode"
+    assert session.subagents_offered()
+
+    async def run() -> None:
+        async for _ in session.run("go"):
+            pass
+
+    anyio.run(run)
+    assert {tool.name for tool in provider.calls[0].tools} == {
+        reserved,
+        "lookup",
+        "codemode",
+        "spawn_agent",
+    }
+    prompt = "\n".join(message.content for message in provider.calls[0].messages)
+    assert "Lookup guide." in prompt
+    assert "Tool presentation is codemode-only" not in prompt

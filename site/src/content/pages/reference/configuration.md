@@ -59,7 +59,7 @@ CLI flag. See [Provider retry behavior](../guide/providers.md#retry-behavior) fo
 Some fields are **user-only** and a project file can never set them:
 
 `protected_paths` · `retry` · `codex_read_timeout_seconds` · `effort` · `context_reserve_tokens` ·
-`auto_compaction_enabled` · `web_search` · `wake_on_process_exit` · `codemode` · `subagents` ·
+`auto_compaction_enabled` · `web_search` · `wake_on_process_exit` · `codemode` · `codemode_presentation` · `subagents` ·
 `subagent_model` ·
 `mcp_servers` · `mcp_tool_exposure` · `openai_compatible` · `tui_keybindings`
 
@@ -80,6 +80,7 @@ These settings belong in `~/.wisp/settings.json`, not the project file:
 |---|---|
 | `tui_keybindings` | Object mapping action IDs to arrays of key chords. See [Keybinding preferences](../guide/tui/keybindings.md#keybinding-preferences) for an example, available actions, and restart requirements. |
 | `mcp_servers` | Object keyed by server name, with either a stdio `command` or an HTTP `url` per entry. See [MCP servers](../guide/mcp.md#add-a-server) for complete JSON examples and authentication options. |
+| `codemode_presentation` | User-only model presentation: `"direct_and_codemode"` (default) or `"codemode_only"`. Separate from availability; falls back to direct tools when codemode is not offered. |
 | `mcp_tool_exposure` · `codemode` | Discovery mode (`"auto"`, `"direct"`, or `"on_demand"`) and script availability (`true`, `false`, or automatic when omitted/`null`). See [MCP with codemode](../guide/mcp.md#mcp-with-codemode) for their interaction and prerequisites. |
 | `openai_compatible` | Object with `provider_name`, `base_url`, and `default_model`, plus optional `requires_api_key` and `ca_bundle`. See [OpenAI-compatible endpoints](../guide/providers.md#openai-compatible-endpoints) for hosted and local examples. |
 | `protected_paths` | Array of path-pattern strings, replacing the default list rather than extending it. See the example below and [Protected paths](../guide/tools-and-safety.md#protected-paths) for limits. |

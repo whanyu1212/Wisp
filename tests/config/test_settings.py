@@ -32,6 +32,23 @@ def _write_settings(directory: Path, **values: object) -> None:
     (wisp_dir / "settings.json").write_text(json.dumps(values), encoding="utf-8")
 
 
+def test_codemode_presentation_is_user_only(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    _write_settings(Path.home(), codemode_presentation="codemode_only")
+    _write_settings(project, codemode_presentation="invalid", model="project-model")
+
+    config = WispConfig.from_env(project_dir=project, trusted=True)
+
+    assert config.codemode_presentation == "codemode_only"
+    assert config.model == "project-model"
+
+
+@pytest.mark.parametrize("model", [WispSettings, WispConfig])
+def test_invalid_codemode_presentation(model: type[WispSettings] | type[WispConfig]) -> None:
+    with pytest.raises(ValidationError, match="codemode_presentation"):
+        model.model_validate({"codemode_presentation": "invalid"})
+
+
 def test_codex_read_timeout_is_user_only_and_respects_precedence(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:

@@ -17,6 +17,7 @@ from pydantic import ValidationError
 from wisp import __version__
 from wisp.events import (
     AgentMode,
+    CodemodePresentation,
     CodemodeSetting,
     ImagePart,
     KnownWispEvent,
@@ -222,11 +223,19 @@ class RpcController:
         await self._transport.send(GetCodemodeCommand(id=selected_id))
         return selected_id
 
-    async def set_codemode(self, setting: CodemodeSetting, *, command_id: str | None = None) -> str:
+    async def set_codemode(
+        self,
+        setting: CodemodeSetting,
+        *,
+        presentation: CodemodePresentation | None = None,
+        command_id: str | None = None,
+    ) -> str:
         """Apply a codemode setting from the next run and save it as the user setting.
 
         Args:
             setting (CodemodeSetting): "automatic", "always" or "never".
+            presentation (CodemodePresentation | None): Presentation to select, or
+                None to keep the current selection.
             command_id (str | None): Optional identifier for matching the response.
 
         Returns:
@@ -234,7 +243,9 @@ class RpcController:
         """
 
         selected_id = command_id or self._command_id_factory("codemode")
-        await self._transport.send(SetCodemodeCommand(id=selected_id, setting=setting))
+        await self._transport.send(
+            SetCodemodeCommand(id=selected_id, setting=setting, presentation=presentation)
+        )
         return selected_id
 
     async def get_subagents(self, *, command_id: str | None = None) -> str:

@@ -88,6 +88,10 @@ switching to another session. Changing the default clears temporary grants. Star
 is not saved. These choices do not change project trust or protected paths. In the home folder or a
 folder above it, YOLO applies for the session only and the panel says so; Ask is still saved.
 
+Use `/codemode presentation codemode_only` or `/codemode presentation direct_and_codemode`
+to choose the model-facing tool presentation independently of availability. The picker shows
+both the saved choice and a direct-tool fallback when codemode cannot be offered.
+
 Use `/codemode` to choose when runs offer the [codemode](../mcp.md#mcp-with-codemode)
 tool: automatic (when a script may call one of a run's MCP tools), always, or never. `/codemode always`
 and the other settings apply one directly. The panel docks above the composer like
@@ -156,7 +160,7 @@ Adding or enabling a server needs confirmation; reconnecting clears per-tool ses
 /plan                                     switch to read-only planning mode
 /build                                    switch to normal build mode
 /permissions [ask|yolo]                   inspect or change the project permission default
-/codemode [automatic|always|never]        inspect or save when runs offer the codemode tool
+/codemode [automatic|always|never|presentation direct_and_codemode|codemode_only]  inspect or save availability and presentation
 /subagents [on|off|model <name>|model -]  inspect or save the subagents settings
 /history                                  search prompts submitted in this TUI run
 /theme [name]                             preview or select a curated color theme
