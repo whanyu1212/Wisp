@@ -244,7 +244,7 @@ class RpcMcpServerSnapshot(BaseModel):
     tool_names: tuple[str, ...] = ()
     # The tools among ``tool_names`` Wisp treats as read-only, in the same order:
     # those the server's `tool_safety` marked so when it last started. Only these
-    # can a codemode script, a subagent or plan mode call.
+    # can a subagent or plan mode call.
     read_only_tool_names: tuple[str, ...] = ()
     # The tools among ``tool_names`` the server itself says are read-only
     # (`readOnlyHint`) and its `tool_safety` leaves unset, in the same order. Wisp
@@ -484,8 +484,7 @@ class CodemodeState(BaseModel):
     # The setting `WISP_CODEMODE` gives, which outranks the saved one at startup.
     env_setting: CodemodeSetting | None = None
     # The MCP tools a run started now may use, and how many of them a script may
-    # call: those their server's `tool_safety` marks read-only, less any that a run
-    # sending its MCP tools directly cannot call by name.
+    # call: eligible tools, less any that direct exposure cannot call by name.
     mcp_tools: int = Field(ge=0)
     scriptable_mcp_tools: int = Field(ge=0)
 

@@ -56,7 +56,7 @@ from wisp.tools.base import ArgumentCheckedTool, Tool
 from wisp.tools.codemode.calls import CODEMODE, NestedCallResult, ResultLimits
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
-from wisp.tools.progress import ToolProgress
+from wisp.tools.progress import OutputProgress, ToolProgress
 from wisp.tools.result import ToolError, ToolResult
 from wisp.tools.subagent import SPAWN_AGENT
 from wisp.tools.summary import summarize_tool_result
@@ -195,6 +195,58 @@ class _ToolRunOutcome:
 _NESTED_CALL_HOSTS = frozenset({CODEMODE, SPAWN_AGENT})
 
 
+@dataclass(frozen=True, slots=True)
+class _NestedCallAudit:
+    """Bounded child records retained until the parent result is saved."""
+
+    calls: tuple[NestedToolCall, ...] = ()
+    omitted: int = 0
+
+
+@dataclass(slots=True)
+class _ScriptProgress:
+    """Combine child stream counters into the parent's cumulative progress."""
+
+    sink: ToolProgress
+    stdout_bytes: int = 0
+    stderr_bytes: int = 0
+    stdout_tail: str = ""
+    stderr_tail: str = ""
+
+    def report(self, progress: OutputProgress, stdout_added: int, stderr_added: int) -> None:
+        """Retain the newest growing stream tails and add each child's new bytes."""
+
+        self.stdout_bytes += stdout_added
+        self.stderr_bytes += stderr_added
+        if stdout_added:
+            self.stdout_tail = progress.stdout_tail
+        if stderr_added:
+            self.stderr_tail = progress.stderr_tail
+        self.sink.report(
+            OutputProgress(self.stdout_tail, self.stderr_tail, self.stdout_bytes, self.stderr_bytes)
+        )
+
+
+@dataclass(slots=True)
+class _ChildProgress:
+    """Translate one child's stream counters into deltas for its script."""
+
+    parent: _ScriptProgress
+    stdout_bytes: int = 0
+    stderr_bytes: int = 0
+
+    def report(self, progress: OutputProgress) -> None:
+        """Forward only bytes this child has not already contributed."""
+
+        stdout_bytes = max(self.stdout_bytes, progress.stdout_bytes)
+        stderr_bytes = max(self.stderr_bytes, progress.stderr_bytes)
+        self.parent.report(
+            progress, stdout_bytes - self.stdout_bytes, stderr_bytes - self.stderr_bytes
+        )
+        self.stdout_bytes = stdout_bytes
+        self.stderr_bytes = stderr_bytes
+
+
 @dataclass(slots=True)
 class _ScriptCallLog:
     """The calls one codemode script or subagent makes, in the order it made them.
@@ -203,8 +255,9 @@ class _ScriptCallLog:
     a result stays bounded however many calls its limits allow. When the script or
     subagent ends the log closes: a call still unfinished is recorded then, as one
     that was ended before it finished, and nothing a call does later is recorded
-    or published. Closing does not wait for tools to stop. The owner joins only
-    bounded approval cleanup before publishing its terminal event.
+    or published. Closing does not wait for tools to stop. The owner joins approval
+    and mutating-call cleanup before publishing its terminal event. Read-only tools
+    that ignore cancellation may finish later without affecting the closed log.
 
     A subagent's model responses are recorded here too, so its result accounts for
     them however the subagent ended.
@@ -217,6 +270,8 @@ class _ScriptCallLog:
     closed: bool = False
     model_usage: list[ModelResponseUsage] = field(default_factory=list)
     approvals: dict[anyio.CancelScope, anyio.Event] = field(default_factory=dict)
+    mutations: dict[anyio.CancelScope, anyio.Event] = field(default_factory=dict)
+    progress: _ScriptProgress | None = None
     _count: int = 0
     _recorded: dict[int, NestedToolCall] = field(default_factory=dict)
     _unfinished: dict[int, tuple[NestedToolCall, float]] = field(default_factory=dict)
@@ -260,10 +315,15 @@ class _ScriptCallLog:
             self._recorded[index] = call.model_copy(update={"duration_ms": duration_ms})
         self._unfinished.clear()
 
-    async def finish_approvals(self) -> None:
-        """Cancel owned approvals and join their bounded cleanup before the parent ends."""
+    async def finish_children(self) -> None:
+        """Cancel and join owned approvals and mutations before the parent ends.
 
-        pending = tuple(self.approvals.items())
+        A mutation must relinquish execution before another run may observe its
+        result. Unlike a read-only call, a tool ignoring cancellation can therefore
+        delay the parent's terminal event until its cleanup finishes.
+        """
+
+        pending = (*self.approvals.items(), *self.mutations.items())
         for scope, _ in pending:
             scope.cancel()
         with anyio.CancelScope(shield=True):
@@ -389,6 +449,9 @@ class ConfiguredToolExecutor:
         # returns one from here, and one that returned can still lose it when the
         # run is abandoned before it is published, so the spend is kept apart.
         self._unsaved_model_usage: dict[str, tuple[ModelResponseUsage, ...]] = {}
+        # Cancellation can replace a script's result with a synthetic interruption.
+        # Keep completed effects and unfinished children available to that repair.
+        self._unsaved_nested_calls: dict[str, _NestedCallAudit] = {}
 
     @property
     def mcp_catalog(self) -> McpCatalog | None:
@@ -448,6 +511,23 @@ class ConfiguredToolExecutor:
         if forget:
             return self._unsaved_model_usage.pop(call_id, ())
         return self._unsaved_model_usage.get(call_id, ())
+
+    def unsaved_nested_calls(self, call_id: str, *, forget: bool) -> _NestedCallAudit:
+        """Read a script's child audit for its normal result or interruption repair.
+
+        Args:
+            call_id (str): The parent script call.
+            forget (bool): Whether its result is now being saved, so a later call
+                reusing the same ID must not inherit this audit.
+
+        Returns:
+            _NestedCallAudit: Completed and interrupted child records, or an empty
+                audit when no script result is waiting to be saved.
+        """
+
+        if forget:
+            return self._unsaved_nested_calls.pop(call_id, _NestedCallAudit())
+        return self._unsaved_nested_calls.get(call_id, _NestedCallAudit())
 
     @staticmethod
     def nested_host_call_id() -> str | None:
@@ -630,9 +710,10 @@ class ConfiguredToolExecutor:
     ) -> NestedCallResult:
         """Run a script's child with its own approval, independently of the wrapper.
 
-        Script eligibility remains read-only. Unlike subagents, scripts can request
-        approval through the live event sink. A missing or failed sink never grants
-        execution. Cancellation clears the request before the child finishes.
+        Unlike subagents, scripts can call mutating tools and request approval
+        through the live event sink. A missing or failed sink never grants
+        execution. Cancellation clears the request and joins mutation cleanup
+        before the script's terminal event.
 
         Args:
             tool_call (ToolCall): The child call, with its own unique identity.
@@ -654,6 +735,10 @@ class ConfiguredToolExecutor:
         """Record a child around its policy checks, approval and execution."""
 
         log = _SCRIPT_CALLS.get()
+        if log is not None and log.closed:
+            return _nested_result(
+                _failure_outcome(log.ended_first, failure_code="policy_denied"), result_limits
+            )
         if log is None:
             return _nested_result(
                 await self._nested_outcome(tool_call, result_limits, origin=origin), result_limits
@@ -724,12 +809,11 @@ class ConfiguredToolExecutor:
         if isinstance(checked, _ToolRunOutcome):
             return replace(checked, is_error=True)
         tool, arguments, target = checked.tool, checked.arguments, checked.target
-        if tool.safety != "read":
+        if origin == "subagent" and tool.safety != "read":
             # Checked on the tool that runs, so no route, such as `mcp_call` naming a
             # command tool, reaches more than a read-only tool even under `--yes`.
             return _failure_outcome(
-                f"{tool.name} is not read-only; a script or a subagent can call only "
-                "read-only tools.",
+                f"{tool.name} is not read-only; a subagent can call only read-only tools.",
                 failure_code="policy_denied",
             )
         if self._approval_policy.requires_approval(tool) and not self._approval_policy.approves(
@@ -747,11 +831,23 @@ class ConfiguredToolExecutor:
                 return denied
         name = target or tool_call.name
         parallel_safe = (
-            self._registry.execution_metadata_for(name).parallel_safe
+            tool.safety == "read" and self._registry.execution_metadata_for(name).parallel_safe
             if self._registry is not None
             else False
         )
         context = self._context
+        log = _SCRIPT_CALLS.get()
+        if origin == "codemode":
+            # The parent's progress forwarder owns sequencing and delivery. Nested
+            # foreground commands cannot be moved through an invisible child id;
+            # explicit managed starts remain owned by the shared supervisor.
+            context = replace(
+                context,
+                progress=_ChildProgress(log.progress)
+                if log is not None and log.progress is not None
+                else None,
+                background_request=None,
+            )
         if result_limits is not None:
             # The tool caps its own output from the context too, so both steps get it.
             context = replace(
@@ -760,6 +856,12 @@ class ConfiguredToolExecutor:
                 max_output_lines=max(context.max_output_lines, result_limits.max_lines),
             )
         async with self._nested_parallel_limit if parallel_safe else self._nested_serial_lock:
+            if log is not None and log.closed:
+                return _failure_outcome(log.ended_first, failure_code="policy_denied")
+            if origin == "codemode" and tool.safety != "read" and log is not None:
+                return await self._run_codemode_mutation(
+                    tool, arguments, tool_call.call_id, name, context, log
+                )
             return await self._run_tool(
                 tool,
                 arguments,
@@ -768,6 +870,29 @@ class ConfiguredToolExecutor:
                 nested=True,
                 context=context,
             )
+
+    async def _run_codemode_mutation(
+        self,
+        tool: Tool,
+        arguments: dict[str, object],
+        call_id: str,
+        name: str,
+        context: ToolContext,
+        log: _ScriptCallLog,
+    ) -> _ToolRunOutcome:
+        """Own one mutation until cancellation and tool cleanup have completed."""
+
+        with anyio.CancelScope() as scope:
+            finished = anyio.Event()
+            log.mutations[scope] = finished
+            try:
+                return await self._run_tool(
+                    tool, arguments, call_id=call_id, tool_name=name, nested=True, context=context
+                )
+            finally:
+                finished.set()
+                log.mutations.pop(scope, None)
+        return _failure_outcome(log.ended_first, failure_code="policy_denied")
 
     async def _approve_codemode_call(
         self, tool_call: ToolCall, tool: Tool, target: str | None
@@ -935,7 +1060,11 @@ class ConfiguredToolExecutor:
                 # after it.
                 log.close()
                 _SCRIPT_CALLS.reset(token)
-                await log.finish_approvals()
+                await log.finish_children()
+                if tool_call.name == CODEMODE:
+                    self._unsaved_nested_calls[tool_call.call_id] = _NestedCallAudit(
+                        calls=log.calls(), omitted=log.omitted
+                    )
                 if log.model_usage:
                     self._unsaved_model_usage[tool_call.call_id] = tuple(log.model_usage)
             outcome = replace(
@@ -991,9 +1120,9 @@ class ConfiguredToolExecutor:
     ) -> _ToolRunOutcome:
         """Run ``tool`` and normalize its result.
 
-        A ``nested`` call, one a codemode script or a subagent made, reports no
-        progress of its own and stores no images, since only its text reaches the
-        script or subagent; a result that had an image says it was left out. It may
+        A ``nested`` call, one a codemode script or a subagent made, stores no
+        images, since only its text reaches the script or subagent; a result that
+        had an image says it was left out. It may
         run in its own ``context``, whose output limits then bound its result.
         """
 
@@ -1146,6 +1275,9 @@ class ConfiguredToolExecutor:
                 return await tool.run(arguments, context)
 
             async def run(progress: ToolProgress) -> ToolResult:
+                log = _SCRIPT_CALLS.get()
+                if tool_name == CODEMODE and log is not None:
+                    log.progress = _ScriptProgress(progress)
                 return await tool.run(arguments, replace(context, progress=progress))
 
             return await run_with_progress(sink, call_id=call_id, name=tool_name, run=run)

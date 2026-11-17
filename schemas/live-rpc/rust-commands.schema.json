@@ -1423,7 +1423,7 @@
     },
     "MarkMcpToolsReadOnlyCommand": {
       "additionalProperties": false,
-      "description": "Mark tools read-only in an MCP server's user settings, then restart MCP servers.\n\nMarking a tool read-only lets codemode scripts, subagents and plan mode call it,\nand lets it run without approval, so it is the user's decision. ``tool_names``\nare the tools the user was shown and confirmed, from the server's\n``read_only_hint_tool_names`` in the ``rpc.mcp`` status. Nothing is saved unless\nevery one is still hinted by the running server, none already has a\n`tool_safety` entry, and the server's saved settings are still the ones it was\nstarted with.",
+      "description": "Mark tools read-only in an MCP server's user settings, then restart MCP servers.\n\nMarking a tool read-only lets subagents and plan mode call it,\nand lets it run without approval, so it is the user's decision. ``tool_names``\nare the tools the user was shown and confirmed, from the server's\n``read_only_hint_tool_names`` in the ``rpc.mcp`` status. Nothing is saved unless\nevery one is still hinted by the running server, none already has a\n`tool_safety` entry, and the server's saved settings are still the ones it was\nstarted with.",
       "properties": {
         "id": {
           "anyOf": [

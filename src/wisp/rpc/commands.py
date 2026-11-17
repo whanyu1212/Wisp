@@ -428,7 +428,7 @@ class SetMcpServerEnabledCommand(RpcCommandModel):
 class MarkMcpToolsReadOnlyCommand(RpcCommandModel):
     """Mark tools read-only in an MCP server's user settings, then restart MCP servers.
 
-    Marking a tool read-only lets codemode scripts, subagents and plan mode call it,
+    Marking a tool read-only lets subagents and plan mode call it,
     and lets it run without approval, so it is the user's decision. ``tool_names``
     are the tools the user was shown and confirmed, from the server's
     ``read_only_hint_tool_names`` in the ``rpc.mcp`` status. Nothing is saved unless

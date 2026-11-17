@@ -96,8 +96,8 @@ class ToolResultPresentationSnapshot(BaseModel):
     edit_locations: tuple[EditLocation, ...] | None = Field(
         default=None, min_length=1, max_length=MAX_EDIT_LOCATIONS
     )
-    # The calls a codemode script made, so a session records what each script read
-    # and called; absent for other tools and for results recorded before they were kept.
+    # The calls a codemode script made, so a session records what each script called;
+    # absent for other tools and for results recorded before they were kept.
     nested_calls: tuple[NestedToolCall, ...] | None = Field(
         default=None, min_length=1, max_length=MAX_NESTED_CALLS
     )

@@ -1,6 +1,6 @@
 ---
 title: MCP servers & codemode
-description: Connect and authenticate MCP servers, control tool discovery and approvals, and use codemode to batch read-only calls without flooding model context.
+description: Connect and authenticate MCP servers, control tool discovery and approvals, and use codemode to orchestrate tool workflows with per-call approvals.
 route: guide/mcp.html
 section: using
 order: 8
@@ -13,7 +13,7 @@ navTitle: MCP & codemode
 # MCP servers & codemode
 
 MCP connects Wisp to external tools. **Discovery** decides which tool definitions the model sees;
-**codemode** lets it orchestrate read-only calls in a sandboxed Python script. Neither changes
+**codemode** lets it orchestrate tool workflows in a sandboxed Python script. Neither changes
 what a server is allowed to do or grants extra permissions.
 
 Start by [adding a server](#add-a-server), then choose [direct or on-demand discovery](#finding-mcp-tools-on-demand).
@@ -130,7 +130,7 @@ tool name exactly.
 shows Wisp's full names, `mcp__<server>__<tool>`; `tool_safety` takes the part after the second
 `__`. Wisp rewrites some names with a hash (too long, characters providers reject, or a leading
 `_`); for those, use the server's own name. Changes apply when the server reconnects (`c` in
-`/mcp`). `/codemode` can count fewer tools than `/mcp` shows as read-only: its count is for the
+`/mcp`). `/codemode` counts the MCP tools a script can call in the
 next run, after tool selection, policy and plan mode, and a run that sends its MCP tools directly
 can call from a script only tools whose names and parameters are Python identifiers.
 
@@ -350,7 +350,7 @@ This adds [monty](https://github.com/pydantic/monty), the sandbox scripts run in
 installation. A plain `wisp-ai` install does not include it. For source development, use
 `uv sync --extra codemode` instead. No server is installed or granted permissions by adding the extra.
 
-The following table assumes the extra is installed and the run has eligible read-only tools:
+The following table assumes the extra is installed and the run has eligible tools:
 
 | `mcp_tool_exposure` | `codemode` omitted or `null` (automatic) | `codemode: true` | `codemode: false` |
 |---|---|---|---|
@@ -358,12 +358,11 @@ The following table assumes the extra is installed and the run has eligible read
 | `on_demand` | Offered when this run's on-demand MCP catalog has a tool a script may call | Offered | Not offered |
 | `direct` | Offered when one of this run's MCP tools is one a script may call by name | Offered | Not offered |
 
-A script may call an MCP tool only when its server's `tool_safety` marks it `"read"`; every other
-MCP tool is treated as a command. Sent directly, a tool must also be callable by its name: its
-name and parameters must be Python identifiers. In automatic mode the built-in read tools are not
-enough: a run with no MCP tool a script may call leaves codemode out, since the evals measured its
-gains on MCP work and none on the built-in tools alone. Mark the read-only tools in [`tool_safety`](#settings-and-tool-safety) to get it, or set
-`codemode: true` to script the built-in tools alone.
+A script may call eligible MCP tools with `read`, `mutating`, or `command` safety. Each child
+call follows its normal approval policy, tool selection, plan-mode restrictions, and protected-path
+checks. Sent directly, a tool must also be callable by its name: its name and parameters must be
+Python identifiers. Automatic mode requires at least one eligible MCP tool; command and mutating
+tools count too. Set `codemode: true` to script the eligible built-in tools without an MCP server.
 
 Both settings are user-only. `WISP_MCP_TOOL_EXPOSURE` and `WISP_CODEMODE` override their settings-file
 values at startup. In the TUI, `/codemode` shows the setting, extra availability, whether the
@@ -374,18 +373,17 @@ after each prompt. Choose automatic, always, or never there. `/codemode always` 
 already running. RPC/SDK clients use `get_codemode` and `set_codemode` for the same information.
 
 **Offered does not mean used.** The model chooses whether to call codemode. A single lookup often
-needs no script; fan-out queries, dependent lookups, and filtering large answers benefit more.
-On-demand discovery with codemode was the cheapest setup measured on Wisp's orchestration evals;
-those task-specific results are not a promise that every workload will be cheaper or faster.
+needs no script; a script can combine dependent lookups, calculations, edits, and tests.
 
-### Make only verified read tools scriptable
+### Classify MCP tools accurately
 
 MCP tools default to `command` safety, even if their names sound read-only or the server advertises
 read-only annotations. Codemode does not infer safety; `h` in `/mcp` only copies a hint into
 `tool_safety` once you confirm it. Inspect the server's implementation and
-contract before setting `tool_safety` for individual remote tool names; do not mark an entire
-write-capable catalog read-only just to enable scripts. A `read` classification also permits calls
-without the ordinary command approval, so it is a security decision, not a performance switch.
+contract before setting `tool_safety` for individual remote tool names. Command and mutating
+tools can be scripted under their usual policy; they need no read-only classification. A `read`
+classification permits calls without the ordinary command approval, so it is a security decision,
+not a performance switch.
 
 For example, suppose you operate a server named `inventory` at the placeholder endpoint below. It
 has a verified read-only remote tool `get_item(item_id: string)` returning JSON text with `id` and
@@ -415,7 +413,7 @@ codemode to avoid bringing full records into the conversation.” The model can:
 
 1. Use `mcp_search` to find the inventory tool and `mcp_describe` to inspect its parameters.
 2. Call codemode with a script using the full discovered tool name as an async function.
-3. Return the filtered answer; make any requested write as a separate normal tool call.
+3. Return the filtered answer, or continue with an authorized write in the same script.
 
 For the hypothetical tool above, this is the script body passed in codemode's `code` argument,
 not a command to paste into your shell. Both calls return text; `json.loads` is appropriate only
@@ -450,7 +448,8 @@ failed call's `RuntimeError` in place of its result (`isinstance(outcome, Runtim
 them apart). It hands back only failed tool calls, recognised by their message
 `<tool> failed: …` naming one of the run's tools; a bug in the script, or reaching a limit, still
 ends it. Scripts may also call
-the run's read-only local tools, but only through their provided functions, not by opening files.
+the run's eligible local tools, including `read`, `edit`, `write`, and `bash`, but only through
+their provided functions, not by opening files directly.
 
 An MCP tool that declares an output schema returns its structured result to a script instead of
 text: a dict typed from the schema, so a script that reads a field the schema lacks fails its type
@@ -460,16 +459,52 @@ field, which the MCP Python SDK writes for a tool returning a plain value, retur
 one wrapping a string keeps returning text. A call whose structured result is missing, not JSON,
 or over 512 KiB fails like any failed call. Direct calls and subagents still read the text.
 
-With on-demand discovery, read-only catalog tools need not appear in codemode's description to be
+With on-demand discovery, eligible catalog tools need not appear in codemode's description to be
 callable by full name. The name and all parameter names must be Python identifiers and not keywords.
 For other schemas, use the provided `mcp_call(name=..., arguments=...)` function in the script;
-its resolved target must still be read-only. Inspect the actual schema rather than assuming every
-MCP tool returns JSON or has Python-compatible parameters.
+its resolved target passes the same per-call policy and approval checks. Inspect the actual schema
+rather than assuming every MCP tool returns JSON or has Python-compatible parameters.
+
+### Inspect, calculate, edit, and test
+
+For a local workflow, enable `codemode: true` and select the needed built-in tools. Suppose an
+existing `settings.py` contains the unique line `RETRY_SECONDS = 2`, and you want to double it and
+run its focused tests. First inspect it in one script:
+
+```python
+print(await read(path="settings.py"))
+```
+
+After confirming the current contents, the next script can calculate the replacement, edit it,
+write a short note, and run the tests:
+
+```python
+retry_seconds = 2 * 2
+print(await edit(path="settings.py", edits=[{
+    "oldText": "RETRY_SECONDS = 2",
+    "newText": "RETRY_SECONDS = " + str(retry_seconds),
+}]))
+print(await write(path="retry-note.txt", content="Retry interval: " + str(retry_seconds) + " seconds\n"))
+print(await bash(operation="run", command="uv run pytest tests/test_settings.py"))
+```
+
+The example assumes that test file exists. Each edit, write, and shell call follows its own normal
+policy and may need approval. If the test fails, the file changes remain; inspect the failure
+before choosing the next step.
+
+### Shell process lifetimes
+
+A foreground `bash(operation="run", command=...)` child belongs to the script. Its child call ID
+cannot be used to move it into the background. To keep work running independently, explicitly use
+`bash(operation="start", command=...)`, then use the returned process ID with
+`bash(operation="poll", process_id=...)` or `bash(operation="cancel", process_id=...)`.
+These operations use the session's shared process supervisor. Processes started this way persist
+after the script ends by design; use `/processes` to inspect or stop them.
 
 ### Finding tools for scripts
 
 When codemode is offered, `tool_search` and `tool_describe` provide one catalog of callable
-read-only built-ins and MCP tools. Search by words in a name, namespace, or description; an
+built-ins and MCP tools. Search by words in a name, namespace, or description; an
 empty `query` lists the catalog. Results include exact callable names, namespaces, connection
 state, and whether confirmation is required. Use `offset` with the returned `next_offset` to
 continue; `limit` defaults to 8 and permits at most 20 results.
@@ -481,7 +516,7 @@ are explicitly marked in `omitted_fields`. Follow the supplied `schema_path` (a 
 such as `/input_schema/properties/path`) to inspect a subtree. Oversized objects and arrays
 return paged child paths; oversized indivisible values report their size and remain omitted.
 
-Listing a tool does not approve it. Selection, read-only restrictions, protected paths, and
+Listing a tool does not approve it. Selection, plan-mode restrictions, protected paths, and
 confirmation checks still apply when it executes. Use the returned `callable_name`: entries
 with `invocation: "function"` support direct keyword calls. In on-demand MCP mode, tools with
 non-Python names or parameters use `invocation: "mcp_call"`; pass the discovered target name
@@ -521,16 +556,19 @@ to 64 KiB and the complete store to 256 KiB, measured as compact UTF-8 JSON incl
 Values may nest at most 32 containers. Only JSON values with string object keys and finite
 numbers are accepted. Delete keys to reclaim space; a single over-limit write is rejected.
 These are active-state limits, not a bound on append-only session history: older snapshots
-remain in the audit log. State storage does not enable filesystem writes or mutating tool calls.
+remain in the audit log. This transaction covers only `store` and `delete`: filesystem writes,
+MCP mutations, and shell effects are never rolled back when a script fails. Do not blindly retry a
+failed script; inspect which calls completed and the current external state first. Wisp disables
+automatic overflow replay for codemode so it cannot repeat these effects.
 
 ### Why a script cannot call a tool
 
 | Symptom | Check or next step |
 |---|---|
-| Codemode is missing | Check the installed extra, `/codemode`, and environment overrides. Automatic mode does not offer it when no MCP tool is marked `"read"` in `tool_safety`, or, with tools sent directly, when none of those has a name and parameters that are Python identifiers. |
-| A tool is missing or not read-only | Check tool selection, plan mode, the exact `tool_safety` remote name, and reconnect after changes. Otherwise call it normally; do not loosen safety just to make the script work. |
-| A write or command call is refused | Expected: scripts cannot call non-read tools, even under YOLO, `--yes`, a session grant, or through `mcp_call`. Use a normal direct call or top-level `mcp_call`, under its usual approval policy. |
-| A read tool requires confirmation | The TUI or RPC/SDK client receives an approval for that child call. Child prompts are serialized. Without a live approval channel, the call fails; call the tool directly instead. |
+| Codemode is missing | Check the installed extra, `/codemode`, and environment overrides. Automatic mode requires an eligible MCP tool; command and mutating tools count too. With tools sent directly, at least one needs a name and parameters that are Python identifiers. Set `codemode: true` for local-only workflows. |
+| A tool is missing | Check tool selection, plan mode, and the tool schema, and reconnect MCP servers after changes. Do not loosen safety just to make the script work. |
+| A write or command call is refused | Check the child call's policy, plan mode, protected paths, and approval outcome. Allowing codemode does not approve its children. Subagents remain read-only. |
+| A child tool requires confirmation | The TUI or RPC/SDK client receives an approval for that child call. Child prompts are serialized. Without a live approval channel, the call fails; call the tool directly instead. |
 | Script type-check fails | Describe the tool and correct its name, parameter types, and keyword arguments. Scripts are checked before any calls run. |
 | A server fails or needs sign-in | Fix the server connection or authentication, not codemode. See [MCP troubleshooting](#troubleshooting). |
 
@@ -559,12 +597,12 @@ image artifacts are not yet supported by codemode.
 
 Codemode's safety, audit, and resource limits apply regardless of discovery mode:
 
-- **Only read-only tools.** A script can call the read-only tools the run already offers: `read`,
-  `ls`, `grep`, `find`, and MCP tools whose `tool_safety` you set to `"read"`. Tool selection and
-  plan mode apply as for direct calls. When [MCP tools are found on demand](#finding-mcp-tools-on-demand),
-  a script can also call a read-only tool `mcp_search` finds by its full name, when that name and
-  its parameters are Python identifiers, without the codemode description listing them. Other
-  tools stay reachable through `mcp_call`.
+- **Eligible tools under normal policy.** A script can call the run's selected tools, including
+  `read`, `edit`, `write`, `bash`, and MCP tools with any safety classification. Tool selection,
+  plan mode, protected paths, and approvals apply as for direct calls. On-demand MCP catalog tools
+  can be called by full name when their names and parameters are Python identifiers; other schemas
+  use `mcp_call`. Scripts cannot call `codemode` recursively or invoke `spawn_agent`. Subagents
+  remain read-only.
 - **Each call is checked on its own.** Every call a script makes passes the same checks as a direct
   call. A child that needs approval opens its own prompt through the live event channel. Only one
   child approval is pending at a time; denial reaches the script as a catchable error. With no live
@@ -577,16 +615,20 @@ Codemode's safety, audit, and resource limits apply regardless of discovery mode
   list. While the script runs, RPC and SDK clients and `--mode json` also receive transient
   `tool.nested.started` and `tool.nested.ended` events, on a best-effort basis. The model still
   reads only what the script prints and returns. A run cancelled while a script is running
-  records that script as interrupted, with no calls listed; its live events are then the only
-  trace. The terminal UI shows each script as one card that lists these calls when opened, and
-  a script's optional `title` names it there.
+  records that script as interrupted and saves its bounded child-call audit: completed calls
+  retain their outcomes, and unfinished calls are marked interrupted. These records survive
+  session resume. The terminal UI shows each script as one card that lists these calls when opened, and
+  a script's optional `title` names it there. Foreground shell progress is aggregated on that parent
+  codemode card, while each child's start and end remain separate audit events.
 - **A sandbox, not a shell.** Scripts run in a separate process with no files, network, environment
   or third-party packages, in a subset of Python. They are type-checked against the tools'
   declarations before anything runs.
 - **Limits.** 200 tool calls, 2 minutes, 10 seconds of the script's own computing, 128 MiB and
   1 MiB of combined printed and final-value output per script. A script that reaches one fails with the limit named. A
-  script cannot start another script, and cancelling a run kills it along with the calls it has
-  running.
+  script cannot start another script, and cancelling a run kills it along with its active
+  foreground calls. Explicitly started background processes have a separate lifecycle; see
+  [Shell process lifetimes](#shell-process-lifetimes). Returning after a cancellation or time limit
+  can take longer while a mutation or foreground process finishes its cleanup.
 
 ## Troubleshooting
 

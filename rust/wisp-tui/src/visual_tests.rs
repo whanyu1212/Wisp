@@ -2052,6 +2052,11 @@ fn script_card(events: &[serde_json::Value], open: bool, width: u16) -> ratatui:
             BackendEvent::ToolResult(result) => {
                 ui.state.transcript.observe_tool_result(*result);
             }
+            BackendEvent::ToolExecutionProgress { call_id, progress } => {
+                ui.state
+                    .transcript
+                    .observe_tool_progress(&call_id, &progress);
+            }
             BackendEvent::ScriptCallStarted {
                 parent_call_id,
                 call_id,
@@ -2116,6 +2121,57 @@ fn script_tallies_calls_while_running() {
         "{row:?}"
     );
     assert!(!screen_text(&buffer).contains("import asyncio"));
+}
+
+#[test]
+fn script_shows_live_shell_output() {
+    let mut events = vec![
+        script_call(Some("test")),
+        json!({"type": "tool.nested.started", "parent_call_id": "script-1", "call_id": "n1",
+               "name": "bash", "arguments": {"command": "pytest"}}),
+        json!({"type": "tool.execution.progress", "call_id": "script-1", "name": "codemode",
+               "sequence": 1, "stdout_tail": "collecting tests\nchecks passed\n",
+               "stderr_tail": "warning summary\n", "stdout_bytes": 31, "stderr_bytes": 16}),
+    ];
+    for width in [40, 100] {
+        let collapsed = screen_text(&script_card(&events, false, width));
+        // At a narrow width the action may truncate before its live suffix.
+        if width == 100 {
+            assert!(collapsed.contains("checks passed"), "{collapsed}");
+        }
+        let opened = screen_text(&script_card(&events, true, width));
+        for expected in [
+            "collecting tests",
+            "checks passed",
+            "warning summary",
+            "pytest",
+        ] {
+            assert!(opened.contains(expected), "{width}: {expected}: {opened}");
+        }
+    }
+
+    let output = (0..12)
+        .map(|line| format!("step {line}\n"))
+        .collect::<String>();
+    events.push(
+        json!({"type": "tool.execution.progress", "call_id": "script-1", "name": "codemode",
+        "sequence": 2, "stdout_tail": output, "stderr_tail": "",
+        "stdout_bytes": output.len(), "stderr_bytes": 16}),
+    );
+    for width in [40, 100] {
+        let opened = screen_text(&script_card(&events, true, width));
+        assert!(opened.contains("Earlier output omitted"), "{opened}");
+        assert!(opened.contains("step 11"), "{opened}");
+        assert!(!opened.contains("step 0"), "{opened}");
+    }
+
+    events.push(finished_script("final answer", false));
+    for width in [40, 100] {
+        let completed = screen_text(&script_card(&events, true, width));
+        assert!(completed.contains("Returned final answer"), "{completed}");
+        assert!(!completed.contains("checks passed"), "{completed}");
+        assert!(!completed.contains("warning summary"), "{completed}");
+    }
 }
 
 #[test]

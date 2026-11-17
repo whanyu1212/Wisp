@@ -118,9 +118,8 @@ def test_missing_channel_denies(origin: str) -> None:
     assert tools.lookup.calls == []
 
 
-@pytest.mark.parametrize("origin", ["codemode", "subagent"])
 @pytest.mark.parametrize("proxy", [True, False])
-def test_mutations_still_denied(origin: str, proxy: bool) -> None:
+def test_subagent_mutations_denied(proxy: bool) -> None:
     tools = _Tools()
     executor = ConfiguredToolExecutor(
         registry=_proxied_registry(tools),
@@ -131,8 +130,7 @@ def test_mutations_still_denied(origin: str, proxy: bool) -> None:
     )
 
     async def run() -> None:
-        caller = executor.run_codemode if origin == "codemode" else executor.run_nested
-        result = await caller(
+        result = await executor.run_nested(
             ToolCall(
                 call_id="child",
                 name=MCP_CALL if proxy else tools.drop.name,
@@ -145,6 +143,48 @@ def test_mutations_still_denied(origin: str, proxy: bool) -> None:
 
     anyio.run(run)
     assert tools.drop.calls == []
+
+
+@pytest.mark.parametrize("approved", [True, False], ids=["approve", "deny"])
+@pytest.mark.parametrize("proxy", [True, False], ids=["proxy", "direct"])
+def test_mutations_have_own_approval(approved: bool, proxy: bool) -> None:
+    tools = _Tools()
+    policy = RpcToolApprovalPolicy(ToolApprovalPolicy.require_approval())
+    events: list[WispEvent] = []
+
+    async def live(event: WispEvent) -> None:
+        events.append(event)
+        if isinstance(event, ToolApprovalRequested):
+            assert not tools.drop.calls
+            policy.resolve_approval(call_id=event.call_id, approved=approved)
+
+    executor = ConfiguredToolExecutor(
+        registry=_proxied_registry(tools),
+        context=ToolContext(cwd=Path.cwd()),
+        policy=ToolPolicy.allow_all_tools(),
+        approval_policy=policy,
+        mcp_catalog=McpCatalog.from_tools([tools.query, tools.drop], connected=lambda _: True),
+        progress_sink=live,
+    )
+
+    async def run() -> None:
+        result = await executor.run_codemode(
+            ToolCall(
+                call_id="child",
+                name=MCP_CALL if proxy else tools.drop.name,
+                arguments={"name": tools.drop.name, "arguments": {"table": "a"}}
+                if proxy
+                else {"table": "a"},
+            )
+        )
+        assert result.is_error is not approved
+
+    anyio.run(run)
+    requested, resolved = events
+    assert isinstance(requested, ToolApprovalRequested)
+    assert requested.target == (tools.drop.name if proxy else None)
+    assert isinstance(resolved, ToolApprovalResolved) and resolved.approved is approved
+    assert tools.drop.calls == ([{"table": "a"}] if approved else [])
 
 
 @pytest.mark.parametrize("stage", ["request", "waiting", "resolved"])

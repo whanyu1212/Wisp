@@ -399,3 +399,33 @@ objective inventory lookup. Use `--tasks unified-tool-discovery --codemode pytho
 [The report](reports/2026-11-17-hy550.md) separates this capability probe from fresh
 off/current/candidate comparisons. Ordinary tasks retained their correctness but used legacy
 discovery and incurred additional schema cost; this is not an efficiency win.
+
+### Complete-workflow contract checks (HY-552)
+
+The deterministic layer now exercises real file and shell tools through codemode,
+with a scripted provider and controlled MCP approvals. Run:
+
+```bash
+uv run pytest tests/coding/test_codemode_workflows.py \
+  tests/coding/test_codemode_execution.py tests/coding/test_codemode_approvals.py \
+  tests/coding/test_overflow_retry.py tests/docs/test_mcp_guide.py --durations=10
+```
+
+Acceptance is exact behavior: inspect → calculate → edit → write → shell verification;
+read → decide → approve or deny a direct/proxied MCP action; serialized mutations;
+protected-path and selection enforcement; and unchanged read-only subagents. A failed
+script must retain completed external effects while discarding script-state writes.
+Overflow recovery must not replay a script after a mutation. Cancellation must join
+foreground process cleanup; explicit managed starts must remain session-owned until
+stopped or the session shuts down. Parent progress must retain monotonic counters
+across sequential and overlapping children, with per-child audit records intact.
+Both user and caller cancellation must persist completed and interrupted child
+records while discarding staged script state. The two new workflow test files ran
+26 cases in 6.33 seconds locally on 2026-11-17; this is incremental test cost, not
+a production latency measurement.
+
+These are offline capability and safety checks, not evidence of model adoption,
+token savings, latency improvements, or parity with Pi. No live model comparison
+was run for this slice. Presentation modes and default rollout decisions still need
+their separate controlled comparisons. Process tests need normal OS process access;
+a sandbox that blocks `ps` cannot verify process-tree cleanup.

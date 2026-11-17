@@ -477,33 +477,44 @@ def codemode_available() -> bool:
     return importlib.util.find_spec("pydantic_monty") is not None
 
 
-def _with_unsaved_subagent_usage(
+def _with_unsaved_tool_details(
     event: AgentHarnessEvent, executor: ConfiguredToolExecutor
 ) -> AgentHarnessEvent:
-    """Give a `spawn_agent` call's result what its subagents spent, when it lacks it.
+    """Restore child audit and usage when the loop synthesizes an interrupted result.
 
     A call that returned carries its own usage. The loop settles a cancelled call
     with a result of its own making, which knows nothing of the model responses
-    the call's subagents had completed; adding them here puts them in the saved
-    result, where session usage and cost are counted.
+    the call's subagents had completed or the script's child calls. Adding them here
+    preserves both usage accounting and the audit of effects already performed.
 
     Args:
         event (AgentHarnessEvent): An event from the run's loop.
         executor (ConfiguredToolExecutor): The run's executor, which keeps each
-            call's spend until its result is saved.
+            call's audit and spend until its result is saved.
 
     Returns:
-        AgentHarnessEvent: The event, with the spend when it is the terminal or the
-        result of a call that has none. The result comes second, and with it the
-        executor forgets the call: its spend is saved, one way or the other.
+        AgentHarnessEvent: The terminal or result with missing details restored.
+            The result comes second and consumes the executor's retained details.
     """
 
     if not isinstance(event, ToolExecutionEnded | ToolResultReady):
         return event
-    spent = executor.unsaved_model_usage(event.call_id, forget=isinstance(event, ToolResultReady))
-    if event.model_usage or not spent:
-        return event
-    return event.model_copy(update={"model_usage": spent})
+    forget = isinstance(event, ToolResultReady)
+    spent = executor.unsaved_model_usage(event.call_id, forget=forget)
+    audit = executor.unsaved_nested_calls(event.call_id, forget=forget)
+    updates: dict[str, object] = {}
+    if not event.model_usage and spent:
+        updates["model_usage"] = spent
+    if not event.nested_calls and (audit.calls or audit.omitted):
+        updates["nested_calls"] = audit.calls
+        updates["nested_calls_omitted"] = audit.omitted
+    if event.name == CODEMODE and event.process_state == "cancelled":
+        updates["retryable"] = False
+        updates["recovery_hint"] = (
+            "Inspect completed child calls and external effects before continuing; "
+            "script cancellation does not roll them back."
+        )
+    return event.model_copy(update=updates) if updates else event
 
 
 @dataclass(frozen=True, slots=True)
@@ -582,7 +593,7 @@ class CodingSession:
         self.events = events
         self.tool_registry = tool_registry
         self.mcp_tool_exposure: McpToolExposure = mcp_tool_exposure
-        # Offer the experimental codemode tool, which scripts the run's read-only
+        # Offer the experimental codemode tool, which scripts the run's permitted
         # tools: always, never, or (None) whenever the run finds MCP tools on demand.
         self.codemode = codemode
         # Offer `spawn_agent`, which hands a read-only task to a subagent.
@@ -1738,7 +1749,7 @@ class CodingSession:
             async for event in harness_events:
                 for compaction_event in compaction.take_events():
                     yield compaction_event
-                event = _with_unsaved_subagent_usage(event, executor)
+                event = _with_unsaved_tool_details(event, executor)
                 loop.observe(event, compaction=compaction, tool_is_unsafe=self._tool_is_unsafe)
                 for published in self._persist_loop_event(
                     event,
@@ -2347,9 +2358,8 @@ class CodingSession:
         """Count the MCP tools a run started now may use and those a script may call.
 
         The tools are worked out as a run would work them out, after mode, policy
-        and MCP exposure, without starting one. A script may call an MCP tool only
-        when its server's `tool_safety` marks it read-only. Sent directly, the tool
-        must also be callable by its name; found on demand, `mcp_call` reaches one
+        and MCP exposure, without starting one. Sent directly, the tool must be
+        callable by its name; found on demand, `mcp_call` reaches one
         whose name Python does not accept.
 
         Returns:
@@ -2369,10 +2379,7 @@ class CodingSession:
         ).entries
         _, found_on_demand = self._apply_mcp_exposure(tools, registry)
         scriptable = sum(
-            1
-            for entry in mcp_tools
-            if entry.tool.safety == "read"
-            and (found_on_demand is not None or callable_by_name(entry.tool))
+            1 for entry in mcp_tools if found_on_demand is not None or callable_by_name(entry.tool)
         )
         return scriptable, len(mcp_tools)
 
@@ -2387,9 +2394,9 @@ class CodingSession:
     ) -> CodemodeTool | None:
         """Register the codemode tool for one run, when the session offers it.
 
-        A script may call the read-only tools among ``offered``: what this run
+        A script may call the tools among ``offered``: what this run
         already allows after selection, policy, plan mode and MCP exposure. With
-        on-demand exposure it may also call the read-only tools in ``catalog`` by
+        on-demand exposure it may also call the tools in ``catalog`` by
         name, the same tools `mcp_call` reaches. Their calls run through
         ``executor``, built after this tool and so looked up when a script calls.
 
@@ -2406,14 +2413,14 @@ class CodingSession:
         Unset (``self.codemode`` None), codemode is offered only when a script may
         call at least one of the run's MCP tools, found on demand or sent directly:
         the evals measured its gains on MCP work, and found none on built-in tools
-        alone. An MCP tool is read-only only where its server's `tool_safety` says
-        so, and one sent directly must be callable by its name, so a run whose MCP
-        tools are none of these would have every script call to them refused.
+        alone. A tool sent directly must be callable by its name. Each child call
+        uses the same policy and approvals as a direct call; registering the script
+        grants no permission to its children.
 
         Returns:
             CodemodeTool | None: The registered tool, or None when codemode is off,
             or automatic and a script could call none of the run's MCP tools, when
-            the run has no registry, or when no read-only tool is offered.
+            the run has no registry, or when no eligible tool is offered.
         """
 
         automatic = self.codemode is None
@@ -2433,7 +2440,7 @@ class CodingSession:
             tool
             for spec in offered
             if spec.name in registered
-            and (tool := registry.get(spec.name)).safety == "read"
+            and (tool := registry.get(spec.name)).name not in (CODEMODE, SPAWN_AGENT)
             and (
                 allowed.allows(tool) or (catalog is not None and tool.name in DISCOVERY_TOOL_NAMES)
             )
@@ -2441,7 +2448,7 @@ class CodingSession:
         discoverable = [
             entry.tool
             for entry in (catalog.entries if catalog is not None else ())
-            if entry.tool.safety == "read" and allowed.allows(entry.tool)
+            if allowed.allows(entry.tool)
         ]
         scriptable_mcp = discoverable or [
             tool
@@ -2482,7 +2489,7 @@ class CodingSession:
     def _codemode_discovery_tools(
         self, registry: ToolRegistry, tools: Sequence[Tool], *, mcp_discovery: bool
     ) -> tuple[Tool, ...]:
-        """Register catalog readers for this run's already permitted read-only tools.
+        """Register catalog readers for this run's already permitted tools.
 
         Existing tools with either reader name take precedence. Discovery describes
         confirmation requirements but never updates approvals or target policy.
@@ -3599,7 +3606,9 @@ class CodingSession:
     def _tool_is_unsafe(self, name: str) -> bool:
         """Return whether a replayed tool turn could repeat side effects on recovery."""
 
-        if self.tool_registry is None:
+        # A script may have performed a mutation before failing or overflowing.
+        # Its wrapper safety controls approval, not whether replay is safe.
+        if name == CODEMODE or self.tool_registry is None:
             return True
         try:
             return self.tool_registry.get(name).safety != "read"
@@ -3608,12 +3617,11 @@ class CodingSession:
             # session's: they read the catalog, and `mcp_call` never runs anything
             # itself (a proxied call that ran a tool is judged by its `target`). A
             # registered tool that shares their name is judged above by its safety.
-            # The codemode tool is the same: a script reaches only read-only tools.
-            # So is `spawn_agent`, whose subagent does too.
+            # `spawn_agent` also reaches only read-only tools.
             return (
                 name not in DISCOVERY_TOOL_NAMES
                 and name not in CODEMODE_DISCOVERY_NAMES
-                and name not in (CODEMODE, SPAWN_AGENT)
+                and name != SPAWN_AGENT
             )
 
     def _effective_tools(self, registry: ToolRegistry | None = None) -> tuple[ToolSpec, ...]:
@@ -4010,6 +4018,8 @@ class CodingSession:
                 A repaired `spawn_agent` call takes from it what its subagents
                 spent, whether the call was cut off or had returned a result the
                 run never published, so the spend stays in the session's totals.
+                A repaired script also retains its completed and interrupted child
+                records, including effects already performed before cancellation.
                 Defaults to None, for repairs made outside a run.
         """
 
@@ -4019,12 +4029,20 @@ class CodingSession:
                 if executor is not None and message.tool_call_id is not None
                 else ()
             )
+            audit = (
+                executor.unsaved_nested_calls(message.tool_call_id, forget=True)
+                if executor is not None and message.tool_call_id is not None
+                else None
+            )
             self._queue_message(
                 session,
                 message,
                 operation_id=operation_id,
                 tool_result=ToolResultPresentationSnapshot(
-                    status="cancelled", model_usage=spent or None
+                    status="cancelled",
+                    model_usage=spent or None,
+                    nested_calls=audit.calls or None if audit is not None else None,
+                    nested_calls_omitted=audit.omitted or None if audit is not None else None,
                 ),
             )
         await self._flush_pending_entries()
