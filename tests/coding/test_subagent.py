@@ -1080,9 +1080,7 @@ def test_fork_is_read_only(tmp_path: Path) -> None:
         (SPAWN_AGENT, True),
         ("lookup", False),
     ]
-    assert "a script or a subagent can call only read-only tools" in (
-        run.result.nested_calls[0].error or ""
-    )
+    assert "a subagent can call only read-only tools" in (run.result.nested_calls[0].error or "")
     assert tools.drop.calls == []
     assert len(run.provider.calls) == 4
 

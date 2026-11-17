@@ -143,7 +143,9 @@ def test_first_prompt_waits_for_mcp_tools(tmp_path: Path, monkeypatch: pytest.Mo
 
     assert _finished(records, "p1")["ok"]
     # The prompt arrived before the server connected, yet the model was offered its tools.
-    assert [tool.name for tool in provider.calls[0].tools][-2:] == _FIXTURE_TOOLS
+    assert [tool.name for tool in provider.calls[0].tools if tool.name.startswith("mcp__")] == (
+        _FIXTURE_TOOLS
+    )
     types = [record["type"] for record in records]
     assert types.index("mcp.status.updated") < types.index("agent.started")
     updated = records[types.index("mcp.status.updated")]["status"]["servers"]
@@ -167,7 +169,9 @@ def test_first_request_matches_an_eager_connect(
     _serve(tmp_path, monkeypatch, deferred, prompt)
 
     assert deferred.calls[0].tools == eager.calls[0].tools
-    assert [message.name for message in eager.calls[0].tools][-2:] == _FIXTURE_TOOLS
+    assert [tool.name for tool in eager.calls[0].tools if tool.name.startswith("mcp__")] == (
+        _FIXTURE_TOOLS
+    )
 
     def instructions(provider: ScriptedProvider) -> list[str]:
         # Each session names its own scratch folder; the rest must match.

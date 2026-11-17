@@ -983,8 +983,8 @@ fn server_detail(server: &McpServerSnapshot) -> Vec<String> {
         None => {}
     }
     if !server.tool_names.is_empty() {
-        // Only read-only tools can be called from a codemode script, a subagent or
-        // plan mode. The mark leads, so a long name wraps after it.
+        // Only read-only tools can be called from a subagent or in plan mode.
+        // The mark leads, so a long name wraps after it.
         rows.push("tools (read = read-only, set by tool_safety; c reconnects):".into());
         if !server.read_only_hint_tool_names.is_empty() {
             rows.push("(hint = the server says read-only; press h to mark it so)".into());
@@ -1113,7 +1113,7 @@ fn confirm_details(kind: &ConfirmKind, width: usize) -> Vec<String> {
     {
         rows.extend(wrapped(
             "The server says these tools only read. Marked read-only in tool_safety, \
-             they run without asking, and scripts, subagents and plan mode can call them:",
+             they run without asking, and subagents and plan mode can call them:",
             width,
         ));
         rows.extend(

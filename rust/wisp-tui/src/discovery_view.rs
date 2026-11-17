@@ -758,9 +758,8 @@ fn codemode_notes(state: &UiState) -> Vec<(String, bool)> {
 }
 
 /// How many of the next run's MCP tools a script may call, flagged when it is none.
-/// Scripts are refused every other MCP tool, so the note names the setting that
-/// decides it. It states the cause without urging a change: the tools left out may
-/// be ones that write. The counts come first, so a narrow panel cuts the setting.
+/// Selection, policy, plan mode, and callable schemas determine eligibility.
+/// Counts come first so they remain visible in a narrow panel.
 fn scriptable_mcp_note(snapshot: &wisp_protocol::events::CodemodeState) -> Option<(String, bool)> {
     let (scriptable, total) = (snapshot.scriptable_mcp_tools, snapshot.mcp_tools);
     if total == 0 || snapshot.setting == CodemodeSetting::Never {
@@ -771,7 +770,7 @@ fn scriptable_mcp_note(snapshot: &wisp_protocol::events::CodemodeState) -> Optio
         return Some((format!("Scripts can call all {total} MCP {tools}."), false));
     }
     Some((
-        format!("Scripts can call {scriptable} of {total} MCP {tools} (tool_safety \"read\")."),
+        format!("Scripts can call {scriptable} of {total} MCP {tools} under normal tool policy."),
         scriptable == 0,
     ))
 }
@@ -876,7 +875,7 @@ mod tests {
                 0,
                 12,
                 Some((
-                    "Scripts can call 0 of 12 MCP tools (tool_safety \"read\").",
+                    "Scripts can call 0 of 12 MCP tools under normal tool policy.",
                     true,
                 )),
             ),
@@ -885,7 +884,7 @@ mod tests {
                 5,
                 102,
                 Some((
-                    "Scripts can call 5 of 102 MCP tools (tool_safety \"read\").",
+                    "Scripts can call 5 of 102 MCP tools under normal tool policy.",
                     false,
                 )),
             ),

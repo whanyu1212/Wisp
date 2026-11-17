@@ -3544,8 +3544,10 @@ fn script_projection(card: &crate::tool_cards::ToolCardSnapshot) -> CardProjecti
     let (mut action, action_marker_end, action_label_end, action_argument_start, _) =
         tool_action_projection(card);
     let tally = script.tally();
-    let suffix_start = push_status_note(&mut action, (!tally.is_empty()).then_some(tally.as_str()))
-        .min(push_status_note(&mut action, card.status_note()));
+    let suffix_start =
+        push_status_note(&mut action, (!tally.is_empty()).then_some(tally.as_str())).min(
+            push_status_note(&mut action, card.status_note().or(card.live_line())),
+        );
     let mut detail = String::new();
     let mut detail_tones = Vec::new();
     let mut detail_syntax = Vec::new();
@@ -3561,6 +3563,17 @@ fn script_projection(card: &crate::tool_cards::ToolCardSnapshot) -> CardProjecti
     }
     push_script_calls(&mut detail, &mut detail_tones, card, script);
     match card.status {
+        ToolStatus::Requested | ToolStatus::Running if card.progress_sequence > 0 => {
+            let lines: Vec<&str> = card.retained_output.text.lines().collect();
+            let start = lines.len().saturating_sub(SCRIPT_RETURN_LINES);
+            if start > 0 || card.retained_output.dropped_bytes > 0 {
+                push_detail_row(&mut detail, "Earlier output omitted");
+            }
+            for (index, line) in lines[start..].iter().enumerate() {
+                let label = if index == 0 { "Output   " } else { "         " };
+                push_detail_row(&mut detail, &format!("{label}{}", line.trim_end()));
+            }
+        }
         ToolStatus::Done => {
             // Its first lines under `Returned`, aligned after the label; the rest
             // counted, since the card keeps only the start of a long result.

@@ -62,7 +62,8 @@ def test_catalog_includes_both_sources(tmp_path: Path, exposure: McpToolExposure
     entries = {entry["name"]: entry for entry in json.loads(search.output)["tools"]}
     assert entries["lookup"]["namespace"] == "builtin"
     assert entries["mcp__db__query"]["namespace"] == "mcp:db"
-    assert "mcp__db__drop" not in entries
+    assert entries["mcp__db__drop"]["requires_confirmation"] is True
+    assert tools.drop.calls == []
     detail = json.loads(description.output)
     assert detail["guidelines"] == ["Use current tables."]
     assert detail["input_schema"]["required"] == ["table"]

@@ -4,7 +4,7 @@ A script can fan out many calls with `asyncio.gather`, chain calls on earlier
 answers, and filter what it reads, so only what it prints and returns reaches the
 model. Each call it makes is a separate call under the run's tool policy (see
 `ConfiguredToolExecutor.run_codemode`), so the script itself needs no approval and
-grants none. The run offers only read-only tools to scripts.
+grants none. Scripts may call permitted read, mutation and command tools.
 """
 
 from __future__ import annotations
@@ -106,7 +106,7 @@ INCOMPLETE_MARKER = "[result incomplete]"
 _logger = logging.getLogger(__name__)
 
 CODEMODE_PROMPT = ToolPromptMetadata(
-    prompt_snippet="codemode: run a Python script that calls the read-only tools.",
+    prompt_snippet="codemode: run a Python script that calls the permitted tools.",
     guidelines=(
         "Use codemode when a task needs many tool calls, or calls that depend on "
         "earlier results: one script replaces many turns, and only what it prints "
@@ -181,7 +181,7 @@ class _CallLog:
 
 
 class CodemodeTool:
-    """Run a Python script whose only way out is calling the run's read-only tools."""
+    """Run a Python script whose only way out is calling the run's permitted tools."""
 
     name = CODEMODE
     # The script itself touches nothing; every call it makes is checked on its own.
@@ -309,7 +309,7 @@ class CodemodeTool:
                     failure_code="internal_error",
                 )
             if run.failure is not None:
-                # The calls already made stand: every tool a script reaches is read-only.
+                # External effects already performed stand; only script state rolls back.
                 status = await save_output(run.printed, self._output_store) if run.printed else None
                 notice = saved_output_notice([("script", status)])
                 raise ToolError(_failure_message(run, log, notice))
@@ -373,12 +373,13 @@ def _failure_message(run: ScriptRun, log: _CallLog, notice: str | None = None) -
     heading = f"Script failed ({run.failure}): "
     printed_label = "Printed before it failed:\n"
     calls = f"Calls made before it failed: {log.line(_FAILURE_CALLS_CHARS)}"
-    recovery = [notice] if notice else []
+    effects = "External effects are not rolled back. Inspect completed calls before retrying."
+    recovery = ([notice] if notice else []) + ([effects] if log.total else [])
     room = (
         _FAILURE_MESSAGE_CHARS
         - len(heading)
         - len(calls)
-        - len(notice or "")
+        - sum(len(item) + 1 for item in recovery)
         - _SHORTENED_MARKER_CHARS
         - 4
     )
@@ -544,7 +545,11 @@ def _description(
         "State: `await store(key, value)`, `await load(key)` (KeyError if missing), "
         "and `await delete(key)` (whether it existed). Values are copied strict JSON. "
         "Writes commit together only when the script succeeds; failure, timeout or "
-        "cancellation discards them. State lasts across scripts in this session. "
+        "cancellation discards them. External effects (file writes, commands and MCP "
+        "actions) are NOT rolled back. Inspect completed calls before retrying; never "
+        "blindly rerun a failed script with mutations. Each child follows normal "
+        "permissions and approvals; approving codemode does not approve its children. "
+        "State lasts across scripts in this session. "
         "Quotas: 128 keys; non-empty keys up to 128 UTF-8 bytes; values up to 64 KiB "
         "canonical UTF-8 JSON, 256 KiB total, and 32 nested containers.",
         f"Limits: {limits.max_calls} tool calls, {limits.wall_seconds:g} seconds and "
@@ -578,7 +583,7 @@ def _description(
     if discoverable:
         lines += [
             "",
-            "A read-only MCP tool that mcp_search finds is callable too, by its full name "
+            "An eligible MCP tool that mcp_search finds is callable too, by its full name "
             "(such as mcp__server__tool_name), when that name and its parameters are "
             "Python identifiers; call any other through mcp_call(name=..., "
             "arguments=...). Calls by name are type-checked: mcp_describe shows a tool's "

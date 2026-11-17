@@ -260,8 +260,10 @@ separate user confirmation, even under YOLO; they are refused in print and JSON 
 
 See [MCP with codemode](mcp.md#mcp-with-codemode) for configuration and a worked example, and
 [Codemode safety and limits](mcp.md#scripting-tool-calls-with-codemode-experimental) for the sandbox,
-audit records, and cancellation behavior. Scripts reach only the run's read-only tools; they cannot
-approve a call or turn a command tool into a read-only one.
+audit records, and cancellation behavior. Scripts can combine eligible reads, edits, writes, shell
+commands, and MCP calls. Every child follows normal tool policy, plan-mode restrictions, protected
+paths, and its own approval checks; approving the script grants nothing to its children. Scripts
+cannot invoke `spawn_agent` or another `codemode` script. Subagents remain read-only.
 
 ## Delegating to a subagent (experimental)
 

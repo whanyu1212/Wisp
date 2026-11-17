@@ -826,8 +826,15 @@ def test_retries_after_rejected_truncated_mutating_call(
     )
 
 
-def test_overflow_does_not_retry_after_mutating_tool(tmp_path: Path) -> None:
-    call = ToolCall(call_id="call-1", name="mutate", arguments={})
+@pytest.mark.parametrize("scripted", [False, True], ids=["direct", "codemode"])
+def test_overflow_does_not_retry_after_mutating_tool(tmp_path: Path, scripted: bool) -> None:
+    if scripted:
+        pytest.importorskip("pydantic_monty")
+    call = ToolCall(
+        call_id="call-1",
+        name="codemode" if scripted else "mutate",
+        arguments={"code": "await mutate()"} if scripted else {},
+    )
     provider = ScriptedProvider(
         [
             [
@@ -857,6 +864,7 @@ def test_overflow_does_not_retry_after_mutating_tool(tmp_path: Path) -> None:
         await _append_turn(session, "two")
         agent = CodingSession(
             provider=provider,
+            codemode=scripted,
             sessions=store,
             model="model",
             models=build_model_registry(),

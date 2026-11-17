@@ -140,6 +140,7 @@ def _run(
     mode: AgentMode = "build",
     exposure: McpToolExposure = "direct",
     timeline: list[WispEvent] | None = None,
+    policy: ToolPolicy | None = None,
 ) -> tuple[list[WispEvent], ScriptedProvider]:
     provider = ScriptedProvider([*streams, _done()])
     session = CodingSession(
@@ -147,7 +148,7 @@ def _run(
         sessions=JsonlSessionStore(tmp_path / "sessions"),
         tool_registry=tools.registry(),
         tool_context=ToolContext(cwd=tmp_path),
-        tool_policy=ToolPolicy.allow_all_tools(),
+        tool_policy=policy or ToolPolicy.allow_all_tools(),
         tool_approval_policy=ToolApprovalPolicy.require_approval(),
         mcp_tool_exposure=exposure,
         codemode=codemode,
@@ -182,7 +183,7 @@ def test_offered_only_when_on(tmp_path: Path, enabled: bool) -> None:
     assert (CODEMODE in offered) is enabled
     if enabled:
         description = offered[CODEMODE].description
-        # Only read-only tools are callable, named but not re-declared: the model
+        # Eligible tools are callable, named but not re-declared: the model
         # already has each one's schema as a direct tool.
         assert "tool_search(query=...)" in description
         assert "tool_describe(name=...)" in description
@@ -291,7 +292,12 @@ def test_script_fans_out(tmp_path: Path) -> None:
 def test_unlisted_tool_unreachable(tmp_path: Path) -> None:
     tools = _Tools()
 
-    events, _ = _run(tmp_path, tools, [_script("await mcp__db__drop(table='users')")])
+    events, _ = _run(
+        tmp_path,
+        tools,
+        [_script("await mcp__db__drop(table='users')")],
+        policy=ToolPolicy.allow_read_tools(),
+    )
 
     result = _result(events)
     assert result.is_error and "Script failed (type)" in result.output
@@ -347,12 +353,11 @@ def test_not_offered_without_monty(
     [
         (True, "direct", "read", True),
         (None, "direct", "read", True),
-        (None, "direct", "command", False),
+        (None, "direct", "command", True),
         (None, "on_demand", "read", True),
         (False, "on_demand", "read", False),
-        # Unset, the built-in read tools are not enough: with no MCP tool a script
-        # may call, every call a script made to the catalog would be refused.
-        (None, "on_demand", "command", False),
+        # Command tools are callable too; each child still needs its own approval.
+        (None, "on_demand", "command", True),
         (True, "on_demand", "command", True),
     ],
 )
@@ -395,13 +400,13 @@ def test_offered_matches_the_run(
 @pytest.mark.parametrize(
     ("mcp_safety", "mode", "exposure", "counts"),
     [
-        ("read", "build", "direct", (1, 2)),
-        ("read", "build", "on_demand", (1, 2)),
-        ("command", "build", "on_demand", (0, 2)),
+        ("read", "build", "direct", (2, 2)),
+        ("read", "build", "on_demand", (2, 2)),
+        ("command", "build", "on_demand", (2, 2)),
         # Plan mode offers no command tool, so only the read-only MCP tool is left.
         ("read", "plan", "direct", (1, 1)),
     ],
-    ids=["direct", "on-demand", "none-scriptable", "plan-mode"],
+    ids=["direct", "on-demand", "commands-scriptable", "plan-mode"],
 )
 def test_counts_scriptable_mcp_tools(
     tmp_path: Path,
@@ -410,7 +415,7 @@ def test_counts_scriptable_mcp_tools(
     exposure: McpToolExposure,
     counts: tuple[int, int],
 ) -> None:
-    """The session counts the MCP tools its next run may use, and those marked read-only."""
+    """The session counts the MCP tools its next run may use, and those callable by scripts."""
 
     tools = _Tools()
     tools.query.safety = mcp_safety
@@ -426,7 +431,7 @@ def test_counts_scriptable_mcp_tools(
     assert session.scriptable_mcp_tools() == counts
 
 
-@pytest.mark.parametrize(("exposure", "scriptable"), [("direct", 1), ("on_demand", 2)])
+@pytest.mark.parametrize(("exposure", "scriptable"), [("direct", 2), ("on_demand", 3)])
 def test_direct_counts_callable_names(
     tmp_path: Path, exposure: McpToolExposure, scriptable: int
 ) -> None:
@@ -459,7 +464,7 @@ def test_policy_limits_counted_tools(tmp_path: Path) -> None:
         tool_policy=ToolPolicy.allow_tool_names({"lookup", "mcp__db__drop"}),
     )
 
-    assert session.scriptable_mcp_tools() == (0, 1)
+    assert session.scriptable_mcp_tools() == (1, 1)
 
 
 def test_no_registry_counts_no_mcp_tools(tmp_path: Path) -> None:
@@ -470,8 +475,8 @@ def test_no_registry_counts_no_mcp_tools(tmp_path: Path) -> None:
     assert session.scriptable_mcp_tools() == (0, 0)
 
 
-def test_script_is_safe_to_replay(tmp_path: Path) -> None:
-    """A script reaches only read-only tools, so it never blocks overflow recovery."""
+def test_script_blocks_automatic_replay(tmp_path: Path) -> None:
+    """A script may already have mutated external state, so never replay it automatically."""
 
     session = CodingSession(
         provider=ScriptedProvider([]),
@@ -481,7 +486,7 @@ def test_script_is_safe_to_replay(tmp_path: Path) -> None:
         codemode=True,
     )
 
-    assert not session._tool_is_unsafe(CODEMODE)
+    assert session._tool_is_unsafe(CODEMODE)
     assert session._tool_is_unsafe("mcp__db__drop")
 
 
@@ -502,14 +507,14 @@ def test_on_demand_scripts_call_catalog(tmp_path: Path) -> None:
     assert tools.query.calls == [{"table": "a"}]
 
 
-def test_on_demand_command_tool_unreachable(tmp_path: Path) -> None:
+def test_on_demand_command_needs_approval(tmp_path: Path) -> None:
     tools = _Tools()
 
     events, _ = _run(
         tmp_path, tools, [_script("await mcp__db__drop(table='users')")], exposure="on_demand"
     )
 
-    assert "Script failed (type)" in _result(events).output
+    assert "requires approval" in _result(events).output
     assert tools.drop.calls == []
 
 
@@ -519,7 +524,7 @@ def test_eval_reaches_only_given_tools(tmp_path: Path) -> None:
     tools = _Tools()
     code = "await eval(\"mcp__db__drop(table='a')\")"
 
-    events, _ = _run(tmp_path, tools, [_script(code)])
+    events, _ = _run(tmp_path, tools, [_script(code)], policy=ToolPolicy.allow_read_tools())
 
     assert "NameError" in _result(events).output
     assert tools.drop.calls == []
@@ -874,7 +879,7 @@ def test_refused_call_is_a_settled_error(tmp_path: Path) -> None:
     assert (tools.query.calls, tools.drop.calls) == ([{"table": "a"}], [])
     refused = [call for call in _ended(events).nested_calls if call.is_error]
     assert [(call.target, call.failure_code) for call in refused] == [
-        ("mcp__db__drop", "policy_denied")
+        ("mcp__db__drop", "approval_denied")
     ]
 
 
@@ -1315,10 +1320,10 @@ def test_script_calls_recorded(tmp_path: Path) -> None:
             "mcp__db__drop",
             {"name": "mcp__db__drop", "arguments": {"table": "c"}},
             True,
-            "policy_denied",
+            "approval_denied",
         ),
     ]
-    assert calls[2].error is not None and "not read-only" in calls[2].error
+    assert calls[2].error is not None and "requires approval" in calls[2].error
     assert _result(events).nested_calls == calls
     saved = [
         entry.tool_result.nested_calls
@@ -1330,7 +1335,7 @@ def test_script_calls_recorded(tmp_path: Path) -> None:
     ]
     assert saved == [calls]
     # The model reads only what the script returned, never the records.
-    assert "policy_denied" not in repr(provider.calls[-1])
+    assert "approval_denied" not in repr(provider.calls[-1])
 
 
 def test_live_events_bracket_calls(tmp_path: Path) -> None:

@@ -205,9 +205,9 @@ class WispConfig(BaseModel):
         the CLI and TUI, off for the in-process SDK.
 
         ``codemode`` (``WISP_CODEMODE``) is user-only. It offers the experimental
-        codemode tool, which runs model-written scripts that call the run's read-only
+        codemode tool, which runs model-written scripts that call the run's permitted
         tools. Unset, it resolves to None: the tool is offered whenever a run finds
-        its MCP tools on demand, where scripts help most; true or false always or
+        eligible MCP tools, where scripts help most; true or false always or
         never offers it.
 
         ``subagents`` (``WISP_SUBAGENTS``) is user-only, because a subagent's model
