@@ -20,6 +20,7 @@ store lock guards.
 from __future__ import annotations
 
 import asyncio
+import codecs
 import errno
 import logging
 import os
@@ -37,7 +38,7 @@ from typing import Final, TypeVar
 
 import anyio
 
-from wisp.tools.result import ToolError
+from wisp.tools.result import ToolArgumentError, ToolError
 
 T = TypeVar("T")
 
@@ -116,6 +117,7 @@ class OutputPage:
         omitted_bytes (int): Bytes the stream produced past the saving limits.
         complete (bool): Whether the stream had ended when the page was read.
         line_truncated (bool): Whether a selected line was shortened to fit.
+        character_offset (int): 0-based character offset of the first selected line.
     """
 
     lines: tuple[str, ...]
@@ -125,6 +127,7 @@ class OutputPage:
     omitted_bytes: int
     complete: bool
     line_truncated: bool
+    character_offset: int
 
     @property
     def next_offset(self) -> int | None:
@@ -132,6 +135,34 @@ class OutputPage:
 
         following = self.offset + len(self.lines)
         return following if following <= self.line_count else None
+
+
+@dataclass(frozen=True, slots=True)
+class CharacterOutputPage:
+    """An exact substring of decoded saved output, including original line endings.
+
+    Attributes:
+        text (str): Selected Unicode characters, without display markers.
+        character_offset (int): 0-based offset of the substring.
+        character_count (int): Total decoded characters saved at read time.
+        label (str): Description of the stream.
+        omitted_bytes (int): Produced bytes beyond the saving limits.
+        complete (bool): Whether the stream had ended at read time.
+    """
+
+    text: str
+    character_offset: int
+    character_count: int
+    label: str
+    omitted_bytes: int
+    complete: bool
+
+    @property
+    def next_character_offset(self) -> int | None:
+        """Return the next unread character offset, or None at the current end."""
+
+        following = self.character_offset + len(self.text)
+        return following if following < self.character_count else None
 
 
 def saved_output_notice(streams: Sequence[tuple[str, SaveStatus | None]]) -> str | None:
@@ -159,7 +190,11 @@ def saved_output_notice(streams: Sequence[tuple[str, SaveStatus | None]]) -> str
             unsaved.append(f"The full {name} could not be saved: {status.reason}.")
     sentences: list[str] = []
     if saved:
-        sentences.append(f"Full output saved: {'; '.join(saved)}.")
+        capped = any(
+            isinstance(status, SavedOutput) and status.omitted_bytes for _, status in streams
+        )
+        description = "Output prefix saved" if capped else "Full output saved"
+        sentences.append(f"{description}: {'; '.join(saved)}.")
     sentences.extend(unsaved)
     if saved:
         sentences.append("Read it with read_output.")
@@ -238,17 +273,7 @@ class OutputStore:
                 ``offset`` is past the end.
         """
 
-        with self._lock:
-            stream = self._saved.get(output_id)
-        if stream is None:
-            raise ToolError(
-                f"Unknown output_id: {output_id}",
-                failure_code="not_found",
-                recovery_hint=(
-                    "Saved output lasts only while this Wisp process runs, and the oldest "
-                    "is removed once the store is full. Rerun the command if you need it."
-                ),
-            )
+        stream = self._stream_for_read(output_id)
         return await _run_in_thread(
             lambda: stream._read_page(
                 offset=offset,
@@ -257,6 +282,58 @@ class OutputStore:
                 max_lines=max_lines,
             )
         )
+
+    async def read_character_page(
+        self,
+        output_id: str,
+        *,
+        character_offset: int,
+        character_limit: int | None,
+        max_bytes: int,
+        max_lines: int,
+    ) -> CharacterOutputPage:
+        """Read a bounded substring without dropping partial lines or line endings.
+
+        Args:
+            output_id (str): Id reported when the stream was saved.
+            character_offset (int): 0-based Unicode character offset.
+            character_limit (int | None): Most characters to return, or None.
+            max_bytes (int): UTF-8 byte budget for the substring.
+            max_lines (int): Line budget, including every Python line separator.
+
+        Returns:
+            CharacterOutputPage: Exact substring and the cursor for continuing it.
+
+        Raises:
+            ToolError: Output is unavailable, the offset is past the end, or the
+                budgets cannot fit the next character.
+        """
+
+        if character_offset < 0 or (character_limit is not None and character_limit < 1):
+            raise ToolArgumentError("Character offset must be nonnegative and limit positive")
+        stream = self._stream_for_read(output_id)
+        return await _run_in_thread(
+            lambda: stream._read_character_page(
+                character_offset=character_offset,
+                character_limit=character_limit,
+                max_bytes=max_bytes,
+                max_lines=max_lines,
+            )
+        )
+
+    def _stream_for_read(self, output_id: str) -> SavedStream:
+        with self._lock:
+            stream = self._saved.get(output_id)
+        if stream is None:
+            raise ToolError(
+                f"Unknown output_id: {output_id}",
+                failure_code="not_found",
+                recovery_hint=(
+                    "Saved output lasts only while this Wisp process runs, and the oldest "
+                    "is removed once the store is full. Rerun the tool if you need it."
+                ),
+            )
+        return stream
 
     async def aclose(self) -> None:
         """Delete this runtime's saved output and release its directory lock.
@@ -605,13 +682,7 @@ class SavedStream:
         max_bytes: int,
         max_lines: int,
     ) -> OutputPage:
-        with self._lock:
-            if self._fd is not None:
-                self._write_buffer()
-            size = self._saved_bytes
-            line_count = self._line_count()
-            omitted_bytes = self._omitted_bytes
-            complete = self._ended
+        content, line_count, omitted_bytes, complete = self._read_snapshot()
         if offset > max(line_count, 1):
             raise ToolError(
                 f"read_output.offset {offset} is beyond the end of the output ({line_count} lines)",
@@ -619,12 +690,6 @@ class SavedStream:
                 retryable=True,
                 recovery_hint=f"Use an offset from 1 to {max(line_count, 1)}.",
             )
-        read_fd = self._store._duplicate_read_fd(self)
-        try:
-            with self._read_lock:
-                content = _read_from_start(read_fd, size)
-        finally:
-            os.close(read_fd)
         lines, line_truncated = _select_lines(
             content,
             offset=offset,
@@ -640,7 +705,66 @@ class SavedStream:
             omitted_bytes=omitted_bytes,
             complete=complete,
             line_truncated=line_truncated,
+            character_offset=sum(
+                len(line.decode("utf-8", errors="replace")) + 1
+                for line in content.split(b"\n")[: offset - 1]
+            ),
         )
+
+    def _read_character_page(
+        self,
+        *,
+        character_offset: int,
+        character_limit: int | None,
+        max_bytes: int,
+        max_lines: int,
+    ) -> CharacterOutputPage:
+        content, _, omitted_bytes, complete = self._read_snapshot()
+        # A running stream may end between UTF-8 bytes. Keep that incomplete
+        # character for a later page instead of issuing a cursor past a replacement.
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        text = decoder.decode(content, final=complete or bool(omitted_bytes))
+        if character_offset > len(text):
+            raise ToolArgumentError(
+                f"read_output.character_offset {character_offset} is beyond the end "
+                f"of the output ({len(text)} characters)"
+            )
+        end = None if character_limit is None else character_offset + character_limit
+        selected = text[character_offset:end]
+        selected = "".join(selected.splitlines(keepends=True)[: max(0, max_lines)])
+        selected = selected.encode("utf-8")[: max(0, max_bytes)].decode("utf-8", errors="ignore")
+        if not selected and character_offset < len(text):
+            raise ToolError(
+                "read_output output budget cannot fit the next character",
+                failure_code="invalid_arguments",
+                recovery_hint="Increase the output byte and line budgets before continuing.",
+            )
+        return CharacterOutputPage(
+            text=selected,
+            character_offset=character_offset,
+            character_count=len(text),
+            label=self.label,
+            omitted_bytes=omitted_bytes,
+            complete=complete,
+        )
+
+    def _read_snapshot(self) -> tuple[bytes, int, int, bool]:
+        """Flush and read one bounded snapshot through the pinned descriptor."""
+
+        with self._lock:
+            if self._fd is not None:
+                self._write_buffer()
+            size = self._saved_bytes
+            line_count = self._line_count()
+            omitted_bytes = self._omitted_bytes
+            complete = self._ended
+        read_fd = self._store._duplicate_read_fd(self)
+        try:
+            with self._read_lock:
+                content = _read_from_start(read_fd, size)
+        finally:
+            os.close(read_fd)
+        return content, line_count, omitted_bytes, complete
 
 
 def _read_from_start(fd: int, size: int) -> bytes:

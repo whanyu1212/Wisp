@@ -361,7 +361,8 @@ scope is GPT and Claude; Gemini is excluded.
 | Approve once, deny, session grants | Scripted decisions exercised against the shared RPC host | Codemode inner-action approval and cancellation scenarios |
 | Mutating tools inside scripts | Still prohibited by the existing read-only executor | Separate codemode policy boundary before exposing mutations |
 | Persistent store/load/delete | Bounded JSON transactions, durable result snapshots, branch/resume/compaction coverage (HY-548) | Broader workload and quota evaluation |
-| Recoverable script artifacts, image/model helpers | Not implemented | HY-546 capability slices and dedicated acceptance metrics |
+| Recoverable text script artifacts | Process-owned saved output, line/character paging, failure recovery and bounded cleanup tests | Durable artifacts and broader live workloads |
+| Image/model helpers | Not implemented | HY-546 capability slices and dedicated acceptance metrics |
 
 Windows, interactive TUI approval UX and paid-model reliability are not established by the
 foundation tests. Keep deterministic CI coverage small; live comparisons and stress sweeps
@@ -380,3 +381,11 @@ Run with `--tasks mcp-session-reuse --mcp-tool-exposure on_demand --mcp-results 
 --effort medium`, comparing codemode `off`, the pre-state build with `python`, and the state
 candidate with `python`. Use identical task/catalog fingerprints and provider/model settings.
 [The pilot report](reports/2026-11-17-hy548.md) records outcomes, usage, reproducibility and limits.
+
+### Output-recovery capability pilot
+
+`codemode-output-recovery` explicitly requests a report once, then retrieves a row outside
+its preview using the saved reference. This tests an instructed capability, not spontaneous
+adoption or comparative efficiency. Run with `--tasks codemode-output-recovery --codemode python
+--effort medium`. [The pilot report](reports/2026-11-17-output-recovery.md) retains all GPT/Claude
+outcomes, including exact-approval mismatches and an ID-copying error.

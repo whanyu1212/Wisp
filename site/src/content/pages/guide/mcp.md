@@ -510,6 +510,27 @@ remain in the audit log. State storage does not enable filesystem writes or muta
 
 ## Scripting tool calls with codemode (experimental)
 
+### Recovering a long result
+
+When a script's output exceeds the model-facing preview, codemode saves the bounded text and
+reports an `output_id`. Use `read_output` with that ID and a 1-indexed `offset` and `limit` to
+read more lines without running the script again. For a single long line, use 0-indexed
+`character_offset` and `character_limit` instead; follow the returned character cursor to
+continue. Do not mix line and character paging arguments.
+
+Printed output is also saved when a script fails, even though that script's state changes are
+discarded. A hard output limit retains only a prefix: bytes beyond it cannot be recovered.
+Storage failures are reported explicitly. Output previews use the run's configured tool-output
+byte and line budgets; saving output does not increase those model-facing budgets.
+
+Artifacts share the existing `read_output` store with shell output: they last only while the
+Wisp process runs, and older output may be evicted (32 outputs, 8 MiB per output, 64 MiB total).
+They are not durable script state and do not survive a backend restart. If you restrict the
+tool list, include `read_output` to enable saving and recovery. This feature saves text;
+image artifacts are not yet supported by codemode.
+
+### Execution limits
+
 Codemode's safety, audit, and resource limits apply regardless of discovery mode:
 
 - **Only read-only tools.** A script can call the read-only tools the run already offers: `read`,
@@ -534,7 +555,7 @@ Codemode's safety, audit, and resource limits apply regardless of discovery mode
   or third-party packages, in a subset of Python. They are type-checked against the tools'
   declarations before anything runs.
 - **Limits.** 200 tool calls, 2 minutes, 10 seconds of the script's own computing, 128 MiB and
-  1 MiB of printed output per script. A script that reaches one fails with the limit named. A
+  1 MiB of combined printed and final-value output per script. A script that reaches one fails with the limit named. A
   script cannot start another script, and cancelling a run kills it along with the calls it has
   running.
 

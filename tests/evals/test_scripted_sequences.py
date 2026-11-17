@@ -200,6 +200,28 @@ def test_failed_edit_recovers(tmp_path: Path) -> None:
     assert _outcome(events) == "completed"
 
 
+@pytest.mark.parametrize("fails", [False, True], ids=["success", "partial-failure"])
+def test_script_output_read_back(tmp_path: Path, fails: bool) -> None:
+    pytest.importorskip("pydantic_monty")
+    code = "for n in range(5000):\n    print('MISMATCH account 4810' if n == 2500 else f'ok {n}')\n"
+    if fails:
+        code += "raise ValueError('report stopped')\n"
+
+    def read_middle(request: _Request) -> list[ProviderEvent]:
+        (output_id,) = re.findall(r"output_id=([0-9a-f]+)", request.last_result)
+        assert "MISMATCH" not in request.last_result
+        return _tool_call("read_output", {"output_id": output_id, "offset": 2501, "limit": 1})
+
+    steps = [_call("codemode", code=code), read_middle, _answer("Account 4810.")]
+    events = anyio.run(
+        lambda: _run(tmp_path, steps, tools=["read_output"], settings={"codemode": True})
+    )
+    script, recovered = _results(events)
+    assert script.is_error is fails
+    assert "MISMATCH account 4810" in recovered.output and not recovered.is_error
+    assert _outcome(events) == "completed"
+
+
 @pytest.mark.process
 def test_mcp_tool_found_and_called(tmp_path: Path) -> None:
     task = next(task for task in select_tasks(tags=["mcp"]) if task.id == "mcp-pick-tool")

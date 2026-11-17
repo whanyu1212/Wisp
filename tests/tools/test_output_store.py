@@ -429,7 +429,7 @@ def test_running_stream_pages_show_buffered_output(root: Path) -> None:
         ),
         (
             SavedOutput("ab12", 10, 2, 7, False),
-            "[Full output saved: stdout output_id=ab12 (10 bytes, 2 lines; 7 later bytes "
+            "[Output prefix saved: stdout output_id=ab12 (10 bytes, 2 lines; 7 later bytes "
             "not saved so far). Read it with read_output.]",
         ),
         (None, None),
@@ -445,7 +445,9 @@ class TestReadOutputTool:
         store = OutputStore(root)
 
         async def scenario() -> str:
-            return (await saved_stream(store, content)).output_id
+            stream = await saved_stream(store, content)
+            await stream.save()
+            return stream.output_id
 
         return ReadOutputTool(store), run(scenario)
 
@@ -472,6 +474,104 @@ class TestReadOutputTool:
         }
         assert last.text == "[stdout of `make`: lines 9-10 of 10]\nline 9\nline 10"
         assert last.truncated is False
+
+    @pytest.mark.parametrize(
+        "content",
+        ["é🚀" * 1500, "first\r\n" + "é🚀" * 1500 + "\n\nlast\n", "a\rb\vc\u2028d\n" * 100],
+        ids=["oversized-line", "multiline", "line-separators"],
+    )
+    @pytest.mark.parametrize(("max_bytes", "max_lines"), [(1000, 20), (2000, 5)])
+    def test_characters_reconstruct_saved_output(
+        self, root: Path, content: str, max_bytes: int, max_lines: int
+    ) -> None:
+        tool, output_id = self.saved(root, content.encode())
+        context = ToolContext(
+            cwd=root.parent, max_output_bytes=max_bytes, max_output_lines=max_lines
+        )
+        reconstructed: list[str] = []
+        offset = 0
+        while True:
+            result = run_tool(
+                tool,
+                {"output_id": output_id, "character_offset": offset, "character_limit": 1000},
+                context,
+            )
+            assert result.data is not None
+            text = result.data["text"]
+            assert isinstance(text, str)
+            assert text and text in result.text
+            assert len(result.text.encode()) <= max_bytes
+            assert len(result.text.splitlines()) <= max_lines
+            assert result.data["character_count"] == len(content)
+            assert result.data["selected_count"] == len(text)
+            reconstructed.append(text)
+            following = result.data["next_character_offset"]
+            if following is None:
+                break
+            assert isinstance(following, int) and following == offset + len(text)
+            assert f"character_offset={following}" in result.text
+            offset = following
+        assert "".join(reconstructed) == content
+
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            {"character_offset": -1},
+            {"character_limit": 0},
+            {"character_offset": True},
+            {"character_limit": "3"},
+            {"character_offset": 0, "offset": 1},
+            {"character_limit": 2, "limit": 1},
+        ],
+    )
+    def test_rejects_invalid_character_arguments(
+        self, root: Path, arguments: dict[str, object]
+    ) -> None:
+        tool, output_id = self.saved(root, b"saved\n")
+        with pytest.raises(ToolError):
+            run_tool(tool, {"output_id": output_id, **arguments}, ToolContext(cwd=root.parent))
+
+    @pytest.mark.parametrize("arguments", [{"character_limit": 2}, {"character_offset": 0}])
+    def test_defaults_character_arguments(self, root: Path, arguments: dict[str, int]) -> None:
+        tool, output_id = self.saved(root, "é🚀x\n".encode())
+        result = run_tool(tool, {"output_id": output_id, **arguments}, ToolContext(cwd=root.parent))
+
+        assert result.data is not None
+        expected = "é🚀" if "character_limit" in arguments else "é🚀x\n"
+        assert result.data["text"] == expected
+        assert result.truncated is False
+
+    @pytest.mark.parametrize("offset", [4, 5])
+    def test_character_end_bounds(self, root: Path, offset: int) -> None:
+        tool, output_id = self.saved(root, b"end\n")
+        if offset > 4:
+            with pytest.raises(ToolError, match="beyond the end"):
+                run_tool(
+                    tool,
+                    {"output_id": output_id, "character_offset": offset},
+                    ToolContext(cwd=root.parent),
+                )
+        else:
+            result = run_tool(
+                tool,
+                {"output_id": output_id, "character_offset": offset},
+                ToolContext(cwd=root.parent),
+            )
+            assert result.data is not None
+            assert result.data["text"] == ""
+            assert result.data["next_character_offset"] is None
+
+    @pytest.mark.parametrize(("max_bytes", "max_lines"), [(401, 5), (1000, 2)])
+    def test_rejects_no_progress_budget(self, root: Path, max_bytes: int, max_lines: int) -> None:
+        tool, output_id = self.saved(root, "🚀".encode())
+        with pytest.raises(ToolError, match="budget cannot fit"):
+            run_tool(
+                tool,
+                {"output_id": output_id, "character_offset": 0},
+                ToolContext(
+                    cwd=root.parent, max_output_bytes=max_bytes, max_output_lines=max_lines
+                ),
+            )
 
     @pytest.mark.parametrize(
         ("arguments", "max_lines", "truncated"),
@@ -506,7 +606,8 @@ class TestReadOutputTool:
 
         result = run_tool(tool, {"output_id": output_id}, context)
 
-        assert result.text.endswith("x [line truncated]")
+        assert result.text.splitlines()[1].endswith("x [line truncated]")
+        assert "character_offset=0" in result.text
         assert result.truncated is True
 
     def test_shortens_a_line_larger_than_the_budget(self, root: Path) -> None:
@@ -518,7 +619,7 @@ class TestReadOutputTool:
         # The store gets the budget less 400 bytes kept for the header and notice; the
         # shortened line, its marker, and its newline fill the rest exactly.
         assert result.text.splitlines()[1] == "x" * 582 + " [line truncated]"
-        assert result.text.endswith("[More lines follow. Use offset=2 to continue.]")
+        assert "character_offset=0" in result.text
 
     def test_reports_output_lost_to_the_cap(
         self, root: Path, monkeypatch: pytest.MonkeyPatch
@@ -532,7 +633,7 @@ class TestReadOutputTool:
             "kept",
             "l",
             "[4 later bytes were not saved because a saved-output limit was reached. "
-            "The command's own result shows how the output ended.]",
+            "The original tool result may show how the output ended.]",
         ]
 
     @pytest.mark.parametrize("output_id", ["../../etc/passwd", "missing", " "])
@@ -599,3 +700,43 @@ def test_final_line_without_newline_is_read_in_full(root: Path) -> None:
         return page.lines
 
     assert run(scenario) == ("first", "last line")
+
+
+def test_character_cursor_survives_live_unicode(root: Path) -> None:
+    async def scenario() -> None:
+        store = OutputStore(root)
+        stream = store.open_stream("output", spill_threshold=0)
+        await stream.append(b"a\xf0\x9f")
+        await stream.save()
+        first = await store.read_character_page(
+            stream.output_id, character_offset=0, character_limit=None, max_bytes=100, max_lines=10
+        )
+        assert first.text == "a"
+        assert first.character_count == 1
+        await stream.append(b"\x9a\x80b")
+        stream.close()
+        following = await store.read_character_page(
+            stream.output_id, character_offset=1, character_limit=None, max_bytes=100, max_lines=10
+        )
+        assert first.text + following.text == "a🚀b"
+        assert following.next_character_offset is None
+
+    run(scenario)
+
+
+def test_shortened_line_has_character_cursor(root: Path) -> None:
+    tool, output_id = TestReadOutputTool.saved(root, ("é\r\n🚀\n" + "z" * 2000).encode())
+    result = run_tool(
+        tool,
+        {"output_id": output_id, "offset": 3},
+        ToolContext(cwd=root.parent, max_output_bytes=1000),
+    )
+    assert result.data is not None
+    assert result.data["next_character_offset"] == 5
+    following = run_tool(
+        tool,
+        {"output_id": output_id, "character_offset": 5, "character_limit": 2000},
+        ToolContext(cwd=root.parent),
+    )
+    assert following.data is not None
+    assert following.data["text"] == "z" * 2000
