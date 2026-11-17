@@ -16,6 +16,7 @@ mod connection_panel;
 mod context_split;
 mod context_view;
 mod detail_view;
+mod dialog;
 mod diff_card;
 mod diff_review;
 mod directory_completion;
@@ -1902,6 +1903,7 @@ impl LiveUi {
             panel_border: None,
             popup: None,
             rows: mouse::Rows::default(),
+            dialog_controls: dialog::Controls::default(),
         };
         let mut rendered_decision_context = None;
         let mut rendered_decision_choice = None;
@@ -2198,14 +2200,16 @@ impl LiveUi {
                 }
                 OverlayKind::Model => {
                     rendered_model_picker = true;
-                    model_picker::render(
+                    let dialog = model_picker::render(
                         frame,
                         area,
                         self.model_picker.as_ref().expect("active model"),
                         self.state.model_configuration_active(),
                         self.notice.as_deref(),
                         palette,
-                    )
+                    );
+                    painted.dialog_controls = dialog.controls;
+                    dialog.rows
                 }
                 OverlayKind::Connection => connection_panel::render(
                     frame,
@@ -2221,12 +2225,16 @@ impl LiveUi {
                         .expect("active session tree"),
                     palette,
                 ),
-                OverlayKind::Session => session_picker::render(
-                    frame,
-                    area,
-                    self.session_picker.as_ref().expect("active session picker"),
-                    palette,
-                ),
+                OverlayKind::Session => {
+                    let dialog = session_picker::render(
+                        frame,
+                        area,
+                        self.session_picker.as_ref().expect("active session picker"),
+                        palette,
+                    );
+                    painted.dialog_controls = dialog.controls;
+                    dialog.rows
+                }
                 OverlayKind::Detail => {
                     ui::render_detail_overlay(
                         frame,

@@ -4,13 +4,13 @@ use std::collections::BTreeMap;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::Style;
-use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::Paragraph;
 use wisp_protocol::commands::ModelConfiguration;
 use wisp_protocol::events::{ModelCatalogSnapshot, ModelLifecycle};
 
+use crate::dialog::{self, Dialog, Hint, PickerRow};
 use crate::mouse::Rows;
 use crate::session_picker::terminal_row;
 use crate::theme::Palette;
@@ -295,16 +295,51 @@ pub fn render(
     applying: bool,
     notice: Option<&str>,
     palette: Palette,
-) -> Rows {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(3),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
-        .split(area);
+) -> dialog::Rendered {
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    let hints = if applying {
+        vec![Hint {
+            label: "Esc",
+            description: "close",
+            key: key(KeyCode::Esc),
+        }]
+    } else {
+        vec![
+            Hint {
+                label: "Enter",
+                description: "apply",
+                key: key(KeyCode::Enter),
+            },
+            Hint {
+                label: "Esc",
+                description: "close",
+                key: key(KeyCode::Esc),
+            },
+            Hint {
+                label: "↑",
+                description: "prev",
+                key: key(KeyCode::Up),
+            },
+            Hint {
+                label: "↓",
+                description: "next",
+                key: key(KeyCode::Down),
+            },
+            Hint {
+                label: "r",
+                description: "refresh",
+                key: key(KeyCode::Char('r')),
+            },
+        ]
+    };
+    let layout = Dialog {
+        title: "model",
+        tabs: &[],
+        filter: None,
+        hints: &hints,
+    }
+    .render(frame, area, palette);
+    let mut content = layout.body;
     let current = picker
         .catalog
         .as_ref()
@@ -325,81 +360,118 @@ pub fn render(
             )
         })
         .unwrap_or_else(|| "Select a model".into());
-    frame.render_widget(
-        Paragraph::new(terminal_row(&current, usize::from(chunks[0].width))),
-        chunks[0],
+    // Reserve notices before the current-selection caption so failures stay visible
+    // even when the list must use compact one-line rows.
+    let notice_height = u16::from(notice.is_some() && content.height >= 3);
+    if content.height >= 4 {
+        frame.render_widget(
+            Paragraph::new(terminal_row(&current, usize::from(content.width)))
+                .style(Style::default().fg(palette.muted)),
+            Rect {
+                height: 1,
+                ..content
+            },
+        );
+        content.y += 1;
+        content.height -= 1;
+    }
+    let effort_area = Rect::new(
+        content.x,
+        content.bottom().saturating_sub(notice_height + 1),
+        content.width,
+        u16::from(content.height > 0),
     );
-    let model_block = Block::default()
-        .title(" model ")
-        .borders(Borders::ALL)
-        .border_style(palette.border());
-    let model_inner = model_block.inner(chunks[1]);
-    let model_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
-        .split(model_inner);
-    let height = usize::from(model_chunks[0].height);
-    let width = usize::from(model_chunks[0].width);
+    if notice_height > 0 {
+        frame.render_widget(
+            Paragraph::new(terminal_row(
+                notice.unwrap_or(""),
+                usize::from(content.width),
+            )),
+            Rect::new(content.x, content.bottom() - 1, content.width, 1),
+        );
+    }
+    content.height = content
+        .height
+        .saturating_sub(notice_height + effort_area.height);
+    let row_height = if content.height >= 2 { 2 } else { 1 };
+    let height = usize::from(content.height / row_height);
     let start = picker.selected.map_or(0, |selected| {
         selected.saturating_sub(height.saturating_sub(1))
     });
-    let lines = if picker.loading {
-        vec![Line::from("Loading model catalog…")]
-    } else if let Some(catalog) = &picker.catalog {
-        if picker.rows.is_empty() {
-            vec![Line::from("No models available.")]
-        } else {
-            picker
-                .rows
-                .iter()
-                .enumerate()
-                .skip(start)
-                .take(height)
-                .map(|(index, row)| {
-                    let (label, available) = match row {
-                        Row::Provider(provider) => {
-                            let provider = &catalog.providers[*provider];
-                            (
-                                format!(
-                                    "{}{}",
-                                    provider.display_name,
-                                    if provider.available {
-                                        ""
-                                    } else {
-                                        " (unavailable)"
-                                    }
-                                ),
-                                false,
-                            )
-                        }
-                        Row::Model { provider, model } => {
-                            let provider = &catalog.providers[*provider];
-                            let model = &provider.models[*model];
-                            let lifecycle = match model.lifecycle {
-                                Some(ModelLifecycle::Preview) => " (preview)",
-                                Some(ModelLifecycle::Legacy) => " (legacy)",
-                                _ => "",
-                            };
-                            (
-                                format!("  {}::{}{}", provider.name, model.id, lifecycle),
-                                provider.available,
-                            )
-                        }
-                    };
-                    let style = if picker.selected == Some(index) {
-                        palette.selection()
-                    } else if !available {
-                        Style::default().fg(palette.muted)
-                    } else {
-                        Style::default()
-                    };
-                    Line::from(Span::styled(terminal_row(&label, width), style))
-                })
-                .collect()
-        }
+    let status = if picker.loading {
+        Some("Loading model catalog…")
+    } else if picker.catalog.is_none() {
+        Some("Catalog unavailable. Press r to retry.")
+    } else if picker.rows.is_empty() {
+        Some("No models available.")
     } else {
-        vec![Line::from("Catalog unavailable. Press r to retry.")]
+        None
     };
+    if let Some(status) = status {
+        frame.render_widget(
+            Paragraph::new(terminal_row(status, usize::from(content.width))),
+            content,
+        );
+    } else if let Some(catalog) = &picker.catalog {
+        for (index, row) in picker.rows.iter().enumerate().skip(start).take(height) {
+            let (label, description, tag, muted) = match row {
+                Row::Provider(provider) => {
+                    let provider = &catalog.providers[*provider];
+                    (
+                        provider.display_name.clone(),
+                        None,
+                        Some(if provider.available {
+                            "Available"
+                        } else {
+                            "Unavailable"
+                        }),
+                        true,
+                    )
+                }
+                Row::Model { provider, model } => {
+                    let provider = &catalog.providers[*provider];
+                    let model = &provider.models[*model];
+                    let tag = if !provider.available {
+                        Some("Unavailable")
+                    } else {
+                        match model.lifecycle {
+                            Some(ModelLifecycle::Preview) => Some("Preview"),
+                            Some(ModelLifecycle::Legacy) => Some("Legacy"),
+                            _ => None,
+                        }
+                    };
+                    let description = if model.effort_levels.is_empty() {
+                        "Effort: provider default".into()
+                    } else {
+                        format!("Effort levels: {}", model.effort_levels.join(", "))
+                    };
+                    (
+                        format!("{}::{}", provider.name, model.id),
+                        Some(description),
+                        tag,
+                        !provider.available,
+                    )
+                }
+            };
+            PickerRow {
+                label: &label,
+                description: description.as_deref(),
+                tag,
+                selected: picker.selected == Some(index),
+                muted,
+            }
+            .render(
+                frame,
+                Rect::new(
+                    content.x,
+                    content.y + (index - start) as u16 * row_height,
+                    content.width,
+                    row_height,
+                ),
+                palette,
+            );
+        }
+    }
     let effort = picker
         .selected_model()
         .map(|(provider, model)| {
@@ -415,33 +487,19 @@ pub fn render(
             }
         })
         .unwrap_or_default();
-    frame.render_widget(model_block, chunks[1]);
-    frame.render_widget(Paragraph::new(Text::from(lines)), model_chunks[0]);
+    let effort = if applying { "Applying…" } else { &effort };
     frame.render_widget(
-        Paragraph::new(terminal_row(&effort, usize::from(model_chunks[1].width)))
+        Paragraph::new(terminal_row(effort, usize::from(effort_area.width)))
             .style(Style::default().fg(palette.muted)),
-        model_chunks[1],
+        effort_area,
     );
-    let hint = if applying {
-        "Applying… · Esc close"
-    } else {
-        "↑/↓ model · Enter apply · Esc close · r refresh"
-    };
-    frame.render_widget(
-        Paragraph::new(terminal_row(hint, usize::from(chunks[2].width))),
-        chunks[2],
-    );
-    frame.render_widget(
-        Paragraph::new(terminal_row(
-            notice.unwrap_or(""),
-            usize::from(chunks[3].width),
-        )),
-        chunks[3],
-    );
-    if picker.loading || applying {
-        Rows::default()
-    } else {
-        Rows::new(model_chunks[0], start, picker.rows.len(), 1)
+    dialog::Rendered {
+        rows: if status.is_some() || applying {
+            Rows::default()
+        } else {
+            Rows::new(content, start, picker.rows.len(), row_height)
+        },
+        controls: layout.controls,
     }
 }
 
@@ -566,6 +624,43 @@ pub(crate) mod tests {
         }
         picker.update_catalog(unavailable);
         assert_eq!(press(&mut picker, KeyCode::Enter), ModelPickerAction::None);
+    }
+
+    #[test]
+    fn short_dialog_keeps_notices_effort_and_the_selected_model_visible() {
+        let mut picker = ModelPicker::loading();
+        picker.update_catalog(catalog());
+        let mut terminal = Terminal::new(TestBackend::new(30, 8)).unwrap();
+        let mut painted = dialog::Rendered::default();
+        terminal
+            .draw(|frame| {
+                painted = render(
+                    frame,
+                    frame.area(),
+                    &picker,
+                    false,
+                    Some("Could not apply model"),
+                    Palette::default(),
+                );
+            })
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        for expected in [
+            "alpha::one",
+            "Effort: high",
+            "Could not apply model",
+            "Enter apply",
+            "Esc close",
+        ] {
+            assert!(text.contains(expected), "{expected}: {text}");
+        }
+        assert!(!painted.rows.is_empty());
     }
 
     #[test]

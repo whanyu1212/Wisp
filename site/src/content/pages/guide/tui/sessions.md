@@ -143,6 +143,10 @@ Use arrows, `PageUp`/`PageDown`, and `Home`/`End` to move within the page; `Ctrl
 loads the previous/next page. `Enter` resumes the highlighted, rendered session; `Escape` closes.
 `Ctrl+R` refreshes from the first page, and `Ctrl+Y` retries the current page after an error.
 Narrow layouts abbreviate Ctrl as `^`; `Ctrl+G` shows the full action hints.
+The picker shares the model dialog's frame: names sit above muted session IDs and update times,
+with entry counts aligned right. Clicking either line highlights that session; clicking the visible
+`Enter` footer hint resumes it only after the new highlight has been painted. The other visible
+footer hints are clickable too, including page navigation when a previous or next page exists.
 Search and navigation preserve the composer draft and transcript viewport. Submitting `/resume`
 consumes that slash command, not the search text. A deleted session leaves the picker open for recovery.
 Catalog changes invalidate pagination cursors: refresh rather than continuing through shifted rows.
