@@ -530,7 +530,7 @@ remain in the audit log. State storage does not enable filesystem writes or muta
 | Codemode is missing | Check the installed extra, `/codemode`, and environment overrides. Automatic mode does not offer it when no MCP tool is marked `"read"` in `tool_safety`, or, with tools sent directly, when none of those has a name and parameters that are Python identifiers. |
 | A tool is missing or not read-only | Check tool selection, plan mode, the exact `tool_safety` remote name, and reconnect after changes. Otherwise call it normally; do not loosen safety just to make the script work. |
 | A write or command call is refused | Expected: scripts cannot call non-read tools, even under YOLO, `--yes`, a session grant, or through `mcp_call`. Use a normal direct call or top-level `mcp_call`, under its usual approval policy. |
-| A read tool requires confirmation | A script cannot open an approval prompt. Without an existing applicable grant, a confirmation-required call fails. |
+| A read tool requires confirmation | The TUI or RPC/SDK client receives an approval for that child call. Child prompts are serialized. Without a live approval channel, the call fails; call the tool directly instead. |
 | Script type-check fails | Describe the tool and correct its name, parameter types, and keyword arguments. Scripts are checked before any calls run. |
 | A server fails or needs sign-in | Fix the server connection or authentication, not codemode. See [MCP troubleshooting](#troubleshooting). |
 
@@ -566,8 +566,11 @@ Codemode's safety, audit, and resource limits apply regardless of discovery mode
   its parameters are Python identifiers, without the codemode description listing them. Other
   tools stay reachable through `mcp_call`.
 - **Each call is checked on its own.** Every call a script makes passes the same checks as a direct
-  call. A script cannot ask for an approval, so a call that would need one fails, and the script can
-  catch the error. Approving or allowing the script grants nothing to the calls it makes.
+  call. A child that needs approval opens its own prompt through the live event channel. Only one
+  child approval is pending at a time; denial reaches the script as a catchable error. With no live
+  channel the call fails. Approving or allowing the script grants nothing to the calls it makes.
+  Subagents still cannot request approvals. A script cancellation or timeout clears pending child
+  approvals, and waiting for approval counts toward the script’s wall-clock limit.
 - **Each call is recorded.** The script's `tool.execution.ended` and `tool.result` events list every
   call it made in `nested_calls`, with each call's arguments, outcome and timing. Refused calls
   are listed too, and so are calls the script ended before they finished. The session saves that

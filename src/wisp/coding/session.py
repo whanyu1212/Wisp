@@ -25,6 +25,7 @@ from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
 from typing import Protocol
+from uuid import uuid4
 
 import anyio
 from pydantic import JsonValue
@@ -1450,7 +1451,10 @@ class CodingSession:
                 `ToolExecutionStarted` and `ToolExecutionEnded`. The sink may wait
                 while its frontend catches up: a tool keeps running and newer
                 progress replaces what was not delivered, but a script's next
-                call waits for its nested-call events. Defaults to None.
+                call waits for its nested-call events. Child `ToolApprovalRequested`
+                and `ToolApprovalResolved` events also use this channel; delivery
+                must succeed before the child runs. Without a sink, a child needing
+                approval fails. Defaults to None.
             process_wake (bool, optional): Whether this is a wake run, whose
                 prompt is the held process notices alone; with none held it fails
                 before anything is saved. Defaults to False.
@@ -2449,13 +2453,12 @@ class CodingSession:
         readers = self._codemode_discovery_tools(
             registry, (*scriptable, *discoverable), mcp_discovery=catalog is not None
         )
-        call_ids = itertools.count(1)
 
         async def call(name: str, arguments: Mapping[str, object]) -> NestedCallResult:
             tool_call = ToolCall(
-                call_id=f"{CODEMODE}-{next(call_ids)}", name=name, arguments=dict(arguments)
+                call_id=f"{CODEMODE}-{uuid4().hex}", name=name, arguments=dict(arguments)
             )
-            return await executor().run_nested(tool_call, result_limits=SCRIPT_RESULT_LIMITS)
+            return await executor().run_codemode(tool_call, result_limits=SCRIPT_RESULT_LIMITS)
 
         tool = CodemodeTool(
             scriptable,

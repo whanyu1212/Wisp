@@ -3,7 +3,7 @@
 A script can fan out many calls with `asyncio.gather`, chain calls on earlier
 answers, and filter what it reads, so only what it prints and returns reaches the
 model. Each call it makes is a separate call under the run's tool policy (see
-`ConfiguredToolExecutor.run_nested`), so the script itself needs no approval and
+`ConfiguredToolExecutor.run_codemode`), so the script itself needs no approval and
 grants none. The run offers only read-only tools to scripts.
 """
 

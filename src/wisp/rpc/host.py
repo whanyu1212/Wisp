@@ -364,11 +364,11 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
         return pending is not None and not pending.resolved
 
     def cancel_approval(self, *, call_id: str, reason: str) -> bool:
-        return self.resolve_approval(
-            call_id=call_id,
-            approved=False,
-            reason=reason,
-        )
+        resolved = self.resolve_approval(call_id=call_id, approved=False, reason=reason)
+        # Cancellation may arrive while the request is being published, before
+        # await_approval owns cleanup. An active waiter retains its local record.
+        self._pending.pop(call_id, None)
+        return resolved
 
     def resolve_approval(
         self,

@@ -1047,8 +1047,8 @@ impl Transcript {
 
     /// Apply a live update from a running codemode script to its card.
     ///
-    /// `parent_call_id` names the script's own call; the ids of the calls it makes
-    /// are only unique within it, so they are never bound to entries. An update for
+    /// `parent_call_id` names the script's own call; its child calls are displayed
+    /// inside that card rather than bound to entries. An update for
     /// a script that is unknown, not a script, or already finished is ignored.
     /// Returns whether the card changed.
     pub fn observe_script_call(
@@ -1077,6 +1077,31 @@ impl Transcript {
             self.bump_card(binding.entry_id);
         }
         changed
+    }
+
+    /// Whether a live script card already displays this child call's raw id.
+    pub(crate) fn has_live_script_call(&self, call_id: &str) -> bool {
+        self.entries.iter().any(|entry| {
+            entry.tool_card().is_some_and(|card| {
+                !card.status.terminal()
+                    && card.script.as_ref().is_some_and(|script| {
+                        script.calls.iter().any(|call| call.call_id == call_id)
+                    })
+            })
+        })
+    }
+
+    /// Whether this live parent card displays the child call's raw id.
+    pub(crate) fn has_live_script_child(&self, parent_call_id: &str, call_id: &str) -> bool {
+        self.tool_entry_for_call(parent_call_id)
+            .and_then(|id| self.entry(id))
+            .and_then(|entry| entry.tool_card())
+            .is_some_and(|card| {
+                !card.status.terminal()
+                    && card.script.as_ref().is_some_and(|script| {
+                        script.calls.iter().any(|call| call.call_id == call_id)
+                    })
+            })
     }
 
     /// Close a background process's card when the backend says it stopped on its own.
@@ -3741,6 +3766,29 @@ mod tests {
         assert_eq!(transcript.entries()[0].role, TranscriptRole::User);
         assert_eq!(transcript.entries()[1].id, tool);
         assert_eq!(transcript.entries()[2].id, assistant);
+    }
+
+    #[test]
+    fn child_lookup_requires_live_script() {
+        let mut transcript = Transcript::default();
+        let parent = transcript.observe_tool_call(call(
+            "script",
+            "codemode",
+            serde_json::json!({"code": "tools.read(path='file')"}),
+        ));
+        assert!(!transcript.has_live_script_call("child"));
+        assert!(transcript.observe_script_call("script", |script| {
+            script.call_started("child", "read", serde_json::json!({"path": "file"}))
+        }));
+        assert!(transcript.has_live_script_call("child"));
+        assert!(!transcript.has_live_script_call("other"));
+        assert_eq!(transcript.entries().len(), 1);
+        assert_eq!(transcript.tool_entry_for_call("script"), Some(parent));
+        assert!(transcript.tool_entry_for_call("child").is_none());
+
+        transcript.settle_unresolved_tools("Agent run cancelled");
+        assert!(!transcript.has_live_script_call("child"));
+        assert_eq!(transcript.entries().len(), 1);
     }
 
     #[test]
