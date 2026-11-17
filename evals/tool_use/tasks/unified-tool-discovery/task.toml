@@ -1,0 +1,13 @@
+id = "unified-tool-discovery"
+title = "Discover local and MCP invocation contracts through one catalog"
+tags = ["mcp", "long-output"]
+opt_in = true
+prompt = "Use tool_search and tool_describe to inspect the local read function and find the inventory reorder-policy tool, including how to invoke it. Read REQUEST.txt for the SKU and warehouse, look up the stock level that triggers a new purchase order, and write just the number of units to ANSWER.txt."
+verify = "{python} {task}/../mcp-pick-tool/verify.py"
+timeout_seconds = 240
+max_tool_iterations = 20
+tools = ["read", "write"]
+mcp_servers = ["inventory-30"]
+
+[checks]
+uses_tool = "tool_describe"

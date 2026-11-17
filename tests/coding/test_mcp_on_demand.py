@@ -402,8 +402,18 @@ def test_scheduling_follows_target(parallel_safe: bool, tmp_path: Path) -> None:
         (MCP_CALL, None, False),
         (MCP_SEARCH, None, False),
         (MCP_DESCRIBE, None, False),
+        ("tool_search", None, False),
+        ("tool_describe", None, False),
     ],
-    ids=["command-target", "read-target", "unresolved", "search", "describe"],
+    ids=[
+        "command-target",
+        "read-target",
+        "unresolved",
+        "search",
+        "describe",
+        "unified-search",
+        "unified-describe",
+    ],
 )
 def test_overflow_retry_judges_target(
     tmp_path: Path, name: str, target: str | None, unsafe: bool

@@ -197,8 +197,18 @@ from wisp.skills.prompt import build_skill_index
 from wisp.skills.tool import SkillTool
 from wisp.tool_presentation import tool_result_status
 from wisp.tools.approval import ToolApprovalPolicy, confirms_every_call
-from wisp.tools.base import ToolExecutionMetadata
+from wisp.tools.base import Tool, ToolExecutionMetadata
 from wisp.tools.codemode.calls import CODEMODE, SCRIPT_RESULT_LIMITS, NestedCallResult
+from wisp.tools.codemode.discovery import (
+    DISCOVERY_TOOL_NAMES as CODEMODE_DISCOVERY_NAMES,
+)
+from wisp.tools.codemode.discovery import (
+    DiscoveryEntry,
+    ToolCatalog,
+)
+from wisp.tools.codemode.discovery import (
+    discovery_tools as codemode_discovery_tools,
+)
 from wisp.tools.codemode.tool import CODEMODE_PROMPT, CodemodeTool, callable_by_name
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
@@ -2276,12 +2286,17 @@ class CodingSession:
             )
         # A subagent may use what the run offers before the tools below join.
         subagent_tools = offered_tools
-        codemode = self._codemode_tool(offered_tools, registry, lambda: executor, catalog)
+        codemode = self._codemode_tool(
+            offered_tools, registry, lambda: executor, catalog, policy=policy
+        )
         if codemode is not None:
             # Like the discovery tools, the script tool joins without widening what
             # anything else may do: each call a script makes is checked as itself.
-            offered_tools = (*offered_tools, ToolSpec.from_tool(codemode))
-            policy = replace(policy, allowed_tools=policy.allowed_tools | {CODEMODE})
+            added = (*codemode.discovery_tools, codemode)
+            offered_tools = (*offered_tools, *(ToolSpec.from_tool(tool) for tool in added))
+            policy = replace(
+                policy, allowed_tools=policy.allowed_tools | {tool.name for tool in added}
+            )
         # An operation names the tools its run may use, and what a subagent spends
         # is not something it asked for; only an ordinary run gets the tool.
         spawn_agent = (
@@ -2344,7 +2359,9 @@ class CodingSession:
         tools = self._effective_tools(registry)
         registered = set(registry.names())
         mcp_tools = McpCatalog.from_tools(
-            registry.get(spec.name) for spec in tools if spec.name in registered
+            registry.get(spec.name)
+            for spec in tools
+            if spec.name in registered and self.tool_policy.allows(registry.get(spec.name))
         ).entries
         _, found_on_demand = self._apply_mcp_exposure(tools, registry)
         scriptable = sum(
@@ -2361,6 +2378,8 @@ class CodingSession:
         registry: ToolRegistry | None,
         executor: Callable[[], ConfiguredToolExecutor],
         catalog: McpCatalog | None = None,
+        *,
+        policy: ToolPolicy | None = None,
     ) -> CodemodeTool | None:
         """Register the codemode tool for one run, when the session offers it.
 
@@ -2377,6 +2396,8 @@ class CodingSession:
             executor (Callable[[], ConfiguredToolExecutor]): The run's executor.
             catalog (McpCatalog | None): The MCP tools found on demand this run, or
                 None when exposure is direct.
+            policy (ToolPolicy | None): The run's selection policy, or the session
+                policy when inspecting availability outside a run.
 
         Unset (``self.codemode`` None), codemode is offered only when a script may
         call at least one of the run's MCP tools, found on demand or sent directly:
@@ -2403,15 +2424,20 @@ class CodingSession:
                 _logger.warning("codemode is on, but the codemode extra is not installed")
             return None
         registered = set(registry.names())
+        allowed = policy if policy is not None else self.tool_policy
         scriptable = [
             tool
             for spec in offered
-            if spec.name in registered and (tool := registry.get(spec.name)).safety == "read"
+            if spec.name in registered
+            and (tool := registry.get(spec.name)).safety == "read"
+            and (
+                allowed.allows(tool) or (catalog is not None and tool.name in DISCOVERY_TOOL_NAMES)
+            )
         ]
         discoverable = [
             entry.tool
             for entry in (catalog.entries if catalog is not None else ())
-            if entry.tool.safety == "read"
+            if entry.tool.safety == "read" and allowed.allows(entry.tool)
         ]
         scriptable_mcp = discoverable or [
             tool
@@ -2420,6 +2446,9 @@ class CodingSession:
         ]
         if not (scriptable_mcp if automatic else discoverable or scriptable):
             return None
+        readers = self._codemode_discovery_tools(
+            registry, (*scriptable, *discoverable), mcp_discovery=catalog is not None
+        )
         call_ids = itertools.count(1)
 
         async def call(name: str, arguments: Mapping[str, object]) -> NestedCallResult:
@@ -2432,6 +2461,7 @@ class CodingSession:
             scriptable,
             call,
             discoverable=discoverable,
+            discovery_tools=readers,
             state=self._script_state.state if self._script_state is not None else None,
             output_store=next(
                 (tool.output_store for tool in scriptable if isinstance(tool, ReadOutputTool)),
@@ -2445,6 +2475,52 @@ class CodingSession:
             prompt=CODEMODE_PROMPT,
         )
         return tool
+
+    def _codemode_discovery_tools(
+        self, registry: ToolRegistry, tools: Sequence[Tool], *, mcp_discovery: bool
+    ) -> tuple[Tool, ...]:
+        """Register catalog readers for this run's already permitted read-only tools.
+
+        Existing tools with either reader name take precedence. Discovery describes
+        confirmation requirements but never updates approvals or target policy.
+        """
+
+        readers: tuple[Tool, ...] = ()
+        if not set(registry.names()).intersection(CODEMODE_DISCOVERY_NAMES):
+            entries = []
+            for candidate in tools:
+                if mcp_discovery and candidate.name in DISCOVERY_TOOL_NAMES:
+                    continue
+                callable_directly = callable_by_name(candidate)
+                if not callable_directly and not (
+                    mcp_discovery and isinstance(candidate, McpCatalogTool)
+                ):
+                    continue
+                metadata = registry.prompt_metadata_for(candidate.name)
+                namespace = "builtin"
+                connected = True
+                if isinstance(candidate, McpCatalogTool):
+                    namespace = f"mcp:{candidate.server_name}"
+                    if self._mcp_server_connected is not None:
+                        connected = self._mcp_server_connected(candidate.server_name)
+                entries.append(
+                    DiscoveryEntry(
+                        tool=candidate,
+                        namespace=namespace,
+                        guidelines=metadata.guidelines if metadata is not None else (),
+                        requires_confirmation=self.tool_approval_policy.requires_approval(
+                            candidate
+                        ),
+                        connected=connected,
+                        invocation="function" if callable_directly else "mcp_call",
+                    )
+                )
+            readers = codemode_discovery_tools(ToolCatalog(tuple(entries)))
+            for reader in readers:
+                registry.register(
+                    reader, replace=False, execution=ToolExecutionMetadata(parallel_safe=True)
+                )
+        return readers
 
     def subagents_offered(self) -> bool:
         """Report whether a run started now would offer the `spawn_agent` tool.
@@ -3467,7 +3543,11 @@ class CodingSession:
                 stats_tools, stats_registry, _no_executor, context=self.tool_context
             )
             if stats_codemode is not None:
-                stats_tools = (*stats_tools, ToolSpec.from_tool(stats_codemode))
+                stats_tools = (
+                    *stats_tools,
+                    *(ToolSpec.from_tool(tool) for tool in stats_codemode.discovery_tools),
+                    ToolSpec.from_tool(stats_codemode),
+                )
             if stats_spawn_agent is not None:
                 stats_tools = (*stats_tools, ToolSpec.from_tool(stats_spawn_agent))
             prompt = await self._prompt_messages_async(
@@ -3527,7 +3607,11 @@ class CodingSession:
             # registered tool that shares their name is judged above by its safety.
             # The codemode tool is the same: a script reaches only read-only tools.
             # So is `spawn_agent`, whose subagent does too.
-            return name not in DISCOVERY_TOOL_NAMES and name not in (CODEMODE, SPAWN_AGENT)
+            return (
+                name not in DISCOVERY_TOOL_NAMES
+                and name not in CODEMODE_DISCOVERY_NAMES
+                and name not in (CODEMODE, SPAWN_AGENT)
+            )
 
     def _effective_tools(self, registry: ToolRegistry | None = None) -> tuple[ToolSpec, ...]:
         """Return the startup-authorized tools available in the current mode."""

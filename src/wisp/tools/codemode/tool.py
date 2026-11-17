@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from wisp.tool_types import ToolSafety
-from wisp.tools.base import ToolArguments, ToolInputSchema, ToolPromptMetadata
+from wisp.tools.base import Tool, ToolArguments, ToolInputSchema, ToolPromptMetadata
 from wisp.tools.codemode.calls import (
     CODEMODE,
     SCRIPT_RESULT_LIMITS,
@@ -212,6 +212,7 @@ class CodemodeTool:
         limits: ScriptLimits | None = None,
         state: ScriptState | None = None,
         output_store: OutputStore | None = None,
+        discovery_tools: Sequence[Tool] = (),
     ) -> None:
         """Offer ``tools`` to scripts, running each call a script makes with ``call``.
 
@@ -230,8 +231,12 @@ class CodemodeTool:
                 fresh ephemeral state retained by this tool instance.
             output_store (OutputStore | None): Shared store exposed by read_output.
                 None leaves truncated output unrecoverable.
+            discovery_tools (Sequence[Tool]): Per-run catalog readers, offered beside
+                codemode and callable from scripts without granting target permissions.
         """
 
+        self.discovery_tools = tuple(discovery_tools)
+        tools = (*tools, *self.discovery_tools)
         taken = _HELPER_NAMES | frozenset(tool.name for tool in (*tools, *discoverable))
         listed = tuple(
             signature for tool in tools if (signature := _signature(tool, taken)) is not None
@@ -249,7 +254,9 @@ class CodemodeTool:
         self._limits = limits or ScriptLimits()
         self._state = state if state is not None else ScriptState()
         self._output_store = output_store
-        self.description = _description(listed, self._limits, discoverable=bool(found))
+        self.description = _description(
+            listed, self._limits, discoverable=bool(found), unified_discovery=bool(discovery_tools)
+        )
         declarations = [
             declaration
             for signature in self._signatures
@@ -493,7 +500,11 @@ def _is_identifier(name: str) -> bool:
 
 
 def _description(
-    signatures: Sequence[_Signature], limits: ScriptLimits, *, discoverable: bool = False
+    signatures: Sequence[_Signature],
+    limits: ScriptLimits,
+    *,
+    discoverable: bool = False,
+    unified_discovery: bool = False,
 ) -> str:
     """Describe the tool, naming the tools a script may call.
 
@@ -503,13 +514,17 @@ def _description(
     With ``discoverable``, MCP tools found on demand are callable too, unlisted.
     """
 
+    if unified_discovery:
+        # Exact names and schemas are available on demand; do not repeat a large
+        # catalog or server-controlled names in every model request.
+        signatures = ()
     lines = [
         "Run a Python script that calls other tools, and return what it prints and its "
         "last expression. Use it to make many calls at once, to chain calls on earlier "
         "answers, or to keep large results out of the conversation by filtering them in "
         "the script.",
         "",
-        "Each tool named below is an async function with the tool's own name and "
+        "Each available tool is an async function with the tool's own name and "
         "parameters, called with keyword arguments only. It returns the tool's text, up "
         f"to {_kib(SCRIPT_RESULT_LIMITS.max_bytes)}, more than a direct call returns, and "
         "raises RuntimeError when the call fails; catch it to carry on. A result that is "
@@ -533,11 +548,21 @@ def _description(
         "Quotas: 128 keys; non-empty keys up to 128 UTF-8 bytes; values up to 64 KiB "
         "canonical UTF-8 JSON, 256 KiB total, and 32 nested containers.",
         f"Limits: {limits.max_calls} tool calls, {limits.wall_seconds:g} seconds and "
-        f"{_kib(limits.max_printed_bytes)} printed per script.",
+        f"{_kib(limits.max_printed_bytes)} combined printed/final output per script.",
         "",
         "Callable tools:",
         *_grouped_names(signature.name for signature in signatures),
     ]
+    if unified_discovery:
+        lines[-1:] = [
+            "Use tool_search(query=...) for the unified catalog of built-in and MCP "
+            "functions, or an empty query to list them. tool_describe(name=...) gives "
+            "input/result schemas, return semantics, guidance and confirmation requirements. "
+            "Tools with structured results return typed data instead of text. "
+            "Both are callable here too. Discovery grants no execution permission. "
+            "Use its callable_name with keyword arguments. For invocation=mcp_call, "
+            "use mcp_call(name=the discovered name, arguments={...}); this returns text."
+        ]
     structured = [signature for signature in signatures if signature.result is not None]
     if structured:
         lines += [

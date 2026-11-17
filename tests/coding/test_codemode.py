@@ -184,7 +184,9 @@ def test_offered_only_when_on(tmp_path: Path, enabled: bool) -> None:
         description = offered[CODEMODE].description
         # Only read-only tools are callable, named but not re-declared: the model
         # already has each one's schema as a direct tool.
-        assert description.endswith("Callable tools:\n- mcp__db__{query}\n- lookup")
+        assert "tool_search(query=...)" in description
+        assert "tool_describe(name=...)" in description
+        assert "mcp__db__query" not in description
         assert "async def" not in description
 
 
@@ -1544,7 +1546,8 @@ def test_script_reads_structured_fields(tmp_path: Path) -> None:
 
     assert _result(events).output.startswith('[8, "a-1"]')
     description = next(t for t in provider.calls[0].tools if t.name == CODEMODE).description
-    assert "- mcp__db__query: a dict: id, lines, note" in description
+    assert "tool_describe(name=...)" in description
+    assert "mcp__db__query: a dict:" not in description
 
 
 @pytest.mark.parametrize(
