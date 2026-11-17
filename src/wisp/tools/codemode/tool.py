@@ -526,9 +526,12 @@ def _description(
         "the script.",
         "",
         "Each available tool is an async function with the tool's own name and "
-        "parameters, called with keyword arguments only. It returns the tool's text, up "
-        f"to {_kib(SCRIPT_RESULT_LIMITS.max_bytes)}, more than a direct call returns, and "
-        "raises RuntimeError when the call fails; catch it to carry on. A result that is "
+        "parameters, called directly with keyword arguments only; no tool import is needed "
+        "and there is no `tools` module. Return values follow the tool's described "
+        "contract: text or typed structured data. Prefer the named callable when "
+        "available; `mcp_call` returns text, which is not necessarily JSON. Text results "
+        f"are limited to {_kib(SCRIPT_RESULT_LIMITS.max_bytes)}, more than a direct call "
+        "returns. A failed call raises RuntimeError; catch it to carry on. Text that is "
         f"only part of the answer ends with the line `{INCOMPLETE_MARKER}`. Run "
         "independent calls at once with `await asyncio.gather(...)` after "
         "`import asyncio`: one failed call ends it and loses the other results. "
@@ -549,7 +552,10 @@ def _description(
         "actions) are NOT rolled back. Inspect completed calls before retrying; never "
         "blindly rerun a failed script with mutations. Each child follows normal "
         "permissions and approvals; approving codemode does not approve its children. "
-        "State lasts across scripts in this session. "
+        "State lasts across scripts in this session; in persisted sessions it survives "
+        "compaction and resuming the same branch after restart. Try `await load(key)` "
+        "before refetching retained data unless fresh data is required; refetch if the "
+        "key is missing. "
         "Quotas: 128 keys; non-empty keys up to 128 UTF-8 bytes; values up to 64 KiB "
         "canonical UTF-8 JSON, 256 KiB total, and 32 nested containers.",
         f"Limits: {limits.max_calls} tool calls, {limits.wall_seconds:g} seconds and "
