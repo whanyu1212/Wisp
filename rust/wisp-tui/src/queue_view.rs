@@ -267,7 +267,7 @@ impl QueueView {
             List::new(rows.into_iter().map(ListItem::new).collect::<Vec<_>>())
                 .block(block)
                 .highlight_style(palette.selection())
-                .highlight_symbol("› "),
+                .highlight_symbol(palette.selection_marker()),
             area,
             &mut selection,
         );

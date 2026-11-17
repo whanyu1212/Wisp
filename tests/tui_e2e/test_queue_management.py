@@ -4,6 +4,7 @@ import fcntl
 import json
 import os
 import pty
+import re
 import struct
 import sys
 import termios
@@ -13,7 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from tests.tui_e2e.support import full_repaint_after
+from tests.support.paths import REPO_ROOT
+from tests.tui_e2e.support import complete_frames, full_repaint_after
 from tests.tui_e2e.test_readiness import _rust_binary, _TuiProcess
 from wisp import __version__
 
@@ -21,6 +23,11 @@ from wisp import __version__
 @pytest.mark.process
 def test_queue_management_against_blocked_real_rpc_host(tmp_path: Path) -> None:
     binary = _rust_binary()
+    catalog = json.loads((REPO_ROOT / "rust/wisp-tui/src/theme_catalog.json").read_text())
+    palette = next(
+        theme["colors"] for theme in catalog["themes"] if theme["name"] == catalog["default"]
+    )
+    selected_rgb = tuple(int(palette["selected"][index : index + 2], 16) for index in (1, 3, 5))
     home = tmp_path / "home"
     home.mkdir()
     log = tmp_path / "queue.jsonl"
@@ -86,9 +93,10 @@ main()
             "HOME": str(home),
             "USERPROFILE": str(home),
             "WISP_TRUST": "1",
+            "WISP_TUI_COLORS": "truecolor",
             "WISP_RUST_TUI_BINDINGS_JSON": '{"queue.manage":["F7"]}',
         }
-        for key in ("WISP_PROVIDER", "WISP_MODEL", "WISP_FAKE_STREAM_INTERVAL_MS"):
+        for key in ("WISP_PROVIDER", "WISP_MODEL", "WISP_FAKE_STREAM_INTERVAL_MS", "NO_COLOR"):
             environment.pop(key, None)
         os.execve(
             str(binary),
@@ -152,6 +160,47 @@ main()
             lambda frame: idle_footer in frame, failure="queue manager did not settle"
         )
 
+    def selected_label_painted(output: bytes, label: bytes) -> bool:
+        """Check that a label was painted bold on the selection band, not merely listed.
+
+        Args:
+            output (bytes): PTY output since the choice changed.
+            label (bytes): Label of the choice that must have been painted.
+
+        Returns:
+            bool: Whether a complete frame painted the highlighted label.
+        """
+        bold = selected = False
+        for token in re.findall(rb"\x1b\[[0-?]*[ -/]*[@-~]|[^\x1b]+", complete_frames(output)):
+            if token.startswith(b"\x1b["):
+                if not token.endswith(b"m"):
+                    continue
+                codes = [int(code or b"0") for code in token[2:-1].split(b";")]
+                index = 0
+                while index < len(codes):
+                    code = codes[index]
+                    if code in (38, 48, 58) and index + 1 < len(codes):
+                        # RGB channels and indexed colour values are not SGR attributes.
+                        mode = codes[index + 1]
+                        if code == 48:
+                            selected = (
+                                mode == 2 and tuple(codes[index + 2 : index + 5]) == selected_rgb
+                            )
+                        index += 5 if mode == 2 else 3
+                        continue
+                    if code == 0:
+                        bold = selected = False
+                    elif code == 1:
+                        bold = True
+                    elif code == 22:
+                        bold = False
+                    elif code == 49:
+                        selected = False
+                    index += 1
+            elif bold and selected and label in token:
+                return True
+        return False
+
     def select_row(index: int, label: bytes) -> int:
         """Navigate to a row and activate it.
 
@@ -166,7 +215,10 @@ main()
         settle()
         offset = len(tui.output)
         tui.send(b"\x1b[H" + b"\x1b[B" * index)
-        tui.wait_for("› ".encode() + label, since=offset, failure="queue choice did not paint")
+        tui.wait_until(
+            lambda output: selected_label_painted(output[offset:], label),
+            failure="queue choice did not paint bold on its selection band",
+        )
         offset = len(tui.output)
         tui.send(b"\r")
         return offset
@@ -192,7 +244,10 @@ main()
         assert reports("set_queue_mode")[-1]["command"]["expected_token"]
 
         chosen = select_row(3, b"Clear this queue")
-        tui.wait_for("› Cancel".encode(), since=chosen, failure="confirmation did not open")
+        tui.wait_until(
+            lambda output: selected_label_painted(output[chosen:], b"Cancel"),
+            failure="confirmation did not open with Cancel selected",
+        )
         select_row(1, b"Confirm clear")
         wait_report("clear_queue", 1)
         cleared = reports("clear_queue")[-1]
@@ -201,7 +256,10 @@ main()
         assert cleared["state"]["follow_up"] == ["later follow-up"]
 
         chosen = select_row(4, b"Clear both queues")
-        tui.wait_for("› Cancel".encode(), since=chosen, failure="confirmation did not open")
+        tui.wait_until(
+            lambda output: selected_label_painted(output[chosen:], b"Cancel"),
+            failure="confirmation did not open with Cancel selected",
+        )
         tui.send(b"\r")  # Cancel is the default; no destructive command.
         before = len(reports("get_queue_state"))
         select_row(5, b"Refresh")

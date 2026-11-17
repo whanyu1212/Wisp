@@ -648,7 +648,7 @@ pub(crate) fn render_completion(
     frame.render_stateful_widget(
         List::new(items)
             .highlight_style(palette.selection())
-            .highlight_symbol("› "),
+            .highlight_symbol(palette.selection_marker()),
         area,
         &mut state,
     );

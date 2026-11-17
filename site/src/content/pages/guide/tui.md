@@ -348,8 +348,12 @@ Themes are drawn in 24-bit colour. Wisp switches to the nearest 256-colour palet
 Terminal.app (unless `COLORTERM` advertises truecolor), and to the 16 ANSI colours when `TERM` names
 a 16- or 8-colour terminal such as the Linux console. Text that would fall below 4.5:1 contrast
 after the switch moves to the nearest colour that keeps it readable, and background tiers that
-would show as one gray at 256 colours move a step apart. At 16 colours, selected rows reverse
-instead of drawing a band. Inside tmux, Wisp keeps sending
+would show as one gray at 256 colours move a step apart. At 16 colours, subtle background tiers
+can merge, so selected rows reverse instead of drawing a band. Diff additions use black text on
+green and deletions use white text on red; changed words stay bold and underlined rather than
+adding another tint. `NO_COLOR` keeps diffs grayscale at every depth. Pickers omit their cursor
+arrow where a selection band is visible, keeping the same label inset and mouse targets; Glass,
+monochrome and 16-colour pickers keep the arrow. Inside tmux, Wisp keeps sending
 24-bit colour and tmux converts it for its outer terminal, without that contrast step; if that
 terminal lacks truecolor, set `WISP_TUI_COLORS=256` so Wisp converts instead. Set `WISP_TUI_COLORS`
 to `truecolor`, `256`, or `16` to choose the depth yourself, or to `auto` for detection; other

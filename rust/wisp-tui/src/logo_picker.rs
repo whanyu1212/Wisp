@@ -155,7 +155,7 @@ impl LogoPicker {
         let mut state = ListState::default().with_selected(Some(self.selected - offset));
         frame.render_stateful_widget(
             List::new(rows)
-                .highlight_symbol("› ")
+                .highlight_symbol(palette.selection_marker())
                 .highlight_style(palette.selection()),
             list_area,
             &mut state,

@@ -244,7 +244,15 @@ fn cell(
     // Tiny terminals still get readable source; the full gutter returns on resize.
     let gutter = if width > gutter + 4 { gutter } else { 0 };
     let source = chunks(&row.text, width.saturating_sub(gutter));
-    let base = Style::default().fg(palette.foreground).bg(background);
+    let base = match row.kind {
+        DetailRowKind::Addition => palette.diff_line(false),
+        DetailRowKind::Deletion => palette.diff_line(true),
+        _ => Style::default().fg(palette.foreground).bg(background),
+    };
+    // Signs and wrapped-line markers use the same readable pair at 16 colours.
+    let sign_style = palette.syntax(base.fg(color), crate::syntax::SyntaxClass::Plain);
+    let continuation_style =
+        palette.syntax(base.fg(palette.dim()), crate::syntax::SyntaxClass::Plain);
     let safe_offsets = sanitize_for_terminal(&row.text) == row.text;
     let tokens = crate::syntax::highlight_fence(language, &row.text)
         .map(|highlight| highlight.tokens)
@@ -257,20 +265,17 @@ fn cell(
             let mut spans: Vec<Span<'static>> = Vec::new();
             if gutter > 0 {
                 if index == 0 {
-                    spans.push(Span::styled(
-                        prefix.clone(),
-                        Style::default().fg(color).bg(background),
-                    ));
+                    spans.push(Span::styled(prefix.clone(), sign_style));
                 } else if hunk_bars {
                     // A wrapped line continues under its sign: `↳`.
                     spans.push(Span::styled(
                         format!("{}↳ ", " ".repeat(gutter.saturating_sub(2))),
-                        Style::default().fg(palette.dim()).bg(background),
+                        continuation_style,
                     ));
                 } else {
                     spans.push(Span::styled(
                         format!("{}↪ ", " ".repeat(gutter.saturating_sub(2))),
-                        Style::default().fg(color).bg(background),
+                        sign_style,
                     ));
                 }
             }
@@ -675,6 +680,51 @@ mod tests {
         let (_, paired_offset) = review.rows[review.top].paired.unwrap();
         assert!(paired_offset <= offset);
         assert!(offset - paired_offset < 120);
+    }
+
+    #[test]
+    fn ansi16_diff_review_keeps_text_signs_and_wrapped_rows_readable() {
+        use crate::color_depth::ColorDepth;
+        use ratatui::{
+            Terminal, backend::TestBackend, style::Color, text::Text, widgets::Paragraph,
+        };
+
+        let detail = presentation();
+        for theme in crate::theme::themes() {
+            let palette = theme.palette(false).for_depth(ColorDepth::Ansi16);
+            for row in &detail.rows[2..4] {
+                let deletion = row.kind == DetailRowKind::Deletion;
+                let lines = cell(
+                    Some(row),
+                    deletion,
+                    20,
+                    palette,
+                    std::slice::from_ref(&(0..4)),
+                    "rust",
+                    true,
+                    true,
+                )
+                .into_iter()
+                .map(|(line, _)| line)
+                .collect::<Vec<_>>();
+                assert!(lines.len() > 1, "exercise a wrapped row");
+                let mut terminal = Terminal::new(TestBackend::new(20, lines.len() as u16)).unwrap();
+                terminal
+                    .draw(|frame| {
+                        frame.render_widget(Paragraph::new(Text::from(lines)), frame.area());
+                        ColorDepth::Ansi16.downconvert_buffer(frame.buffer_mut());
+                    })
+                    .unwrap();
+                let expected = if deletion {
+                    (Color::White, Color::Red)
+                } else {
+                    (Color::Black, Color::Green)
+                };
+                for cell in &terminal.backend().buffer().content {
+                    assert_eq!((cell.fg, cell.bg), expected, "{} {cell:?}", theme.slug);
+                }
+            }
+        }
     }
 
     #[test]

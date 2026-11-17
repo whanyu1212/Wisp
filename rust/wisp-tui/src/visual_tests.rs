@@ -1164,6 +1164,46 @@ fn user_and_code_surfaces_fill_only_their_allocated_rows() {
 }
 
 #[test]
+fn prompt_padding_survives_color_downconversion() {
+    for theme in theme::themes() {
+        for no_color in [false, true] {
+            for depth in [ColorDepth::Ansi256, ColorDepth::Ansi16] {
+                let mut ui = fixture("conversation");
+                ui.theme.active = theme;
+                ui.no_color = no_color;
+                ui.color_depth = depth;
+                let palette = ui.palette();
+                let canvas = depth.downconvert(palette.base().bg.unwrap_or(Color::Reset));
+                let band = depth.downconvert(palette.user_text().bg.unwrap_or(Color::Reset));
+                let buffer = draw(&mut ui, 100, 48);
+                let label = row_containing(&buffer, "you");
+                let user = row_containing(&buffer, "Review the startup");
+                for y in [label - 1, label, user, user + 1] {
+                    for x in 2..98 {
+                        assert_eq!(
+                            buffer[(x, y)].bg,
+                            band,
+                            "{} {depth:?} at {x},{y}",
+                            theme.slug
+                        );
+                    }
+                }
+                for y in [label - 2, user + 2] {
+                    assert_eq!(buffer[(3, y)].bg, canvas);
+                }
+                if depth == ColorDepth::Ansi256 && palette.user_text().bg.is_some() {
+                    assert_ne!(band, canvas, "{} no_color={no_color}", theme.slug);
+                }
+                assert_eq!(
+                    buffer[(3, user)].modifier.contains(Modifier::BOLD),
+                    palette.user_text().bg.is_none()
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn active_user_surface_keeps_one_highlighted_row_above_and_below() {
     let mut ui = fixture("new-turn");
     let palette = ui.palette();
@@ -1305,27 +1345,52 @@ fn footer_mode_takes_colour() {
 
 #[test]
 fn diff_band_skips_line_numbers() {
-    for depth in [ColorDepth::TrueColor, ColorDepth::Ansi256] {
-        let mut ui = fixture("diff-previews");
-        ui.color_depth = depth;
-        let palette = ui.palette();
-        let shown = |color| depth.downconvert(color);
-        let buffer = draw(&mut ui, 100, 64);
-        for (text, band) in [
-            (".mermaid svg * {", palette.deletion_background),
-            ("await page.goto", palette.addition_background),
-        ] {
-            let y = row_containing(&buffer, text);
-            let digit = (0..buffer.area.width)
-                .find(|&x| buffer[(x, y)].symbol().chars().all(|c| c.is_ascii_digit()))
-                .expect("a line number");
-            assert_eq!(
-                buffer[(digit, y)].bg,
-                shown(palette.background),
-                "{depth:?}"
-            );
-            assert_eq!(buffer[(90, y)].bg, shown(band), "{depth:?}");
-            assert_ne!(shown(band), shown(palette.background), "{depth:?}");
+    for theme in theme::themes() {
+        for no_color in [false, true] {
+            for depth in [
+                ColorDepth::TrueColor,
+                ColorDepth::Ansi256,
+                ColorDepth::Ansi16,
+            ] {
+                let mut ui = fixture("diff-previews");
+                ui.theme.active = theme;
+                ui.no_color = no_color;
+                ui.color_depth = depth;
+                let palette = ui.palette();
+                let shown = |color| depth.downconvert(color);
+                let canvas = shown(palette.base().bg.unwrap_or(Color::Reset));
+                let buffer = draw(&mut ui, 100, 64);
+                for (text, band) in [
+                    (".mermaid svg * {", palette.deletion_background),
+                    ("await page.goto", palette.addition_background),
+                ] {
+                    let y = row_containing(&buffer, text);
+                    let digit = (0..buffer.area.width)
+                        .find(|&x| buffer[(x, y)].symbol().chars().all(|c| c.is_ascii_digit()))
+                        .expect("a line number");
+                    assert_eq!(buffer[(digit, y)].bg, canvas, "{} {depth:?}", theme.slug);
+                    assert_eq!(buffer[(90, y)].bg, shown(band), "{} {depth:?}", theme.slug);
+                    if !no_color || depth != ColorDepth::Ansi16 {
+                        assert_ne!(shown(band), canvas, "{} {depth:?}", theme.slug);
+                    }
+                    if depth == ColorDepth::Ansi16 && !no_color {
+                        // Syntax and changed-word emphasis keep the explicit readable pair.
+                        for x in digit + 4..90 {
+                            let cell = &buffer[(x, y)];
+                            if cell.symbol() != " " {
+                                assert!(
+                                    matches!(
+                                        (cell.fg, cell.bg),
+                                        (Color::Black, Color::Green) | (Color::White, Color::Red)
+                                    ),
+                                    "{} {x},{y}: {cell:?}",
+                                    theme.slug
+                                );
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }

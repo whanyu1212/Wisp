@@ -40,7 +40,11 @@ pub(crate) struct Palette {
     pub surface: Color,
     #[serde(deserialize_with = "color")]
     pub panel: Color,
-    /// The band under a selected row, one tier past `panel`.
+    /// A row under the pointer, between the prompt band and selection tiers.
+    /// Reserved for views that accept hover; adding this token does not enable mouse motion.
+    #[serde(deserialize_with = "color")]
+    pub hover: Color,
+    /// The band under a selected row, one tier past `hover`.
     #[serde(deserialize_with = "color")]
     pub selected: Color,
     /// Reply headings, by level: each its own hue so levels read apart from each other
@@ -87,13 +91,15 @@ impl Palette {
     /// This palette for a terminal of `depth`. At 256 colours, background tiers and diff
     /// bands that would show as one colour are moved apart (see
     /// [`ColorDepth::separate_tiers`]); at 16 colours, where every dark tier shows as
-    /// black, selections reverse instead of drawing a band.
+    /// black, selections reverse instead of drawing a band and diffs use explicit
+    /// red/green pairs. All colours stay RGB until the frame is downconverted.
     pub fn for_depth(mut self, depth: ColorDepth) -> Self {
         self.depth = depth;
         let [
             background,
             surface,
             panel,
+            hover,
             selected,
             addition_background,
             deletion_background,
@@ -101,6 +107,7 @@ impl Palette {
             self.background,
             self.surface,
             self.panel,
+            self.hover,
             self.selected,
             self.addition_background,
             self.deletion_background,
@@ -108,9 +115,16 @@ impl Palette {
         self.background = background;
         self.surface = surface;
         self.panel = panel;
+        self.hover = hover;
         self.selected = selected;
         self.addition_background = addition_background;
         self.deletion_background = deletion_background;
+        if depth == ColorDepth::Ansi16 && !self.monochrome {
+            // Dark and pastel diff fills otherwise quantize to black or gray. Use RGB
+            // equivalents of ANSI red/green, with readable text even in light themes.
+            self.addition_background = Color::Rgb(0, 205, 0);
+            self.deletion_background = Color::Rgb(205, 0, 0);
+        }
         self
     }
 
@@ -215,9 +229,29 @@ impl Palette {
         Style::default().fg(self.foreground)
     }
 
+    /// A changed line's text and fill. Keep the 16-colour text pair local to diffs:
+    /// `addition` and `deletion` also colour counts drawn on the plain background.
+    pub fn diff_line(self, deletion: bool) -> Style {
+        let (text, fill) = if deletion {
+            (self.deletion, self.deletion_background)
+        } else {
+            (self.addition, self.addition_background)
+        };
+        let text = if self.depth == ColorDepth::Ansi16 && !self.monochrome {
+            if deletion {
+                Color::Rgb(255, 255, 255)
+            } else {
+                Color::Rgb(0, 0, 0)
+            }
+        } else {
+            text
+        };
+        Style::default().fg(text).bg(fill)
+    }
+
     /// Emphasize only changed words, preserving a non-color cue in monochrome.
     pub fn diff_change(self, base: Style) -> Style {
-        if self.monochrome {
+        if self.monochrome || self.depth == ColorDepth::Ansi16 {
             return base.add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
         }
         let tint = if base.bg == Some(self.deletion_background) {
@@ -238,6 +272,12 @@ impl Palette {
 
     pub fn syntax(self, base: Style, class: crate::syntax::SyntaxClass) -> Style {
         use crate::syntax::SyntaxClass;
+        // At 16 colours, syntax hues must not undo a diff's explicit readable pair.
+        if self.depth == ColorDepth::Ansi16
+            && matches!(base.bg, Some(bg) if bg == self.addition_background || bg == self.deletion_background)
+        {
+            return base.patch(self.diff_line(base.bg == Some(self.deletion_background)));
+        }
         let color = match class {
             SyntaxClass::Plain => return base,
             SyntaxClass::Comment => self.muted,
@@ -447,6 +487,11 @@ impl Palette {
         Style::default().fg(self.muted)
     }
 
+    /// Keep the two-column label inset without a cursor glyph where a band shows selection.
+    pub fn selection_marker(self) -> &'static str {
+        if self.shows_bands() { "  " } else { "› " }
+    }
+
     /// A selected picker or list row: bold text on the selected band, or where a band
     /// cannot show, reversed foreground text, so the row reverses as one bar rather than a
     /// block per span colour.
@@ -529,6 +574,7 @@ impl Palette {
             error: gray(self.error),
             surface: gray(self.surface),
             panel: gray(self.panel),
+            hover: gray(self.hover),
             selected: gray(self.selected),
             heading_1: gray(self.heading_1),
             heading_2: gray(self.heading_2),
