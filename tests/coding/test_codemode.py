@@ -871,8 +871,14 @@ def test_broken_helpers_are_not_the_scripts_fault(
     assert "codemode's helpers did not load" in caplog.text
 
 
-def test_description_names_the_helper() -> None:
-    assert "`await gather_settled(...)`" in _tool().description
+def test_description_explains_script_contract() -> None:
+    description = _tool().description
+    assert "`await gather_settled(...)`" in description
+    assert "no tool import is needed" in description
+    assert "text or typed structured data" in description
+    assert "`mcp_call` returns text, which is not necessarily JSON" in description
+    assert "resuming the same branch after restart" in description
+    assert "before refetching retained data unless fresh data is required" in description
 
 
 def test_refused_call_is_a_settled_error(tmp_path: Path) -> None:
