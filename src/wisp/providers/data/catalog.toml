@@ -16,10 +16,14 @@ name = "openai"
 display_name = "OpenAI API"
 default_model = "gpt-5.6-sol"
 docs_url = "https://platform.openai.com/docs"
-# Current Responses-API text/tool models verified against OpenAI's model
-# catalog on 2026-10-13. Excludes specialized audio, image, realtime,
-# embeddings, moderation, and deprecated models.
+# General-purpose Responses-API text/tool models. GPT-6.2 additions verified
+# 2026-11-18 against the model pages; older entries retain their prior snapshots.
+# https://developers.openai.com/api/docs/models/gpt-6.2-astra
+# https://developers.openai.com/api/docs/models/gpt-6.2-sol
+# Excludes specialized audio, image, realtime, embeddings, and moderation models.
 models = [
+    "gpt-6.2-astra",
+    "gpt-6.2-sol",
     "gpt-6-astra",
     "gpt-6.1-sol",
     "gpt-6-sol",
@@ -32,8 +36,11 @@ models = [
     "gpt-5.4",
     "gpt-5.4-mini",
 ]
-# Verified 2026-11-09 on each model's page: "Input modalities: text, image".
+# GPT-6.2 image input verified on the model pages 2026-11-18; older entries
+# retain the 2026-11-09 image-capability snapshot.
 image_input_models = [
+    "gpt-6.2-astra",
+    "gpt-6.2-sol",
     "gpt-6-astra",
     "gpt-6.1-sol",
     "gpt-6-sol",
@@ -51,6 +58,8 @@ image_input_models = [
 "gpt-5.6" = "gpt-5.6-sol"
 
 [providers.context_windows]
+"gpt-6.2-astra" = 1050000
+"gpt-6.2-sol" = 1050000
 "gpt-6-astra" = 1050000
 "gpt-6.1-sol" = 1050000
 "gpt-6-sol" = 1050000
@@ -63,7 +72,16 @@ image_input_models = [
 "gpt-5.4" = 272000
 "gpt-5.4-mini" = 400000
 
+# The model pages separately cap input at 922K within the 1.05M total window.
+# Keep the nominal context metadata and reserve the remaining 128K via the
+# existing provider-budget cap, rather than relying on overflow recovery.
+[providers.auto_compact_token_limits]
+"gpt-6.2-astra" = 922000
+"gpt-6.2-sol" = 922000
+
 [providers.model_lifecycle]
+"gpt-6.2-astra" = "stable"
+"gpt-6.2-sol" = "stable"
 "gpt-6-astra" = "stable"
 "gpt-6.1-sol" = "stable"
 "gpt-6-sol" = "stable"
@@ -80,6 +98,8 @@ image_input_models = [
 # reasoning-effort guide. Older models remain usable but are omitted unless
 # their exact accepted subsets are documented.
 [providers.effort_levels]
+"gpt-6.2-astra" = ["low", "medium", "high", "xhigh", "max"]
+"gpt-6.2-sol" = ["low", "medium", "high", "xhigh", "max"]
 "gpt-6-astra" = ["low", "medium", "high", "xhigh", "max"]
 "gpt-6.1-sol" = ["low", "medium", "high", "xhigh", "max"]
 "gpt-6-sol" = ["none", "low", "medium", "high", "xhigh", "max"]
@@ -91,7 +111,8 @@ image_input_models = [
 
 # The tier each API applies when a request sets no reasoning.effort, from the model
 # pages and the reasoning guide, verified 2026-11-07. gpt-6-astra's page names no
-# default, so it has none here.
+# default, so it has none here. GPT-6.2's pages likewise do not state an
+# omitted-request default; Codex client defaults are not API defaults.
 [providers.default_effort]
 "gpt-6.1-sol" = "medium"
 "gpt-6-sol" = "medium"
@@ -100,6 +121,36 @@ image_input_models = [
 "gpt-5.6-terra" = "medium"
 "gpt-5.6-luna" = "medium"
 "gpt-5.5" = "medium"
+
+# GPT-6.2 Standard API list prices per million tokens, verified 2026-11-18:
+# https://developers.openai.com/api/docs/pricing
+# Cache writes use 30-minute retention. Above 272K input tokens, input/cache
+# rates double and output costs 1.5x for the full request.
+[[providers.pricing."gpt-6.2-astra"]]
+input_usd_per_million = "8"
+cache_read_usd_per_million = "0.4"
+cache_write_usd_per_million = "10"
+output_usd_per_million = "40"
+
+[[providers.pricing."gpt-6.2-astra"]]
+input_token_threshold = 272001
+input_usd_per_million = "16"
+cache_read_usd_per_million = "0.8"
+cache_write_usd_per_million = "20"
+output_usd_per_million = "60"
+
+[[providers.pricing."gpt-6.2-sol"]]
+input_usd_per_million = "2"
+cache_read_usd_per_million = "0.1"
+cache_write_usd_per_million = "2.5"
+output_usd_per_million = "10"
+
+[[providers.pricing."gpt-6.2-sol"]]
+input_token_threshold = 272001
+input_usd_per_million = "4"
+cache_read_usd_per_million = "0.2"
+cache_write_usd_per_million = "5"
+output_usd_per_million = "15"
 
 # Astra metadata: https://developers.openai.com/api/docs/models/gpt-6-astra
 # OpenAI GPT-6/5.6 standard API list prices per million tokens, verified 2026-10-13:
@@ -241,11 +292,15 @@ name = "openai-codex"
 display_name = "OpenAI Codex (ChatGPT subscription)"
 default_model = "gpt-5.6-sol"
 docs_url = "https://developers.openai.com/codex/models"
-# Current Codex CLI subscription picker models verified against the Codex model
-# guide and local Codex backend model metadata on 2026-10-13. GPT-6.1 Sol has
-# a larger provider-surface context than the other listed subscription models.
+# GPT-6.2 subscription metadata verified 2026-11-18 against the Codex model
+# guide and OpenAI's checked-in catalog at commit 18352dc4e8757d652e4102a17abc76601847b8da:
+# https://github.com/openai/codex/blob/18352dc4e8757d652e4102a17abc76601847b8da/codex-rs/models-manager/models.json
+# Sol has a larger default Codex context than Astra; neither inherits the API
+# context here. Older entries retain their previous snapshots.
 # Ultra is agent orchestration, not a provider reasoning-effort tier.
 models = [
+    "gpt-6.2-sol",
+    "gpt-6.2-astra",
     "gpt-6.1-sol",
     "gpt-6-astra",
     "gpt-6-sol",
@@ -256,6 +311,8 @@ models = [
 ]
 # The same models as the OpenAI API, which document image input on each model page.
 image_input_models = [
+    "gpt-6.2-sol",
+    "gpt-6.2-astra",
     "gpt-6.1-sol",
     "gpt-6-astra",
     "gpt-6-sol",
@@ -271,6 +328,8 @@ image_input_models = [
 # Codex subscription limits are provider-surface metadata and intentionally
 # differ from the direct OpenAI Responses API for several shared model ids.
 [providers.context_windows]
+"gpt-6.2-sol" = 500000
+"gpt-6.2-astra" = 272000
 "gpt-6.1-sol" = 500000
 "gpt-6-astra" = 272000
 "gpt-6-sol" = 272000
@@ -279,10 +338,13 @@ image_input_models = [
 "gpt-5.6-terra" = 272000
 "gpt-5.6-luna" = 272000
 
-# Codex derives automatic compaction at 95% of its nominal context window.
-# Wisp treats these as upper bounds: a larger user reserve still triggers
-# compaction earlier, while a smaller reserve cannot weaken this safeguard.
+# GPT-6.2 limits follow ModelInfo::auto_compact_token_limit at the source commit
+# above: omitted limits default to 90% of the nominal context. Older entries keep
+# their previous 95% snapshots. Wisp uses these as upper bounds; a larger user
+# reserve still compacts earlier and a smaller reserve cannot weaken the cap.
 [providers.auto_compact_token_limits]
+"gpt-6.2-sol" = 450000
+"gpt-6.2-astra" = 244800
 "gpt-6.1-sol" = 475000
 "gpt-6-astra" = 258400
 "gpt-6-sol" = 258400
@@ -292,6 +354,8 @@ image_input_models = [
 "gpt-5.6-luna" = 258400
 
 [providers.model_lifecycle]
+"gpt-6.2-sol" = "stable"
+"gpt-6.2-astra" = "stable"
 "gpt-6.1-sol" = "stable"
 "gpt-6-astra" = "stable"
 "gpt-6-sol" = "stable"
@@ -302,7 +366,11 @@ image_input_models = [
 
 [providers.effort_levels]
 # The backend also advertises Ultra for some models, but that is Codex agent
-# orchestration rather than a provider reasoning-effort tier.
+# orchestration rather than a provider reasoning-effort tier. The source's
+# default_reasoning_level is a client-selected effort, not an omitted-request
+# backend default, so it is not copied into default_effort.
+"gpt-6.2-sol" = ["low", "medium", "high", "xhigh", "max"]
+"gpt-6.2-astra" = ["low", "medium", "high", "xhigh", "max"]
 "gpt-6.1-sol" = ["low", "medium", "high", "xhigh", "max"]
 "gpt-6-astra" = ["low", "medium", "high", "xhigh", "max"]
 "gpt-6-sol" = ["low", "medium", "high", "xhigh", "max"]

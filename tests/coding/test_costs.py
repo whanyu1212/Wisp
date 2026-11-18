@@ -289,6 +289,10 @@ def test_registry_selects_effective_dated_anthropic_rates() -> None:
 @pytest.mark.parametrize(
     ("model", "input_tokens", "rates"),
     [
+        ("gpt-6.2-astra", 272_000, ("8", "0.4", "10", "40")),
+        ("gpt-6.2-astra", 272_001, ("16", "0.8", "20", "60")),
+        ("gpt-6.2-sol", 272_000, ("2", "0.1", "2.5", "10")),
+        ("gpt-6.2-sol", 272_001, ("4", "0.2", "5", "15")),
         ("gpt-6-astra", 272_000, ("10", "1", "12.5", "50")),
         ("gpt-6-astra", 272_001, ("20", "2", "25", "75")),
         ("gpt-6.1-sol", 272_000, ("2", "0.1", "2.5", "10")),
