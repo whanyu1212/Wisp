@@ -62,6 +62,9 @@ class ToolApprovalResolved(WispEvent):
     target: str | None = None
     approved: bool
     reason: str | None = None
+    # Automatic resolutions have no preceding human approval request.
+    source: Literal["auto"] | None = None
+    rule_id: Literal["workspace_edit_v1"] | None = None
 
 
 # Bounds of one progress snapshot's output tail, per stream. The tail is already
@@ -200,6 +203,7 @@ class NestedToolCall(BaseModel):
     target: str | None = None
     arguments: JsonObject | None = None
     is_error: bool = False
+    auto_approved: bool = False
     failure_code: ToolFailureCode | None = None
     error: str | None = Field(default=None, max_length=NESTED_CALL_TEXT_MAX_CHARS)
     summary: str | None = Field(default=None, max_length=NESTED_CALL_TEXT_MAX_CHARS)

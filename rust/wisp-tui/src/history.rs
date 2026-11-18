@@ -396,7 +396,11 @@ fn project_tool_result(
         transcript.observe_approval_resolved(&result.call_id, false, Some("denied"));
     }
     let pending_result = request_missing.then(|| result.clone());
+    let call_id = result.call_id.clone();
     let entry_id = transcript.observe_tool_result(result);
+    if message.get("auto_approved").and_then(Value::as_bool) == Some(true) {
+        transcript.observe_auto_approved(&call_id);
+    }
     Ok((entry_id, pending_result))
 }
 
@@ -944,6 +948,33 @@ mod tests {
             assert!(restored.entries()[0].content.is_empty());
             assert_eq!(restored.entries()[0].searches()[0].argument, "docs");
         }
+    }
+
+    #[test]
+    fn history_restores_auto_approval_even_when_the_call_is_on_another_page() {
+        let mut result = message("tool", "written");
+        result["tool_call_id"] = json!("auto-edit");
+        result["tool_name"] = json!("write");
+        result["auto_approved"] = json!(true);
+        result["tool_result"] = json!({"status": "done"});
+        let mut restored = project_rpc_messages(&[result]).unwrap();
+        let card = restored.entries()[0].tool_card().unwrap();
+        assert!(card.auto_approved);
+        assert_eq!(card.status, crate::tool_cards::ToolStatus::Done);
+        let mut assistant = message("assistant", "");
+        assistant["tool_calls"] = json!([{
+            "call_id": "auto-edit", "name": "write",
+            "arguments": {"path": "file.txt", "content": "new"},
+        }]);
+        let older = project_rpc_messages(&[assistant]).unwrap();
+        assert!(restored.prepend_history_page(&older));
+        let cards: Vec<_> = restored
+            .entries()
+            .iter()
+            .filter_map(|entry| entry.tool_card())
+            .collect();
+        assert_eq!(cards.len(), 1);
+        assert!(cards[0].auto_approved && cards[0].arguments_available);
     }
 
     #[test]

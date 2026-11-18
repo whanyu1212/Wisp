@@ -15,10 +15,16 @@ Tools declare `read`, `mutating`, or `command` safety. Exposure and approval pol
 choices outside model or extension control. Extension metadata cannot grant tool access, mark an
 unsafe operation approved, or bypass print-mode restrictions.
 
-`mutating` and `command` tools need approval. The permission mode is `ask` or `yolo`; YOLO
-approves every safety class, is saved per project by `wisp.trust.permissions`, and lasts one
-session at most in a broad folder such as the home folder. A tool that sets `confirm_every_call`
-(the MCP proposal tools) is never approved by YOLO, `--yes`, or a session grant.
+`mutating` and `command` tools need approval. Permission modes are `ask`, `auto`, and `yolo`.
+Auto approves only eligible exact built-in workspace/scratch file edits on macOS/Linux; commands,
+MCP mutations, Git metadata, agent-control files, and shared hard-linked files retain the ordinary
+approval flow. Protected-path, write-constraint, and stale-input checks still apply. Auto edits
+require atomic replacement and never use in-place write fallbacks. Auto does not assess content
+safety. YOLO approves every safety class. Auto and YOLO are saved per project by
+`wisp.trust.permissions` and last one session at most in a broad folder such as home. Auto's saved
+`workspace_edit_v1` consent never authorizes automatic shell execution. A tool that sets
+`confirm_every_call` (the MCP proposal tools) is never approved by Auto, YOLO, `--yes`, or a
+session grant.
 
 The agent mode is `build` or `plan`. Plan mode offers only `read` tools that build mode would offer
 and narrows the tool policy to those names, so a plan-mode run cannot call a mutating tool even if

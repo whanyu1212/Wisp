@@ -334,12 +334,20 @@ user-only, like `subagents`.
 ## Saved project permissions
 
 The Rust permission dialog offers allow once, allow this tool for the session, saved project YOLO,
-and deny. `/permissions` shows the current default; `/permissions ask` or `/permissions yolo`
-changes it. Defaults are stored outside the repository in `~/.wisp/permissions/`, keyed by the
+and deny. `/permissions` shows the current default; `/permissions ask`, `/permissions auto`,
+or `/permissions yolo` changes it. Auto grants only eligible exact built-in workspace and
+session-scratch writes/edits on macOS/Linux. Commands, MCP mutations, Git metadata, agent-control
+files, shared hard-linked files, and mandatory confirmations retain their ordinary approval flow.
+Auto preserves protected paths, write constraints, and stale-write checks; it requires atomic
+replacement rather than an in-place write fallback. The session records each automatic decision
+and the TUI labels it on the tool card, including after reopening. This is not a content-safety
+assessment or a shell sandbox. Saved Auto consent is explicitly edit-only; it cannot authorize
+future automatic shell execution. Defaults are stored outside the repository in `~/.wisp/permissions/`, keyed by the
 canonical project directory, and survive restarts. Changing the default clears temporary grants.
 One-time and session grants are not saved, and starting or switching sessions expires session
 grants. YOLO allows mutating and command tools without approval; project trust, tool availability,
 and the file tools' [protected paths](#protected-paths) still apply. `--yes` alone remains a
-temporary startup choice. In the home folder or a folder above it, YOLO is not saved and lasts for
-the session; see
+temporary startup choice. In the home folder or a folder above it, Auto and YOLO are not saved
+and last for the session. Auto never grants arbitrary edits throughout such a broad folder; only
+the session scratch remains eligible. See
 [Home folder and broad folders](#home-folder-and-broad-folders).

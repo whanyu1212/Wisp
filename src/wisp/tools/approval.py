@@ -4,8 +4,16 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+import anyio
 
 from wisp.tools.base import Tool, ToolSafety
+from wisp.tools.context import ToolContext
+from wisp.tools.result import ToolError
+
+if TYPE_CHECKING:
+    from wisp.events import PermissionMode
 
 APPROVAL_REQUIRED_SAFETY: frozenset[ToolSafety] = frozenset({"mutating", "command"})
 
@@ -43,6 +51,8 @@ class ToolApprovalPolicy:
     # Set when choosing YOLO applies for the session only rather than being saved
     # for the project, as in the home folder.
     session_only_yolo: bool = field(default=False, kw_only=True)
+    # Auto means workspace edits only. Future command approval needs new consent.
+    mode: PermissionMode = field(default="ask", kw_only=True)
 
     @classmethod
     def require_approval(cls) -> ToolApprovalPolicy:
@@ -54,13 +64,53 @@ class ToolApprovalPolicy:
     def approve_all(cls) -> ToolApprovalPolicy:
         """Approve every tool safety class for non-interactive execution."""
 
-        return cls(approved_safety=frozenset({"read", "mutating", "command"}))
+        return cls(approved_safety=frozenset({"read", "mutating", "command"}), mode="yolo")
 
     @classmethod
     def approve_tool_names(cls, names: set[str] | frozenset[str]) -> ToolApprovalPolicy:
         """Approve an explicit set of tool names."""
 
         return cls(approved_tools=frozenset(names))
+
+    @classmethod
+    def auto_edits(cls) -> ToolApprovalPolicy:
+        """Automatically approve eligible built-in workspace edits, and nothing else."""
+
+        return cls(mode="auto")
+
+    async def evaluate_call(
+        self, tool: Tool, *, arguments: Mapping[str, object], context: ToolContext
+    ) -> ToolApprovalDecision | None:
+        """Evaluate edit-only Auto before opening an interactive approval request.
+
+        Args:
+            tool (Tool): Resolved tool implementation.
+            arguments (Mapping[str, object]): Exact proposed arguments.
+            context (ToolContext): Execution-time workspace and path restrictions.
+
+        Returns:
+            ToolApprovalDecision | None: An automatic grant or path denial; None
+                when the ordinary approval flow must decide. Never creates grants.
+        """
+
+        if self.mode != "auto" or confirms_every_call(tool):
+            return None
+        # Local import keeps file-tool dependencies out of approval policy startup.
+        from wisp.tools.auto_edits import eligible_workspace_edit
+
+        try:
+            eligible = await anyio.to_thread.run_sync(
+                lambda: eligible_workspace_edit(tool, arguments, context)
+            )
+        except ToolError as exc:
+            return ToolApprovalDecision(approved=False, reason=str(exc))
+        except (OSError, ValueError):
+            # An unreadable or unresolvable destination is not an automatic grant.
+            return None
+        # An explicit mode change while preflight runs revokes the pending grant.
+        if not eligible or self.mode != "auto":
+            return None
+        return ToolApprovalDecision(approved=True, reason="Auto-approved: workspace edit")
 
     def requires_approval(self, tool: Tool) -> bool:
         """Return whether this tool safety class requires approval."""

@@ -1483,6 +1483,7 @@ fn permission_mode(state: &UiState) -> Option<&'static str> {
         .as_ref()
         .map(|permissions| match permissions.mode {
             PermissionMode::Ask => "ask",
+            PermissionMode::Auto => "auto (edits)",
             PermissionMode::Yolo => "YOLO",
         })
 }

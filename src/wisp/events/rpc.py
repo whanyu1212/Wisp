@@ -20,7 +20,7 @@ from wisp.skills.models import SkillDiagnosticCode, SkillDiagnosticSeverity, Ski
 
 # The tool-approval posture a frontend selects; persisted per project by ``wisp.trust``.
 # A ``type`` alias so the schema bundle keeps its named ``PermissionMode`` definition.
-PermissionMode = TypeAliasType("PermissionMode", Literal["ask", "yolo"])
+PermissionMode = TypeAliasType("PermissionMode", Literal["ask", "auto", "yolo"])
 
 # Whether the agent may change the project ("build") or only inspect it and plan ("plan").
 # A ``type`` alias for the same reason as ``PermissionMode``.
@@ -461,8 +461,8 @@ class PermissionState(BaseModel):
     mode: PermissionMode
     saved_mode: PermissionMode | None = None
     project_path: Path | None = None
-    # True in the home folder or a folder above it, where YOLO is never saved
-    # and lasts for the session only.
+    # True in broad folders, where Auto and YOLO are session-only. The wire
+    # name is retained for existing clients; it applies to both elevated modes.
     session_only_yolo: bool = False
 
 

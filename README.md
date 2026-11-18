@@ -42,8 +42,14 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
   between model requests while preserving completed tool work (`Alt+Enter` steers in the TUI;
   `Enter` queues a follow-up).
 - **Approval and trust gates.** Read-only tools run directly; file writes, edits, and shell
-  commands stop for explicit approval outside the model's control. Project-local settings,
-  `AGENTS.md`, and skills stay inert until a repository is trusted.
+  commands require approval outside the model's control. `/permissions auto` automatically
+  approves eligible built-in workspace and session-scratch edits on macOS/Linux, but still asks
+  before commands and other mutations. Git metadata, agent-control files, shared hard-linked
+  files, protected paths, and mandatory confirmations are not automatically granted. Auto is
+  saved per project (session-only in broad folders); `/permissions ask` revokes it. Automatic
+  decisions are recorded in the session and shown on tool cards. This checks where and how an
+  edit runs, not whether its contents are safe. Project-local settings, `AGENTS.md`, and skills
+  stay inert until a repository is trusted.
 - **Unwindable cancellation.** Cancelling unwinds in-flight tool processes cleanly and leaves the
   session log valid so `--continue` resumes from the last committed state.
 - **Append-only session trees.** Runs are recorded as typed `WispEvent` entries in JSONL files that

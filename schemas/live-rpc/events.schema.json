@@ -1785,6 +1785,11 @@
           "default": null,
           "title": "Arguments"
         },
+        "auto_approved": {
+          "default": false,
+          "title": "Auto Approved",
+          "type": "boolean"
+        },
         "call_id": {
           "title": "Call Id",
           "type": "string"
@@ -1878,6 +1883,7 @@
         "target",
         "arguments",
         "is_error",
+        "auto_approved",
         "failure_code",
         "error",
         "summary",
@@ -1890,6 +1896,7 @@
     "PermissionMode": {
       "enum": [
         "ask",
+        "auto",
         "yolo"
       ],
       "type": "string"
@@ -3656,6 +3663,11 @@
       ],
       "description": "One bounded, frontend-oriented persisted message snapshot.",
       "properties": {
+        "auto_approved": {
+          "default": false,
+          "title": "Auto Approved",
+          "type": "boolean"
+        },
         "content": {
           "title": "Content",
           "type": "string"
@@ -3900,6 +3912,7 @@
         "content_truncated",
         "images",
         "tool_call_id",
+        "auto_approved",
         "tool_name",
         "tool_calls",
         "tool_calls_original_count",
@@ -7367,6 +7380,32 @@
           "default": null,
           "title": "Reason"
         },
+        "rule_id": {
+          "anyOf": [
+            {
+              "const": "workspace_edit_v1",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rule Id"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "const": "auto",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source"
+        },
         "target": {
           "anyOf": [
             {
@@ -7398,7 +7437,9 @@
         "name",
         "target",
         "approved",
-        "reason"
+        "reason",
+        "source",
+        "rule_id"
       ],
       "title": "ToolApprovalResolved",
       "type": "object"
@@ -10145,6 +10186,8 @@
       "call_id": "call-1",
       "name": "read",
       "reason": null,
+      "rule_id": null,
+      "source": null,
       "target": null,
       "timestamp": "2026-01-02T03:04:05Z",
       "type": "tool.approval.resolved"
@@ -10218,6 +10261,7 @@
         "arguments": {
           "path": "fixture.txt"
         },
+        "auto_approved": false,
         "call_id": "nested-1",
         "duration_ms": 5,
         "error": null,

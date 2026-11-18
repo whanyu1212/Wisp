@@ -120,6 +120,46 @@ class _PreparedExecutor:
                 yield event
 
 
+@pytest.mark.parametrize("approved", [True, False])
+def test_lifecycle_auto_resolution_needs_no_request_but_settles_once(approved: bool) -> None:
+    call = _call()
+    lifecycle = ToolExecutionLifecycle(call)
+    decision = ToolApprovalResolved(
+        call_id=call.call_id,
+        name=call.name,
+        approved=approved,
+        source="auto",
+        rule_id="workspace_edit_v1",
+    )
+    assert lifecycle.accept(decision) is decision
+    with pytest.raises(ToolExecutionProtocolError, match="more than once"):
+        lifecycle.accept(decision)
+    with pytest.raises(ToolExecutionProtocolError, match="requested approval more than once"):
+        lifecycle.accept(_approval(call))
+    if not approved:
+        with pytest.raises(ToolExecutionProtocolError, match="success after approval was denied"):
+            lifecycle.accept(_ended(call))
+    else:
+        lifecycle.accept(_ended(call))
+        assert lifecycle.finish().is_error is False
+
+
+def test_lifecycle_cannot_auto_resolve_a_human_request() -> None:
+    call = _call()
+    lifecycle = ToolExecutionLifecycle(call)
+    lifecycle.accept(_approval(call))
+    with pytest.raises(ToolExecutionProtocolError, match="auto-resolved a human request"):
+        lifecycle.accept(
+            ToolApprovalResolved(
+                call_id=call.call_id,
+                name=call.name,
+                approved=True,
+                source="auto",
+                rule_id="workspace_edit_v1",
+            )
+        )
+
+
 def test_lifecycle_accepts_valid_approval_sequence() -> None:
     call = _call()
     lifecycle = ToolExecutionLifecycle(call)

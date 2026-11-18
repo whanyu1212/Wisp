@@ -1,8 +1,8 @@
 """User-owned permission defaults, isolated by canonical project directory.
 
-YOLO is never kept for a broad folder such as the home folder (see
-:mod:`wisp.trust.scope`): saving it there is refused, and a record already
-saved there is ignored, so YOLO in such a folder lasts one session at most.
+Auto and YOLO are never kept for a broad folder such as the home folder (see
+:mod:`wisp.trust.scope`): saving either there is refused, and records already
+saved there are ignored. Elevated modes there last one session at most.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ def _private_directory(path: Path) -> bool:
 
 
 class BroadRootYoloError(PermissionError):
-    """YOLO cannot be saved for a broad folder such as the home folder."""
+    """An elevated mode cannot be saved for a broad folder such as home."""
 
 
 def load_permission_mode(project: Path) -> PermissionMode | None:
@@ -58,11 +58,11 @@ def load_permission_mode(project: Path) -> PermissionMode | None:
     Returns:
         PermissionMode | None: Explicit saved mode, or None when no usable record exists.
             Callers must use approval prompts when there is no saved mode. A saved
-            YOLO for a broad folder is ignored and reads as None.
+            Auto or YOLO for a broad folder is ignored and reads as None.
     """
 
     mode = _read_saved_mode(project)
-    if mode == "yolo" and is_broad_root(project):
+    if mode in ("auto", "yolo") and is_broad_root(project):
         return None
     return mode
 
@@ -105,6 +105,9 @@ def _read_saved_mode(project: Path) -> PermissionMode | None:
     mode = record.get("mode")
     if mode == "ask":
         return "ask"
+    # Shell approval must never reuse this edit-only consent in a future release.
+    if mode == "auto" and record.get("auto_scope") == "workspace_edit_v1":
+        return "auto"
     if mode == "yolo":
         return "yolo"
     return None
@@ -122,16 +125,16 @@ def save_permission_mode(project: Path, mode: PermissionMode) -> None:
 
     Raises:
         ValueError: The mode is unsupported.
-        BroadRootYoloError: ``mode`` is YOLO and ``project`` is a broad folder.
+        BroadRootYoloError: ``mode`` is Auto or YOLO and the project is broad.
         OSError: The preference cannot be saved securely. Callers must not claim or
             apply a persistent permission change when this write fails.
     """
 
-    if mode not in ("ask", "yolo"):
+    if mode not in ("ask", "auto", "yolo"):
         raise ValueError(f"Unsupported permission mode: {mode!r}")
-    if mode == "yolo" and is_broad_root(project):
+    if mode in ("auto", "yolo") and is_broad_root(project):
         raise BroadRootYoloError(
-            f"YOLO is not saved for {project}: it is {BROAD_FOLDER_DESCRIPTION}"
+            f"{mode.upper()} is not saved for {project}: it is {BROAD_FOLDER_DESCRIPTION}"
         )
     path = _preference_path(project)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -143,7 +146,10 @@ def save_permission_mode(project: Path, mode: PermissionMode) -> None:
             mode="w", encoding="utf-8", dir=path.parent, delete=False
         ) as stream:
             temporary = stream.name
-            json.dump({"project": _project_key(project), "mode": mode}, stream)
+            record = {"project": _project_key(project), "mode": mode}
+            if mode == "auto":
+                record["auto_scope"] = "workspace_edit_v1"
+            json.dump(record, stream)
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())

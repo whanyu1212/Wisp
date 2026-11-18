@@ -1535,6 +1535,7 @@
     "PermissionMode": {
       "enum": [
         "ask",
+        "auto",
         "yolo"
       ],
       "type": "string"

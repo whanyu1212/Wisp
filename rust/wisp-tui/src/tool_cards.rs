@@ -300,6 +300,8 @@ pub struct ToolCardSnapshot {
     pub mcp_subject: Option<String>,
     pub process_id: Option<String>,
     pub status: ToolStatus,
+    /// A backend policy grant, independent of whether execution succeeded.
+    pub auto_approved: bool,
     pub arguments_available: bool,
     pub detail: String,
     pub retained_output: BoundedText,
@@ -394,6 +396,7 @@ impl ToolCardSnapshot {
             mcp_subject: mcp_subject(input),
             process_id: None,
             status,
+            auto_approved: false,
             arguments_available: true,
             detail: String::new(),
             retained_output: BoundedText::default(),
@@ -735,6 +738,7 @@ impl ToolCardSnapshot {
             return false;
         }
         self.status = ToolStatus::Requested;
+        self.auto_approved |= result_card.auto_approved;
         self.detail_source = detail_source;
         self.structured_detail = DetailAvailability::None;
         if result_card.status == ToolStatus::Denied {

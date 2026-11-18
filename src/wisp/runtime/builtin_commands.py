@@ -118,7 +118,11 @@ def builtin_command_descriptors() -> tuple[CommandDescriptor, ...]:
             title="Permissions",
             description="View or save this project's permission mode",
             category=CommandCategory.configuration,
-            arguments=(CommandArgument("mode", "Optional 'ask' or 'yolo' default"),),
+            arguments=(
+                CommandArgument(
+                    "mode", "Optional 'ask', 'auto' (workspace edits), or 'yolo' default"
+                ),
+            ),
             accepts_arguments=True,
             order=28,
         ),
