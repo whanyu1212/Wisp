@@ -60,8 +60,14 @@ from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
 from wisp.tools.progress import OutputProgress, ToolProgress
 from wisp.tools.result import ToolError, ToolResult
-from wisp.tools.shell.seatbelt import SeatbeltLaunch, prepare_seatbelt, sandbox_development_command
+from wisp.tools.shell.seatbelt import (
+    ProcessAuthority,
+    SeatbeltLaunch,
+    prepare_seatbelt,
+    sandbox_development_command,
+)
 from wisp.tools.shell.tool import BashTool
+from wisp.tools.shell.working_directory import command_context
 from wisp.tools.subagent import SPAWN_AGENT
 from wisp.tools.summary import summarize_tool_result
 from wisp.tools.truncation import truncate_text
@@ -451,6 +457,7 @@ class _ApprovalEvaluation:
     resolution: ToolApprovalResolved | None = None
     generation: int | None = None
     sandbox: SeatbeltLaunch | None = None
+    process_authority: ProcessAuthority | None = None
 
     @property
     def note(self) -> str | None:
@@ -670,6 +677,9 @@ class ConfiguredToolExecutor:
                         target=target,
                         auto_approved=decision.rule_id == "workspace_edit_v1",
                         sandbox=automatic.sandbox if decision.source == "auto" else None,
+                        process_authority=(
+                            automatic.process_authority if decision.source == "auto" else None
+                        ),
                         generation=automatic.generation,
                     )
                     return
@@ -756,6 +766,29 @@ class ConfiguredToolExecutor:
         ):
             return _ApprovalEvaluation()
         generation = self._approval_policy.generation
+        try:
+            authority = ProcessAuthority(
+                self._context.process_owner,
+                self._approval_policy,
+                generation,
+                self._context.boundary(),
+            )
+            owned_control = tool.can_control(arguments, self._context, authority)
+        except (OSError, ValueError, RuntimeError):
+            return _ApprovalEvaluation()
+        if owned_control:
+            return _ApprovalEvaluation(
+                generation=generation,
+                process_authority=authority,
+                resolution=ToolApprovalResolved(
+                    call_id=tool_call.call_id,
+                    name=tool_call.name,
+                    approved=True,
+                    source="auto",
+                    rule_id="sandbox_process_v1",
+                    reason="Auto-approved: control of this session's sandboxed job.",
+                ),
+            )
         sandbox: SeatbeltLaunch | None = None
 
         def still_authorized() -> bool:
@@ -770,10 +803,12 @@ class ConfiguredToolExecutor:
         if objection is None:
             try:
                 sandbox = await anyio.to_thread.run_sync(
-                    lambda: prepare_seatbelt(arguments, self._context), abandon_on_cancel=True
+                    lambda: prepare_seatbelt(arguments, command_context(arguments, self._context)),
+                    abandon_on_cancel=True,
                 )
                 if not isinstance(sandbox, SeatbeltLaunch):
                     raise ToolError("Sandbox preparation returned no launch authority.")
+                sandbox = replace(sandbox, authority=authority)
             except Exception:  # noqa: BLE001 - a failed sandbox never grants execution
                 objection = (
                     "Seatbelt containment unavailable; explicit unrestricted approval required."
@@ -784,6 +819,7 @@ class ConfiguredToolExecutor:
             return _ApprovalEvaluation(
                 generation=generation,
                 sandbox=sandbox,
+                process_authority=authority,
                 resolution=ToolApprovalResolved(
                     call_id=tool_call.call_id,
                     name=tool_call.name,
@@ -838,6 +874,7 @@ class ConfiguredToolExecutor:
             review=review,
             generation=generation,
             sandbox=sandbox if approved else None,
+            process_authority=authority if approved else None,
             resolution=ToolApprovalResolved(
                 call_id=tool_call.call_id,
                 name=tool_call.name,
@@ -870,6 +907,7 @@ class ConfiguredToolExecutor:
             return replace(
                 evaluation,
                 sandbox=None,
+                process_authority=None,
                 resolution=ToolApprovalResolved(
                     call_id=event.call_id,
                     name=event.name,
@@ -1111,7 +1149,9 @@ class ConfiguredToolExecutor:
             else False
         )
         context = replace(
-            self._context, command_sandbox=automatic.sandbox or self._context.command_sandbox
+            self._context,
+            command_sandbox=automatic.sandbox or self._context.command_sandbox,
+            process_authority=automatic.process_authority,
         )
         if automatic.resolution is not None and automatic.resolution.rule_id == "workspace_edit_v1":
             context = replace(context, atomic_writes_only=True)
@@ -1135,7 +1175,7 @@ class ConfiguredToolExecutor:
                 max_output_lines=max(context.max_output_lines, result_limits.max_lines),
             )
         async with self._nested_parallel_limit if parallel_safe else self._nested_serial_lock:
-            if automatic.sandbox is not None and (
+            if (automatic.sandbox is not None or automatic.process_authority is not None) and (
                 automatic.generation is None
                 or not self._command_consent_active(automatic.generation)
             ):
@@ -1325,10 +1365,11 @@ class ConfiguredToolExecutor:
         target: str | None = None,
         auto_approved: bool = False,
         sandbox: SeatbeltLaunch | None = None,
+        process_authority: ProcessAuthority | None = None,
         generation: int | None = None,
     ) -> PreparedToolExecution:
         async def run() -> ToolExecutionEnded:
-            if sandbox is not None and (
+            if (sandbox is not None or process_authority is not None) and (
                 generation is None or not self._command_consent_active(generation)
             ):
                 return _execution_ended(
@@ -1346,6 +1387,7 @@ class ConfiguredToolExecutor:
                         self._context,
                         atomic_writes_only=auto_approved or self._context.atomic_writes_only,
                         command_sandbox=sandbox or self._context.command_sandbox,
+                        process_authority=process_authority,
                     ),
                 )
                 return _execution_ended(tool_call, outcome, target=target)

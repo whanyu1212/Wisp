@@ -25,7 +25,12 @@ safety. YOLO approves every safety class. Elevated modes are saved per project b
 `workspace_edit_v1` consent never authorizes automatic shell execution. Separately selecting
 `auto_commands` (`/permissions auto-commands`) requires fresh `sandbox_commands_v1` consent
 and macOS Seatbelt for automatic bash run/start execution. Supported pytest/unittest, Cargo
-test/check/build, and npm test/build forms run sandboxed without model review. Other eligible
+test/check/build, and npm test/build forms run sandboxed without model review. Use
+`uv run --no-sync pytest` for installed Python environments; use Bash's validated `cwd` argument
+for subprojects instead of shell composition. Poll/cancel of a sandboxed job is automatic only
+for its owning conversation, workspace, and still-active consent. Installed Python packages are
+read-only; credential-module source access does not exempt credential data or explicit protections.
+Other eligible
 commands use bounded independent no-tools review on the active provider/model; Allow is exact-call
 only, uncertainty/failure asks the user, and Deny does not execute. Reviews and usage/cost are
 persisted separately from the acting context. Sandboxed children inherit filesystem restrictions,

@@ -5753,13 +5753,17 @@ mod tests {
         home.pending_approval = Some(PendingApproval {
             call_id: "call-1".into(),
             name: "bash".into(),
-            arguments: json!({"command": "ls"}),
+            arguments: json!({"command": "ls", "cwd": "site"}),
             detail_source: crate::tool_detail::ToolDetailSource::None,
             safety: "command".into(),
             grants_allowed: true,
             session_only_yolo: true,
         });
         let approval = render_to_string(80, 18, &home, &PromptEditor::default());
+        assert!(
+            approval.contains("cwd") && approval.contains("site"),
+            "{approval}"
+        );
         // In the home folder YOLO is a session grant; the panel must not promise
         // that it is saved for the project.
         assert!(approval.contains("3  YOLO for this session"), "{approval}");

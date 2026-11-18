@@ -50,8 +50,10 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
   decisions are recorded in the session and shown on tool cards. This checks where and how an
   edit runs, not whether its contents are safe. Separately opt into `/permissions auto-commands`
   for macOS Seatbelt containment: supported tests/builds run without prompts or model review;
-  other eligible commands receive independent review. Network is blocked, filesystem access is
-  restricted, and sandbox failure never silently runs unrestricted. Pre-existing hardlink aliases
+  other eligible commands receive independent review. Use `uv run --no-sync pytest` for installed
+  Python environments and Bash's `cwd` argument for subprojects. Polling/cancelling a sandboxed
+  job needs no further approval while its session and consent remain active. Network is blocked,
+  filesystem access is restricted, and sandbox failure never silently runs unrestricted. Pre-existing hardlink aliases
   can still expose or modify protected/outside files: this is not complete file isolation. Existing Auto or earlier
   command-review consent does not enable this mode; select it again to opt in. Project-local settings, `AGENTS.md`, and skills
   stay inert until a repository is trusted.

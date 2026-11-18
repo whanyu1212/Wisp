@@ -1777,6 +1777,10 @@ fn format_bash(arguments: &Map<String, Value>) -> String {
         );
     }
     let command = string_value(arguments, "command", "");
+    let command = match arguments.get("cwd").and_then(Value::as_str) {
+        Some(cwd) => format!("(cwd: {}) {command}", clip_chars(&one_line(cwd), 80)),
+        None => command,
+    };
     if operation == "start" {
         format!("start {}", clip_chars(&one_line(&command), 180))
     } else {
@@ -2156,6 +2160,28 @@ pub(crate) fn format_duration(milliseconds: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_command_directory_is_visible_and_bounded() {
+        for (operation, expected) in [
+            ("run", "(cwd: site) npm test"),
+            ("start", "start (cwd: site) npm test"),
+        ] {
+            assert_eq!(
+                format_tool_arguments(
+                    "bash",
+                    &serde_json::json!({"operation": operation, "command": "npm test", "cwd": "site"}),
+                ),
+                expected,
+            );
+        }
+        let shown = format_tool_arguments(
+            "bash",
+            &serde_json::json!({"command": "npm test", "cwd": "long\n".repeat(500)}),
+        );
+        assert!(!shown.contains('\n'));
+        assert!(shown.chars().count() <= BUILTIN_ACTION_MAX_CHARS);
+    }
 
     #[test]
     fn redundant_cd_is_hidden() {

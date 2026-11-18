@@ -24,6 +24,7 @@ from wisp.tools.result import ToolError
 from wisp.trust.scope import is_broad_root
 
 if TYPE_CHECKING:
+    from wisp.tools.approval import ToolApprovalPolicy
     from wisp.tools.context import ToolContext
 
 _EXECUTABLE = "/usr/bin/sandbox-exec"
@@ -67,9 +68,39 @@ _PRIVATE_NAMES = (
     ".npmrc",
     ".pypirc",
     ".pgpass",
-    "credentials",
     "credentials.json",
 )
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessAuthority:
+    """Session-, workspace-, and consent-bound authority for sandboxed job handles."""
+
+    owner: object
+    policy: ToolApprovalPolicy
+    generation: int
+    workspace: Path
+
+    def active(self, context: ToolContext) -> bool:
+        """Check live consent and scope without granting a different tool or operation."""
+        return (
+            self.owner is context.process_owner
+            and self.policy.mode == "auto_commands"
+            and self.policy.generation == self.generation
+            and self.workspace == context.boundary()
+            and not context.allow_outside_cwd
+            and context.write_constraint is None
+            and not context.atomic_writes_only
+        )
+
+    def matches(self, other: ProcessAuthority) -> bool:
+        """Compare identities, not structural equality of mutable approval policies."""
+        return (
+            self.owner is other.owner
+            and self.policy is other.policy
+            and self.generation == other.generation
+            and self.workspace == other.workspace
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,9 +112,15 @@ class SeatbeltLaunch:
     profile: str
     environment: tuple[tuple[str, str], ...]
     roots: tuple[Path, ...]
+    authority: ProcessAuthority | None = None
 
     def validate(self, command: str, cwd: Path) -> None:
         """Reject rebinding or symlinked roots before spawning any command."""
+        if self.authority is not None and (
+            self.authority.policy.mode != "auto_commands"
+            or self.authority.policy.generation != self.authority.generation
+        ):
+            raise ToolError("Automatic command consent was revoked before launch.")
         if command != self.command or cwd.resolve() != self.cwd:
             raise ToolError("Sandbox launch no longer matches the approved command.")
         for root in self.roots:
@@ -343,11 +380,62 @@ def _runtime_access(roots: tuple[Path, Path]) -> tuple[set[Path], dict[str, str]
     return reads, environment
 
 
+def _package_roots(reads: set[Path], workspace: Path) -> tuple[Path, ...]:
+    """Locate installed Python packages, not arbitrary project source directories."""
+    candidates = {path for path in reads if path.name in {"site-packages", "dist-packages"}}
+    for prefix in {*reads, workspace / ".venv"}:
+        if (prefix / "pyvenv.cfg").is_file():
+            candidates.update((prefix / "lib").glob("python*/site-packages"))
+    packages: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved.name not in {"site-packages", "dist-packages"} or is_broad_root(resolved):
+            raise ToolError("Python package directory resolves outside an installed package root.")
+        if resolved.is_dir():
+            packages.add(resolved)
+    return tuple(sorted(packages))
+
+
+def _package_protections(packages: tuple[Path, ...]) -> list[str]:
+    """Allow public credential-module source only in pinned, read-only packages.
+
+    Explicit configured protections are applied separately and still win. All
+    package writes and ancestor moves are denied so a workspace secret cannot be
+    relocated into this read exception. Pre-existing hardlink aliases remain the
+    documented shared-workspace limitation.
+    """
+    rules: list[str] = []
+    for package in packages:
+        rules.append(f"(deny file-write* (subpath {json.dumps(str(package))}))")
+        for ancestor in (package, *package.parents):
+            rules.append(
+                "(deny file-write-unlink (require-all (vnode-type DIRECTORY) "
+                f"(literal {json.dumps(str(ancestor))})))"
+            )
+    credentials = _protected_regex("credentials").replace('"', '\\"')
+    rules.append(f'(deny file-write* (regex #"{credentials}"))')
+    if packages:
+        locations = " ".join(f"(subpath {json.dumps(str(path))})" for path in packages)
+        public_source = (
+            f"(require-all (require-any {locations}) "
+            "(require-any (vnode-type DIRECTORY) "
+            '(require-all (vnode-type REGULAR-FILE) (regex #"[.]py$"))))'
+        )
+        rules.append(
+            f'(deny file-read* (require-all (regex #"{credentials}") '
+            f"(require-not {public_source})))"
+        )
+    else:
+        rules.append(f'(deny file-read* (regex #"{credentials}"))')
+    return rules
+
+
 def _filesystem_profile(
     reads: set[Path], roots: tuple[Path, Path], protected_paths: tuple[str, ...]
 ) -> str:
     """Compile read/write grants with final path and ancestor protections."""
-    workspace, _ = roots
+    workspace, scratch = roots
+    packages = _package_roots(reads, workspace)
     rules = [_BASE]
     for root in sorted(reads):
         resolved_root = root.resolve()
@@ -364,7 +452,18 @@ def _filesystem_profile(
             )
     for name in _CONTROL_NAMES:
         regex = _protected_regex(name).replace('"', '\\"')
-        rules.append(f'(deny file-write* (regex #"{regex}"))')
+        if name == ".git":
+            # UV initializes this regular-file cache sentinel even with --no-sync.
+            # Only this exact private-cache file is exempt, never a Git directory.
+            marker = json.dumps(str(scratch / "uv-cache/sdists-v9/.git"))
+            exception = f"(require-all (literal {marker}) (vnode-type REGULAR-FILE))"
+            rules.append(
+                f'(deny file-write* (require-all (regex #"{regex}") (require-not {exception})))'
+            )
+        else:
+            rules.append(f'(deny file-write* (regex #"{regex}"))')
+    # Seatbelt evaluates ordered rules: restrictions must follow workspace grants.
+    rules.extend(_package_protections(packages))
     # Scratch lives under ~/.wisp, but .wisp descendants of either writable root
     # are configuration, not scratch. Protect every nested project directory too.
     for root in roots:

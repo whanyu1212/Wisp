@@ -600,6 +600,53 @@ def test_cancelled_review_is_durably_unpriced_not_silently_free(
     )
 
 
+def test_process_owner_is_stable_per_conversation_not_per_shared_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    owners: list[object] = []
+
+    async def run_tool(
+        self: BashTool, arguments: Mapping[str, object], context: ToolContext
+    ) -> ToolResult:
+        owners.append(context.process_owner)
+        return ToolResult(text="ok")
+
+    monkeypatch.setattr(BashTool, "run", run_tool)
+    provider = ScriptedProvider(
+        [
+            response
+            for _ in range(3)
+            for response in (
+                tool_call_stream(_call("python -m pytest")),
+                [ProviderResponseStarted(model="test"), ProviderResponseCompleted(content="done")],
+            )
+        ]
+    )
+    registry = ToolRegistry()
+    registry.register(BashTool())
+    store = JsonlSessionStore(tmp_path / "sessions")
+    session = CodingSession(
+        provider=provider,
+        sessions=store,
+        tool_registry=registry,
+        tool_context=ToolContext(cwd=tmp_path),
+        tool_approval_policy=ToolApprovalPolicy.auto_commands(),
+    )
+
+    async def run() -> None:
+        async for _ in session.run("Run tests"):
+            pass
+        saved = store.latest()
+        async for _ in session.run("Run tests again", session=saved):
+            pass
+        async for _ in session.run("Run tests in a new conversation"):
+            pass
+
+    anyio.run(run)
+    assert len(owners) == 3
+    assert owners[0] is owners[1] and owners[0] is not owners[2]
+
+
 def test_audit_delivery_failure_cannot_execute_or_double_count_the_request(
     tmp_path: Path, executions: list[dict[str, object]]
 ) -> None:

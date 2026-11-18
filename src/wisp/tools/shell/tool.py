@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import math
 import os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from typing import Final, Literal, cast, overload
 
 import anyio
+from jsonschema import Draft202012Validator
 
 from wisp.tools.base import ToolArguments, ToolInputSchema, ToolSafety
 from wisp.tools.common import _optional_bool, _optional_int, _required_string
@@ -17,8 +18,9 @@ from wisp.tools.context import SCRATCH_ENVIRONMENT_VARIABLE, ToolContext
 from wisp.tools.output_store import SavedOutput, SavedStream, SaveStatus, saved_output_notice
 from wisp.tools.result import ToolArgumentError, ToolError, ToolResult
 from wisp.tools.shell.process import _format_process_output_preview, _run_shell
-from wisp.tools.shell.seatbelt import activate_seatbelt
+from wisp.tools.shell.seatbelt import ProcessAuthority, activate_seatbelt
 from wisp.tools.shell.supervisor import PollUntil, ProcessSupervisor, ProcessUpdate
+from wisp.tools.shell.working_directory import command_context
 from wisp.tools.truncation import TruncatedText, truncate_text_tail
 
 _DEFAULT_PROCESS_SUPERVISOR: Final = object()
@@ -72,6 +74,9 @@ class BashTool:
     description = (
         "Run a command in bash (or /bin/sh where bash is not installed) and capture stdout, "
         "stderr, and an explicit completion exit code. "
+        "Set cwd to a workspace subdirectory instead of using cd and shell composition. "
+        "For automatic offline Python tests use uv run --no-sync pytest or python -m pytest; "
+        "avoid environment assignments and shell redirects (output is captured already). "
         "Use operation=start to launch a resumable command, operation=poll to read incremental "
         "output by process_id, and operation=cancel to terminate it. "
         "A poll with wait_seconds returns at the next output; pass until=exit to wait for the "
@@ -92,6 +97,10 @@ class BashTool:
                 "default": "run",
             },
             "command": {"type": "string"},
+            "cwd": {
+                "type": "string",
+                "description": "Run/start cwd within workspace, relative to session cwd.",
+            },
             "timeout": {
                 "type": "integer",
                 "minimum": 1,
@@ -157,14 +166,75 @@ class BashTool:
         if process_supervisor is _DEFAULT_PROCESS_SUPERVISOR:
             process_supervisor = ProcessSupervisor(max_processes=1)
         self._process_supervisor = cast(ProcessSupervisor | None, process_supervisor)
+        self._process_grants: dict[str, ProcessAuthority] = {}
 
     async def aclose(self) -> None:
         """Retry and release any retained default-supervisor process cleanup."""
 
         if self._process_supervisor is not None:
             await self._process_supervisor.aclose()
+        self._process_grants.clear()
+
+    def can_control(
+        self, arguments: Mapping[str, object], context: ToolContext, authority: ProcessAuthority
+    ) -> bool:
+        """Check control of a retained sandboxed job without consuming its output.
+
+        Args:
+            arguments (Mapping[str, object]): Exact poll/cancel arguments.
+            context (ToolContext): Current conversation and workspace boundary.
+            authority (ProcessAuthority): Live consent identity and generation.
+
+        Returns:
+            bool: Whether this tool still owns the job for that authority. Unknown,
+            unrestricted, hidden, and differently scoped jobs do not qualify.
+        """
+        operation = arguments.get("operation")
+        allowed = {"operation", "process_id"}
+        if operation == "poll":
+            allowed |= {"wait_seconds", "until"}
+        elif operation != "cancel":
+            return False
+        if (
+            set(arguments) - allowed
+            or not Draft202012Validator(self.input_schema).is_valid(dict(arguments))
+            or any(
+                isinstance(value, float) and not math.isfinite(value)
+                for value in arguments.values()
+            )
+            or not authority.active(context)
+            or self._process_supervisor is None
+        ):
+            return False
+        process_id = arguments.get("process_id")
+        if not isinstance(process_id, str):
+            return False
+        self._prune_process_grants()
+        grant = self._process_grants.get(process_id)
+        return grant is not None and grant.matches(authority)
+
+    def _prune_process_grants(self) -> None:
+        if self._process_supervisor is not None:
+            visible = {process.process_id for process in self._process_supervisor.processes()}
+            self._process_grants = {
+                key: value for key, value in self._process_grants.items() if key in visible
+            }
+
+    def _remember_process(self, process_id: str, context: ToolContext) -> None:
+        if context.command_sandbox is not None and context.process_authority is not None:
+            self._prune_process_grants()
+            self._process_grants[process_id] = context.process_authority
 
     async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
+        context = command_context(arguments, context)
+        authority = context.process_authority
+        if authority is not None:
+            if not authority.active(context):
+                raise ToolError("Automatic command consent was revoked before execution.")
+            if arguments.get("operation") in {"poll", "cancel"} and not self.can_control(
+                arguments, context, authority
+            ):
+                raise ToolError("Automatic process control no longer owns this job.")
         with activate_seatbelt(context.command_sandbox):
             return await self._dispatch(arguments, context)
 
@@ -220,6 +290,7 @@ class BashTool:
                 background=context.background_request,
             )
             if isinstance(outcome, ProcessUpdate):
+                self._remember_process(outcome.process_id, context)
                 moved = await _managed_update_result(outcome, context=context)
                 notice = (
                     _MOVED_NOTICE_PROMISED
@@ -331,6 +402,7 @@ class BashTool:
             env=_command_environment(context),
             notify_on_exit=notify_on_exit,
         )
+        self._remember_process(process_id, context)
         try:
             update = await supervisor.poll(process_id, wait_seconds=yield_seconds, until=until)
         except asyncio.CancelledError:

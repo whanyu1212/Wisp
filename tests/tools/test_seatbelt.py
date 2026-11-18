@@ -250,6 +250,7 @@ def test_production_context_runs_fast_path_without_review(
                 for event in events
             )
             assert isinstance(events[-1], ToolExecutionEnded) and not events[-1].is_error
+            assert events[-1].exit_code == 0, events[-1].output
         finally:
             await tool.aclose()
 
@@ -317,6 +318,36 @@ def test_launch_is_bound_and_context_does_not_leak(macos: None, context: ToolCon
         assert result.exit_code == 0
 
     asyncio.run(run())
+
+
+@pytest.mark.process
+@pytest.mark.parametrize("revocation", ["mode", "generation"])
+def test_shared_launcher_rechecks_consent(
+    macos: None, context: ToolContext, revocation: str
+) -> None:
+    from dataclasses import replace
+
+    from wisp.tools.approval import ToolApprovalPolicy
+    from wisp.tools.shell.seatbelt import ProcessAuthority
+
+    policy = ToolApprovalPolicy.auto_commands()
+    authority = ProcessAuthority(
+        context.process_owner, policy, policy.generation, context.boundary()
+    )
+    command = "printf launched > launched.txt"
+    launch = replace(prepare_seatbelt({"command": command}, context), authority=authority)
+    if revocation == "mode":
+        policy.mode = "ask"
+    else:
+        policy.generation += 1
+
+    async def run() -> None:
+        with activate_seatbelt(launch):
+            with pytest.raises(ToolError, match="consent was revoked"):
+                await _run_shell(command, cwd=context.cwd, timeout=3, max_output_bytes=4000)
+
+    asyncio.run(run())
+    assert not (context.cwd / "launched.txt").exists()
 
 
 @pytest.mark.process

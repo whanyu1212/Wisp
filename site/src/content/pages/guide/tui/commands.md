@@ -115,7 +115,9 @@ in-flight assessment; it does not become a grant if the same mode is re-enabled.
 Only a conservative subset of simple local test/build and Git inspection commands is eligible.
 Shell composition, expansions, redirects, unsupported commands/options, publishing, explicit
 credential/control paths, and outside-workspace paths require human approval before any model
-review. `uv run` needs `--no-sync`. Process poll/cancel calls, MCP mutations, custom/replacement tools,
+review. `uv run` needs `--no-sync`; use Bash's `cwd` argument for a workspace subdirectory rather
+than shell composition. Poll/cancel is automatic only for sandboxed jobs owned by this conversation
+under the original, still-active consent. Other jobs, MCP mutations, custom/replacement tools,
 and mandatory confirmations retain their existing approval flow. Automatically approved commands
 and their children have restricted filesystem access, a controlled environment, and no network
 access. Sandbox setup failure or requests for broader access require explicit human approval;
