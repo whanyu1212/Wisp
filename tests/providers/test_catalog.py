@@ -348,7 +348,10 @@ def test_builtin_catalog_is_a_complete_checked_in_agent_model_matrix() -> None:
         "deepseek-v4-flash-vision-exp": "deepseek-flash",
     }
     assert providers["openai"].context_windows["gpt-6.1-sol"] == 1_050_000
-    assert set(providers["openai"].auto_compact_token_limits) == set()
+    assert providers["openai"].auto_compact_token_limits == {
+        "gpt-6.2-astra": 922_000,
+        "gpt-6.2-sol": 922_000,
+    }
     assert providers["openai-codex"].context_windows == {
         "gpt-6.2-sol": 500_000,
         "gpt-6.2-astra": 272_000,
@@ -374,13 +377,13 @@ def test_builtin_catalog_is_a_complete_checked_in_agent_model_matrix() -> None:
 
 
 @pytest.mark.parametrize(
-    ("model", "codex_window", "compact_limit", "effective_reserve"),
+    ("model", "codex_window", "compact_limit", "effective_reserve", "api_limit", "api_reserve"),
     [
-        ("gpt-6.2-sol", 500_000, 450_000, 50_000),
-        ("gpt-6.2-astra", 272_000, 244_800, 27_200),
-        ("gpt-6.1-sol", 500_000, 475_000, 25_000),
-        ("gpt-6-astra", 272_000, 258_400, 16_384),
-        ("gpt-6-luna", 272_000, 258_400, 16_384),
+        ("gpt-6.2-sol", 500_000, 450_000, 50_000, 922_000, 128_000),
+        ("gpt-6.2-astra", 272_000, 244_800, 27_200, 922_000, 128_000),
+        ("gpt-6.1-sol", 500_000, 475_000, 25_000, None, 16_384),
+        ("gpt-6-astra", 272_000, 258_400, 16_384, None, 16_384),
+        ("gpt-6-luna", 272_000, 258_400, 16_384, None, 16_384),
     ],
 )
 def test_builtin_openai_surfaces_keep_distinct_context_and_compaction_policy(
@@ -388,13 +391,15 @@ def test_builtin_openai_surfaces_keep_distinct_context_and_compaction_policy(
     codex_window: int,
     compact_limit: int,
     effective_reserve: int,
+    api_limit: int | None,
+    api_reserve: int,
 ) -> None:
     registry = ModelRegistry(builtin_catalog())
 
     assert registry.context_window("openai", model) == 1_050_000
     assert registry.context_window("openai-codex", model) == codex_window
     assert registry.context_window("openai-codex", "gpt-5.6") == 272_000
-    assert registry.auto_compact_token_limit("openai", model) is None
+    assert registry.auto_compact_token_limit("openai", model) == api_limit
     assert registry.auto_compact_token_limit("openai-codex", model) == compact_limit
     assert registry.auto_compact_token_limit("openai-codex", "gpt-5.6") == 258_400
     assert (
@@ -424,7 +429,11 @@ def test_builtin_openai_surfaces_keep_distinct_context_and_compaction_policy(
             model,
             reserve_tokens=16_384,
         )
-        == 16_384
+        == api_reserve
+    )
+    assert (
+        registry.effective_context_reserve_tokens("openai", model, reserve_tokens=256_000)
+        == 256_000
     )
 
 

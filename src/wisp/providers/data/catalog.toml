@@ -72,6 +72,13 @@ image_input_models = [
 "gpt-5.4" = 272000
 "gpt-5.4-mini" = 400000
 
+# The model pages separately cap input at 922K within the 1.05M total window.
+# Keep the nominal context metadata and reserve the remaining 128K via the
+# existing provider-budget cap, rather than relying on overflow recovery.
+[providers.auto_compact_token_limits]
+"gpt-6.2-astra" = 922000
+"gpt-6.2-sol" = 922000
+
 [providers.model_lifecycle]
 "gpt-6.2-astra" = "stable"
 "gpt-6.2-sol" = "stable"

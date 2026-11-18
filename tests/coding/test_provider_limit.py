@@ -17,6 +17,7 @@ from wisp.coding.compaction import (
     exceeds_provider_auto_compaction_limit,
     matches_provider_suffix,
     provider_auto_compaction_excess_tokens,
+    should_auto_compact,
 )
 from wisp.coding.session import CodingSession
 from wisp.events import (
@@ -35,6 +36,7 @@ from wisp.events import (
 )
 from wisp.messages import Message, ProcessNotice
 from wisp.providers.base import ContextOverflowError
+from wisp.providers.catalog import ModelRegistry, builtin_catalog
 from wisp.providers.events import (
     ProviderResponseCompleted,
     ProviderResponseStarted,
@@ -574,6 +576,31 @@ def test_suffix_match_ignores_persistence_only_metadata() -> None:
         persisted,
         (live[0], Message(role="tool", content="changed", tool_call_id="call-1", tool_name="read")),
     )
+
+
+@pytest.mark.parametrize("model", ["gpt-6.2-astra", "gpt-6.2-sol"])
+@pytest.mark.parametrize(
+    ("input_tokens", "must_compact"),
+    [(921_999, False), (922_000, False), (922_001, True), (1_030_000, True)],
+)
+def test_gpt_6_2_api_budget_respects_separate_input_ceiling(
+    model: str, input_tokens: int, must_compact: bool
+) -> None:
+    registry = ModelRegistry(builtin_catalog())
+    budget = build_context_budget(
+        estimate_context((Message(role="user", content="hello"),)),
+        context_window=registry.context_window("openai", model),
+        reserve_tokens=registry.effective_context_reserve_tokens(
+            "openai", model, reserve_tokens=16_384
+        ),
+        observed_tokens=input_tokens,
+        observed_is_current=True,
+    )
+
+    assert budget.context_window == 1_050_000
+    assert budget.reserve_tokens == 128_000
+    assert should_auto_compact(budget, enabled=True) is must_compact
+    assert exceeds_provider_auto_compaction_limit(budget) is must_compact
 
 
 def test_limit_helpers_detect_unfixable_reserve() -> None:
