@@ -615,16 +615,18 @@ pub(crate) fn run_in_status_line(state: &UiState) -> bool {
             || state.interaction_status == crate::reducer::InteractionStatus::Compacting)
 }
 
-/// The permission mode where the main column names it: only YOLO, since Ask is the
-/// safe default. YOLO that is not saved for the project reads as a session grant.
+/// Elevated permission modes shown in the main column; Ask is the safe default.
+/// Auto is explicitly labelled edit-only and unsaved modes name their scope.
 pub(crate) fn yolo_label(state: &UiState) -> Option<&'static str> {
     let permissions = state.permissions.snapshot.as_ref()?;
-    if permissions.mode != PermissionMode::Yolo {
-        return None;
+    let saved = permissions.saved_mode == Some(permissions.mode) && !permissions.session_only_yolo;
+    match (permissions.mode, saved) {
+        (PermissionMode::Ask, _) => None,
+        (PermissionMode::Auto, true) => Some("Auto (edits)"),
+        (PermissionMode::Auto, false) => Some("Auto (edits, session)"),
+        (PermissionMode::Yolo, true) => Some("YOLO"),
+        (PermissionMode::Yolo, false) => Some("YOLO (session)"),
     }
-    let saved =
-        permissions.saved_mode == Some(PermissionMode::Yolo) && !permissions.session_only_yolo;
-    Some(if saved { "YOLO" } else { "YOLO (session)" })
 }
 
 fn yolo_style(palette: Palette) -> Style {

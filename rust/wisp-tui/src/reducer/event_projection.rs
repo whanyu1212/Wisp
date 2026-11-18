@@ -606,6 +606,14 @@ impl BackendEvent {
                     None => Self::Other { event_type },
                 }
             }
+            "tool.approval.resolved"
+                if value.get("source").and_then(Value::as_str) == Some("auto")
+                    && bool_field(value, &event_type, "approved")? =>
+            {
+                Self::ToolAutoApproved {
+                    call_id: bounded_identity(&string_field(value, &event_type, "call_id")?),
+                }
+            }
             "tool.approval.resolved" => Self::ToolApprovalResolved {
                 call_id: bounded_identity(&string_field(value, &event_type, "call_id")?),
                 name: bounded_tool_name(target_or_name(value, &event_type)?),

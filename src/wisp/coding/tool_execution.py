@@ -161,6 +161,7 @@ class _ToolRunOutcome:
 
     output: str
     is_error: bool = False
+    auto_approved: bool = False
     # The tool's structured result as it returned it, for a script's call only.
     structured: object = None
     failure_code: ToolFailureCode | None = None
@@ -292,6 +293,14 @@ class _ScriptCallLog:
         self._unfinished[index] = (unfinished, time.monotonic())
         return index
 
+    def mark_auto_approved(self, call_id: str) -> None:
+        """Keep an automatic grant even if its child is interrupted before returning."""
+
+        for index, (call, started) in self._unfinished.items():
+            if call.call_id == call_id:
+                self._unfinished[index] = (call.model_copy(update={"auto_approved": True}), started)
+                return
+
     def record(self, index: int | None, call: NestedToolCall) -> bool:
         """Record a call's outcome, unless the script has ended.
 
@@ -302,7 +311,9 @@ class _ScriptCallLog:
         if self.closed:
             return False
         if index is not None:
-            self._unfinished.pop(index, None)
+            unfinished = self._unfinished.pop(index, None)
+            if unfinished is not None and unfinished[0].auto_approved:
+                call = call.model_copy(update={"auto_approved": True})
             self._recorded[index] = call
         return True
 
@@ -591,13 +602,26 @@ class ConfiguredToolExecutor:
             if self._approval_policy.requires_approval(tool) and not self._approval_policy.approves(
                 tool
             ):
-                async with aclosing(self._approval_events(tool_call, tool, target)) as approvals:
-                    async for event in approvals:
-                        yield event
-                        if isinstance(event, ToolApprovalResolved):
-                            decision = event
+                automatic = await self._automatic_approval(tool_call, tool, arguments, target)
+                if automatic is not None:
+                    yield automatic
+                    decision = automatic
+                else:
+                    async with aclosing(
+                        self._approval_events(tool_call, tool, target)
+                    ) as approvals:
+                        async for event in approvals:
+                            yield event
+                            if isinstance(event, ToolApprovalResolved):
+                                decision = event
                 if decision.approved:
-                    yield self._prepare_tool(tool_call, tool, arguments, target=target)
+                    yield self._prepare_tool(
+                        tool_call,
+                        tool,
+                        arguments,
+                        target=target,
+                        auto_approved=decision.source == "auto",
+                    )
                     return
                 outcome = _failure_outcome(
                     decision.reason or "Tool execution was not approved",
@@ -644,6 +668,30 @@ class ConfiguredToolExecutor:
                 self._approval_policy.cancel_approval(
                     call_id=tool_call.call_id, reason="Agent run cancelled"
                 )
+
+    async def _automatic_approval(
+        self,
+        tool_call: ToolCall,
+        tool: Tool,
+        arguments: Mapping[str, object],
+        target: str | None,
+    ) -> ToolApprovalResolved | None:
+        """Evaluate the exact call without opening a human approval request."""
+
+        decision = await self._approval_policy.evaluate_call(
+            tool, arguments=arguments, context=self._context
+        )
+        if decision is None:
+            return None
+        return ToolApprovalResolved(
+            call_id=tool_call.call_id,
+            name=tool_call.name,
+            target=target,
+            approved=decision.approved,
+            reason=decision.reason,
+            source="auto",
+            rule_id="workspace_edit_v1",
+        )
 
     def _check_call(self, tool_call: ToolCall) -> _CheckedCall | _ToolRunOutcome:
         """Find the tool a call runs and run every check that comes before approval.
@@ -756,6 +804,7 @@ class ConfiguredToolExecutor:
                 target=target,
                 arguments=arguments,
                 is_error=outcome.is_error,
+                auto_approved=outcome.auto_approved,
                 failure_code=outcome.failure_code,
                 error=outcome.output[:NESTED_CALL_TEXT_MAX_CHARS] if outcome.is_error else None,
                 summary=summary[:NESTED_CALL_TEXT_MAX_CHARS] if summary is not None else None,
@@ -816,6 +865,7 @@ class ConfiguredToolExecutor:
                 f"{tool.name} is not read-only; a subagent can call only read-only tools.",
                 failure_code="policy_denied",
             )
+        automatic: ToolApprovalResolved | None = None
         if self._approval_policy.requires_approval(tool) and not self._approval_policy.approves(
             tool
         ):
@@ -825,10 +875,26 @@ class ConfiguredToolExecutor:
                     "Call it directly instead.",
                     failure_code="approval_denied",
                 )
-            async with self._nested_approval_lock:
-                denied = await self._approve_codemode_call(tool_call, tool, target)
-            if denied is not None:
-                return denied
+            automatic = await self._automatic_approval(tool_call, tool, arguments, target)
+            if automatic is not None:
+                log = _SCRIPT_CALLS.get()
+                if log is not None and log.closed:
+                    return _failure_outcome(log.ended_first, failure_code="approval_denied")
+                if self._progress_sink is not None:
+                    # Like human decisions, automatic decisions must be delivered
+                    # before mutation. Without a sink the parent result audits it.
+                    await self._progress_sink(automatic)
+                if not automatic.approved:
+                    return _failure_outcome(
+                        automatic.reason or "Auto approval denied", failure_code="approval_denied"
+                    )
+                if log is not None:
+                    log.mark_auto_approved(tool_call.call_id)
+            else:
+                async with self._nested_approval_lock:
+                    denied = await self._approve_codemode_call(tool_call, tool, target)
+                if denied is not None:
+                    return denied
         name = target or tool_call.name
         parallel_safe = (
             tool.safety == "read" and self._registry.execution_metadata_for(name).parallel_safe
@@ -836,6 +902,8 @@ class ConfiguredToolExecutor:
             else False
         )
         context = self._context
+        if automatic is not None:
+            context = replace(context, atomic_writes_only=True)
         log = _SCRIPT_CALLS.get()
         if origin == "codemode":
             # The parent's progress forwarder owns sequencing and delivery. Nested
@@ -859,17 +927,19 @@ class ConfiguredToolExecutor:
             if log is not None and log.closed:
                 return _failure_outcome(log.ended_first, failure_code="policy_denied")
             if origin == "codemode" and tool.safety != "read" and log is not None:
-                return await self._run_codemode_mutation(
+                outcome = await self._run_codemode_mutation(
                     tool, arguments, tool_call.call_id, name, context, log
                 )
-            return await self._run_tool(
-                tool,
-                arguments,
-                call_id=tool_call.call_id,
-                tool_name=name,
-                nested=True,
-                context=context,
-            )
+            else:
+                outcome = await self._run_tool(
+                    tool,
+                    arguments,
+                    call_id=tool_call.call_id,
+                    tool_name=name,
+                    nested=True,
+                    context=context,
+                )
+            return replace(outcome, auto_approved=automatic is not None and automatic.approved)
 
     async def _run_codemode_mutation(
         self,
@@ -1033,6 +1103,7 @@ class ConfiguredToolExecutor:
         arguments: dict[str, object],
         *,
         target: str | None = None,
+        auto_approved: bool = False,
     ) -> PreparedToolExecution:
         async def run() -> ToolExecutionEnded:
             if tool_call.name not in _NESTED_CALL_HOSTS:
@@ -1041,6 +1112,9 @@ class ConfiguredToolExecutor:
                     arguments,
                     call_id=tool_call.call_id,
                     tool_name=target or tool_call.name,
+                    context=replace(self._context, atomic_writes_only=True)
+                    if auto_approved
+                    else self._context,
                 )
                 return _execution_ended(tool_call, outcome, target=target)
             log = _ScriptCallLog(
@@ -1130,7 +1204,7 @@ class ConfiguredToolExecutor:
         try:
             if not nested:
                 result = await self._run_reporting_progress(
-                    tool, arguments, call_id=call_id, tool_name=tool_name
+                    tool, arguments, call_id=call_id, tool_name=tool_name, context=context
                 )
             else:
                 result = await tool.run(arguments, context)
@@ -1257,6 +1331,7 @@ class ConfiguredToolExecutor:
         *,
         call_id: str,
         tool_name: str,
+        context: ToolContext,
     ) -> ToolResult:
         """Run a tool, giving it a progress handle when a frontend is listening.
 
@@ -1264,7 +1339,6 @@ class ConfiguredToolExecutor:
         background, while it runs.
         """
 
-        context = self._context
         requests = self._background_requests
         movable = requests is not None and _runs_in_foreground(tool_name, arguments)
         if requests is not None and movable:

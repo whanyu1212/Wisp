@@ -5509,6 +5509,22 @@
    "event": "tool.approval.resolved",
    "operation": "remove",
    "path": [
+    "rule_id"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.approval.resolved",
+   "operation": "remove",
+   "path": [
+    "source"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.approval.resolved",
+   "operation": "remove",
+   "path": [
     "target"
    ],
    "accepted": true
@@ -6019,6 +6035,15 @@
    "path": [
     "call",
     "arguments"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.nested.ended",
+   "operation": "remove",
+   "path": [
+    "call",
+    "auto_approved"
    ],
    "accepted": true
   },

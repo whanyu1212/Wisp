@@ -68,6 +68,9 @@ class ToolContext:
     allow_outside_cwd: bool = False
     # ``None`` permits the normal project-root sandbox.
     write_constraint: WriteConstraint | None = None
+    # Automatic edits never rewrite shared inodes or use permission fallbacks.
+    # The executor sets this per approved call, not for the whole session.
+    atomic_writes_only: bool = field(default=False, kw_only=True)
     # Secure by default: every construction path (including a bare
     # ``ToolContext(cwd=...)`` from embedding/SDK code) protects secrets unless a
     # caller explicitly passes ``protected_paths=()`` to opt out.

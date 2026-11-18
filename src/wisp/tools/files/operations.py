@@ -677,6 +677,8 @@ def _atomic_write(
 ) -> _WriteOutcome:
     _check_conflicting_paths(context)
     if os.name == "nt":
+        if context.atomic_writes_only:
+            raise ToolError("Atomic-only edits are not supported on this platform")
         return _atomic_write_windows(
             path, content, overwrite=overwrite, seen_files=context.seen_files
         )
@@ -747,6 +749,10 @@ def _atomic_write(
         if initial_version is not None and context.seen_files is not None:
             context.seen_files.require_current(path.path, initial_version, display=path.display)
         if overwrite and initial_version is not None and (link_count > 1 or requires_in_place):
+            if context.atomic_writes_only:
+                raise ToolError(
+                    "Auto edits require an atomic replacement; confirm this file instead"
+                )
             version = _write_existing_in_place(parent, content, expected=initial_version)
             return _WriteOutcome(False, before_text, None, version)
 
@@ -757,6 +763,7 @@ def _atomic_write(
                 overwrite
                 and initial_version is not None
                 and isinstance(exc.__cause__, PermissionError)
+                and not context.atomic_writes_only
             ):
                 version = _write_existing_in_place(parent, content, expected=initial_version)
                 return _WriteOutcome(False, before_text, None, version)
@@ -803,12 +810,18 @@ def _atomic_write(
 
 
 def _atomic_edit(
-    path: SecureToolPath, edits: list[tuple[str, str]], seen_files: SeenFiles | None = None
+    path: SecureToolPath,
+    edits: list[tuple[str, str]],
+    seen_files: SeenFiles | None = None,
+    *,
+    atomic_only: bool = False,
 ) -> _EditOutcome:
     """Apply ``edits``; return the version they produced, if it could be verified,
     and where each edit landed."""
 
     if os.name == "nt":
+        if atomic_only:
+            raise ToolError("Atomic-only edits are not supported on this platform")
         return _atomic_edit_windows(path, edits, seen_files)
     with open_parent(path) as parent:
         initial = stat_leaf(parent)
@@ -837,13 +850,17 @@ def _atomic_edit(
         edited = _apply_edits(original, edits)
         replacement = edited.text
         if link_count > 1:
+            if atomic_only:
+                raise ToolError(
+                    "Auto edits require an atomic replacement; confirm this file instead"
+                )
             return _EditOutcome(
                 _write_existing_in_place(parent, replacement, expected=version), edited.lines
             )
         try:
             temporary, written = _write_temporary(parent, replacement, metadata=metadata)
         except ToolError as exc:
-            if isinstance(exc.__cause__, PermissionError):
+            if isinstance(exc.__cause__, PermissionError) and not atomic_only:
                 return _EditOutcome(
                     _write_existing_in_place(parent, replacement, expected=version),
                     edited.lines,
@@ -1266,7 +1283,9 @@ class EditTool:
         path = secure_tool_path(_required_string(arguments, "path"), context, write=True)
         edits = _parse_edits(arguments)
         outcome = await anyio.to_thread.run_sync(
-            lambda: _atomic_edit(path, edits, context.seen_files)
+            lambda: _atomic_edit(
+                path, edits, context.seen_files, atomic_only=context.atomic_writes_only
+            )
         )
         if context.seen_files is not None and outcome.version is not None:
             context.seen_files.record(path.path, outcome.version)

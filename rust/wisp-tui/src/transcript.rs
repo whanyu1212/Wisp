@@ -982,6 +982,17 @@ impl Transcript {
         entry_id
     }
 
+    /// Mark the call's audit without changing any human approval state.
+    pub fn observe_auto_approved(&mut self, call_id: &str) {
+        let Some(binding) = self.call_entries.get(call_id).copied() else {
+            return;
+        };
+        if let TranscriptEntryKind::Tool(card) = &mut self.entry_mut(binding.entry_id).kind {
+            card.auto_approved = true;
+            self.bump_card(binding.entry_id);
+        }
+    }
+
     pub fn observe_approval_resolved(
         &mut self,
         call_id: &str,

@@ -45,6 +45,60 @@ fn frame(receiver: &mut mpsc::Receiver<WriterMessage>) -> serde_json::Value {
 }
 
 #[tokio::test]
+async fn auto_permissions_command_selects_edit_only_mode() {
+    let (writer, mut receiver) = mpsc::channel(16);
+    let mut ui = ui("/permissions auto", false);
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    let command = frame(&mut receiver);
+    assert_eq!(command["type"], "set_permissions");
+    assert_eq!(command["mode"], "auto");
+}
+
+#[tokio::test]
+async fn automatic_grant_is_visible_without_opening_an_approval_overlay() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut ui = ui("", true);
+    let entry = ui
+        .state
+        .transcript
+        .observe_tool_call(crate::tool_cards::ToolCallInput {
+            call_id: crate::tool_cards::bounded_identity("auto-edit"),
+            name: "write".into(),
+            arguments: serde_json::json!({"path": "file.txt", "content": "new"}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+        });
+    let automatic = BackendEvent::from_projection_value(&serde_json::json!({
+        "type": "tool.approval.resolved", "call_id": "auto-edit", "name": "write",
+        "approved": true, "source": "auto", "rule_id": "workspace_edit_v1",
+        "reason": "Auto-approved: workspace edit",
+    }))
+    .unwrap();
+    assert!(matches!(automatic, BackendEvent::ToolAutoApproved { .. }));
+    ui.dispatch(UiAction::BackendEvent(automatic), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(ui.state.pending_approval.is_none());
+    assert_eq!(ui.state.view_status, ViewStatus::Running);
+    assert!(
+        ui.state
+            .transcript
+            .entry(entry)
+            .unwrap()
+            .tool_card()
+            .unwrap()
+            .auto_approved
+    );
+    let painted = draw(&mut ui, 100, 24);
+    assert!(
+        painted.contains("Auto-approved: workspace edit"),
+        "{painted}"
+    );
+    assert!(!painted.contains("Allow once"), "{painted}");
+}
+
+#[tokio::test]
 async fn permissions_dock_above_the_composer_and_apply_only_a_painted_highlight() {
     use wisp_protocol::{commands::PermissionMode, events::PermissionState};
     let (writer, mut receiver) = mpsc::channel(16);
@@ -86,7 +140,7 @@ async fn permissions_dock_above_the_composer_and_apply_only_a_painted_highlight(
     let rows: Vec<String> = cells.chunks(80).map(|row| row.iter().collect()).collect();
     let yolo = rows
         .iter()
-        .find(|row| row.contains("2  YOLO"))
+        .find(|row| row.contains("3  YOLO"))
         .expect("YOLO choice");
     assert!(yolo.contains("current"), "{painted}");
     // Docked: the panel's bottom border sits just above the composer (with its blank
@@ -229,11 +283,11 @@ async fn permissions_in_the_home_folder_say_yolo_is_not_saved() {
     .unwrap();
     let painted = draw(&mut ui, 80, 24);
     assert!(
-        painted.contains("YOLO lasts for this session; it is not saved here."),
+        painted.contains("Auto and YOLO last for this session; they are not saved here."),
         "{painted}"
     );
     assert!(
-        painted.contains("YOLO is never saved in this folder. Changing mode clears grants."),
+        painted.contains("Auto and YOLO are not saved here. Changing mode clears grants."),
         "{painted}"
     );
     assert!(!painted.contains("choose one to save it"), "{painted}");
@@ -289,8 +343,9 @@ async fn permissions_require_a_confirmed_snapshot_and_painted_choice() {
     let painted = draw(&mut ui, 80, 24);
     assert!(painted.contains("Project permissions"));
     assert!(painted.contains("1  Ask before changes"));
-    assert!(painted.contains("2  YOLO"));
-    ui.handle_input(key(KeyCode::Char('2')), &writer, 8192)
+    assert!(painted.contains("2  Auto"));
+    assert!(painted.contains("3  YOLO"));
+    ui.handle_input(key(KeyCode::Char('3')), &writer, 8192)
         .await
         .unwrap();
     let change = frame(&mut receiver);

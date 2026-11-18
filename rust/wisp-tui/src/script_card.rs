@@ -76,6 +76,7 @@ pub struct ScriptCall {
     /// backend left them out.
     pub arguments: Value,
     pub state: ScriptCallState,
+    pub auto_approved: bool,
     /// Why it failed, on one line.
     pub error: Option<String>,
     pub duration_ms: Option<u32>,
@@ -224,6 +225,7 @@ impl ScriptCard {
             tool: clip(&one_line(tool), CALL_NAME_MAX_CHARS),
             arguments,
             state: ScriptCallState::Running,
+            auto_approved: false,
             error: None,
             duration_ms: None,
         });
@@ -370,6 +372,7 @@ impl ScriptCall {
             tool: clip(&one_line(tool), CALL_NAME_MAX_CHARS),
             arguments: call_arguments(name, target, record.get("arguments")),
             state,
+            auto_approved: record.get("auto_approved").and_then(Value::as_bool) == Some(true),
             error: error.filter(|_| state == ScriptCallState::Failed),
             duration_ms: record
                 .get("duration_ms")
@@ -456,6 +459,7 @@ mod tests {
             tool: tool.into(),
             arguments: Value::Null,
             state,
+            auto_approved: false,
             error: None,
             duration_ms: Some(5),
         }

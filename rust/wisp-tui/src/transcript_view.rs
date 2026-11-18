@@ -3495,6 +3495,8 @@ fn process_marker(card: &crate::tool_cards::ProcessCardSnapshot) -> &'static str
     status_marker(card.display_state.status())
 }
 
+const AUTO_APPROVAL_NOTE: &str = " · Auto-approved: workspace edit";
+
 fn tool_action_projection(
     card: &crate::tool_cards::ToolCardSnapshot,
 ) -> (String, usize, usize, usize, crate::markdown::InlineStyle) {
@@ -3513,7 +3515,7 @@ fn tool_action_projection(
         "read" | "ls" | "edit" | "write" => crate::markdown::InlineStyle::ToolPath,
         _ => crate::markdown::InlineStyle::ToolArgument,
     };
-    let rest = if let Some(target) = card.mcp_target().filter(|_| card.arguments_available) {
+    let mut rest = if let Some(target) = card.mcp_target().filter(|_| card.arguments_available) {
         let subject = card.action_line_arguments();
         if subject.is_empty() {
             target
@@ -3530,6 +3532,9 @@ fn tool_action_projection(
             .map(|rest| rest.strip_prefix("  ").unwrap_or(rest).to_owned())
             .unwrap_or_default()
     };
+    if card.auto_approved {
+        rest.push_str(AUTO_APPROVAL_NOTE);
+    }
     (
         if rest.is_empty() {
             format!("{marker}{label}")
@@ -3819,14 +3824,20 @@ pub(crate) fn script_call_action(
     };
     let mut row_card = crate::tool_cards::ToolCardSnapshot::requested(&input, status);
     row_card.display_base.clone_from(&card.display_base);
+    row_card.auto_approved = call.auto_approved;
     if !call.arguments.is_object() {
         // Its arguments were too large to keep: name the tool alone.
         let target = row_card.mcp_target().map(|target| format!(" {target}"));
         return format!(
-            "{}{}{}",
+            "{}{}{}{}",
             status_marker(status),
             row_card.action_verb(),
-            target.unwrap_or_default()
+            target.unwrap_or_default(),
+            if call.auto_approved {
+                AUTO_APPROVAL_NOTE
+            } else {
+                ""
+            },
         );
     }
     tool_action_projection(&row_card).0

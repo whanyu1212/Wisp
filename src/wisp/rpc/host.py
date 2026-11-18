@@ -194,6 +194,7 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
         super().__init__(
             approved_tools=fallback.approved_tools,
             approved_safety=fallback.approved_safety,
+            mode=fallback.mode,
         )
         self._pending: dict[str, _PendingApproval] = {}
         self._confirmations: dict[str, ConfirmationHandler] = {}
@@ -226,10 +227,12 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
         self._saved_mode = load_permission_mode(project_path) if project_path is not None else None
         self.approved_tools = self._fallback.approved_tools
         self.approved_safety = self._fallback.approved_safety
+        self.mode = self._saved_mode or self._fallback.mode
         if self._saved_mode == "yolo":
             self.approved_safety = self.approved_safety | {"mutating", "command"}
         self._baseline_approved_tools = self.approved_tools
         self._baseline_approved_safety = self.approved_safety
+        self._baseline_mode = self.mode
 
     def register_confirmation(self, tool_name: str, handler: ConfirmationHandler) -> None:
         """Apply a confirm-every-call tool's effect when the user confirms it.
@@ -251,6 +254,7 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
 
         self.approved_tools = self._baseline_approved_tools
         self.approved_safety = self._baseline_approved_safety
+        self.mode = self._baseline_mode
 
     def revoke_session_tool_grants(self, prefix: str) -> None:
         """Expire per-tool session grants for tools whose names start with ``prefix``.
@@ -271,7 +275,7 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
         """Return effective permissions without reading the preference store."""
 
         return PermissionState(
-            mode="yolo" if {"mutating", "command"} <= self.approved_safety else "ask",
+            mode="yolo" if {"mutating", "command"} <= self.approved_safety else self.mode,
             saved_mode=self._saved_mode,
             project_path=self._project_path,
             session_only_yolo=self.session_only_yolo,
@@ -280,8 +284,8 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
     def set_permissions(self, mode: PermissionMode) -> None:
         """Save the new default before applying it and clearing temporary grants.
 
-        In the home folder or a folder above it, YOLO is not saved: it becomes a
-        session grant, which a new session clears, and the saved mode is unchanged.
+        In the home folder or a folder above it, Auto and YOLO are not saved:
+        they last for this session only, and the saved mode is unchanged.
         Saving Ask there still replaces a YOLO record an earlier release saved.
 
         Args:
@@ -292,22 +296,32 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
             OSError: Saving fails; current approvals remain unchanged.
         """
 
-        if mode == "yolo" and self.session_only_yolo:
-            self.approved_tools = self._baseline_approved_tools
-            self.approved_safety = self.approved_safety | {"read", "mutating", "command"}
+        if mode in ("auto", "yolo") and self.session_only_yolo:
+            self.approved_tools = frozenset()
+            self.approved_safety = (
+                frozenset({"read", "mutating", "command"}) if mode == "yolo" else frozenset()
+            )
+            self.mode = mode
             self._drop_startup_grants()
+            # This choice is session-only, but it must permanently replace any
+            # startup --yes. Resetting the session must not resurrect that grant.
+            self._baseline_approved_tools = frozenset()
+            self._baseline_approved_safety = frozenset()
+            self._baseline_mode = self._saved_mode or "ask"
             return
         if self._project_path is None:
             raise OSError("No project is available for saving permissions")
         save_permission_mode(self._project_path, mode)
         self._drop_startup_grants()
         self._saved_mode = mode
+        self.mode = mode
         self.approved_tools = frozenset()
         self.approved_safety = (
             frozenset({"read", "mutating", "command"}) if mode == "yolo" else frozenset()
         )
         self._baseline_approved_tools = self.approved_tools
         self._baseline_approved_safety = self.approved_safety
+        self._baseline_mode = self.mode
 
     def prepare_approval(
         self,

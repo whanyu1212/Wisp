@@ -84,15 +84,22 @@ command tools still pause for approval (MCP server proposals offer only Confirm 
 allow that tool for the session, choose a saved
 project YOLO default, or deny.
 
-Use `/permissions` in Rust to inspect and change the project default, or `/permissions ask` and
-`/permissions yolo`. The panel docks above the composer and marks the current mode; choose with
-`1`/`2`, or highlight with `↑`/`↓` and press `Enter` (there is no default highlight, because
+Use `/permissions` in Rust to inspect and change the project default, or `/permissions ask`,
+`/permissions auto`, and `/permissions yolo`. Auto approves eligible built-in workspace and
+session-scratch edits on macOS/Linux, but still asks before commands and other mutations. Git
+metadata, agent-control files, shared hard-linked files, and mandatory confirmations do not qualify;
+protected-path and stale-write checks still apply. Each automatic grant is recorded and labelled
+on the tool card. Auto checks the operation and destination, not the safety of the content.
+The panel docks above the composer and marks the current mode; choose with
+`1` (Ask), `2` (Auto), or `3` (YOLO), or highlight with `↑`/`↓` and press `Enter` (there is no default highlight, because
 saving a mode also clears temporary grants). Saved defaults apply to subsequent launches in the same canonical
 project directory and live in user-owned `~/.wisp/permissions/` files, outside the repository.
 Allow-once and tool-session choices do not persist; temporary session grants expire on `/new` or
 switching to another session. Changing the default clears temporary grants. Startup `--yes` alone
 is not saved. These choices do not change project trust or protected paths. In the home folder or a
-folder above it, YOLO applies for the session only and the panel says so; Ask is still saved.
+folder above it, Auto and YOLO apply for the session only and the panel says so; Ask is still saved.
+Auto never grants arbitrary edits throughout a broad folder, though the session scratch remains
+eligible. Saved Auto consent is edit-only and does not authorize future automatic shell execution.
 
 Use `/codemode presentation codemode_only` or `/codemode presentation direct_and_codemode`
 to choose the model-facing tool presentation independently of availability. The picker shows
@@ -165,7 +172,7 @@ Adding or enabling a server needs confirmation; reconnecting clears per-tool ses
 /queue                                    inspect and manage steering and follow-up queues
 /plan                                     switch to read-only planning mode
 /build                                    switch to normal build mode
-/permissions [ask|yolo]                   inspect or change the project permission default
+/permissions [ask|auto|yolo]              inspect or change the project permission default
 /codemode [automatic|always|never|presentation direct_and_codemode|codemode_only]  inspect or save availability and presentation
 /subagents [on|off|model <name>|model -]  inspect or save the subagents settings
 /history                                  search prompts submitted in this TUI run

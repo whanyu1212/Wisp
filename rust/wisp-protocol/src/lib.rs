@@ -516,6 +516,7 @@ pub mod commands {
     #[serde(rename_all = "snake_case")]
     pub enum PermissionMode {
         Ask,
+        Auto,
         Yolo,
     }
 

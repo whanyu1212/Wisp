@@ -246,7 +246,7 @@ class ToolExecutionLifecycle:
             )
 
         if isinstance(event, ToolApprovalRequested):
-            if self.approval_requested:
+            if self.approval_requested or self.approval_resolved:
                 raise ToolExecutionProtocolError(
                     f"Tool executor requested approval more than once for {self.tool_call.call_id}"
                 )
@@ -257,7 +257,11 @@ class ToolExecutionLifecycle:
                 )
             self.approval_requested = True
         elif isinstance(event, ToolApprovalResolved):
-            if not self.approval_requested:
+            if event.source == "auto" and self.approval_requested:
+                raise ToolExecutionProtocolError(
+                    f"Tool executor auto-resolved a human request for {self.tool_call.call_id}"
+                )
+            if not self.approval_requested and event.source != "auto":
                 raise ToolExecutionProtocolError(
                     "Tool executor resolved approval before requesting it for "
                     f"{self.tool_call.call_id}"

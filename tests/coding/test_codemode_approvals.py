@@ -27,8 +27,47 @@ from wisp.sessions.jsonl import JsonlSessionStore
 from wisp.tools.approval import ToolApprovalPolicy
 from wisp.tools.base import Tool
 from wisp.tools.context import ToolContext
-from wisp.tools.files.operations import ReadTool
+from wisp.tools.files.operations import ReadTool, WriteTool
 from wisp.tools.policy import ToolPolicy
+
+
+def test_auto_edit_child_has_independent_durable_audit(tmp_path: Path) -> None:
+    tools = ToolRegistry()
+    tools.register(WriteTool())
+    store = JsonlSessionStore(tmp_path / "sessions")
+    timeline: list[WispEvent] = []
+    session = CodingSession(
+        provider=ScriptedProvider(
+            [_script('await write(path="child.txt", content="new")'), _done()]
+        ),
+        sessions=store,
+        tool_registry=tools,
+        tool_context=ToolContext(cwd=tmp_path),
+        tool_policy=ToolPolicy.allow_all_tools(),
+        tool_approval_policy=ToolApprovalPolicy.auto_edits(),
+        codemode=True,
+    )
+
+    async def live(event: WispEvent) -> None:
+        timeline.append(event)
+
+    async def run() -> list[WispEvent]:
+        return [event async for event in session.run("write a file", live_event_sink=live)]
+
+    events = anyio.run(run)
+    assert not any(isinstance(event, ToolApprovalRequested) for event in [*events, *timeline])
+    automatic = next(event for event in timeline if isinstance(event, ToolApprovalResolved))
+    assert automatic.source == "auto" and automatic.approved
+    result = next(event for event in events if isinstance(event, ToolResultReady))
+    assert not result.is_error and result.nested_calls[0].auto_approved
+    persisted = store.latest()
+    assert persisted is not None
+    snapshot = next(
+        message for message in persisted.read_message_page().messages if message.role == "tool"
+    )
+    assert snapshot.tool_result is not None and snapshot.tool_result.nested_calls is not None
+    assert snapshot.tool_result.nested_calls[0].auto_approved
+    assert (tmp_path / "child.txt").read_text() == "new"
 
 
 class _ReadApprovalPolicy(RpcToolApprovalPolicy):
@@ -147,9 +186,12 @@ def test_subagent_mutations_denied(proxy: bool) -> None:
 
 @pytest.mark.parametrize("approved", [True, False], ids=["approve", "deny"])
 @pytest.mark.parametrize("proxy", [True, False], ids=["proxy", "direct"])
-def test_mutations_have_own_approval(approved: bool, proxy: bool) -> None:
+@pytest.mark.parametrize("auto", [False, True], ids=["ask", "auto"])
+def test_mutations_have_own_approval(approved: bool, proxy: bool, auto: bool) -> None:
     tools = _Tools()
-    policy = RpcToolApprovalPolicy(ToolApprovalPolicy.require_approval())
+    policy = RpcToolApprovalPolicy(
+        ToolApprovalPolicy.auto_edits() if auto else ToolApprovalPolicy.require_approval()
+    )
     events: list[WispEvent] = []
 
     async def live(event: WispEvent) -> None:

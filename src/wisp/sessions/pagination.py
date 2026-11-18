@@ -25,6 +25,7 @@ from wisp.events import (
     RpcMessageToolResultSnapshot,
     RpcSkillInvocationSnapshot,
     SessionDirectoryChanged,
+    ToolApprovalResolved,
     ToolCallSnapshot,
     WebSearchPerformed,
     WebSearchSource,
@@ -84,6 +85,8 @@ class MessagePageIndex:
     # The folder the moves after a message ended in, keyed by that message, when they
     # left the session somewhere other than where they started.
     moves: dict[str, Path]
+    # Tool message entry IDs with a preceding automatic grant in the same run.
+    auto_approved: frozenset[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +145,8 @@ def message_page_index_from_entries(
     # no message of its own (its prompt rolled back) must not claim an earlier run's.
     run_last_message: str | None = None
     operation_id: str | None = None
+    auto_approved: set[str] = set()
+    pending_auto: set[str] = set()
     # Searches precede their assistant completion on the active branch. Never
     # carry evidence from an interrupted response into a later run or message.
     for entry in tree.active_path:
@@ -153,10 +158,21 @@ def message_page_index_from_entries(
         }:
             pending.clear()
         if entry.operation_id != operation_id:
+            pending_auto.clear()
             pending.clear()
             run_last_message = None
             operation_id = entry.operation_id
+        if (
+            isinstance(entry, EventSessionEntry)
+            and entry.event.payload.get("type") == "tool.approval.resolved"
+        ):
+            decision = ToolApprovalResolved.model_validate(entry.event.payload)
+            if decision.source == "auto" and decision.approved:
+                pending_auto.add(decision.call_id)
         if isinstance(entry, MessageSessionEntry):
+            if entry.message.role == "tool" and entry.message.tool_call_id in pending_auto:
+                auto_approved.add(entry.id)
+                pending_auto.discard(entry.message.tool_call_id)
             run_last_message = entry.id
             last_message = entry.id
         if (
@@ -189,6 +205,7 @@ def message_page_index_from_entries(
         messages=messages,
         positions={entry.id: index for index, entry in enumerate(messages)},
         web_searches=searches,
+        auto_approved=frozenset(auto_approved),
         run_totals=run_totals,
         # Moves that end where they started, such as a failed move into another project
         # and the move back saved after it, changed nothing to show.
@@ -278,6 +295,7 @@ def message_page_from_index(
             web_searches=index.web_searches.get(entry.id, ()),
             run_completed=index.run_totals.get(entry.id),
             moved_to=index.moves.get(entry.id),
+            auto_approved=entry.id in index.auto_approved,
             complete_structure=complete_structure or full_content,
         )
         for entry in reversed(selected)
@@ -309,6 +327,7 @@ def _rpc_message_snapshot(
     web_searches: tuple[WebSearchPerformed, ...] = (),
     run_completed: AgentCompleted | None = None,
     moved_to: Path | None = None,
+    auto_approved: bool = False,
 ) -> RpcMessageSnapshot:
     message = entry.message
     skill_invocation = _rpc_skill_invocation_snapshot(
@@ -344,6 +363,7 @@ def _rpc_message_snapshot(
         content_truncated=content_truncated or tool_result_projection_truncated,
         images=message.images or (),
         tool_call_id=message.tool_call_id,
+        auto_approved=auto_approved,
         tool_name=message.tool_name,
         tool_calls=tuple(
             _rpc_tool_call_snapshot(
