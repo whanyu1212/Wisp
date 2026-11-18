@@ -152,25 +152,33 @@ def _case_literal(text: str) -> str:
     )
 
 
-def _protected_regex(pattern: str, cwd: Path) -> str:
+def _protected_pattern(pattern: str) -> str:
+    # The file tools treat a leading **/ as a suffix match. A trailing /**
+    # protects a whole subtree, including the mandatory permissions directory.
+    # Configured credential paths are already expanded; custom globs stay literal.
+    expanded = pattern
+    if expanded.startswith("**/"):
+        expanded = expanded[3:]
+    if expanded.endswith("/**"):
+        expanded = expanded[:-3]
     # Unsupported glob syntax is an admission failure, not an ignored protection.
-    if any(char in pattern for char in "[]{}\\\n\r\0") or (
-        "/" in pattern and any(char in pattern for char in "*?")
+    if (
+        not expanded.strip("/")
+        or any(char in expanded for char in "[]{}\\\n\r\0")
+        or ("/" in expanded and any(char in expanded for char in "*?"))
     ):
         raise ToolError("Sandbox cannot enforce this protected-path pattern.")
-    expanded = os.path.expanduser(pattern)
-    if expanded.startswith("/"):
-        prefix = "^"
-    elif "/" in expanded:
-        expanded = str(cwd / expanded)
-        prefix = "^"
-    else:
-        prefix = "^(.*/)?"
-    parts = expanded.split("*")
+    return expanded
+
+
+def _protected_regex(pattern: str, *, subtree: bool = True) -> str:
+    # Match trailing segments at every depth, as the file tools do, rather than
+    # silently weakening slash-bearing relative protections to one workspace path.
+    parts = _protected_pattern(pattern).lstrip("/").split("*")
     expression = "[^/]*".join(
         "[^/]".join(_case_literal(part) for part in piece.split("?")) for piece in parts
     )
-    return prefix + expression + "(/.*)?$"
+    return "^(.*/)?" + expression + ("(/.*)?$" if subtree else "$")
 
 
 def prepare_seatbelt(arguments: Mapping[str, object], context: ToolContext) -> SeatbeltLaunch:
@@ -247,6 +255,10 @@ def _runtime_access(roots: tuple[Path, Path]) -> tuple[set[Path], dict[str, str]
             "/private/etc/passwd",
             "/private/etc/group",
             "/private/etc/ssl/openssl.cnf",
+            "/opt/homebrew/etc/openssl@3/openssl.cnf",
+            "/opt/homebrew/etc/openssl@4/openssl.cnf",
+            "/usr/local/etc/openssl@3/openssl.cnf",
+            "/usr/local/etc/openssl@4/openssl.cnf",
             "/dev/null",
             "/dev/zero",
             "/dev/random",
@@ -268,6 +280,15 @@ def _runtime_access(roots: tuple[Path, Path]) -> tuple[set[Path], dict[str, str]
     for installation in ("/opt/homebrew/Cellar", "/usr/local/Cellar"):
         if Path(installation).is_dir():
             reads.add(Path(installation))
+    selection = Path("/var/db/xcode_select_link")
+    if selection.exists():
+        developer = selection.resolve()
+        if developer.name == "Developer" and developer.parent.name == "Contents":
+            # Full Xcode installs keep linker dependencies in the selected bundle's
+            # sibling Frameworks directories, outside Contents/Developer.
+            reads.add(developer.parent.parent)
+        else:
+            reads.add(developer)
     paths = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
     for name in (
         "uv",
@@ -339,7 +360,7 @@ def _filesystem_profile(
                 f"(literal {json.dumps(str(ancestor))})))"
             )
     for name in _CONTROL_NAMES:
-        regex = _protected_regex(name, workspace).replace('"', '\\"')
+        regex = _protected_regex(name).replace('"', '\\"')
         rules.append(f'(deny file-write* (regex #"{regex}"))')
     # Scratch lives under ~/.wisp, but .wisp descendants of either writable root
     # are configuration, not scratch. Protect every nested project directory too.
@@ -350,10 +371,21 @@ def _filesystem_profile(
     patterns = (*protected_paths, ".env*", *_PRIVATE_NAMES, str(workspace / ".wisp"))
     for pattern in patterns:
         # SBPL's #"..." is a raw regex literal, unlike its ordinary path strings.
-        regex = _protected_regex(pattern, workspace).replace('"', '\\"')
+        regex = _protected_regex(pattern).replace('"', '\\"')
         rules.append(f'(deny file-read* file-write* (regex #"{regex}"))')
-        if "/" in pattern and "*" not in pattern and "?" not in pattern:
-            path = Path(pattern).expanduser()
+        expanded = _protected_pattern(pattern)
+        if "/" in expanded and "*" not in expanded and "?" not in expanded:
+            # Also protect ancestors of suffix matches in nested directories and
+            # scratch. Otherwise moving `sub/private` would expose its secret.
+            for ancestor in Path(expanded).parents:
+                if ancestor in (Path("."), Path("/")):
+                    continue
+                ancestor_regex = _protected_regex(str(ancestor), subtree=False).replace('"', '\\"')
+                rules.append(
+                    "(deny file-write-unlink (require-all (vnode-type DIRECTORY) "
+                    f'(regex #"{ancestor_regex}")))'
+                )
+            path = Path(expanded).expanduser()
             path = path if path.is_absolute() else workspace / path
             # Bind both names when an explicit protected path currently follows a symlink.
             resolved = path.resolve()

@@ -157,9 +157,103 @@ def test_protected_ancestor_cannot_move(macos: None, context: ToolContext) -> No
 def test_unsupported_patterns_fail_closed(macos: None, context: ToolContext) -> None:
     from dataclasses import replace
 
-    for pattern in ("private/*.txt", "[abc].txt", "**/secret"):
+    for pattern in ("private/*.txt", "[abc].txt", "private/**/secret"):
         with pytest.raises(ToolError, match="protected-path pattern"):
             prepare_seatbelt({"command": "pytest"}, replace(context, protected_paths=(pattern,)))
+
+
+@pytest.mark.process
+@pytest.mark.parametrize("prefix", ["", "sub/"])
+@pytest.mark.parametrize("operation", ["cat", "write", "move"])
+def test_relative_protections_match_nested_suffixes(
+    macos: None, context: ToolContext, prefix: str, operation: str
+) -> None:
+    from dataclasses import replace
+
+    directory = context.cwd / prefix / "private"
+    directory.mkdir(parents=True)
+    (directory / "secret.txt").write_text("canary")
+    context = replace(context, protected_paths=("private/secret.txt",))
+    commands = {
+        "cat": f"cat {prefix}private/secret.txt",
+        "write": f"printf changed > {prefix}private/secret.txt",
+        "move": f"mv {prefix}private {prefix}public",
+    }
+    code, _, stderr = execute(commands[operation], context)
+    assert code != 0, stderr
+    assert (directory / "secret.txt").read_text() == "canary"
+
+
+@pytest.mark.process
+def test_mandatory_subtree_pattern_protects_scratch(macos: None, context: ToolContext) -> None:
+    from dataclasses import replace
+
+    assert context.scratch_root is not None
+    permissions = context.scratch_root / "permissions"
+    permissions.mkdir()
+    (permissions / "record.json").write_text("synthetic permission record")
+    context = replace(context, protected_paths=(f"{permissions}/**",))
+    for command in (
+        f"cat {shlex.quote(str(permissions / 'record.json'))}",
+        f"printf changed > {shlex.quote(str(permissions / 'new.json'))}",
+    ):
+        code, _, stderr = execute(command, context)
+        assert code != 0, stderr
+
+
+@pytest.mark.process
+def test_production_context_runs_fast_path_without_review(
+    macos: None, context: ToolContext
+) -> None:
+    from dataclasses import replace
+
+    from wisp.coding.tool_execution import ConfiguredToolExecutor
+    from wisp.config.runtime import WispConfig
+    from wisp.events import (
+        ToolApprovalRequested,
+        ToolApprovalResolved,
+        ToolApprovalReviewed,
+        ToolExecutionEnded,
+    )
+    from wisp.providers.events import ToolCall
+    from wisp.runtime.registry import ToolRegistry
+    from wisp.tools.approval import ToolApprovalPolicy
+    from wisp.tools.policy import ToolPolicy
+
+    production = ToolContext.from_config(WispConfig(), cwd=context.cwd)
+    production = replace(production, scratch_root=context.scratch_root)
+    (context.cwd / "test_local.py").write_text("def test_ok():\n    assert 2+2 == 4\n")
+    tool = BashTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    executor = ConfiguredToolExecutor(
+        registry=registry,
+        context=production,
+        policy=ToolPolicy.allow_all_tools(),
+        approval_policy=ToolApprovalPolicy.auto_commands(),
+    )
+
+    async def run() -> None:
+        try:
+            call = ToolCall(
+                call_id="production",
+                name="bash",
+                arguments={"command": "python -m pytest -q test_local.py"},
+            )
+            events = [event async for event in executor.execute(call)]
+            assert not any(
+                isinstance(event, ToolApprovalRequested | ToolApprovalReviewed) for event in events
+            )
+            assert any(
+                isinstance(event, ToolApprovalResolved)
+                and event.rule_id == "sandbox_development_v1"
+                for event in events
+            )
+            assert isinstance(events[-1], ToolExecutionEnded) and not events[-1].is_error
+        finally:
+            await tool.aclose()
+
+    asyncio.run(run())
 
 
 @pytest.mark.process
@@ -303,6 +397,8 @@ def test_offline_development_workflows(
         )
         command = "npm test --offline"
     code, stdout, stderr = execute(command, context)
+    if code != 0:
+        print(f"stdout:\n{stdout}\nstderr:\n{stderr}")
     assert code == 0, (stdout, stderr)
 
 
