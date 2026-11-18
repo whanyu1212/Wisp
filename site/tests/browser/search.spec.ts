@@ -159,6 +159,28 @@ test("keyboard dismissal, focus containment, pagination, empty state, and both t
   }
 });
 
+test("a queued close event cannot cancel a reopened search", async ({
+  page,
+}) => {
+  await page.goto("guide/quickstart.html");
+  await page
+    .getByRole("button", { name: "Search documentation", exact: true })
+    .click();
+  const dialog = page.getByRole("dialog", { name: "Search documentation" });
+  await dialog.evaluate((element) => {
+    // Native close events are queued. Reopen and type before that task runs.
+    (element as HTMLDialogElement).close();
+    document.querySelector<HTMLButtonElement>("#search-open")!.click();
+    const input = element.querySelector<HTMLInputElement>("input")!;
+    input.value = "wisp";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("searchbox")).toBeFocused();
+  await expect(dialog.getByRole("status")).toContainText("Showing 8 of");
+  await expect(dialog.getByRole("listitem")).toHaveCount(8);
+});
+
 test("search reports loading and ignores a stale query after clearing, closing, and reopening", async ({
   page,
 }) => {
