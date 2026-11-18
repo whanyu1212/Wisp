@@ -39,6 +39,7 @@ from wisp.tools.base import Tool
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
 from wisp.tools.result import ToolResult
+from wisp.tools.shell.seatbelt import SeatbeltLaunch
 from wisp.tools.shell.tool import BashTool
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="Command review is POSIX-only")
@@ -78,8 +79,18 @@ def _executor(
     )
 
 
-def _call(command: str = "pytest tests -q") -> ToolCall:
+def _call(command: str = "ruff check .") -> ToolCall:
     return ToolCall(call_id="command", name="bash", arguments={"command": command})
+
+
+@pytest.fixture(autouse=True)
+def sandbox_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Approval unit tests isolate the launch preflight; real OS enforcement is
+    # exercised through the shared launcher in tests/tools/test_seatbelt.py.
+    def prepare(arguments: Mapping[str, object], context: ToolContext) -> SeatbeltLaunch:
+        return SeatbeltLaunch(str(arguments["command"]), context.cwd.resolve(), "", (), ())
+
+    monkeypatch.setattr("wisp.coding.tool_execution.prepare_seatbelt", prepare)
 
 
 @pytest.fixture
@@ -94,6 +105,107 @@ def executions(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
 
     monkeypatch.setattr(BashTool, "run", run)
     return calls
+
+
+@pytest.mark.parametrize("command", ["pytest tests -q", "cargo test", "npm run build"])
+def test_sandbox_fast_path_skips_model_review(
+    tmp_path: Path, executions: list[dict[str, object]], command: str
+) -> None:
+    provider = _provider()
+    executor = _executor(tmp_path, provider, ToolApprovalPolicy.auto_commands())
+
+    async def run() -> list[WispEvent]:
+        return [event async for event in executor.execute(_call(command))]
+
+    events = anyio.run(run)
+    assert not provider.calls
+    assert not any(
+        isinstance(event, ToolApprovalRequested | ToolApprovalReviewed) for event in events
+    )
+    decision = next(event for event in events if isinstance(event, ToolApprovalResolved))
+    assert decision.rule_id == "sandbox_development_v1" and decision.approved
+    assert len(executions) == 1
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_automatic_execution_receives_the_bound_sandbox(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, nested: bool
+) -> None:
+    captures: list[ToolContext] = []
+
+    async def run_tool(
+        self: BashTool, arguments: Mapping[str, object], context: ToolContext
+    ) -> ToolResult:
+        captures.append(context)
+        return ToolResult(text="ok")
+
+    monkeypatch.setattr(BashTool, "run", run_tool)
+    registry = ToolRegistry()
+    registry.register(BashTool())
+    events: list[WispEvent] = []
+
+    async def sink(event: WispEvent) -> None:
+        events.append(event)
+
+    executor = ConfiguredToolExecutor(
+        registry=registry,
+        context=ToolContext(cwd=tmp_path),
+        policy=ToolPolicy.allow_all_tools(),
+        approval_policy=ToolApprovalPolicy.auto_commands(),
+        progress_sink=sink,
+    )
+
+    async def run() -> None:
+        if nested:
+            result = await executor.run_codemode(_call("pytest"))
+            assert not result.is_error
+        else:
+            events.extend([event async for event in executor.execute(_call("pytest"))])
+
+    anyio.run(run)
+    assert len(captures) == 1
+    assert captures[0].command_sandbox is not None
+    assert captures[0].command_sandbox.command == "pytest"
+    assert any(isinstance(event, ToolApprovalResolved) for event in events)
+
+
+def test_sandbox_preflight_failure_never_requests_model_or_executes(
+    tmp_path: Path, executions: list[dict[str, object]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail(arguments: Mapping[str, object], context: ToolContext) -> SeatbeltLaunch:
+        raise RuntimeError("unavailable")
+
+    monkeypatch.setattr("wisp.coding.tool_execution.prepare_seatbelt", fail)
+    provider = _provider()
+    executor = _executor(tmp_path, provider, ToolApprovalPolicy.auto_commands())
+
+    async def run() -> list[WispEvent]:
+        return [event async for event in executor.execute(_call("pytest"))]
+
+    events = anyio.run(run)
+    assert any(isinstance(event, ToolApprovalRequested) for event in events)
+    assert not provider.calls and not executions
+    assessment = next(event for event in events if isinstance(event, ToolApprovalReviewed))
+    assert "unrestricted approval" in assessment.reason
+
+
+def test_fast_grant_revocation_before_execution_never_runs(
+    tmp_path: Path, executions: list[dict[str, object]]
+) -> None:
+    policy = RpcToolApprovalPolicy(ToolApprovalPolicy.auto_commands(), project_path=tmp_path)
+    executor = _executor(tmp_path, _provider(), policy)
+
+    async def run() -> list[WispEvent]:
+        events: list[WispEvent] = []
+        async for event in executor.execute(_call("pytest")):
+            events.append(event)
+            if isinstance(event, ToolApprovalResolved):
+                policy.set_permissions("ask")
+        return events
+
+    events = anyio.run(run)
+    assert isinstance(events[-1], ToolExecutionEnded) and events[-1].is_error
+    assert not executions
 
 
 @pytest.mark.parametrize("verdict", ["allow", "ask", "deny"])
@@ -373,7 +485,7 @@ def test_nested_review_has_one_durable_cost_and_restored_child_reason(
 
     provider = ScriptedProvider(
         [
-            _script('await bash(command="pytest tests -q")'),
+            _script('await bash(command="ruff check .")'),
             _review_stream(),
             _done(),
         ]

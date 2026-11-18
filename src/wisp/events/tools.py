@@ -64,7 +64,9 @@ class ToolApprovalResolved(WispEvent):
     reason: str | None = None
     # Automatic resolutions have no preceding human approval request.
     source: Literal["auto"] | None = None
-    rule_id: Literal["workspace_edit_v1", "command_review_v1"] | None = None
+    rule_id: Literal["workspace_edit_v1", "command_review_v1", "sandbox_development_v1"] | None = (
+        None
+    )
 
 
 class ToolApprovalReviewed(WispEvent):

@@ -82,10 +82,11 @@ class ToolApprovalPolicy:
 
     @classmethod
     def auto_commands(cls) -> ToolApprovalPolicy:
-        """Opt into independent command review in addition to workspace edits.
+        """Opt into macOS sandboxed commands in addition to workspace edits.
 
-        A coding session supplies the no-tools reviewer; a bare policy grants no
-        commands without one. This consent does not enable a shell sandbox.
+        The executor requires Seatbelt for every automatic command. Supported
+        test/build forms bypass model review; other eligible commands require the
+        coding session's independent reviewer. A bare policy grants no commands.
         """
 
         return cls(mode="auto_commands")

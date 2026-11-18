@@ -108,7 +108,7 @@ def _read_saved_mode(project: Path) -> PermissionMode | None:
     # Shell approval must never reuse this edit-only consent in a future release.
     if mode == "auto" and record.get("auto_scope") == "workspace_edit_v1":
         return "auto"
-    if mode == "auto_commands" and record.get("auto_scope") == "command_review_v1":
+    if mode == "auto_commands" and record.get("auto_scope") == "sandbox_commands_v1":
         return "auto_commands"
     if mode == "yolo":
         return "yolo"
@@ -152,7 +152,7 @@ def save_permission_mode(project: Path, mode: PermissionMode) -> None:
             if mode == "auto":
                 record["auto_scope"] = "workspace_edit_v1"
             elif mode == "auto_commands":
-                record["auto_scope"] = "command_review_v1"
+                record["auto_scope"] = "sandbox_commands_v1"
             json.dump(record, stream)
             stream.write("\n")
             stream.flush()

@@ -101,8 +101,10 @@ folder above it, Auto, Auto commands, and YOLO apply for the session only and th
 Auto never grants arbitrary edits throughout a broad folder, though the session scratch remains
 eligible. Saved Auto consent is edit-only and never enables command review.
 
-**Auto commands is a separate opt-in, not a sandbox.** It keeps Auto's edit behavior and asks an
-independent reviewer about eligible exact built-in `bash` run/start calls on macOS/Linux. The reviewer makes a
+**Auto commands is a separate macOS-only opt-in with mandatory Seatbelt containment.** It keeps
+Auto's edit behavior and runs supported pytest/unittest, Cargo test/check/build, and npm test/build
+forms inside the sandbox without model review. Other eligible exact built-in `bash` run/start
+calls go to an independent reviewer. The reviewer makes a
 fresh, no-tools request on the active provider/model, without conversation history, project
 instructions, or repository file contents. Each run allows at most eight review requests, each
 with a 20-second deadline; these requests can incur additional model charges. Allow runs only that
@@ -114,11 +116,18 @@ Only a conservative subset of simple local test/build and Git inspection command
 Shell composition, expansions, redirects, unsupported commands/options, publishing, explicit
 credential/control paths, and outside-workspace paths require human approval before any model
 review. `uv run` needs `--no-sync`. Process poll/cancel calls, MCP mutations, custom/replacement tools,
-and mandatory confirmations retain their existing approval flow. Known commands such as `pytest`
-and `npm test` can execute arbitrary repository code, access files, and use the network: model
-review and path preflight do **not** contain those indirect effects or guarantee safety. Reviews,
-reasons, and available usage/cost are saved; incomplete/cancelled requests remain cost-unknown,
-not zero-cost. Tool cards distinguish reviewed commands from automatic file edits.
+and mandatory confirmations retain their existing approval flow. Automatically approved commands
+and their children have restricted filesystem access, a controlled environment, and no network
+access. Sandbox setup failure or requests for broader access require explicit human approval;
+there is no silent unrestricted retry. Ask, explicit grants, and YOLO retain unrestricted execution.
+
+Tests can still modify allowed workspace files. **Pre-existing hardlink aliases remain a known
+limitation**: an allowed alias can read or modify a file whose other name is protected or outside
+the workspace. This is not complete file/credential isolation. Shared-cache writes and network-dependent
+tests may need human approval. Saved consent is `sandbox_commands_v1`; earlier command-review
+consent is not reused, so select this mode again to opt in. Reviews, reasons, and available
+usage/cost are saved; incomplete/cancelled requests remain cost-unknown, not zero-cost. Tool cards
+distinguish sandboxed test/build grants, reviewed commands, and automatic file edits.
 
 Use `/codemode presentation codemode_only` or `/codemode presentation direct_and_codemode`
 to choose the model-facing tool presentation independently of availability. The picker shows

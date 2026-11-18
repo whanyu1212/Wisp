@@ -97,7 +97,7 @@ const PERMISSION_CHOICES: [(char, &str, PermissionMode); 4] = [
     ),
     (
         '3',
-        "Auto commands — model review; no sandbox",
+        "Auto commands — macOS sandbox; tests auto",
         PermissionMode::AutoCommands,
     ),
     (
