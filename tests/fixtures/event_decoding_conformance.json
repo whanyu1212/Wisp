@@ -5544,6 +5544,116 @@
    "accepted": false
   },
   {
+   "event": "tool.approval.reviewed",
+   "operation": "remove",
+   "path": [
+    "call_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.approval.reviewed",
+   "operation": "remove",
+   "path": [
+    "cost"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.approval.reviewed",
+   "operation": "remove",
+   "path": [
+    "duration_ms"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.approval.reviewed",
+   "operation": "remove",
+   "path": [
+    "model"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.approval.reviewed",
+   "operation": "remove",
+   "path": [
+    "model_ms"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.approval.reviewed",
+   "operation": "remove",
+   "path": [
+    "name"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.approval.reviewed",
+   "operation": "remove",
+   "path": [
+    "provider"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.approval.reviewed",
+   "operation": "remove",
+   "path": [
+    "reason"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.approval.reviewed",
+   "operation": "remove",
+   "path": [
+    "rule_id"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.approval.reviewed",
+   "operation": "remove",
+   "path": [
+    "target"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.approval.reviewed",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.approval.reviewed",
+   "operation": "remove",
+   "path": [
+    "usage"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "tool.approval.reviewed",
+   "operation": "remove",
+   "path": [
+    "verdict"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "tool.approval.reviewed",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
    "event": "tool.call",
    "operation": "remove",
    "path": [
@@ -6028,6 +6138,15 @@
    "operation": "add_unknown",
    "path": [],
    "accepted": false
+  },
+  {
+   "event": "tool.nested.ended",
+   "operation": "remove",
+   "path": [
+    "call",
+    "approval_note"
+   ],
+   "accepted": true
   },
   {
    "event": "tool.nested.ended",

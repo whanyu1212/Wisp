@@ -517,6 +517,7 @@ pub mod commands {
     pub enum PermissionMode {
         Ask,
         Auto,
+        AutoCommands,
         Yolo,
     }
 

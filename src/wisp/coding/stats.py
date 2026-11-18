@@ -31,6 +31,7 @@ from wisp.events import (
     SessionBranchSummary,
     SessionStats,
     TokenUsage,
+    ToolApprovalReviewed,
     ToolResultReady,
     UsageCost,
     WispEvent,
@@ -72,6 +73,11 @@ class RunStats:
         """
         if isinstance(event, ToolResultReady):
             self.tool_calls += 1
+        elif isinstance(event, ToolApprovalReviewed):
+            if event.usage is not None:
+                self.output_tokens = (self.output_tokens or 0) + event.usage.output_tokens
+                if event.model_ms is not None:
+                    self.model_seconds = (self.model_seconds or 0.0) + event.model_ms / 1_000
         elif isinstance(event, MessageStarted):
             self._response_started = time.monotonic()
         elif isinstance(event, MessageCompleted):
@@ -311,6 +317,9 @@ def _usage_records(entries: Sequence[SessionEntry]) -> list[TokenUsage]:
         if isinstance(entry, MessageSessionEntry) and entry.message.usage is not None:
             records.append(entry.message.usage)
         records.extend(response.usage for response in _subagent_responses(entry))
+        review = _command_review(entry)
+        if review is not None and review.usage is not None:
+            records.append(review.usage)
         if isinstance(entry, CompactionSessionEntry) and entry.compaction.usage is not None:
             records.append(entry.compaction.usage)
         if (
@@ -333,6 +342,9 @@ def _cost_records(entries: Sequence[SessionEntry]) -> list[UsageCost | None]:
         if isinstance(entry, MessageSessionEntry) and entry.message.role == "assistant":
             records.append(entry.message.cost)
         records.extend(response.cost for response in _subagent_responses(entry))
+        review = _command_review(entry)
+        if review is not None and review.provider is not None:
+            records.append(review.cost)
         if isinstance(entry, CompactionSessionEntry):
             records.append(entry.compaction.cost)
         if (
@@ -348,6 +360,18 @@ def _cost_records(entries: Sequence[SessionEntry]) -> list[UsageCost | None]:
             elif entry.event.payload.get("usage") is not None:
                 records.append(None)
     return records
+
+
+def _command_review(entry: SessionEntry) -> ToolApprovalReviewed | None:
+    if (
+        not isinstance(entry, EventSessionEntry)
+        or entry.event.payload.get("type") != "tool.approval.reviewed"
+    ):
+        return None
+    try:
+        return ToolApprovalReviewed.model_validate(entry.event.payload)
+    except ValidationError:
+        return None
 
 
 def _subagent_responses(entry: SessionEntry) -> tuple[ModelResponseUsage, ...]:

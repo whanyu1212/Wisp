@@ -1772,6 +1772,19 @@
       "additionalProperties": false,
       "description": "One tool call a codemode script or a subagent made, as its result records it.\n\nEvery call is recorded, including those refused before running and those the\nscript or subagent ended before they finished, so a session shows everything\nit tried. Only the script or subagent sees the call's output; the model sees\nwhat the script prints and returns, or the subagent's final message.\n\nAttributes:\n    call_id (str): The call's id, unique within its script or subagent.\n    name (str): The tool that was called.\n    target (str | None): The MCP tool a proxied `mcp_call` ran.\n    arguments (JsonObject | None): The call's arguments; None when they were\n        too large to keep.\n    is_error (bool): Whether the call failed or was refused.\n    failure_code (ToolFailureCode | None): Why it failed, when classified.\n    error (str | None): The start of its error message.\n    summary (str | None): A one-line summary, for read-type tools.\n    started_at (datetime): When the call was made.\n    duration_ms (int): How long it took, waiting for other calls included.",
       "properties": {
+        "approval_note": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Approval Note"
+        },
         "arguments": {
           "anyOf": [
             {
@@ -1884,6 +1897,7 @@
         "arguments",
         "is_error",
         "auto_approved",
+        "approval_note",
         "failure_code",
         "error",
         "summary",
@@ -1897,6 +1911,7 @@
       "enum": [
         "ask",
         "auto",
+        "auto_commands",
         "yolo"
       ],
       "type": "string"
@@ -3663,6 +3678,19 @@
       ],
       "description": "One bounded, frontend-oriented persisted message snapshot.",
       "properties": {
+        "approval_note": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Approval Note"
+        },
         "auto_approved": {
           "default": false,
           "title": "Auto Approved",
@@ -3913,6 +3941,7 @@
         "images",
         "tool_call_id",
         "auto_approved",
+        "approval_note",
         "tool_name",
         "tool_calls",
         "tool_calls_original_count",
@@ -7383,7 +7412,10 @@
         "rule_id": {
           "anyOf": [
             {
-              "const": "workspace_edit_v1",
+              "enum": [
+                "workspace_edit_v1",
+                "command_review_v1"
+              ],
               "type": "string"
             },
             {
@@ -7442,6 +7474,147 @@
         "rule_id"
       ],
       "title": "ToolApprovalResolved",
+      "type": "object"
+    },
+    "ToolApprovalReviewed": {
+      "additionalProperties": false,
+      "description": "An auditable command assessment, not itself an execution grant.\n\nAsk continues through the existing human approval flow. Usage and cost\nbelong to this independent request, never to the acting model's context.",
+      "properties": {
+        "call_id": {
+          "title": "Call Id",
+          "type": "string"
+        },
+        "cost": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UsageCost"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "duration_ms": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Duration Ms",
+          "type": "integer"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "model_ms": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Ms"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider"
+        },
+        "reason": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        },
+        "rule_id": {
+          "const": "command_review_v1",
+          "default": "command_review_v1",
+          "title": "Rule Id",
+          "type": "string"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "tool.approval.reviewed",
+          "default": "tool.approval.reviewed",
+          "title": "Type",
+          "type": "string"
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TokenUsage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "verdict": {
+          "enum": [
+            "allow",
+            "ask",
+            "deny"
+          ],
+          "title": "Verdict",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "timestamp",
+        "call_id",
+        "name",
+        "target",
+        "verdict",
+        "reason",
+        "rule_id",
+        "provider",
+        "model",
+        "usage",
+        "cost",
+        "duration_ms",
+        "model_ms"
+      ],
+      "title": "ToolApprovalReviewed",
       "type": "object"
     },
     "ToolCallRequested": {
@@ -9153,6 +9326,7 @@
       "skill.invoked": "#/$defs/SkillInvoked",
       "tool.approval.requested": "#/$defs/ToolApprovalRequested",
       "tool.approval.resolved": "#/$defs/ToolApprovalResolved",
+      "tool.approval.reviewed": "#/$defs/ToolApprovalReviewed",
       "tool.call": "#/$defs/ToolCallRequested",
       "tool.execution.ended": "#/$defs/ToolExecutionEnded",
       "tool.execution.progress": "#/$defs/ToolExecutionProgress",
@@ -9379,6 +9553,9 @@
     },
     {
       "$ref": "#/$defs/WarningEvent"
+    },
+    {
+      "$ref": "#/$defs/ToolApprovalReviewed"
     }
   ],
   "title": "Wisp current live event output",
@@ -10192,6 +10369,22 @@
       "timestamp": "2026-01-02T03:04:05Z",
       "type": "tool.approval.resolved"
     },
+    "tool.approval.reviewed": {
+      "call_id": "call-1",
+      "cost": null,
+      "duration_ms": 0,
+      "model": null,
+      "model_ms": null,
+      "name": "bash",
+      "provider": null,
+      "reason": "Human approval required for this command.",
+      "rule_id": "command_review_v1",
+      "target": null,
+      "timestamp": "2026-01-02T03:04:05Z",
+      "type": "tool.approval.reviewed",
+      "usage": null,
+      "verdict": "ask"
+    },
     "tool.call": {
       "arguments": {},
       "call_id": "call-1",
@@ -10258,6 +10451,7 @@
     },
     "tool.nested.ended": {
       "call": {
+        "approval_note": null,
         "arguments": {
           "path": "fixture.txt"
         },

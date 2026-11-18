@@ -88,7 +88,7 @@ impl ChoiceView {
     }
 }
 
-const PERMISSION_CHOICES: [(char, &str, PermissionMode); 3] = [
+const PERMISSION_CHOICES: [(char, &str, PermissionMode); 4] = [
     ('1', "Ask before changes", PermissionMode::Ask),
     (
         '2',
@@ -97,6 +97,11 @@ const PERMISSION_CHOICES: [(char, &str, PermissionMode); 3] = [
     ),
     (
         '3',
+        "Auto commands — model review; no sandbox",
+        PermissionMode::AutoCommands,
+    ),
+    (
+        '4',
         "YOLO — allow tools without asking",
         PermissionMode::Yolo,
     ),
@@ -172,7 +177,7 @@ impl DiscoveryView {
         }
         key.code == KeyCode::Enter
             || (matches!(self, Self::Permissions(_))
-                && matches!(key.code, KeyCode::Char('1'..='3')))
+                && matches!(key.code, KeyCode::Char('1'..='4')))
             || (matches!(self, Self::Codemode(_)) && matches!(key.code, KeyCode::Char('1'..='5')))
     }
 
@@ -636,7 +641,7 @@ fn render_permissions(
             .filter(|snapshot| snapshot.saved_mode != Some(snapshot.mode))
             .map(|snapshot| {
                 let text = if snapshot.session_only_yolo && snapshot.mode != PermissionMode::Ask {
-                    "Auto and YOLO last for this session; they are not saved here."
+                    "This mode lasts for this session; it is not saved here."
                 } else {
                     "Current mode is not saved; choose one to save it."
                 };
@@ -648,7 +653,7 @@ fn render_permissions(
     };
     lines.extend(status);
     let scope = if snapshot.is_some_and(|snapshot| snapshot.session_only_yolo) {
-        "Auto and YOLO are not saved here. Changing mode clears grants."
+        "Elevated modes are not saved here. Changing mode clears grants."
     } else {
         "Saved for this project. Changing mode clears temporary grants."
     };
@@ -660,7 +665,7 @@ fn render_permissions(
         ));
     }
     frame.render_widget(Paragraph::new(lines), inner);
-    view.painted = inner.height >= 3 && inner.width >= 22 && !state.permissions.loading();
+    view.painted = inner.height >= 4 && inner.width >= 22 && !state.permissions.loading();
     view.rendered = if view.painted { view.selected } else { None };
     Rows::default()
 }
@@ -844,8 +849,8 @@ pub(crate) fn permissions_panel_height(state: &UiState) -> u16 {
         || state.permissions.loading()
         || snapshot.is_some_and(|snapshot| snapshot.saved_mode != Some(snapshot.mode));
     let project = snapshot.is_some_and(|snapshot| snapshot.project_path.is_some());
-    // Borders, three choices, a gap and the grants note, then optional rows.
-    7 + u16::from(status) + u16::from(project)
+    // Borders, four choices, a gap and the grants note, then optional rows.
+    8 + u16::from(status) + u16::from(project)
 }
 
 #[cfg(test)]

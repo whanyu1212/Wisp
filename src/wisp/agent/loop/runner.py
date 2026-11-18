@@ -22,6 +22,7 @@ from wisp.events import (
     TokenUsage,
     ToolApprovalRequested,
     ToolApprovalResolved,
+    ToolApprovalReviewed,
     ToolCallRequested,
     ToolExecutionEnded,
     ToolExecutionStarted,
@@ -66,6 +67,7 @@ AgentLoopEvent = TypeAliasType(
     | ToolExecutionStarted
     | ToolApprovalRequested
     | ToolApprovalResolved
+    | ToolApprovalReviewed
     | ToolExecutionEnded
     | ToolResultReady
     | TurnCompleted

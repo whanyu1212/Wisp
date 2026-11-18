@@ -2847,27 +2847,32 @@ async fn reopened_script_details() {
 }
 
 #[tokio::test]
-async fn reopened_auto_edit_keeps_its_audit_when_arguments_were_clipped() {
-    let assistant = json!({
-        "entry_id": "auto-call", "role": "assistant", "content": "", "content_truncated": false,
-        "tool_calls": [{"call_id": "script-auto", "name": "codemode", "arguments": {"code": SCRIPT}}],
-    });
-    let mut child = nested("auto-child", "write", Value::Null, None);
-    child["auto_approved"] = json!(true);
-    let result = json!({
-        "entry_id": "auto-result", "role": "tool", "content": "done", "content_truncated": false,
-        "tool_name": "codemode", "tool_call_id": "script-auto", "tool_calls": [],
-        "tool_result": {"status": "done", "nested_calls": [child]},
-    });
-    let mut ui = LiveUi::default();
-    ui.state.transcript = crate::history::project_rpc_messages(&[assistant, result]).unwrap();
-    let (writer, _receiver) = mpsc::channel(8);
-    open_script_details(&mut ui, &writer).await;
-    let text = screen_rows(&draw(&mut ui, 100, 40));
-    assert_shows(
-        &text,
-        &["Auto-approved: workspace edit", "Arguments not kept."],
-    );
+async fn reopened_automatic_calls_keep_audit_when_arguments_were_clipped() {
+    for (name, note) in [
+        ("write", "Auto-approved: workspace edit"),
+        ("bash", "Auto-approved: command review — requested tests"),
+    ] {
+        let assistant = json!({
+            "entry_id": "auto-call", "role": "assistant", "content": "", "content_truncated": false,
+            "tool_calls": [{"call_id": "script-auto", "name": "codemode", "arguments": {"code": SCRIPT}}],
+        });
+        let mut child = nested("auto-child", name, Value::Null, None);
+        child["auto_approved"] = json!(true);
+        if name == "bash" {
+            child["approval_note"] = json!(note);
+        }
+        let result = json!({
+            "entry_id": "auto-result", "role": "tool", "content": "done", "content_truncated": false,
+            "tool_name": "codemode", "tool_call_id": "script-auto", "tool_calls": [],
+            "tool_result": {"status": "done", "nested_calls": [child]},
+        });
+        let mut ui = LiveUi::default();
+        ui.state.transcript = crate::history::project_rpc_messages(&[assistant, result]).unwrap();
+        let (writer, _receiver) = mpsc::channel(8);
+        open_script_details(&mut ui, &writer).await;
+        let text = screen_rows(&draw(&mut ui, 100, 40));
+        assert_shows(&text, &[note, "Arguments not kept."]);
+    }
 }
 
 #[tokio::test]

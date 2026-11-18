@@ -181,6 +181,7 @@ from wisp.events.tools import (
     ProjectConfigApplied,
     ToolApprovalRequested,
     ToolApprovalResolved,
+    ToolApprovalReviewed,
     ToolCallRequested,
     ToolExecutionEnded,
     ToolExecutionProgress,
@@ -385,6 +386,7 @@ __all__ = [
     "TokenUsage",
     "ToolApprovalRequested",
     "ToolApprovalResolved",
+    "ToolApprovalReviewed",
     "ToolCallRequested",
     "ToolCallSnapshot",
     "ToolExecutionEnded",
@@ -485,7 +487,8 @@ KnownWispEvent = TypeAliasType(
         | ErrorEvent
         | ToolNestedCallStarted
         | ToolNestedCallEnded
-        | WarningEvent,
+        | WarningEvent
+        | ToolApprovalReviewed,
         Field(discriminator="type"),
     ],
 )

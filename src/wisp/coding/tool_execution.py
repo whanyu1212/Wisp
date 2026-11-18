@@ -38,6 +38,7 @@ from wisp.events import (
     TokenUsage,
     ToolApprovalRequested,
     ToolApprovalResolved,
+    ToolApprovalReviewed,
     ToolExecutionEnded,
     ToolNestedCallEnded,
     ToolNestedCallStarted,
@@ -54,10 +55,12 @@ from wisp.tool_types import ToolFailureCode
 from wisp.tools.approval import ToolApprovalPolicy, confirms_every_call
 from wisp.tools.base import ArgumentCheckedTool, Tool
 from wisp.tools.codemode.calls import CODEMODE, NestedCallResult, ResultLimits
+from wisp.tools.command_review import CommandReviewer, command_review_objection
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
 from wisp.tools.progress import OutputProgress, ToolProgress
 from wisp.tools.result import ToolError, ToolResult
+from wisp.tools.shell.tool import BashTool
 from wisp.tools.subagent import SPAWN_AGENT
 from wisp.tools.summary import summarize_tool_result
 from wisp.tools.truncation import truncate_text
@@ -82,6 +85,10 @@ _BEFORE_TEXT_TOOLS = frozenset({"write"})
 _MODEL_VISIBLE_TOOL_ERROR_MAX_CHARS = 2_000
 # The batch limit, `_MAX_PARALLEL_TOOL_EXECUTIONS` in the loop, for a script's calls.
 _MAX_PARALLEL_NESTED_CALLS = 8
+_REVOKED_COMMAND_REVIEW = (
+    "Permissions changed during command review; no grant was issued. "
+    "Retry under the current permissions."
+)
 # How a nested call is recorded when its script ended before the call finished.
 _SCRIPT_ENDED_FIRST = "The script ended before this call finished"
 _SUBAGENT_ENDED_FIRST = "The subagent ended before this call finished"
@@ -162,6 +169,7 @@ class _ToolRunOutcome:
     output: str
     is_error: bool = False
     auto_approved: bool = False
+    approval_note: str | None = None
     # The tool's structured result as it returned it, for a script's call only.
     structured: object = None
     failure_code: ToolFailureCode | None = None
@@ -293,12 +301,20 @@ class _ScriptCallLog:
         self._unfinished[index] = (unfinished, time.monotonic())
         return index
 
-    def mark_auto_approved(self, call_id: str) -> None:
-        """Keep an automatic grant even if its child is interrupted before returning."""
+    def mark_approval(self, call_id: str, *, auto_approved: bool, note: str | None) -> None:
+        """Keep assessment/grant evidence even if the child is interrupted."""
 
         for index, (call, started) in self._unfinished.items():
             if call.call_id == call_id:
-                self._unfinished[index] = (call.model_copy(update={"auto_approved": True}), started)
+                self._unfinished[index] = (
+                    call.model_copy(
+                        update={
+                            "auto_approved": auto_approved,
+                            "approval_note": note,
+                        }
+                    ),
+                    started,
+                )
                 return
 
     def record(self, index: int | None, call: NestedToolCall) -> bool:
@@ -312,8 +328,13 @@ class _ScriptCallLog:
             return False
         if index is not None:
             unfinished = self._unfinished.pop(index, None)
-            if unfinished is not None and unfinished[0].auto_approved:
-                call = call.model_copy(update={"auto_approved": True})
+            if unfinished is not None:
+                call = call.model_copy(
+                    update={
+                        "auto_approved": call.auto_approved or unfinished[0].auto_approved,
+                        "approval_note": call.approval_note or unfinished[0].approval_note,
+                    }
+                )
             self._recorded[index] = call
         return True
 
@@ -423,6 +444,21 @@ def _runs_in_foreground(tool_name: str, arguments: dict[str, object]) -> bool:
     return tool_name == "bash" and arguments.get("operation", "run") == "run"
 
 
+@dataclass(frozen=True, slots=True)
+class _ApprovalEvaluation:
+    review: ToolApprovalReviewed | None = None
+    resolution: ToolApprovalResolved | None = None
+    generation: int | None = None
+
+    @property
+    def note(self) -> str | None:
+        if self.resolution is not None and self.resolution.approved:
+            return (self.resolution.reason or "Auto-approved")[:500]
+        if self.review is not None:
+            return f"Command review ({self.review.verdict}): {self.review.reason}"[:500]
+        return None
+
+
 class ConfiguredToolExecutor:
     """Adapt Wisp's registry and approval policies to the pure loop contract."""
 
@@ -437,6 +473,7 @@ class ConfiguredToolExecutor:
         mcp_catalog: McpCatalog | None = None,
         image_store: ImageStore | None = None,
         background_requests: BackgroundRequests | None = None,
+        command_reviewer: CommandReviewer | None = None,
     ) -> None:
         self._registry = registry
         # Where a running foreground `bash` call can be asked to move to the background.
@@ -444,6 +481,7 @@ class ConfiguredToolExecutor:
         self._context = context
         self._policy = policy
         self._approval_policy = approval_policy
+        self._command_reviewer = command_reviewer
         self._progress_sink = progress_sink
         self._mcp_catalog = mcp_catalog
         # Stores a tool's images before its result references them; without one a
@@ -495,6 +533,7 @@ class ConfiguredToolExecutor:
             approval_policy=self._approval_policy,
             progress_sink=self._progress_sink,
             mcp_catalog=self._mcp_catalog,
+            command_reviewer=self._command_reviewer,
         )
         executor._nested_serial_lock = self._nested_serial_lock
         executor._nested_approval_lock = self._nested_approval_lock
@@ -603,9 +642,16 @@ class ConfiguredToolExecutor:
                 tool
             ):
                 automatic = await self._automatic_approval(tool_call, tool, arguments, target)
-                if automatic is not None:
-                    yield automatic
-                    decision = automatic
+                if automatic.review is not None:
+                    yield automatic.review
+                    automatic = self._current_approval(automatic)
+                if automatic.resolution is not None:
+                    yield automatic.resolution
+                    decision = automatic.resolution
+                elif automatic.review is None and self._approval_policy.approves(tool):
+                    # A concurrent explicit user grant needs no human prompt.
+                    yield self._prepare_tool(tool_call, tool, arguments, target=target)
+                    return
                 else:
                     async with aclosing(
                         self._approval_events(tool_call, tool, target)
@@ -620,7 +666,7 @@ class ConfiguredToolExecutor:
                         tool,
                         arguments,
                         target=target,
-                        auto_approved=decision.source == "auto",
+                        auto_approved=decision.rule_id == "workspace_edit_v1",
                     )
                     return
                 outcome = _failure_outcome(
@@ -675,23 +721,130 @@ class ConfiguredToolExecutor:
         tool: Tool,
         arguments: Mapping[str, object],
         target: str | None,
-    ) -> ToolApprovalResolved | None:
-        """Evaluate the exact call without opening a human approval request."""
+        *,
+        review_commands: bool = True,
+    ) -> _ApprovalEvaluation:
+        """Evaluate one exact call; an assessment alone is never an execution grant."""
 
         decision = await self._approval_policy.evaluate_call(
             tool, arguments=arguments, context=self._context
         )
-        if decision is None:
-            return None
-        return ToolApprovalResolved(
-            call_id=tool_call.call_id,
-            name=tool_call.name,
-            target=target,
-            approved=decision.approved,
-            reason=decision.reason,
-            source="auto",
-            rule_id="workspace_edit_v1",
+        if decision is not None:
+            return _ApprovalEvaluation(
+                resolution=ToolApprovalResolved(
+                    call_id=tool_call.call_id,
+                    name=tool_call.name,
+                    target=target,
+                    approved=decision.approved,
+                    reason=decision.reason,
+                    source="auto",
+                    rule_id="workspace_edit_v1",
+                )
+            )
+        if (
+            not review_commands
+            or self._approval_policy.mode != "auto_commands"
+            or confirms_every_call(tool)
+            or self._approval_policy.approves(tool)
+            or type(tool) is not BashTool
+            or tool.name != "bash"
+            or target is not None
+            or self._command_reviewer is None
+        ):
+            return _ApprovalEvaluation()
+        generation = self._approval_policy.generation
+
+        def still_authorized() -> bool:
+            return self._command_consent_active(generation)
+
+        try:
+            objection = await anyio.to_thread.run_sync(
+                lambda: command_review_objection(arguments, self._context), abandon_on_cancel=True
+            )
+        except Exception:  # noqa: BLE001 - uncertain preflight is not a grant
+            objection = "Command preflight unavailable; human approval required."
+        if not still_authorized():
+            objection = "Permissions changed during review; human approval required."
+        if objection is not None:
+            review = ToolApprovalReviewed(
+                call_id=tool_call.call_id,
+                name=tool_call.name,
+                verdict="ask",
+                reason=objection,
+            )
+        else:
+            try:
+                review = await self._command_reviewer.review(
+                    call_id=tool_call.call_id,
+                    arguments=dict(arguments),
+                    context=self._context,
+                    still_authorized=still_authorized,
+                )
+                if (
+                    review.call_id != tool_call.call_id
+                    or review.name != tool_call.name
+                    or review.target is not None
+                ):
+                    raise ValueError("Reviewer changed the call identity")
+            except Exception:  # noqa: BLE001 - no callback failure may grant execution
+                review = ToolApprovalReviewed(
+                    call_id=tool_call.call_id,
+                    name=tool_call.name,
+                    verdict="ask",
+                    reason="Command reviewer unavailable; human approval required.",
+                )
+        if not still_authorized():
+            review = review.model_copy(
+                update={
+                    "verdict": "deny",
+                    "reason": _REVOKED_COMMAND_REVIEW,
+                }
+            )
+        if review.verdict == "ask":
+            return _ApprovalEvaluation(review=review, generation=generation)
+        approved = review.verdict == "allow"
+        return _ApprovalEvaluation(
+            review=review,
+            generation=generation,
+            resolution=ToolApprovalResolved(
+                call_id=tool_call.call_id,
+                name=tool_call.name,
+                approved=approved,
+                source="auto",
+                rule_id="command_review_v1",
+                reason=(
+                    f"Auto-approved: command review — {review.reason}"
+                    if approved
+                    else f"Command review denied: {review.reason}"
+                ),
+            ),
         )
+
+    def _command_consent_active(self, generation: int) -> bool:
+        return (
+            self._approval_policy.mode == "auto_commands"
+            and self._approval_policy.generation == generation
+        )
+
+    def _current_approval(self, evaluation: _ApprovalEvaluation) -> _ApprovalEvaluation:
+        # Publishing the assessment may wait for a frontend. A mode/project
+        # change during that wait must still revoke the unissued grant.
+        if (
+            evaluation.review is not None
+            and evaluation.generation is not None
+            and not self._command_consent_active(evaluation.generation)
+        ):
+            return replace(
+                evaluation,
+                resolution=ToolApprovalResolved(
+                    call_id=evaluation.review.call_id,
+                    name=evaluation.review.name,
+                    approved=False,
+                    source="auto",
+                    reason=_REVOKED_COMMAND_REVIEW,
+                ),
+            )
+        return evaluation
 
     def _check_call(self, tool_call: ToolCall) -> _CheckedCall | _ToolRunOutcome:
         """Find the tool a call runs and run every check that comes before approval.
@@ -805,6 +958,7 @@ class ConfiguredToolExecutor:
                 arguments=arguments,
                 is_error=outcome.is_error,
                 auto_approved=outcome.auto_approved,
+                approval_note=outcome.approval_note,
                 failure_code=outcome.failure_code,
                 error=outcome.output[:NESTED_CALL_TEXT_MAX_CHARS] if outcome.is_error else None,
                 summary=summary[:NESTED_CALL_TEXT_MAX_CHARS] if summary is not None else None,
@@ -865,7 +1019,7 @@ class ConfiguredToolExecutor:
                 f"{tool.name} is not read-only; a subagent can call only read-only tools.",
                 failure_code="policy_denied",
             )
-        automatic: ToolApprovalResolved | None = None
+        automatic = _ApprovalEvaluation()
         if self._approval_policy.requires_approval(tool) and not self._approval_policy.approves(
             tool
         ):
@@ -875,26 +1029,47 @@ class ConfiguredToolExecutor:
                     "Call it directly instead.",
                     failure_code="approval_denied",
                 )
-            automatic = await self._automatic_approval(tool_call, tool, arguments, target)
-            if automatic is not None:
-                log = _SCRIPT_CALLS.get()
-                if log is not None and log.closed:
-                    return _failure_outcome(log.ended_first, failure_code="approval_denied")
+            automatic = await self._automatic_approval(
+                tool_call,
+                tool,
+                arguments,
+                target,
+                review_commands=self._progress_sink is not None,
+            )
+            log = _SCRIPT_CALLS.get()
+            if log is not None and log.closed:
+                return _failure_outcome(log.ended_first, failure_code="approval_denied")
+            if automatic.review is not None and self._progress_sink is not None:
+                review = automatic.review
+                await self._progress_sink(review)
+                automatic = self._current_approval(automatic)
+                if log is not None:
+                    log.mark_approval(
+                        tool_call.call_id,
+                        auto_approved=False,
+                        note=f"Command review ({review.verdict}): {review.reason}"[:500],
+                    )
+            if automatic.resolution is not None:
+                resolution = automatic.resolution
                 if self._progress_sink is not None:
-                    # Like human decisions, automatic decisions must be delivered
-                    # before mutation. Without a sink the parent result audits it.
-                    await self._progress_sink(automatic)
-                if not automatic.approved:
-                    return _failure_outcome(
-                        automatic.reason or "Auto approval denied", failure_code="approval_denied"
+                    # Delivery must succeed before mutation. Without a sink only
+                    # edit-only grants qualify, audited by the parent's result.
+                    await self._progress_sink(resolution)
+                if not resolution.approved:
+                    return replace(
+                        _failure_outcome(
+                            resolution.reason or "Auto approval denied",
+                            failure_code="approval_denied",
+                        ),
+                        approval_note=automatic.note,
                     )
                 if log is not None:
-                    log.mark_auto_approved(tool_call.call_id)
+                    log.mark_approval(tool_call.call_id, auto_approved=True, note=automatic.note)
             else:
                 async with self._nested_approval_lock:
                     denied = await self._approve_codemode_call(tool_call, tool, target)
                 if denied is not None:
-                    return denied
+                    return replace(denied, approval_note=automatic.note)
         name = target or tool_call.name
         parallel_safe = (
             tool.safety == "read" and self._registry.execution_metadata_for(name).parallel_safe
@@ -902,7 +1077,7 @@ class ConfiguredToolExecutor:
             else False
         )
         context = self._context
-        if automatic is not None:
+        if automatic.resolution is not None and automatic.resolution.rule_id == "workspace_edit_v1":
             context = replace(context, atomic_writes_only=True)
         log = _SCRIPT_CALLS.get()
         if origin == "codemode":
@@ -939,7 +1114,11 @@ class ConfiguredToolExecutor:
                     nested=True,
                     context=context,
                 )
-            return replace(outcome, auto_approved=automatic is not None and automatic.approved)
+            return replace(
+                outcome,
+                auto_approved=automatic.resolution is not None and automatic.resolution.approved,
+                approval_note=automatic.note,
+            )
 
     async def _run_codemode_mutation(
         self,

@@ -1352,6 +1352,11 @@ pub enum BackendEvent {
     /// An automatic grant never opens or closes a human approval overlay.
     ToolAutoApproved {
         call_id: String,
+        note: Option<String>,
+    },
+    ToolApprovalReviewed {
+        call_id: String,
+        note: String,
     },
     ToolApprovalResolved {
         call_id: String,
@@ -5535,8 +5540,17 @@ fn handle_backend_event(
             })
         }
         BackendEvent::ToolApprovalRequested(pending) => request_tool_approval(state, pending, ids),
-        BackendEvent::ToolAutoApproved { call_id } => {
+        BackendEvent::ToolAutoApproved { call_id, note } => {
             state.transcript.observe_auto_approved(&call_id);
+            state
+                .transcript
+                .observe_approval_note(&call_id, note.as_deref());
+            Ok(vec![UiEffect::RequestRender])
+        }
+        BackendEvent::ToolApprovalReviewed { call_id, note } => {
+            state
+                .transcript
+                .observe_approval_note(&call_id, Some(&note));
             Ok(vec![UiEffect::RequestRender])
         }
         BackendEvent::ToolApprovalResolved {
@@ -5756,6 +5770,7 @@ fn is_run_event(event: &BackendEvent) -> bool {
         | BackendEvent::ToolTargetResolved(_)
         | BackendEvent::ToolApprovalRequested(_)
         | BackendEvent::ToolAutoApproved { .. }
+        | BackendEvent::ToolApprovalReviewed { .. }
         | BackendEvent::ToolApprovalResolved { .. }
         | BackendEvent::ToolResult(_)
         | BackendEvent::CompactionStarted(_)
@@ -8932,6 +8947,7 @@ mod tests {
                         arguments: serde_json::json!({"path": "file"}),
                         state: child_state,
                         auto_approved: false,
+                        approval_note: None,
                         error: reason.map(str::to_owned),
                         duration_ms: Some(1),
                     },

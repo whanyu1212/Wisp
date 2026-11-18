@@ -993,6 +993,21 @@ impl Transcript {
         }
     }
 
+    /// Preserve the backend's bounded assessment without changing approval state.
+    pub fn observe_approval_note(&mut self, call_id: &str, note: Option<&str>) {
+        let Some(note) = note else {
+            return;
+        };
+        let Some(binding) = self.call_entries.get(call_id).copied() else {
+            return;
+        };
+        if let TranscriptEntryKind::Tool(card) = &mut self.entry_mut(binding.entry_id).kind {
+            let note = crate::ui::sanitize_for_terminal(note);
+            card.approval_note = Some(crate::tool_cards::BoundedText::head(&note, 2_000, 1).text);
+            self.bump_card(binding.entry_id);
+        }
+    }
+
     pub fn observe_approval_resolved(
         &mut self,
         call_id: &str,

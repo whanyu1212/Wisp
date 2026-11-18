@@ -26,6 +26,7 @@ from wisp.events import (
     RpcSkillInvocationSnapshot,
     SessionDirectoryChanged,
     ToolApprovalResolved,
+    ToolApprovalReviewed,
     ToolCallSnapshot,
     WebSearchPerformed,
     WebSearchSource,
@@ -87,6 +88,7 @@ class MessagePageIndex:
     moves: dict[str, Path]
     # Tool message entry IDs with a preceding automatic grant in the same run.
     auto_approved: frozenset[str]
+    approval_notes: dict[str, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,11 +149,15 @@ def message_page_index_from_entries(
     operation_id: str | None = None
     auto_approved: set[str] = set()
     pending_auto: set[str] = set()
+    pending_notes: dict[str, str] = {}
+    approval_notes: dict[str, str] = {}
     # Searches precede their assistant completion on the active branch. Never
     # carry evidence from an interrupted response into a later run or message.
     for entry in tree.active_path:
         if isinstance(entry, MessageSessionEntry) and entry.message.role == "user":
             pending.clear()
+            pending_auto.clear()
+            pending_notes.clear()
         if isinstance(entry, EventSessionEntry) and entry.event.payload.get("type") in {
             "message.started",
             "turn.started",
@@ -159,9 +165,18 @@ def message_page_index_from_entries(
             pending.clear()
         if entry.operation_id != operation_id:
             pending_auto.clear()
+            pending_notes.clear()
             pending.clear()
             run_last_message = None
             operation_id = entry.operation_id
+        if (
+            isinstance(entry, EventSessionEntry)
+            and entry.event.payload.get("type") == "tool.approval.reviewed"
+        ):
+            review = ToolApprovalReviewed.model_validate(entry.event.payload)
+            pending_notes[review.call_id] = f"Command review ({review.verdict}): {review.reason}"[
+                :500
+            ]
         if (
             isinstance(entry, EventSessionEntry)
             and entry.event.payload.get("type") == "tool.approval.resolved"
@@ -169,7 +184,11 @@ def message_page_index_from_entries(
             decision = ToolApprovalResolved.model_validate(entry.event.payload)
             if decision.source == "auto" and decision.approved:
                 pending_auto.add(decision.call_id)
+                if decision.reason is not None:
+                    pending_notes[decision.call_id] = decision.reason[:500]
         if isinstance(entry, MessageSessionEntry):
+            if entry.message.role == "tool" and entry.message.tool_call_id in pending_notes:
+                approval_notes[entry.id] = pending_notes.pop(entry.message.tool_call_id)
             if entry.message.role == "tool" and entry.message.tool_call_id in pending_auto:
                 auto_approved.add(entry.id)
                 pending_auto.discard(entry.message.tool_call_id)
@@ -206,6 +225,7 @@ def message_page_index_from_entries(
         positions={entry.id: index for index, entry in enumerate(messages)},
         web_searches=searches,
         auto_approved=frozenset(auto_approved),
+        approval_notes=approval_notes,
         run_totals=run_totals,
         # Moves that end where they started, such as a failed move into another project
         # and the move back saved after it, changed nothing to show.
@@ -296,6 +316,7 @@ def message_page_from_index(
             run_completed=index.run_totals.get(entry.id),
             moved_to=index.moves.get(entry.id),
             auto_approved=entry.id in index.auto_approved,
+            approval_note=index.approval_notes.get(entry.id),
             complete_structure=complete_structure or full_content,
         )
         for entry in reversed(selected)
@@ -328,6 +349,7 @@ def _rpc_message_snapshot(
     run_completed: AgentCompleted | None = None,
     moved_to: Path | None = None,
     auto_approved: bool = False,
+    approval_note: str | None = None,
 ) -> RpcMessageSnapshot:
     message = entry.message
     skill_invocation = _rpc_skill_invocation_snapshot(
@@ -351,6 +373,15 @@ def _rpc_message_snapshot(
         entry.tool_result,
         text_budget=text_budget,
     )
+    note_truncated = False
+    if approval_note is not None and text_budget is not None:
+        approval_note, _, note_truncated = _clip_text_with_budget(
+            approval_note,
+            limit=MESSAGE_CONTENT_BYTE_LIMIT,
+            text_budget=text_budget,
+        )
+        if note_truncated:
+            approval_note = None
     return RpcMessageSnapshot(
         entry_id=entry.id,
         parent_id=entry.parent_id,
@@ -360,10 +391,11 @@ def _rpc_message_snapshot(
         content=content,
         process_wake=message.is_process_wake,
         content_original_bytes=content_original_bytes,
-        content_truncated=content_truncated or tool_result_projection_truncated,
+        content_truncated=content_truncated or tool_result_projection_truncated or note_truncated,
         images=message.images or (),
         tool_call_id=message.tool_call_id,
         auto_approved=auto_approved,
+        approval_note=approval_note,
         tool_name=message.tool_name,
         tool_calls=tuple(
             _rpc_tool_call_snapshot(

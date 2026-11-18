@@ -11,12 +11,14 @@ from typing_extensions import TypeAliasType
 from wisp.events import (
     ToolApprovalRequested,
     ToolApprovalResolved,
+    ToolApprovalReviewed,
     ToolExecutionEnded,
 )
 from wisp.providers.events import ToolCall
 
 ToolExecutionEvent = TypeAliasType(
-    "ToolExecutionEvent", ToolApprovalRequested | ToolApprovalResolved | ToolExecutionEnded
+    "ToolExecutionEvent",
+    ToolApprovalRequested | ToolApprovalResolved | ToolApprovalReviewed | ToolExecutionEnded,
 )
 
 
@@ -49,7 +51,8 @@ class PreparedToolExecution:
 
 
 ToolPreparationEvent = TypeAliasType(
-    "ToolPreparationEvent", ToolApprovalRequested | ToolApprovalResolved | PreparedToolExecution
+    "ToolPreparationEvent",
+    ToolApprovalRequested | ToolApprovalResolved | ToolApprovalReviewed | PreparedToolExecution,
 )
 
 
@@ -66,10 +69,12 @@ class ToolExecutor(Protocol):
     """
 
     def execute(self, tool_call: ToolCall) -> AsyncIterator[ToolExecutionEvent]:
-        """Yield an optional ordered approval pair, then exactly one terminal result.
+        """Yield an optional assessment, approval events, then one terminal result.
 
-        An approval request must be followed by one resolution before the result. A
-        denied approval must terminate with an error result.
+        An assessment alone is not a grant. A human request needs a resolution;
+        automatic resolutions need no human request. A denied approval must end
+        with an error result. A reviewed command needs an explicit resolution
+        before it can be prepared or report success.
         """
         ...
 

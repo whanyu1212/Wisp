@@ -76,7 +76,7 @@ fn usage(name: &str) -> Option<&'static str> {
         "queue" => "/queue",
         "skills" => "/skills",
         "mcp" => "/mcp",
-        "permissions" => "/permissions [ask|auto|yolo]",
+        "permissions" => "/permissions [ask|auto|auto-commands|yolo]",
         "codemode" => {
             "/codemode [automatic|always|never|presentation direct_and_codemode|codemode_only]"
         }
@@ -253,6 +253,9 @@ fn parse_permissions(tail: &str, syntax: &str) -> Command {
         "" => Command::Permissions(None),
         "ask" => Command::Permissions(Some(wisp_protocol::commands::PermissionMode::Ask)),
         "auto" => Command::Permissions(Some(wisp_protocol::commands::PermissionMode::Auto)),
+        "auto-commands" => {
+            Command::Permissions(Some(wisp_protocol::commands::PermissionMode::AutoCommands))
+        }
         "yolo" => Command::Permissions(Some(wisp_protocol::commands::PermissionMode::Yolo)),
         _ => Command::Invalid(format!("Usage: {syntax}")),
     }

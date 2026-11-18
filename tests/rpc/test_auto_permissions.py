@@ -43,6 +43,48 @@ def test_auto_records_without_exact_edit_consent_fail_closed(
     assert load_permission_mode(tmp_path) is None
 
 
+def test_command_review_requires_distinct_saved_consent(tmp_path: Path) -> None:
+    save_permission_mode(tmp_path, "auto")
+    path = _preference_path(tmp_path)
+    record = json.loads(path.read_text())
+    record["mode"] = "auto_commands"
+    path.write_text(json.dumps(record))
+    assert load_permission_mode(tmp_path) is None
+    save_permission_mode(tmp_path, "auto_commands")
+    record = json.loads(path.read_text())
+    assert record["auto_scope"] == "command_review_v1"
+    policy = RpcToolApprovalPolicy(ToolApprovalPolicy(), project_path=tmp_path)
+    assert policy.permissions_snapshot().mode == "auto_commands"
+    assert not policy.approved_tools and not policy.approved_safety
+    generation = policy.generation
+    policy.set_permissions("ask")
+    assert policy.generation > generation and policy.mode == "ask"
+    assert load_permission_mode(tmp_path) == "ask"
+
+
+@pytest.mark.parametrize("scope", [None, "workspace_edit_v1", "command_review_v2"])
+def test_command_review_records_fail_closed_without_exact_scope(
+    tmp_path: Path, scope: str | None
+) -> None:
+    save_permission_mode(tmp_path, "auto_commands")
+    path = _preference_path(tmp_path)
+    record = json.loads(path.read_text())
+    record["auto_scope"] = scope
+    path.write_text(json.dumps(record))
+    assert load_permission_mode(tmp_path) is None
+
+
+def test_command_review_in_home_is_not_persisted_or_restored_on_reset() -> None:
+    policy = RpcToolApprovalPolicy(ToolApprovalPolicy.approve_all(), project_path=Path.home())
+    policy.set_permissions("auto_commands")
+    assert policy.mode == "auto_commands" and policy.permissions_snapshot().session_only_yolo
+    assert not _preference_path(Path.home()).exists()
+    policy.reset_session_grants()
+    assert policy.mode == "ask" and not policy.approved_safety
+    with pytest.raises(BroadRootYoloError):
+        save_permission_mode(Path.home(), "auto_commands")
+
+
 def test_project_switch_and_ask_revoke_auto(tmp_path: Path) -> None:
     first, second = tmp_path / "a", tmp_path / "b"
     save_permission_mode(first, "auto")

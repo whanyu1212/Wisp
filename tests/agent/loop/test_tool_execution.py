@@ -25,6 +25,7 @@ from wisp.agent.transcript_repair import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.events import (
     ToolApprovalRequested,
     ToolApprovalResolved,
+    ToolApprovalReviewed,
     ToolCallRequested,
     ToolExecutionEnded,
     ToolExecutionStarted,
@@ -158,6 +159,52 @@ def test_lifecycle_cannot_auto_resolve_a_human_request() -> None:
                 rule_id="workspace_edit_v1",
             )
         )
+
+
+@pytest.mark.parametrize("verdict", ["allow", "ask", "deny"])
+def test_assessment_alone_never_authorizes_success_or_preparation(verdict: str) -> None:
+    call = _call()
+    lifecycle = ToolExecutionLifecycle(call)
+    lifecycle.accept(
+        ToolApprovalReviewed(
+            call_id=call.call_id, name=call.name, verdict=verdict, reason="Assessment only"
+        )
+    )
+
+    async def run() -> ToolExecutionEnded:
+        pytest.fail("An assessment must not schedule this runner")
+
+    prepared = PreparedToolExecution(
+        call_id=call.call_id, name=call.name, parallel_safe=False, runner=run
+    )
+    with pytest.raises(ToolExecutionProtocolError, match="unresolved approval"):
+        lifecycle.accept_prepared(prepared)
+    with pytest.raises(ToolExecutionProtocolError, match="without resolving its review"):
+        lifecycle.accept(_ended(call))
+
+
+def test_review_order_and_matching_automatic_resolution_are_enforced() -> None:
+    call = _call()
+    lifecycle = ToolExecutionLifecycle(call)
+    review = ToolApprovalReviewed(
+        call_id=call.call_id, name=call.name, verdict="ask", reason="Uncertain"
+    )
+    lifecycle.accept(review)
+    with pytest.raises(ToolExecutionProtocolError, match="out of order"):
+        lifecycle.accept(review)
+    with pytest.raises(ToolExecutionProtocolError, match="does not match its review"):
+        lifecycle.accept(
+            ToolApprovalResolved(
+                call_id=call.call_id,
+                name=call.name,
+                approved=True,
+                source="auto",
+                rule_id="command_review_v1",
+            )
+        )
+    lifecycle.accept(_approval(call))
+    lifecycle.accept(_resolution(call))
+    lifecycle.accept(_ended(call))
 
 
 def test_lifecycle_accepts_valid_approval_sequence() -> None:

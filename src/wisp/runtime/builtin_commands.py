@@ -120,7 +120,8 @@ def builtin_command_descriptors() -> tuple[CommandDescriptor, ...]:
             category=CommandCategory.configuration,
             arguments=(
                 CommandArgument(
-                    "mode", "Optional 'ask', 'auto' (workspace edits), or 'yolo' default"
+                    "mode",
+                    "Optional 'ask', 'auto' (edits), 'auto-commands' (model review), or 'yolo'",
                 ),
             ),
             accepts_arguments=True,

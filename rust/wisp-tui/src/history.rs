@@ -401,6 +401,10 @@ fn project_tool_result(
     if message.get("auto_approved").and_then(Value::as_bool) == Some(true) {
         transcript.observe_auto_approved(&call_id);
     }
+    transcript.observe_approval_note(
+        &call_id,
+        message.get("approval_note").and_then(Value::as_str),
+    );
     Ok((entry_id, pending_result))
 }
 
@@ -952,29 +956,42 @@ mod tests {
 
     #[test]
     fn history_restores_auto_approval_even_when_the_call_is_on_another_page() {
-        let mut result = message("tool", "written");
-        result["tool_call_id"] = json!("auto-edit");
-        result["tool_name"] = json!("write");
-        result["auto_approved"] = json!(true);
-        result["tool_result"] = json!({"status": "done"});
-        let mut restored = project_rpc_messages(&[result]).unwrap();
-        let card = restored.entries()[0].tool_card().unwrap();
-        assert!(card.auto_approved);
-        assert_eq!(card.status, crate::tool_cards::ToolStatus::Done);
-        let mut assistant = message("assistant", "");
-        assistant["tool_calls"] = json!([{
-            "call_id": "auto-edit", "name": "write",
-            "arguments": {"path": "file.txt", "content": "new"},
-        }]);
-        let older = project_rpc_messages(&[assistant]).unwrap();
-        assert!(restored.prepend_history_page(&older));
-        let cards: Vec<_> = restored
-            .entries()
-            .iter()
-            .filter_map(|entry| entry.tool_card())
-            .collect();
-        assert_eq!(cards.len(), 1);
-        assert!(cards[0].auto_approved && cards[0].arguments_available);
+        for (name, arguments, note) in [
+            ("write", json!({"path":"file.txt","content":"new"}), None),
+            (
+                "bash",
+                json!({"command":"pytest tests -q"}),
+                Some("Auto-approved: command review — requested tests"),
+            ),
+        ] {
+            let mut result = message("tool", "done");
+            result["tool_call_id"] = json!("automatic-call");
+            result["tool_name"] = json!(name);
+            result["auto_approved"] = json!(true);
+            if let Some(note) = note {
+                result["approval_note"] = json!(note);
+            }
+            result["tool_result"] = json!({"status": "done"});
+            let mut restored = project_rpc_messages(&[result]).unwrap();
+            let card = restored.entries()[0].tool_card().unwrap();
+            assert!(card.auto_approved);
+            assert_eq!(card.approval_note.as_deref(), note);
+            assert_eq!(card.status, crate::tool_cards::ToolStatus::Done);
+            let mut assistant = message("assistant", "");
+            assistant["tool_calls"] = json!([{
+                "call_id": "automatic-call", "name": name, "arguments": arguments,
+            }]);
+            let older = project_rpc_messages(&[assistant]).unwrap();
+            assert!(restored.prepend_history_page(&older));
+            let cards: Vec<_> = restored
+                .entries()
+                .iter()
+                .filter_map(|entry| entry.tool_card())
+                .collect();
+            assert_eq!(cards.len(), 1);
+            assert!(cards[0].auto_approved && cards[0].arguments_available);
+            assert_eq!(cards[0].approval_note.as_deref(), note);
+        }
     }
 
     #[test]
