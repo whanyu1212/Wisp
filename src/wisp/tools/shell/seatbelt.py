@@ -249,6 +249,9 @@ def _runtime_access(roots: tuple[Path, Path]) -> tuple[set[Path], dict[str, str]
             "/sbin",
             "/Library/Developer",
             "/Library/Apple",
+            # xcrun checks the system's existing Xcode license receipt. This is
+            # read-only, not permission to accept a license or change preferences.
+            "/Library/Preferences/com.apple.dt.Xcode.plist",
             "/private/var/db/timezone",
             "/private/etc/localtime",
             "/private/etc/hosts",
