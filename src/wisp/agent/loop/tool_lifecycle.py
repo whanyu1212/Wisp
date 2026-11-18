@@ -22,6 +22,7 @@ from wisp.agent.transcript_repair import INTERRUPTED_TOOL_RESULT_TEXT
 from wisp.events import (
     ToolApprovalRequested,
     ToolApprovalResolved,
+    ToolApprovalReviewed,
     ToolCallRequested,
     ToolExecutionEnded,
     ToolExecutionStarted,
@@ -37,6 +38,7 @@ ToolBatchEvent = TypeAliasType(
     | ToolExecutionStarted
     | ToolApprovalRequested
     | ToolApprovalResolved
+    | ToolApprovalReviewed
     | ToolExecutionEnded
     | ToolResultReady,
 )
@@ -206,6 +208,7 @@ class ToolExecutionLifecycle:
     target: str | None = None
     approval_requested: bool = False
     approval_resolved: bool = False
+    review: ToolApprovalReviewed | None = None
     approved: bool | None = None
     terminal: ToolExecutionEnded | None = None
 
@@ -224,7 +227,13 @@ class ToolExecutionLifecycle:
                 violates approval ordering, follows a terminal result, or reports
                 success after approval was denied.
         """
-        if not isinstance(event, ToolApprovalRequested | ToolApprovalResolved | ToolExecutionEnded):
+        if not isinstance(
+            event,
+            ToolApprovalRequested
+            | ToolApprovalResolved
+            | ToolApprovalReviewed
+            | ToolExecutionEnded,
+        ):
             raise ToolExecutionProtocolError(
                 "Tool executor emitted an unsupported event type for "
                 f"{self.tool_call.call_id}: {type(event).__name__}"
@@ -245,7 +254,13 @@ class ToolExecutionLifecycle:
                 f"{event.target!r}, but the call was announced with {self.target!r}"
             )
 
-        if isinstance(event, ToolApprovalRequested):
+        if isinstance(event, ToolApprovalReviewed):
+            if self.review is not None or self.approval_requested or self.approval_resolved:
+                raise ToolExecutionProtocolError(
+                    f"Tool executor reviewed approval out of order for {self.tool_call.call_id}"
+                )
+            self.review = event
+        elif isinstance(event, ToolApprovalRequested):
             if self.approval_requested or self.approval_resolved:
                 raise ToolExecutionProtocolError(
                     f"Tool executor requested approval more than once for {self.tool_call.call_id}"
@@ -257,6 +272,13 @@ class ToolExecutionLifecycle:
                 )
             self.approval_requested = True
         elif isinstance(event, ToolApprovalResolved):
+            if event.rule_id == "command_review_v1" and (
+                self.review is None
+                or self.review.verdict != ("allow" if event.approved else "deny")
+            ):
+                raise ToolExecutionProtocolError(
+                    f"Command approval does not match its review for {self.tool_call.call_id}"
+                )
             if event.source == "auto" and self.approval_requested:
                 raise ToolExecutionProtocolError(
                     f"Tool executor auto-resolved a human request for {self.tool_call.call_id}"
@@ -273,6 +295,11 @@ class ToolExecutionLifecycle:
             self.approval_resolved = True
             self.approved = event.approved
         else:
+            if self.review is not None and not self.approval_resolved and not event.is_error:
+                raise ToolExecutionProtocolError(
+                    "Tool executor reported success without resolving its review for "
+                    f"{self.tool_call.call_id}"
+                )
             if self.approval_requested and not self.approval_resolved:
                 raise ToolExecutionProtocolError(
                     f"Tool executor ended with an unresolved approval for {self.tool_call.call_id}"
@@ -305,7 +332,7 @@ class ToolExecutionLifecycle:
                 f"expected {self.tool_call.name}/{self.tool_call.call_id}, "
                 f"got {prepared.name}/{prepared.call_id}"
             )
-        if self.approval_requested and not self.approval_resolved:
+        if (self.approval_requested or self.review is not None) and not self.approval_resolved:
             raise ToolExecutionProtocolError(
                 f"Tool executor prepared {self.tool_call.call_id} with unresolved approval"
             )

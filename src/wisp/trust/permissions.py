@@ -1,6 +1,6 @@
 """User-owned permission defaults, isolated by canonical project directory.
 
-Auto and YOLO are never kept for a broad folder such as the home folder (see
+Elevated modes are never kept for a broad folder such as the home folder (see
 :mod:`wisp.trust.scope`): saving either there is refused, and records already
 saved there are ignored. Elevated modes there last one session at most.
 """
@@ -58,11 +58,11 @@ def load_permission_mode(project: Path) -> PermissionMode | None:
     Returns:
         PermissionMode | None: Explicit saved mode, or None when no usable record exists.
             Callers must use approval prompts when there is no saved mode. A saved
-            Auto or YOLO for a broad folder is ignored and reads as None.
+            elevated mode for a broad folder is ignored and reads as None.
     """
 
     mode = _read_saved_mode(project)
-    if mode in ("auto", "yolo") and is_broad_root(project):
+    if mode in ("auto", "auto_commands", "yolo") and is_broad_root(project):
         return None
     return mode
 
@@ -108,6 +108,8 @@ def _read_saved_mode(project: Path) -> PermissionMode | None:
     # Shell approval must never reuse this edit-only consent in a future release.
     if mode == "auto" and record.get("auto_scope") == "workspace_edit_v1":
         return "auto"
+    if mode == "auto_commands" and record.get("auto_scope") == "command_review_v1":
+        return "auto_commands"
     if mode == "yolo":
         return "yolo"
     return None
@@ -125,14 +127,14 @@ def save_permission_mode(project: Path, mode: PermissionMode) -> None:
 
     Raises:
         ValueError: The mode is unsupported.
-        BroadRootYoloError: ``mode`` is Auto or YOLO and the project is broad.
+        BroadRootYoloError: ``mode`` is elevated and the project is broad.
         OSError: The preference cannot be saved securely. Callers must not claim or
             apply a persistent permission change when this write fails.
     """
 
-    if mode not in ("ask", "auto", "yolo"):
+    if mode not in ("ask", "auto", "auto_commands", "yolo"):
         raise ValueError(f"Unsupported permission mode: {mode!r}")
-    if mode in ("auto", "yolo") and is_broad_root(project):
+    if mode in ("auto", "auto_commands", "yolo") and is_broad_root(project):
         raise BroadRootYoloError(
             f"{mode.upper()} is not saved for {project}: it is {BROAD_FOLDER_DESCRIPTION}"
         )
@@ -149,6 +151,8 @@ def save_permission_mode(project: Path, mode: PermissionMode) -> None:
             record = {"project": _project_key(project), "mode": mode}
             if mode == "auto":
                 record["auto_scope"] = "workspace_edit_v1"
+            elif mode == "auto_commands":
+                record["auto_scope"] = "command_review_v1"
             json.dump(record, stream)
             stream.write("\n")
             stream.flush()

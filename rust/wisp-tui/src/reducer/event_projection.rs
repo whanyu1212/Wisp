@@ -606,12 +606,21 @@ impl BackendEvent {
                     None => Self::Other { event_type },
                 }
             }
+            "tool.approval.reviewed" => Self::ToolApprovalReviewed {
+                call_id: bounded_identity(&string_field(value, &event_type, "call_id")?),
+                note: format!(
+                    "Command review ({}): {}",
+                    string_field_ref(value, &event_type, "verdict")?,
+                    bounded_display_string_field(value, &event_type, "reason", 500)?,
+                ),
+            },
             "tool.approval.resolved"
                 if value.get("source").and_then(Value::as_str) == Some("auto")
                     && bool_field(value, &event_type, "approved")? =>
             {
                 Self::ToolAutoApproved {
                     call_id: bounded_identity(&string_field(value, &event_type, "call_id")?),
+                    note: optional_bounded_display_string_field(value, &event_type, "reason", 500)?,
                 }
             }
             "tool.approval.resolved" => Self::ToolApprovalResolved {

@@ -1536,6 +1536,7 @@
       "enum": [
         "ask",
         "auto",
+        "auto_commands",
         "yolo"
       ],
       "type": "string"

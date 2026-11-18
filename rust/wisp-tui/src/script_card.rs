@@ -77,6 +77,7 @@ pub struct ScriptCall {
     pub arguments: Value,
     pub state: ScriptCallState,
     pub auto_approved: bool,
+    pub approval_note: Option<String>,
     /// Why it failed, on one line.
     pub error: Option<String>,
     pub duration_ms: Option<u32>,
@@ -226,6 +227,7 @@ impl ScriptCard {
             arguments,
             state: ScriptCallState::Running,
             auto_approved: false,
+            approval_note: None,
             error: None,
             duration_ms: None,
         });
@@ -373,6 +375,10 @@ impl ScriptCall {
             arguments: call_arguments(name, target, record.get("arguments")),
             state,
             auto_approved: record.get("auto_approved").and_then(Value::as_bool) == Some(true),
+            approval_note: record
+                .get("approval_note")
+                .and_then(Value::as_str)
+                .map(|note| clip(&one_line(note), CALL_TEXT_MAX_CHARS)),
             error: error.filter(|_| state == ScriptCallState::Failed),
             duration_ms: record
                 .get("duration_ms")
@@ -460,6 +466,7 @@ mod tests {
             arguments: Value::Null,
             state,
             auto_approved: false,
+            approval_note: None,
             error: None,
             duration_ms: Some(5),
         }

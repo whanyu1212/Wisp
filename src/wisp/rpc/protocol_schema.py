@@ -657,6 +657,12 @@ _EVENT_FIXTURE_VALUES: dict[str, dict[str, object]] = {
         "safety": "read",
     },
     "tool.approval.resolved": {"call_id": "call-1", "name": "read", "approved": True},
+    "tool.approval.reviewed": {
+        "call_id": "call-1",
+        "name": "bash",
+        "verdict": "ask",
+        "reason": "Human approval required for this command.",
+    },
     "tool.call": {"call_id": "call-1", "name": "read", "arguments": {}},
     "tool.execution.ended": {"call_id": "call-1", "name": "read", "output": "", "is_error": False},
     "tool.execution.progress": {

@@ -102,6 +102,7 @@ class RpcMessageSnapshot(BaseModel):
     tool_call_id: str | None = None
     # The persisted automatic decision for this tool result, not execution success.
     auto_approved: bool = False
+    approval_note: str | None = Field(default=None, max_length=500)
     tool_name: str | None = None
     tool_calls: tuple[RpcMessageToolCallSnapshot, ...] = ()
     tool_calls_original_count: int = Field(default=0, ge=0)

@@ -48,11 +48,13 @@ class ToolApprovalPolicy:
 
     approved_tools: frozenset[str] = field(default_factory=frozenset)
     approved_safety: frozenset[ToolSafety] = field(default_factory=frozenset)
-    # Set when choosing YOLO applies for the session only rather than being saved
-    # for the project, as in the home folder.
+    # Elevated modes are session-only rather than saved in broad folders.
+    # Keep the existing wire-facing name for compatibility.
     session_only_yolo: bool = field(default=False, kw_only=True)
-    # Auto means workspace edits only. Future command approval needs new consent.
+    # Auto remains edit-only; auto_commands requires separate explicit consent.
     mode: PermissionMode = field(default="ask", kw_only=True)
+    # Revokes an in-flight command assessment when consent or project changes.
+    generation: int = field(default=0, init=False, repr=False)
 
     @classmethod
     def require_approval(cls) -> ToolApprovalPolicy:
@@ -78,6 +80,16 @@ class ToolApprovalPolicy:
 
         return cls(mode="auto")
 
+    @classmethod
+    def auto_commands(cls) -> ToolApprovalPolicy:
+        """Opt into independent command review in addition to workspace edits.
+
+        A coding session supplies the no-tools reviewer; a bare policy grants no
+        commands without one. This consent does not enable a shell sandbox.
+        """
+
+        return cls(mode="auto_commands")
+
     async def evaluate_call(
         self, tool: Tool, *, arguments: Mapping[str, object], context: ToolContext
     ) -> ToolApprovalDecision | None:
@@ -93,7 +105,7 @@ class ToolApprovalPolicy:
                 when the ordinary approval flow must decide. Never creates grants.
         """
 
-        if self.mode != "auto" or confirms_every_call(tool):
+        if self.mode not in ("auto", "auto_commands") or confirms_every_call(tool):
             return None
         # Local import keeps file-tool dependencies out of approval policy startup.
         from wisp.tools.auto_edits import eligible_workspace_edit
@@ -108,7 +120,7 @@ class ToolApprovalPolicy:
             # An unreadable or unresolvable destination is not an automatic grant.
             return None
         # An explicit mode change while preflight runs revokes the pending grant.
-        if not eligible or self.mode != "auto":
+        if not eligible or self.mode not in ("auto", "auto_commands"):
             return None
         return ToolApprovalDecision(approved=True, reason="Auto-approved: workspace edit")
 

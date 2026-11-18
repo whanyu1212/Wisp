@@ -57,6 +57,109 @@ async fn auto_permissions_command_selects_edit_only_mode() {
 }
 
 #[tokio::test]
+async fn reviewed_commands_require_the_separate_explicit_mode() {
+    let (writer, mut receiver) = mpsc::channel(16);
+    let mut ui = ui("/permissions auto-commands", false);
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    let command = frame(&mut receiver);
+    assert_eq!(command["type"], "set_permissions");
+    assert_eq!(command["mode"], "auto_commands");
+}
+
+#[tokio::test]
+async fn command_assessments_are_not_grants_and_do_not_change_human_overlays() {
+    for approved in [true, false] {
+        for human_pending in [true, false] {
+            let (writer, _receiver) = mpsc::channel(16);
+            let mut ui = ui("", true);
+            let entry = ui
+                .state
+                .transcript
+                .observe_tool_call(crate::tool_cards::ToolCallInput {
+                    call_id: crate::tool_cards::bounded_identity("review-command"),
+                    name: "bash".into(),
+                    arguments: serde_json::json!({"command":"pytest tests -q"}),
+                    detail_source: crate::tool_detail::ToolDetailSource::None,
+                });
+            if human_pending {
+                let human = BackendEvent::from_projection_value(&serde_json::json!({
+                    "type":"tool.approval.requested", "call_id":"human", "name":"write",
+                    "arguments":{"path":"file.txt","content":"new"}, "safety":"mutating",
+                    "grants_allowed":true, "session_only_yolo":false,
+                }))
+                .unwrap();
+                ui.dispatch(UiAction::BackendEvent(human), &writer, 8192)
+                    .await
+                    .unwrap();
+            }
+            let before = ui
+                .state
+                .pending_approval
+                .as_ref()
+                .map(|approval| approval.call_id.clone());
+            let review = BackendEvent::from_projection_value(&serde_json::json!({
+                "type":"tool.approval.reviewed", "call_id":"review-command", "name":"bash",
+                "verdict": if approved {"allow"} else {"deny"},
+                "reason":"Requested tests\u{001b}]52;c;untrusted\u{202e}",
+            }))
+            .unwrap();
+            ui.dispatch(UiAction::BackendEvent(review), &writer, 8192)
+                .await
+                .unwrap();
+            let card = ui
+                .state
+                .transcript
+                .entry(entry)
+                .unwrap()
+                .tool_card()
+                .unwrap();
+            assert!(!card.auto_approved);
+            assert!(
+                !card
+                    .approval_note
+                    .as_ref()
+                    .unwrap()
+                    .chars()
+                    .any(|c| c.is_control() || crate::is_bidi_control(c))
+            );
+            let resolution = BackendEvent::from_projection_value(&serde_json::json!({
+                "type":"tool.approval.resolved", "call_id":"review-command", "name":"bash",
+                "approved":approved, "source":"auto", "rule_id":"command_review_v1",
+                "reason": if approved {"Auto-approved: command review — Requested tests"} else {"Command review denied"},
+            })).unwrap();
+            ui.dispatch(UiAction::BackendEvent(resolution), &writer, 8192)
+                .await
+                .unwrap();
+            assert_eq!(
+                before,
+                ui.state
+                    .pending_approval
+                    .as_ref()
+                    .map(|approval| approval.call_id.clone())
+            );
+            let card = ui
+                .state
+                .transcript
+                .entry(entry)
+                .unwrap()
+                .tool_card()
+                .unwrap();
+            assert_eq!(card.auto_approved, approved);
+            if approved && !human_pending {
+                let painted = draw(&mut ui, 100, 24);
+                assert!(
+                    painted.contains("Auto-approved: command review"),
+                    "{painted}"
+                );
+                assert!(!painted.contains("Allow once"), "{painted}");
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn automatic_grant_is_visible_without_opening_an_approval_overlay() {
     let (writer, _receiver) = mpsc::channel(16);
     let mut ui = ui("", true);
@@ -140,7 +243,7 @@ async fn permissions_dock_above_the_composer_and_apply_only_a_painted_highlight(
     let rows: Vec<String> = cells.chunks(80).map(|row| row.iter().collect()).collect();
     let yolo = rows
         .iter()
-        .find(|row| row.contains("3  YOLO"))
+        .find(|row| row.contains("4  YOLO"))
         .expect("YOLO choice");
     assert!(yolo.contains("current"), "{painted}");
     // Docked: the panel's bottom border sits just above the composer (with its blank
@@ -283,11 +386,11 @@ async fn permissions_in_the_home_folder_say_yolo_is_not_saved() {
     .unwrap();
     let painted = draw(&mut ui, 80, 24);
     assert!(
-        painted.contains("Auto and YOLO last for this session; they are not saved here."),
+        painted.contains("This mode lasts for this session; it is not saved here."),
         "{painted}"
     );
     assert!(
-        painted.contains("Auto and YOLO are not saved here. Changing mode clears grants."),
+        painted.contains("Elevated modes are not saved here. Changing mode clears grants."),
         "{painted}"
     );
     assert!(!painted.contains("choose one to save it"), "{painted}");
@@ -344,8 +447,9 @@ async fn permissions_require_a_confirmed_snapshot_and_painted_choice() {
     assert!(painted.contains("Project permissions"));
     assert!(painted.contains("1  Ask before changes"));
     assert!(painted.contains("2  Auto"));
-    assert!(painted.contains("3  YOLO"));
-    ui.handle_input(key(KeyCode::Char('3')), &writer, 8192)
+    assert!(painted.contains("3  Auto commands"));
+    assert!(painted.contains("4  YOLO"));
+    ui.handle_input(key(KeyCode::Char('4')), &writer, 8192)
         .await
         .unwrap();
     let change = frame(&mut receiver);

@@ -57,6 +57,7 @@ from wisp.agent.validation import (
     validate_non_negative_integer,
     validate_optional_non_negative_integer,
 )
+from wisp.coding.command_review import ModelCommandReviewer
 from wisp.coding.compaction import (
     CompactionSummary,
     CompactionSummaryError,
@@ -128,6 +129,7 @@ from wisp.events import (
     SkillInvoked,
     SubagentKind,
     ToolApprovalResolved,
+    ToolApprovalReviewed,
     ToolExecutionEnded,
     ToolExecutionStarted,
     ToolPresentationStatus,
@@ -212,6 +214,7 @@ from wisp.tools.codemode.discovery import (
     discovery_tools as codemode_discovery_tools,
 )
 from wisp.tools.codemode.tool import CODEMODE_PROMPT, CodemodeTool, callable_by_name
+from wisp.tools.command_review import CommandReviewer
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
 from wisp.tools.read_output import ReadOutputTool
@@ -237,6 +240,7 @@ PERSISTED_SESSION_EVENT_TYPES = frozenset(
         "tool.call",
         "tool.approval.requested",
         "tool.approval.resolved",
+        "tool.approval.reviewed",
         "tool.execution.ended",
         "context.pressure",
         "context.overflow",
@@ -644,6 +648,7 @@ class CodingSession:
         self._cancelled_harness: AgentHarness | None = None
         self._active_session_id: str | None = None
         self._active_persistence: RunPersistence | None = None
+        self._active_command_reviewer: ModelCommandReviewer | None = None
         self._script_state: RunScriptState | None = None
         # Image bytes the active run's tool results and queued messages may still
         # add to its requests: the request budget less the images its history
@@ -1469,8 +1474,9 @@ class CodingSession:
                 progress replaces what was not delivered, but a script's next
                 call waits for its nested-call events. Child `ToolApprovalRequested`
                 and `ToolApprovalResolved` events also use this channel; delivery
-                must succeed before the child runs. Without a sink, a child needing
-                approval fails. Defaults to None.
+                must succeed before the child runs. Child `ToolApprovalReviewed`
+                assessments are also delivered here, durably recorded first.
+                Without a sink, a child needing approval fails. Defaults to None.
             process_wake (bool, optional): Whether this is a wake run, whose
                 prompt is the held process notices alone; with none held it fails
                 before anything is saved. Defaults to False.
@@ -1524,6 +1530,7 @@ class CodingSession:
                     self._cancelled_harness = None
                     self._active_session_id = None
                     self._active_persistence = None
+                    self._active_command_reviewer = None
                     self._script_state = None
                     self._operation_active = False
 
@@ -1597,14 +1604,22 @@ class CodingSession:
             if directory_change.previous_cwd is not None and history:
                 directory_notes = (*directory_notes, directory_change_note(directory_change.cwd))
 
+        command_reviewer = ModelCommandReviewer(
+            provider=self.provider,
+            model=self.model,
+            cost_estimator=self._cost_estimator,
+            user_request=lambda: "" if process_wake else self._command_review_request(user_message),
+        )
+        self._active_command_reviewer = command_reviewer
         operation_registry = self._operation_tool_registry()
         effective_tools, executor = self._run_tools(
             operation_registry,
             operation_tool_names,
             context=operation_context,
-            progress_sink=self._progress_sink(live_event_sink),
+            progress_sink=self._progress_sink(live_event_sink, review_sink=emit),
             image_store=session.store_image,
             session=session,
+            command_reviewer=command_reviewer,
         )
         harness, restored_queues = self._start_run_harness(
             session,
@@ -1780,12 +1795,16 @@ class CodingSession:
                 try:
                     await harness_events.aclose()
                 finally:
-                    await self._repair_and_flush(
-                        session,
-                        harness,
-                        operation_id=operation_id,
-                        executor=executor,
-                    )
+                    try:
+                        for review in command_reviewer.unrecorded_reviews:
+                            await emit(review)
+                    finally:
+                        await self._repair_and_flush(
+                            session,
+                            harness,
+                            operation_id=operation_id,
+                            executor=executor,
+                        )
 
         if self._cancelled_harness is harness and loop.outcome == "completed":
             # A cancel accepted between turns closes no turn, so the last turn
@@ -2248,6 +2267,7 @@ class CodingSession:
         progress_sink: LiveEventSink | None = None,
         image_store: ImageStore | None = None,
         session: JsonlSession | None = None,
+        command_reviewer: CommandReviewer | None = None,
     ) -> tuple[tuple[ToolSpec, ...], ConfiguredToolExecutor]:
         """Select the tools one run may use and build the executor that enforces them.
 
@@ -2263,6 +2283,8 @@ class CodingSession:
                 Defaults to None, which drops them.
             session (JsonlSession | None, optional): The run's session, whose saved
                 Git status a subagent's prompt reuses. Defaults to None.
+            command_reviewer (CommandReviewer | None, optional): Isolated, bounded
+                reviewer for this run's explicit command consent. Defaults to None.
 
         Returns:
             tuple[tuple[ToolSpec, ...], ConfiguredToolExecutor]: The specs offered
@@ -2340,6 +2362,7 @@ class CodingSession:
             mcp_catalog=catalog,
             image_store=image_store,
             background_requests=self._background_requests,
+            command_reviewer=command_reviewer,
         )
         return offered_tools, executor
 
@@ -3029,10 +3052,43 @@ class CodingSession:
             offered.append(ToolSpec.from_tool(tool))
         return tuple(offered), catalog
 
-    def _progress_sink(self, live_event_sink: LiveEventSink | None) -> LiveEventSink | None:
-        """Return where tool progress goes: extensions observing events, then the caller.
+    def _command_review_request(self, initial: Message) -> str:
+        """Read current user intent, excluding notices and expanded skill text.
 
-        Progress is transient, so unlike the run's other events it is not persisted.
+        Args:
+            initial (Message): Actual user message if the harness is not active yet.
+
+        Returns:
+            str: Latest user-authored request, or empty when none is available.
+        """
+
+        messages = self._active_harness.messages if self._active_harness is not None else (initial,)
+        for message in reversed(messages):
+            if message.role == "user" and not message.is_process_wake:
+                if message.skill_invocation is not None:
+                    return message.skill_invocation.original_content
+                return message.prompt_content
+        return ""
+
+    def _progress_sink(
+        self,
+        live_event_sink: LiveEventSink | None,
+        *,
+        review_sink: Callable[[WispEvent], Awaitable[WispEvent]] | None = None,
+    ) -> LiveEventSink | None:
+        """Forward live tool events, durably accounting nested command assessments.
+
+        Ordinary progress remains transient. Reviews use the run's durable emit
+        path before delivery or execution. No listener still means no interactive
+        child approval channel, so a hidden human prompt cannot be introduced.
+
+        Args:
+            live_event_sink (LiveEventSink | None): Frontend's live event channel.
+            review_sink (Callable[[WispEvent], Awaitable[WispEvent]] | None): Run's
+                durable publication path for nested command assessments.
+
+        Returns:
+            LiveEventSink | None: Combined publisher, or None without a listener.
         """
 
         bus = self.events
@@ -3040,7 +3096,9 @@ class CodingSession:
             return None
 
         async def publish(event: WispEvent) -> None:
-            if bus is not None:
+            if isinstance(event, ToolApprovalReviewed) and review_sink is not None:
+                await review_sink(event)
+            elif bus is not None:
                 await bus.emit(event)
             if live_event_sink is not None:
                 await live_event_sink(event)
@@ -3969,6 +4027,11 @@ class CodingSession:
                 await persistence.append_event(event)
             else:
                 await session.append_event(event, operation_id=operation_id)
+            if (
+                isinstance(event, ToolApprovalReviewed)
+                and self._active_command_reviewer is not None
+            ):
+                self._active_command_reviewer.mark_recorded(event)
         if self.events is not None:
             await self.events.emit(event)
         return event

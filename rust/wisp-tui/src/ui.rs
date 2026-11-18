@@ -624,6 +624,8 @@ pub(crate) fn yolo_label(state: &UiState) -> Option<&'static str> {
         (PermissionMode::Ask, _) => None,
         (PermissionMode::Auto, true) => Some("Auto (edits)"),
         (PermissionMode::Auto, false) => Some("Auto (edits, session)"),
+        (PermissionMode::AutoCommands, true) => Some("Auto (reviewed commands)"),
+        (PermissionMode::AutoCommands, false) => Some("Auto (commands, session)"),
         (PermissionMode::Yolo, true) => Some("YOLO"),
         (PermissionMode::Yolo, false) => Some("YOLO (session)"),
     }

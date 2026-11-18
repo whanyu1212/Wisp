@@ -335,19 +335,43 @@ user-only, like `subagents`.
 
 The Rust permission dialog offers allow once, allow this tool for the session, saved project YOLO,
 and deny. `/permissions` shows the current default; `/permissions ask`, `/permissions auto`,
-or `/permissions yolo` changes it. Auto grants only eligible exact built-in workspace and
+`/permissions auto-commands`, or `/permissions yolo` changes it. Auto grants only eligible exact built-in workspace and
 session-scratch writes/edits on macOS/Linux. Commands, MCP mutations, Git metadata, agent-control
 files, shared hard-linked files, and mandatory confirmations retain their ordinary approval flow.
 Auto preserves protected paths, write constraints, and stale-write checks; it requires atomic
 replacement rather than an in-place write fallback. The session records each automatic decision
 and the TUI labels it on the tool card, including after reopening. This is not a content-safety
 assessment or a shell sandbox. Saved Auto consent is explicitly edit-only; it cannot authorize
-future automatic shell execution. Defaults are stored outside the repository in `~/.wisp/permissions/`, keyed by the
+future automatic shell execution.
+
+Auto commands requires separate `command_review_v1` consent. It adds independent model review
+for eligible exact built-in `bash` run/start calls on macOS/Linux, without granting a command tool or session.
+Deterministic restrictions run first; the reviewer cannot override them. Simple supported local
+development commands may reach a fresh, no-tools request on the active provider/model (at most
+eight requests per run, with a 20-second deadline each). The reviewer receives the current user
+request, exact arguments, and working directory, not the agent's conversation, project/skill
+instructions, repository contents, or filesystem tools. These extra requests can incur charges.
+Allow approves only that call, Ask opens the ordinary human dialog, and Deny prevents execution.
+Malformed, incomplete, truncated, unavailable, and timed-out answers ask the user. Revoking or
+changing consent invalidates an outstanding assessment, even if the same mode is re-enabled.
+
+Shell composition/expansion, redirects, unsupported commands/options, publishing, explicit
+credential/control paths, and outside-workspace paths require human approval without asking a
+model. `uv run` must use `--no-sync`. Poll/cancel, MCP mutations, custom/replacement tools, Plan,
+read-only subagents, and mandatory confirmations retain their boundaries. **This is risk assessment,
+not OS containment:** tests and build scripts can still execute arbitrary repository code and
+indirectly read/write files or use the network. Model review cannot guarantee safety or enforce
+the file tools' protected-path restrictions inside arbitrary code. Use Ask when that risk is not
+acceptable. Each assessment and available usage/cost is persisted separately from the acting
+model's context; interrupted requests with unknown cost are not counted as free. Tool cards show
+the review reason live and after reopening.
+
+Defaults are stored outside the repository in `~/.wisp/permissions/`, keyed by the
 canonical project directory, and survive restarts. Changing the default clears temporary grants.
 One-time and session grants are not saved, and starting or switching sessions expires session
 grants. YOLO allows mutating and command tools without approval; project trust, tool availability,
 and the file tools' [protected paths](#protected-paths) still apply. `--yes` alone remains a
-temporary startup choice. In the home folder or a folder above it, Auto and YOLO are not saved
+temporary startup choice. In the home folder or a folder above it, Auto, Auto commands, and YOLO are not saved
 and last for the session. Auto never grants arbitrary edits throughout such a broad folder; only
 the session scratch remains eligible. See
 [Home folder and broad folders](#home-folder-and-broad-folders).

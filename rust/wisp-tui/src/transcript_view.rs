@@ -3495,7 +3495,15 @@ fn process_marker(card: &crate::tool_cards::ProcessCardSnapshot) -> &'static str
     status_marker(card.display_state.status())
 }
 
-const AUTO_APPROVAL_NOTE: &str = " · Auto-approved: workspace edit";
+fn approval_note(card: &crate::tool_cards::ToolCardSnapshot) -> Option<&str> {
+    card.approval_note.as_deref().or_else(|| {
+        card.auto_approved.then_some(if card.name == "bash" {
+            "Auto-approved: command review"
+        } else {
+            "Auto-approved: workspace edit"
+        })
+    })
+}
 
 fn tool_action_projection(
     card: &crate::tool_cards::ToolCardSnapshot,
@@ -3532,8 +3540,9 @@ fn tool_action_projection(
             .map(|rest| rest.strip_prefix("  ").unwrap_or(rest).to_owned())
             .unwrap_or_default()
     };
-    if card.auto_approved {
-        rest.push_str(AUTO_APPROVAL_NOTE);
+    if let Some(note) = approval_note(card) {
+        rest.push_str(" · ");
+        rest.push_str(note);
     }
     (
         if rest.is_empty() {
@@ -3825,6 +3834,7 @@ pub(crate) fn script_call_action(
     let mut row_card = crate::tool_cards::ToolCardSnapshot::requested(&input, status);
     row_card.display_base.clone_from(&card.display_base);
     row_card.auto_approved = call.auto_approved;
+    row_card.approval_note.clone_from(&call.approval_note);
     if !call.arguments.is_object() {
         // Its arguments were too large to keep: name the tool alone.
         let target = row_card.mcp_target().map(|target| format!(" {target}"));
@@ -3833,11 +3843,9 @@ pub(crate) fn script_call_action(
             status_marker(status),
             row_card.action_verb(),
             target.unwrap_or_default(),
-            if call.auto_approved {
-                AUTO_APPROVAL_NOTE
-            } else {
-                ""
-            },
+            approval_note(&row_card)
+                .map(|note| format!(" · {note}"))
+                .unwrap_or_default(),
         );
     }
     tool_action_projection(&row_card).0

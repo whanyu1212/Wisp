@@ -220,6 +220,7 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
             project_path (Path | None): The project whose mode to load, if any.
         """
 
+        self.generation += 1
         self._project_path = project_path
         # YOLO is never saved for the home folder or a folder above it, so there it
         # is granted for this session only (see ``wisp.trust.scope``).
@@ -255,6 +256,7 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
         self.approved_tools = self._baseline_approved_tools
         self.approved_safety = self._baseline_approved_safety
         self.mode = self._baseline_mode
+        self.generation += 1
 
     def revoke_session_tool_grants(self, prefix: str) -> None:
         """Expire per-tool session grants for tools whose names start with ``prefix``.
@@ -296,7 +298,8 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
             OSError: Saving fails; current approvals remain unchanged.
         """
 
-        if mode in ("auto", "yolo") and self.session_only_yolo:
+        if mode in ("auto", "auto_commands", "yolo") and self.session_only_yolo:
+            self.generation += 1
             self.approved_tools = frozenset()
             self.approved_safety = (
                 frozenset({"read", "mutating", "command"}) if mode == "yolo" else frozenset()
@@ -312,6 +315,7 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
         if self._project_path is None:
             raise OSError("No project is available for saving permissions")
         save_permission_mode(self._project_path, mode)
+        self.generation += 1
         self._drop_startup_grants()
         self._saved_mode = mode
         self.mode = mode

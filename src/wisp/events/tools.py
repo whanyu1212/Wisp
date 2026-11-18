@@ -64,7 +64,29 @@ class ToolApprovalResolved(WispEvent):
     reason: str | None = None
     # Automatic resolutions have no preceding human approval request.
     source: Literal["auto"] | None = None
-    rule_id: Literal["workspace_edit_v1"] | None = None
+    rule_id: Literal["workspace_edit_v1", "command_review_v1"] | None = None
+
+
+class ToolApprovalReviewed(WispEvent):
+    """An auditable command assessment, not itself an execution grant.
+
+    Ask continues through the existing human approval flow. Usage and cost
+    belong to this independent request, never to the acting model's context.
+    """
+
+    type: Literal["tool.approval.reviewed"] = "tool.approval.reviewed"
+    call_id: str
+    name: str
+    target: str | None = None
+    verdict: Literal["allow", "ask", "deny"]
+    reason: str = Field(min_length=1, max_length=500)
+    rule_id: Literal["command_review_v1"] = "command_review_v1"
+    provider: str | None = None
+    model: str | None = None
+    usage: TokenUsage | None = None
+    cost: UsageCost | None = None
+    duration_ms: int = Field(default=0, ge=0)
+    model_ms: int | None = Field(default=None, ge=0)
 
 
 # Bounds of one progress snapshot's output tail, per stream. The tail is already
@@ -204,6 +226,7 @@ class NestedToolCall(BaseModel):
     arguments: JsonObject | None = None
     is_error: bool = False
     auto_approved: bool = False
+    approval_note: str | None = Field(default=None, max_length=500)
     failure_code: ToolFailureCode | None = None
     error: str | None = Field(default=None, max_length=NESTED_CALL_TEXT_MAX_CHARS)
     summary: str | None = Field(default=None, max_length=NESTED_CALL_TEXT_MAX_CHARS)
