@@ -51,6 +51,11 @@ def main(argv: list[str] | None = None) -> int:
     run = commands.add_parser("run", help="run tasks against models and write runs.jsonl")
     run.add_argument("--models", required=True, help="comma-separated provider::model list")
     run.add_argument("--effort", help="explicit model reasoning effort, recorded with the setup")
+    run.add_argument(
+        "--project-guidance",
+        type=Path,
+        help="append this instruction file to each isolated fixture's AGENTS.md for an experiment",
+    )
     run.add_argument("--reps", type=int, default=3, help="repetitions of each task and model")
     run.add_argument("--tasks", default="", help="comma-separated task ids (default: all)")
     run.add_argument("--tags", default="", help="comma-separated tags; any of them matches")
@@ -154,13 +159,18 @@ def _run(args: argparse.Namespace) -> int:
     try:
         models = [ModelSpec.parse(text) for text in _split(args.models)]
         tasks = select_tasks(ids=_split(args.tasks), tags=_split(args.tags))
+        project_guidance = (
+            args.project_guidance.read_text(encoding="utf-8") if args.project_guidance else None
+        )
+        if project_guidance is not None and not project_guidance.strip():
+            raise ValueError("--project-guidance must contain instructions")
         credentials = resolve_credentials(
             {model.provider for model in models},
             env_file=args.env_file,
             auth_file=args.auth_file,
             environ=os.environ,
         )
-    except (ValueError, TaskError, CredentialError) as err:
+    except (OSError, ValueError, TaskError, CredentialError) as err:
         print(f"error: {err}", file=sys.stderr)
         return 2
     results_dir = args.results or RESULTS_DIR / datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
@@ -177,6 +187,7 @@ def _run(args: argparse.Namespace) -> int:
         codemode_presentation=args.codemode_presentation,
         mcp_results=args.mcp_results,
         effort=args.effort,
+        project_guidance=project_guidance,
     )
     runs_path = results_dir / "runs.jsonl"
     print(
@@ -209,6 +220,7 @@ def _run(args: argparse.Namespace) -> int:
         "codemode_presentation": args.codemode_presentation,
         "mcp_results": args.mcp_results,
         "effort": args.effort,
+        "project_guidance_sha256": context.project_guidance_sha256,
         "stopped_for_budget": result.stopped_for_budget,
         "skipped_runs": result.skipped_runs,
         "finished_at": datetime.now(UTC).isoformat(),

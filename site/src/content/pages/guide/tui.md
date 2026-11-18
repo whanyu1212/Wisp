@@ -101,10 +101,19 @@ Tool calls read as a list of actions. Each is one line: a status mark (`•` don
 denied or cancelled, `?` awaiting approval, a spinner while it runs), a verb and what it acted on,
 such as `• Ran cargo test 3.2s` or `• Read src/retry.rs`, then how long it took. Shell commands
 are shown as typed, with syntax highlighting. Consecutive reads, searches and listings fold into
-one `Explored` line, repeated commands into `Ran N commands`, and repeated MCP calls into one line
-with a count; opening a group hangs its calls under it on `└` rows. Collapsed calls stack with no
-blank row between them. A failed command also shows the last line it printed and how many more
-there are. Select a line with `F6` and press `→`, or click it, to show its details.
+one `Explored` line, successful repeated commands into `Ran N commands`, and repeated MCP calls
+into one line with a count; opening a group hangs its calls under it on `└` rows. Exploration and
+MCP groups with non-success states spell out their outcomes, such as `11 succeeded · 1 failed`,
+with denied, cancelled, pending, running and awaiting-approval calls counted separately. A narrow
+row may show `1/12 failed`; that does not claim the other 11 succeeded. A successful retry never
+erases the earlier failed attempt.
+
+Collapsed calls stack with no blank row between them. Failed calls name the classified reason,
+such as `Command exited 101`, `Stale input` or `Invalid arguments`. A failed command also shows
+the last line it printed; a rejected invocation shows its first diagnostic line. Opening the card
+retains the output and recovery advice. A failed check remains a failed command even when its
+failure was useful during development. Select a line with `F6` and press `→`, or click it, to show
+its details.
 
 A [codemode](tools-and-safety.md#scripting-tool-calls-with-codemode-experimental) script is one
 line that names what it does and counts the calls it makes as they finish, such as
@@ -114,7 +123,9 @@ row, and a failed one says why), then what the script returned. A failed script 
 stopped it under its line, like a failed command. Scripts are never folded into other groups.
 Select a script with `F6` and press `Enter` for its full details: the whole script, numbered and
 highlighted, every call it made with its arguments, outcome, and duration, and its complete
-output. The view keeps up while the script runs, and `Esc` closes it.
+output. Unfinished child calls and unreported outcomes are counted separately; when some outcomes
+are unreported, the failure count is explicitly a count of known failures. The view keeps up while
+the script runs, and `Esc` closes it.
 
 Images are named rather than drawn. An image pasted or dragged into the composer shows as a chip
 such as `Image 1 · 640×480`, and the sent prompt shows a `[image 640×480 png]` line for it. A tool

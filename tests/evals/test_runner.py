@@ -274,6 +274,22 @@ def test_fake_run_scored(tmp_path: Path, verify: str, status: str) -> None:
 
 
 @pytest.mark.process
+def test_project_guidance_is_isolated_appended_and_fingerprinted(tmp_path: Path) -> None:
+    task = _task(tmp_path, "grep -q EXPERIMENT-CANDIDATE AGENTS.md && grep -q existing AGENTS.md")
+    original = "Preserve the task's existing instructions.\n"
+    (task.fixture / "AGENTS.md").write_text(original)
+    context = dataclasses.replace(
+        _context(tmp_path, build=detect_build(_REPO_ROOT)),
+        project_guidance="EXPERIMENT-CANDIDATE: discover uncertain paths first.\n",
+    )
+    row = run_one(task, ModelSpec("fake", "fake"), 1, context)
+    assert row.status == "passed"
+    assert row.project_guidance_sha256 == context.project_guidance_sha256
+    assert row.project_guidance_sha256 is not None and len(row.project_guidance_sha256) == 64
+    assert (task.fixture / "AGENTS.md").read_text() == original
+
+
+@pytest.mark.process
 def test_setup_failure_errors(tmp_path: Path) -> None:
     task = _task(tmp_path)
     toml = task.folder / "task.toml"

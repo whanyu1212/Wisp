@@ -1,0 +1,11 @@
+id = "discipline-read-bounds"
+title = "Use the current small source file rather than historical line locations"
+tags = ["discipline", "edit"]
+opt_in = true
+prompt = "Fix normalize in status.py so surrounding whitespace is removed as well as lowercasing. Keep empty input working and run the unit tests. README has migration notes for this module."
+verify = "{python} {task}/verify.py"
+tools = ["read", "edit", "write", "bash", "find", "grep", "ls"]
+timeout_seconds = 180
+max_tool_iterations = 15
+[checks]
+max_tool_errors = 0

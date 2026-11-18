@@ -663,7 +663,8 @@ struct CardProjection {
     error_peek: Option<ErrorPeek>,
 }
 
-/// The last thing a failed command printed, shown under its collapsed action line.
+/// A failed command's output tail, or an invocation error's first diagnostic line,
+/// shown under its collapsed action line.
 #[derive(Clone, Debug, PartialEq)]
 struct ErrorPeek {
     line: String,
@@ -672,25 +673,38 @@ struct ErrorPeek {
 }
 
 impl ErrorPeek {
-    /// The peek for a card, if it is a command that failed and printed something.
+    /// The diagnostic for a failed card that printed something.
     fn of(card: &crate::tool_cards::ToolCardSnapshot) -> Option<Self> {
         if card.script.is_some() {
             return Self::of_script(card);
         }
-        if card.name != "bash" || card.status != ToolStatus::Error {
+        if card.status != ToolStatus::Error {
             return None;
         }
         let output = &card.retained_output;
+        let diagnostic = if output.text.trim().is_empty() {
+            &card.detail
+        } else {
+            &output.text
+        };
+        if card.name != "bash" {
+            let text = diagnostic;
+            let line = text.lines().map(str::trim).find(|line| !line.is_empty())?;
+            return Some(Self {
+                line: line.to_owned(),
+                hidden_lines: text.lines().count().saturating_sub(1) as u64 + output.dropped_lines,
+            });
+        }
         // The backend opens a failed command's output with its exit status, which the
-        // card already shows by its marker.
+        // action line already names.
         let text = card
             .exit_code
             .and_then(|code| {
                 let status = format!("Command exited with code {code}");
-                let rest = output.text.strip_prefix(&status)?;
+                let rest = diagnostic.strip_prefix(&status)?;
                 Some(rest.strip_prefix(": ").unwrap_or(rest))
             })
-            .unwrap_or(&output.text);
+            .unwrap_or(diagnostic);
         let lines = text.lines().count();
         let line = text
             .lines()
@@ -1661,6 +1675,7 @@ impl TranscriptRowCache {
         };
         let kind = card_group_key(entry)?;
         if !matches!(kind, CardGroupKey::Mcp(_)) {
+            let outcomes = group_outcomes(transcript, &members);
             let tone = explore_group_tone(transcript, &members);
             let marker = status_marker(match tone {
                 TranscriptRowTone::Success => ToolStatus::Done,
@@ -1669,9 +1684,7 @@ impl TranscriptRowCache {
                 _ => ToolStatus::Running,
             });
             let label = match &kind {
-                CardGroupKey::Explore if tone == TranscriptRowTone::Pending => {
-                    "Exploring".to_owned()
-                }
+                CardGroupKey::Explore if outcomes.is_open() => "Exploring".to_owned(),
                 CardGroupKey::Explore => "Explored".to_owned(),
                 CardGroupKey::Tool(_) => entry.tool_card()?.action_verb(),
                 CardGroupKey::Mcp(_) => unreachable!("MCP has its own header"),
@@ -1685,11 +1698,14 @@ impl TranscriptRowCache {
                 (width, FoldHint::None)
             };
             let (row_width, trailing) = group_span_trailing(transcript, &members, row_width);
-            // An open group lists its members below, so only a closed one previews them.
+            let outcome_note = outcomes.note(row_width.saturating_sub(16));
+            let outcome_width = outcome_note.as_ref().map_or(0, |note| note.width() + 3);
+            // Keep the outcome counts ahead of argument previews in the width budget.
             if !expanded {
-                let budget = row_width.saturating_sub(self.action_columns(&source));
+                let budget = row_width.saturating_sub(self.action_columns(&source) + outcome_width);
                 source.push_str(&self.group_preview(transcript, &members, budget));
             }
+            let outcome_start = push_status_note(&mut source, outcome_note.as_deref());
             let spans = self.single_action_row_spans(
                 &source,
                 row_width,
@@ -1698,6 +1714,7 @@ impl TranscriptRowCache {
                     label_end: marker.len() + label.len(),
                     argument_start: count_end,
                     argument_style: crate::markdown::InlineStyle::ToolArgument,
+                    suffix_start: outcome_start,
                     ..CardRowStyle::PLAIN
                 },
                 TranscriptRowKind::CardGroup,
@@ -4446,25 +4463,20 @@ impl McpGroupHeader {
             }
         }
         let suffix_start = source.len();
-        if live.is_some() {
-            let finished = cards
-                .iter()
-                .filter(|card| {
-                    !matches!(
-                        card.status,
-                        ToolStatus::Requested | ToolStatus::Running | ToolStatus::AwaitingApproval
-                    )
-                })
-                .count();
-            source.push_str(&format!(" · {finished} of {} done", cards.len()));
-        } else {
-            source.push_str(&format!(" · {} times", cards.len()));
+        source.push_str(&format!(
+            " · {} {}",
+            cards.len(),
+            if live.is_some() { "calls" } else { "times" }
+        ));
+        let mut outcomes = crate::tool_presentation::OutcomeCounts::default();
+        for card in &cards {
+            outcomes.record(card.status);
+        }
+        if let Some(note) = outcomes.note(if compact { 0 } else { usize::MAX }) {
+            source.push_str(" · ");
+            source.push_str(&note);
         }
         let count_end = source.len();
-        if let Some(note) = shown.status_note() {
-            source.push_str(" · ");
-            source.push_str(note);
-        }
         Some(Self {
             source,
             count_end,
@@ -4593,6 +4605,7 @@ fn card_group_signature(transcript: &Transcript, entry: &TranscriptEntry) -> Opt
             let key = card_group_key(entry)?;
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             group_counts(transcript, &key, &members).hash(&mut hasher);
+            group_outcomes(transcript, &members).hash(&mut hasher);
             group_preview_items(transcript, &members).hash(&mut hasher);
             Some(hasher.finish())
         }
@@ -4640,6 +4653,20 @@ fn group_span_trailing(
     } else {
         (row_width, None)
     }
+}
+
+fn group_outcomes(
+    transcript: &Transcript,
+    members: &[TranscriptEntryId],
+) -> crate::tool_presentation::OutcomeCounts {
+    let mut outcomes = crate::tool_presentation::OutcomeCounts::default();
+    for card in members
+        .iter()
+        .filter_map(|id| transcript.entry(*id)?.tool_card())
+    {
+        outcomes.record(card.status);
+    }
+    outcomes
 }
 
 fn explore_group_tone(transcript: &Transcript, members: &[TranscriptEntryId]) -> TranscriptRowTone {
@@ -7630,6 +7657,123 @@ mod tests {
             })
             .expect("collapsed explore group");
         assert_eq!(row.tone, TranscriptRowTone::Error);
+    }
+
+    #[test]
+    fn conflicting_call_metadata_explains_failure_without_output() {
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("run".into());
+        for command in ["true", "false"] {
+            transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: "conflict".into(),
+                name: "bash".into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+                arguments: serde_json::json!({"command": command}),
+            });
+        }
+        let rows = walked_rows(&transcript, &mut TranscriptRowCache::default());
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("Conflicting lifecycle metadata")),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("conflicting tool lifecycle metadata")),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn mixed_group_counts_refresh_without_erasing_a_failed_attempt() {
+        for name in ["read", "mcp__test__lookup"] {
+            let mut transcript = Transcript::default();
+            transcript.append_prompt("inspect".into());
+            let mut first = None;
+            for id in ["failed", "pending", "ok"] {
+                let entry = transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+                    call_id: id.into(),
+                    name: name.into(),
+                    detail_source: crate::tool_detail::ToolDetailSource::None,
+                    arguments: serde_json::json!({"path": "same.rs"}),
+                });
+                first.get_or_insert(entry);
+                if id != "pending" {
+                    let mut result = tool_result(
+                        id,
+                        if id == "failed" {
+                            "File does not exist: same.rs"
+                        } else {
+                            "ok"
+                        },
+                    );
+                    result.name = name.into();
+                    result.is_error = id == "failed";
+                    result.failure_code = (id == "failed").then(|| "not_found".into());
+                    transcript.observe_tool_result(result);
+                }
+            }
+            let mut viewport = TranscriptViewport::default();
+            let mut cache = TranscriptRowCache::default();
+            viewport.set_geometry(&transcript, &mut cache, 100, 20);
+            let rows = viewport.visible_rows(&transcript, &mut cache);
+            let group = rows
+                .iter()
+                .find(|row| row.kind == TranscriptRowKind::CardGroup)
+                .unwrap()
+                .plain_text();
+            assert!(
+                group.contains("1 succeeded · 1 failed · 1 pending"),
+                "{name}: {group}"
+            );
+            let mut completed = tool_result("pending", "ok");
+            completed.name = name.into();
+            transcript.observe_tool_result(completed);
+            let rows = viewport.visible_rows(&transcript, &mut cache);
+            let group = rows
+                .iter()
+                .find(|row| row.kind == TranscriptRowKind::CardGroup)
+                .unwrap()
+                .plain_text();
+            assert!(group.contains("2 succeeded · 1 failed"), "{name}: {group}");
+            assert!(!group.contains("pending"));
+            transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: "retry".into(),
+                name: name.into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+                arguments: serde_json::json!({"path": "same.rs"}),
+            });
+            let mut retry = tool_result("retry", "ok");
+            retry.name = name.into();
+            transcript.observe_tool_result(retry);
+            let rows = viewport.visible_rows(&transcript, &mut cache);
+            let group = rows
+                .iter()
+                .find(|row| row.kind == TranscriptRowKind::CardGroup)
+                .unwrap()
+                .plain_text();
+            assert!(group.contains("3 succeeded · 1 failed"), "{name}: {group}");
+            viewport.set_geometry(&transcript, &mut cache, 30, 20);
+            let rows = viewport.visible_rows(&transcript, &mut cache);
+            let group = rows
+                .iter()
+                .find(|row| row.kind == TranscriptRowKind::CardGroup)
+                .unwrap()
+                .plain_text();
+            assert!(group.contains("1/4 failed"), "{name}: {group}");
+            cache.fold_mut().expand_group(first.unwrap());
+            let rows = walked_rows(&transcript, &mut cache);
+            assert!(
+                rows.iter()
+                    .any(|row| row.contains("Path or resource not found")),
+                "{rows:?}"
+            );
+            assert!(
+                rows.iter()
+                    .any(|row| row.contains("File does not exist: same.rs")),
+                "{rows:?}"
+            );
+        }
     }
 
     #[test]

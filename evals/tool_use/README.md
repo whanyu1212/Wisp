@@ -33,6 +33,7 @@ uv run python -m evals.tool_use report evals/tool_use/results/<timestamp>
 | `--reps` | Repetitions of each task and model (default 3) |
 | `--tasks`, `--tags` | Run only these task ids, or tasks with any of these tags |
 | `--workers` | Runs in flight at once (default 2) |
+| `--project-guidance FILE` | Append experimental instructions to each isolated fixture's root `AGENTS.md`; record their SHA-256 in rows and suite metadata without changing checkout instructions or user settings |
 | `--budget-usd` | Stop starting rounds once priced runs (OpenAI API) cost this much |
 | `--budget-tokens` | Stop starting rounds once unpriced runs (Codex subscription) used this many tokens |
 | `--env-file`, `--auth-file` | Credential sources (default: the repo's `.env` and `~/.wisp/auth.json`) |
@@ -195,6 +196,32 @@ run. gpt-5.6-luna passed 55% of them: it matched check results to the wrong pull
 named the wrong service. Those are the mistakes keeping results and their calls together in a
 script should prevent.
 
+## Agent-discipline experiments
+
+The opt-in `discipline` tasks exercise uncertain module paths, stale source-map offsets, and
+formatting between a read and an edit. Their verifiers live outside the editable fixture and
+reject changes to the tests/formatter. A passing run must solve the task with zero tool-invocation
+errors; nonzero shell exits are a separate command outcome, not automatically an agent mistake.
+The scripted tests also pin out-of-bounds recovery and the read-after-format safety guard.
+
+```bash
+uv run python -m evals.tool_use run --models openai-codex::gpt-6.1-sol --tags discipline \
+  --reps 2 --workers 1 --budget-tokens 250000 --budget-usd 2 --results evals/tool_use/results/discipline-current
+uv run python -m evals.tool_use run --models openai-codex::gpt-6.1-sol --tags discipline \
+  --reps 2 --workers 1 --budget-tokens 250000 --budget-usd 2 \
+  --project-guidance evals/tool_use/guidance/file-discipline.md --results evals/tool_use/results/discipline-guided
+uv run python -m evals.tool_use compare evals/tool_use/results/discipline-current evals/tool_use/results/discipline-guided
+```
+
+Guidance is appended only in each temporary work folder, before its initial Git commit. Existing
+fixture instructions are preserved. Baselines retain `project_guidance_sha256`, so the candidate
+can be tied to the exact committed guidance text rather than an ephemeral file path.
+
+The [2026-11-17 experiment](reports/2026-11-17-file-discipline.md) found no demonstrated benefit:
+6/6 passes and no tool errors on either side. This is a small single-model ceiling result, not
+evidence that reminders never help. The candidate remains eval data; no production prompt rule
+was added on the strength of it.
+
 ## Add a task
 
 Create `tasks/<id>/` with a `repo/` fixture, a `solution/` folder holding the files that solve
@@ -207,7 +234,7 @@ Ruff and mypy skip `tasks/`, so fixtures stay byte-exact.
 id = "fix-failing-test"          # must match the folder name
 title = "One line saying what the task asks for"
 tags = ["general"]               # general, long-output, edit, mcp, mcp-sweep, multi-read,
-                                 # orchestration, scale
+                                 # orchestration, scale, discipline
 prompt = "What the user types"
 setup = "optional command run after the fixture is committed"
 verify = "{python} -m unittest -q"   # exit 0 means passed

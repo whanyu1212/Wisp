@@ -7032,7 +7032,7 @@ mod tests {
         let mut cache = TranscriptRowCache::default();
         let screen = draw_cards(&state, &mut cache);
         assert!(
-            screen.contains("Calling linear/get_issue · HY-2 · 1 of 2 done"),
+            screen.contains("Calling linear/get_issue · HY-2 · 2 calls · 1 succeeded · 1 pending"),
             "{screen}"
         );
         // The cached header follows a later member's result.
@@ -7042,7 +7042,7 @@ mod tests {
             screen.contains("• Called linear/get_issue · 2 times"),
             "{screen}"
         );
-        assert!(!screen.contains("of 2 done"), "{screen}");
+        assert!(!screen.contains("pending"), "{screen}");
     }
 
     #[test]
@@ -7061,7 +7061,9 @@ mod tests {
             });
         let screen = draw_cards(&state, &mut TranscriptRowCache::default());
         assert!(
-            screen.contains("? Call linear/save_issue · HY-2 · 1 of 2 done · awaiting approval"),
+            screen.contains(
+                "? Call linear/save_issue · HY-2 · 2 calls · 1 succeeded · 1 awaiting approval"
+            ),
             "{screen}"
         );
     }
@@ -7332,7 +7334,8 @@ mod tests {
         // Short output loses the completion envelope and closes with the exit status.
         let short = draw(3);
         let text = short.to_string();
-        assert!(!text.contains("Command exited"), "{text}");
+        assert!(!text.contains("Command exited with code 3"), "{text}");
+        assert!(text.contains("Command exited 3"), "{text}");
         // The action line already names the command, so the output opens the details.
         assert!(text.contains("│└ line 0"), "{text}");
         assert_eq!(style_at_text(&short, "line 0").unwrap().1, palette.surface);
@@ -7602,7 +7605,7 @@ mod tests {
             .observe_approval_resolved("s2", false, None);
         let screen = draw_cards(&state, &mut TranscriptRowCache::default());
         assert!(
-            screen.contains("⊘ Called linear/save_issue · 2 times · denied"),
+            screen.contains("⊘ Called linear/save_issue · 2 times · 1 succeeded · 1 denied"),
             "{screen}"
         );
     }

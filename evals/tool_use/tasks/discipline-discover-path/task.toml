@@ -1,0 +1,11 @@
+id = "discipline-discover-path"
+title = "Find the current implementation before editing a moved module"
+tags = ["discipline", "edit"]
+opt_in = true
+prompt = "The status helper needs to treat both done and ok as ready, while other values remain blocked. Find the implementation in this checkout, make the smallest fix, and run the unit tests."
+verify = "{python} {task}/verify.py"
+tools = ["read", "edit", "write", "bash", "find", "grep", "ls"]
+timeout_seconds = 180
+max_tool_iterations = 15
+[checks]
+max_tool_errors = 0

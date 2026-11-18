@@ -305,6 +305,8 @@ pub struct ToolCardSnapshot {
     pub retained_output: BoundedText,
     pub backend_truncated: bool,
     pub failure_code: Option<String>,
+    /// A bounded explanation from typed result facts, independent of retained output.
+    failure_reason: Option<String>,
     pub retryable: bool,
     pub detail_source: ToolDetailSource,
     pub structured_detail: DetailAvailability,
@@ -397,6 +399,7 @@ impl ToolCardSnapshot {
             retained_output: BoundedText::default(),
             backend_truncated: false,
             failure_code: None,
+            failure_reason: None,
             retryable: false,
             detail_source: input.detail_source.clone(),
             structured_detail: DetailAvailability::None,
@@ -455,6 +458,7 @@ impl ToolCardSnapshot {
         {
             self.status = ToolStatus::Error;
             self.detail = "conflicting tool lifecycle metadata".into();
+            self.failure_reason = Some("Conflicting lifecycle metadata".into());
             self.detail_source = ToolDetailSource::None;
             self.structured_detail = DetailAvailability::None;
             return true;
@@ -533,6 +537,12 @@ impl ToolCardSnapshot {
             return false;
         }
         self.status = tool_result_status(input);
+        self.failure_reason = crate::tool_presentation::failure_reason(
+            input.is_error,
+            input.exit_code,
+            input.failure_code.as_deref(),
+            input.process_state.as_deref(),
+        );
         self.duration_ms = input
             .duration_ms
             .map(|milliseconds| u32::try_from(milliseconds).unwrap_or(u32::MAX));
@@ -804,17 +814,15 @@ impl ToolCardSnapshot {
             .map(|milliseconds| format_duration(u64::from(milliseconds)))
     }
 
-    /// The state the action line spells out because its marker alone does not: `?`
-    /// needs saying what it waits for, and `⊘` stands for both denial and
-    /// cancellation.
-    pub fn status_note(&self) -> Option<&'static str> {
+    /// The state or failure reason the marker alone cannot explain. A command's
+    /// nonzero exit is distinct from a rejected invocation or a tool execution error.
+    pub fn status_note(&self) -> Option<&str> {
         match self.status {
             ToolStatus::AwaitingApproval => Some("awaiting approval"),
             ToolStatus::Denied => Some("denied"),
             ToolStatus::Cancelled => Some("cancelled"),
-            ToolStatus::Requested | ToolStatus::Running | ToolStatus::Done | ToolStatus::Error => {
-                None
-            }
+            ToolStatus::Error => self.failure_reason.as_deref(),
+            ToolStatus::Requested | ToolStatus::Running | ToolStatus::Done => None,
         }
     }
 
@@ -2820,6 +2828,44 @@ mod tests {
 
         assert!(card.observe(ProcessOperation::Poll, &running, 0));
         assert_eq!(card.exit_code, None);
+    }
+
+    #[test]
+    fn failure_notes_use_typed_facts_even_without_an_output_envelope() {
+        for (error, code, exit, state, expected) in [
+            (true, Some("stale_input"), None, None, "Stale input"),
+            (
+                true,
+                Some("invalid_arguments"),
+                None,
+                None,
+                "Invalid arguments",
+            ),
+            (false, None, Some(101), None, "Command exited 101"),
+            (false, None, Some(124), Some("timed_out"), "Timed out"),
+        ] {
+            let mut card = ToolCardSnapshot::requested(
+                &ToolCallInput {
+                    call_id: "call-1".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({}),
+                    detail_source: ToolDetailSource::None,
+                },
+                ToolStatus::Requested,
+            );
+            let mut input = result("diagnostic text never determines the classification");
+            input.is_error = error;
+            input.failure_code = code.map(str::to_owned);
+            input.exit_code = exit;
+            input.process_state = state.map(str::to_owned);
+            assert!(card.apply_result(&input));
+            assert_eq!(card.status_note(), Some(expected));
+            assert_eq!(card.status, ToolStatus::Error);
+            assert_eq!(
+                card.exit_code, None,
+                "the output envelope contract is unchanged"
+            );
+        }
     }
 
     #[test]

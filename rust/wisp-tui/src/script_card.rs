@@ -272,7 +272,8 @@ impl ScriptCard {
     }
 
     /// The calls so far, as the action line counts them: `9 calls · read ×7, grep ×2`,
-    /// with how many failed. Empty before the first call.
+    /// with known failures, unfinished calls and unreported outcomes kept distinct.
+    /// Empty before the first call.
     pub fn tally(&self) -> String {
         let total = u64::try_from(self.calls.len())
             .unwrap_or(u64::MAX)
@@ -290,8 +291,26 @@ impl ScriptCard {
             .iter()
             .filter(|call| call.state == ScriptCallState::Failed)
             .count();
+        let unfinished = self
+            .calls
+            .iter()
+            .filter(|call| call.state == ScriptCallState::Unfinished)
+            .count();
+        let mut outcomes = Vec::new();
         if failed > 0 {
-            tally.push_str(&format!(" ({failed} failed)"));
+            outcomes.push(format!(
+                "{failed} {}failed",
+                if self.omitted > 0 { "known " } else { "" }
+            ));
+        }
+        if unfinished > 0 {
+            outcomes.push(format!("{unfinished} unfinished"));
+        }
+        if self.omitted > 0 {
+            outcomes.push(format!("{} unreported", self.omitted));
+        }
+        if !outcomes.is_empty() {
+            tally.push_str(&format!(" ({})", outcomes.join(", ")));
         }
         let mut counts: Vec<(&str, usize)> = Vec::new();
         for call in &self.calls {
@@ -465,6 +484,20 @@ mod tests {
         card.calls[1].state = ScriptCallState::Failed;
 
         assert_eq!(card.tally(), "5 calls (1 failed) · read ×3, grep, query");
+    }
+
+    #[test]
+    fn tally_never_counts_missing_or_unfinished_outcomes_as_successes() {
+        let mut card = ScriptCard::from_arguments(&json!({}));
+        card.calls = vec![
+            call("1", "read", ScriptCallState::Failed),
+            call("2", "read", ScriptCallState::Unfinished),
+        ];
+        card.omitted = 3;
+        assert_eq!(
+            card.tally(),
+            "5 calls (1 known failed, 1 unfinished, 3 unreported) · read ×2"
+        );
     }
 
     #[test]

@@ -166,6 +166,8 @@ class RunContext:
         mcp_results (McpResults): Whether the synthetic MCP servers' task tools
             return only text (`text`) or their structured result too (`structured`).
         effort (str | None): Explicit provider effort; None keeps the provider default.
+        project_guidance (str | None): Experimental instructions appended to the isolated
+            fixture's root AGENTS.md, never to the checkout or user settings.
     """
 
     build: Build
@@ -177,6 +179,16 @@ class RunContext:
     codemode_presentation: CodemodePresentation = "direct_and_codemode"
     mcp_results: McpResults = "text"
     effort: str | None = None
+    project_guidance: str | None = None
+
+    @property
+    def project_guidance_sha256(self) -> str | None:
+        """Fingerprint experimental guidance without persisting its source path."""
+        return (
+            hashlib.sha256(self.project_guidance.encode()).hexdigest()
+            if self.project_guidance is not None
+            else None
+        )
 
 
 @dataclass(slots=True)
@@ -236,6 +248,7 @@ class RunRow:
     catalog_sha256: str | None = None
     scenario_steps_completed: int | None = None
     scenario_steps_expected: int | None = None
+    project_guidance_sha256: str | None = None
 
 
 @dataclass(slots=True)
@@ -400,6 +413,13 @@ def run_one(task: Task, model: ModelSpec, rep: int, context: RunContext) -> RunR
         home = Path(scratch) / "home"
         home.mkdir()
         shutil.copytree(task.fixture, work)
+        if context.project_guidance is not None:
+            instructions = work / "AGENTS.md"
+            original = instructions.read_text(encoding="utf-8") if instructions.exists() else ""
+            instructions.write_text(
+                original + ("\n\n" if original else "") + context.project_guidance,
+                encoding="utf-8",
+            )
         commands = command_environment(home, os.environ)
         setup_error = _prepare(task, work, run_dir, commands, context.python)
         if setup_error is not None:
@@ -870,6 +890,7 @@ def _row(
         script_failures=dict(measured.script_failures),
         mcp_results=context.mcp_results,
         effort=context.effort,
+        project_guidance_sha256=context.project_guidance_sha256,
         task_sha256=hashlib.sha256((task.folder / "task.toml").read_bytes()).hexdigest(),
         fixture_sha256=_directory_digest(task.fixture),
         catalog_sha256=(

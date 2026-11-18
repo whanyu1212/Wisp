@@ -79,6 +79,7 @@ mod theme_preferences;
 mod theme_tests;
 mod tool_cards;
 mod tool_detail;
+mod tool_presentation;
 mod transcript;
 #[cfg(feature = "transcript-benchmark")]
 pub mod transcript_benchmark;
