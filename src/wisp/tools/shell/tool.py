@@ -17,6 +17,7 @@ from wisp.tools.context import SCRATCH_ENVIRONMENT_VARIABLE, ToolContext
 from wisp.tools.output_store import SavedOutput, SavedStream, SaveStatus, saved_output_notice
 from wisp.tools.result import ToolArgumentError, ToolError, ToolResult
 from wisp.tools.shell.process import _format_process_output_preview, _run_shell
+from wisp.tools.shell.seatbelt import activate_seatbelt
 from wisp.tools.shell.supervisor import PollUntil, ProcessSupervisor, ProcessUpdate
 from wisp.tools.truncation import TruncatedText, truncate_text_tail
 
@@ -164,6 +165,10 @@ class BashTool:
             await self._process_supervisor.aclose()
 
     async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
+        with activate_seatbelt(context.command_sandbox):
+            return await self._dispatch(arguments, context)
+
+    async def _dispatch(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
         operation = _bash_operation(arguments)
         if operation == "run":
             return await self._run_to_completion(arguments, context)

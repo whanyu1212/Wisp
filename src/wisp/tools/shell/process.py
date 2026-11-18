@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 import anyio
 
 from wisp.tools.result import ToolError
+from wisp.tools.shell.seatbelt import active_seatbelt
 from wisp.tools.shell.watchdog import WatchedCommand, release_command, watch_command
 from wisp.tools.truncation import TruncatedText, truncate_text_middle, truncate_text_tail
 from wisp.tools.utf8 import decode_utf8_with_source_byte_lengths
@@ -352,6 +353,12 @@ async def _create_shell_process(
     posix_exit_pipe_read_fd: int | None = None
     command_token: str | None = None
     started_at = time.time()
+    sandbox = active_seatbelt()
+    if sandbox is not None:
+        if sys.platform != "darwin" or os.name != "posix":
+            raise ToolError("Seatbelt is unavailable; automatic execution stopped.")
+        sandbox.validate(command, cwd)
+        env = dict(sandbox.environment)
     if os.name == "posix":
         command_token = secrets.token_hex(16)
         env = {**(os.environ if env is None else env), COMMAND_TOKEN_VARIABLE: command_token}
@@ -388,7 +395,21 @@ async def _create_shell_process(
             process_kwargs: dict[str, Any] = {}
             if posix_inherited_fds:
                 process_kwargs["pass_fds"] = posix_inherited_fds
-            if os.name == "posix" and sys.platform.startswith("linux"):
+            if sandbox is not None:
+                if sys.platform != "darwin" or posix_jobs_file is None:
+                    raise ToolError("Seatbelt is unavailable; automatic execution stopped.")
+                process = await asyncio.create_subprocess_exec(
+                    *sandbox.argv(command, posix_jobs_file),
+                    cwd=str(cwd),
+                    env=env,
+                    start_new_session=True,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    close_fds=True,
+                    **process_kwargs,
+                )
+            elif os.name == "posix" and sys.platform.startswith("linux"):
                 process = await asyncio.create_subprocess_exec(
                     sys.executable,
                     "-c",

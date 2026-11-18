@@ -121,7 +121,7 @@ def builtin_command_descriptors() -> tuple[CommandDescriptor, ...]:
             arguments=(
                 CommandArgument(
                     "mode",
-                    "Optional 'ask', 'auto' (edits), 'auto-commands' (model review), or 'yolo'",
+                    "Optional 'ask', 'auto' (edits), 'auto-commands' (macOS sandbox), or 'yolo'",
                 ),
             ),
             accepts_arguments=True,

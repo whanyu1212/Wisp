@@ -60,6 +60,7 @@ from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
 from wisp.tools.progress import OutputProgress, ToolProgress
 from wisp.tools.result import ToolError, ToolResult
+from wisp.tools.shell.seatbelt import SeatbeltLaunch, prepare_seatbelt, sandbox_development_command
 from wisp.tools.shell.tool import BashTool
 from wisp.tools.subagent import SPAWN_AGENT
 from wisp.tools.summary import summarize_tool_result
@@ -449,6 +450,7 @@ class _ApprovalEvaluation:
     review: ToolApprovalReviewed | None = None
     resolution: ToolApprovalResolved | None = None
     generation: int | None = None
+    sandbox: SeatbeltLaunch | None = None
 
     @property
     def note(self) -> str | None:
@@ -667,6 +669,8 @@ class ConfiguredToolExecutor:
                         arguments,
                         target=target,
                         auto_approved=decision.rule_id == "workspace_edit_v1",
+                        sandbox=automatic.sandbox if decision.source == "auto" else None,
+                        generation=automatic.generation,
                     )
                     return
                 outcome = _failure_outcome(
@@ -749,10 +753,10 @@ class ConfiguredToolExecutor:
             or type(tool) is not BashTool
             or tool.name != "bash"
             or target is not None
-            or self._command_reviewer is None
         ):
             return _ApprovalEvaluation()
         generation = self._approval_policy.generation
+        sandbox: SeatbeltLaunch | None = None
 
         def still_authorized() -> bool:
             return self._command_consent_active(generation)
@@ -763,8 +767,34 @@ class ConfiguredToolExecutor:
             )
         except Exception:  # noqa: BLE001 - uncertain preflight is not a grant
             objection = "Command preflight unavailable; human approval required."
+        if objection is None:
+            try:
+                sandbox = await anyio.to_thread.run_sync(
+                    lambda: prepare_seatbelt(arguments, self._context), abandon_on_cancel=True
+                )
+                if not isinstance(sandbox, SeatbeltLaunch):
+                    raise ToolError("Sandbox preparation returned no launch authority.")
+            except Exception:  # noqa: BLE001 - a failed sandbox never grants execution
+                objection = (
+                    "Seatbelt containment unavailable; explicit unrestricted approval required."
+                )
         if not still_authorized():
             objection = "Permissions changed during review; human approval required."
+        if objection is None and sandbox_development_command(arguments):
+            return _ApprovalEvaluation(
+                generation=generation,
+                sandbox=sandbox,
+                resolution=ToolApprovalResolved(
+                    call_id=tool_call.call_id,
+                    name=tool_call.name,
+                    approved=True,
+                    source="auto",
+                    rule_id="sandbox_development_v1",
+                    reason="Auto-approved: Seatbelt test/build; network blocked; no model review.",
+                ),
+            )
+        if objection is None and self._command_reviewer is None:
+            return _ApprovalEvaluation()
         if objection is not None:
             review = ToolApprovalReviewed(
                 call_id=tool_call.call_id,
@@ -774,6 +804,7 @@ class ConfiguredToolExecutor:
             )
         else:
             try:
+                assert self._command_reviewer is not None
                 review = await self._command_reviewer.review(
                     call_id=tool_call.call_id,
                     arguments=dict(arguments),
@@ -806,6 +837,7 @@ class ConfiguredToolExecutor:
         return _ApprovalEvaluation(
             review=review,
             generation=generation,
+            sandbox=sandbox if approved else None,
             resolution=ToolApprovalResolved(
                 call_id=tool_call.call_id,
                 name=tool_call.name,
@@ -813,7 +845,7 @@ class ConfiguredToolExecutor:
                 source="auto",
                 rule_id="command_review_v1",
                 reason=(
-                    f"Auto-approved: command review — {review.reason}"
+                    f"Auto-approved: command review + Seatbelt (network blocked) — {review.reason}"
                     if approved
                     else f"Command review denied: {review.reason}"
                 ),
@@ -829,16 +861,18 @@ class ConfiguredToolExecutor:
     def _current_approval(self, evaluation: _ApprovalEvaluation) -> _ApprovalEvaluation:
         # Publishing the assessment may wait for a frontend. A mode/project
         # change during that wait must still revoke the unissued grant.
+        event = evaluation.review or evaluation.resolution
         if (
-            evaluation.review is not None
+            event is not None
             and evaluation.generation is not None
             and not self._command_consent_active(evaluation.generation)
         ):
             return replace(
                 evaluation,
+                sandbox=None,
                 resolution=ToolApprovalResolved(
-                    call_id=evaluation.review.call_id,
-                    name=evaluation.review.name,
+                    call_id=event.call_id,
+                    name=event.name,
                     approved=False,
                     source="auto",
                     reason=_REVOKED_COMMAND_REVIEW,
@@ -1076,7 +1110,9 @@ class ConfiguredToolExecutor:
             if self._registry is not None
             else False
         )
-        context = self._context
+        context = replace(
+            self._context, command_sandbox=automatic.sandbox or self._context.command_sandbox
+        )
         if automatic.resolution is not None and automatic.resolution.rule_id == "workspace_edit_v1":
             context = replace(context, atomic_writes_only=True)
         log = _SCRIPT_CALLS.get()
@@ -1099,6 +1135,11 @@ class ConfiguredToolExecutor:
                 max_output_lines=max(context.max_output_lines, result_limits.max_lines),
             )
         async with self._nested_parallel_limit if parallel_safe else self._nested_serial_lock:
+            if automatic.sandbox is not None and (
+                automatic.generation is None
+                or not self._command_consent_active(automatic.generation)
+            ):
+                return _failure_outcome(_REVOKED_COMMAND_REVIEW, failure_code="approval_denied")
             if log is not None and log.closed:
                 return _failure_outcome(log.ended_first, failure_code="policy_denied")
             if origin == "codemode" and tool.safety != "read" and log is not None:
@@ -1283,17 +1324,29 @@ class ConfiguredToolExecutor:
         *,
         target: str | None = None,
         auto_approved: bool = False,
+        sandbox: SeatbeltLaunch | None = None,
+        generation: int | None = None,
     ) -> PreparedToolExecution:
         async def run() -> ToolExecutionEnded:
+            if sandbox is not None and (
+                generation is None or not self._command_consent_active(generation)
+            ):
+                return _execution_ended(
+                    tool_call,
+                    _failure_outcome(_REVOKED_COMMAND_REVIEW, failure_code="approval_denied"),
+                    target=target,
+                )
             if tool_call.name not in _NESTED_CALL_HOSTS:
                 outcome = await self._run_tool(
                     tool,
                     arguments,
                     call_id=tool_call.call_id,
                     tool_name=target or tool_call.name,
-                    context=replace(self._context, atomic_writes_only=True)
-                    if auto_approved
-                    else self._context,
+                    context=replace(
+                        self._context,
+                        atomic_writes_only=auto_approved or self._context.atomic_writes_only,
+                        command_sandbox=sandbox or self._context.command_sandbox,
+                    ),
                 )
                 return _execution_ended(tool_call, outcome, target=target)
             log = _ScriptCallLog(

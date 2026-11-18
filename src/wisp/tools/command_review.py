@@ -88,8 +88,9 @@ class CommandReviewer(Protocol):
 def command_review_objection(arguments: Mapping[str, object], context: ToolContext) -> str | None:
     """Return why a proposal needs human approval before any model review.
 
-    Every eligible command still needs independent model review. Known test and
-    build programs can execute arbitrary repository code; these checks do not
+    Eligibility alone never grants execution. The caller must require containment
+    and select either the explicit test/build fast path or independent model review.
+    Test/build programs can execute arbitrary repository code; these checks do not
     establish filesystem/network containment or prove a program's behavior.
 
     Args:
@@ -97,7 +98,7 @@ def command_review_objection(arguments: Mapping[str, object], context: ToolConte
         context (ToolContext): Working directory and existing path restrictions.
 
     Returns:
-        str | None: A human-approval reason, or None when model review may proceed.
+        str | None: A human-approval reason, or None when sandbox preparation may proceed.
     """
 
     if os.name != "posix":

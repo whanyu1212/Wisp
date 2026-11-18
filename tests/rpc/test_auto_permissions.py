@@ -52,7 +52,7 @@ def test_command_review_requires_distinct_saved_consent(tmp_path: Path) -> None:
     assert load_permission_mode(tmp_path) is None
     save_permission_mode(tmp_path, "auto_commands")
     record = json.loads(path.read_text())
-    assert record["auto_scope"] == "command_review_v1"
+    assert record["auto_scope"] == "sandbox_commands_v1"
     policy = RpcToolApprovalPolicy(ToolApprovalPolicy(), project_path=tmp_path)
     assert policy.permissions_snapshot().mode == "auto_commands"
     assert not policy.approved_tools and not policy.approved_safety
@@ -62,7 +62,9 @@ def test_command_review_requires_distinct_saved_consent(tmp_path: Path) -> None:
     assert load_permission_mode(tmp_path) == "ask"
 
 
-@pytest.mark.parametrize("scope", [None, "workspace_edit_v1", "command_review_v2"])
+@pytest.mark.parametrize(
+    "scope", [None, "workspace_edit_v1", "command_review_v1", "command_review_v2"]
+)
 def test_command_review_records_fail_closed_without_exact_scope(
     tmp_path: Path, scope: str | None
 ) -> None:

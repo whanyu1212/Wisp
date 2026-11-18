@@ -157,7 +157,8 @@ Change the list with the `protected_paths` setting in your user settings; a proj
 cannot change it. Wisp's credential files, including MCP sign-ins, and its settings and permission
 files stay protected even if you set the list to empty.
 
-Protected paths are not a sandbox. They apply only to Wisp's file tools. A `bash` command runs as
+Protected paths alone are not a sandbox. Outside sandboxed Auto commands, they apply only to
+Wisp's file tools. An unrestricted `bash` command runs as
 your user, so `cat .env`, or a script that reads it, is not blocked, and neither are MCP or extension
 tools. For those, approval is the safeguard: keep `bash` on ask when secrets are within reach, read
 each command before allowing it, and run Wisp in a container or virtual machine for repositories you
@@ -344,8 +345,16 @@ and the TUI labels it on the tool card, including after reopening. This is not a
 assessment or a shell sandbox. Saved Auto consent is explicitly edit-only; it cannot authorize
 future automatic shell execution.
 
-Auto commands requires separate `command_review_v1` consent. It adds independent model review
-for eligible exact built-in `bash` run/start calls on macOS/Linux, without granting a command tool or session.
+Auto commands requires separate `sandbox_commands_v1` consent and works only on macOS with
+Seatbelt available. Earlier `command_review_v1` consent is not reused: select
+`/permissions auto-commands` again. Every automatic built-in `bash` run/start grant is bound to
+its exact command, working directory, and sandbox policy, without granting a command tool or session.
+
+The sandbox fast path runs supported `pytest`, `python -m pytest`/`unittest`, Cargo
+`test`/`check`/`build`, and npm `test`/`run test`/`run build` forms without model review or a
+human prompt. Eligible `uv run --no-sync` wrappers use the same fast path. Tests/builds execute
+arbitrary repository code and can modify allowed workspace files: this is containment, not a
+judgment that their contents are safe. Other eligible commands retain independent model review.
 Deterministic restrictions run first; the reviewer cannot override them. Simple supported local
 development commands may reach a fresh, no-tools request on the active provider/model (at most
 eight requests per run, with a 20-second deadline each). The reviewer receives the current user
@@ -358,13 +367,23 @@ changing consent invalidates an outstanding assessment, even if the same mode is
 Shell composition/expansion, redirects, unsupported commands/options, publishing, explicit
 credential/control paths, and outside-workspace paths require human approval without asking a
 model. `uv run` must use `--no-sync`. Poll/cancel, MCP mutations, custom/replacement tools, Plan,
-read-only subagents, and mandatory confirmations retain their boundaries. **This is risk assessment,
-not OS containment:** tests and build scripts can still execute arbitrary repository code and
-indirectly read/write files or use the network. Model review cannot guarantee safety or enforce
-the file tools' protected-path restrictions inside arbitrary code. Use Ask when that risk is not
-acceptable. Each assessment and available usage/cost is persisted separately from the acting
+read-only subagents, and mandatory confirmations retain their boundaries.
+
+Seatbelt restricts writes to the workspace/session scratch, excludes protected paths, limits
+runtime/toolchain reads, blocks network and local sockets, and starts commands with a controlled
+environment. Foreground/background children inherit containment. Unsupported protected-path
+patterns or unavailable sandboxing stop automatic execution and require explicit unrestricted
+approval. A failed command is never silently retried outside the sandbox. Existing human grants,
+Ask approvals, and YOLO are not sandboxed by this mode.
+
+**Known limitation:** a pre-existing hardlink under an allowed name can expose or modify the
+same file even when its other name is protected or outside the workspace. Seatbelt is not a VM
+or complete file/credential isolation guarantee.
+Model review does not close this gap. Network-dependent tests, dependency downloads, and tools
+needing writes to shared caches may need explicit human approval. Use Ask if this residual risk
+is unacceptable. Each assessment and available usage/cost is persisted separately from the acting
 model's context; interrupted requests with unknown cost are not counted as free. Tool cards show
-the review reason live and after reopening.
+the sandbox fast-path or model-review reason live and after reopening.
 
 Defaults are stored outside the repository in `~/.wisp/permissions/`, keyed by the
 canonical project directory, and survive restarts. Changing the default clears temporary grants.
