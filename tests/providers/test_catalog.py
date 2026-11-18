@@ -263,6 +263,8 @@ def test_builtin_catalog_is_a_complete_checked_in_agent_model_matrix() -> None:
 
     assert {name: entry.models for name, entry in providers.items()} == {
         "openai": (
+            "gpt-6.2-astra",
+            "gpt-6.2-sol",
             "gpt-6-astra",
             "gpt-6.1-sol",
             "gpt-6-sol",
@@ -276,6 +278,8 @@ def test_builtin_catalog_is_a_complete_checked_in_agent_model_matrix() -> None:
             "gpt-5.4-mini",
         ),
         "openai-codex": (
+            "gpt-6.2-sol",
+            "gpt-6.2-astra",
             "gpt-6.1-sol",
             "gpt-6-astra",
             "gpt-6-sol",
@@ -346,18 +350,34 @@ def test_builtin_catalog_is_a_complete_checked_in_agent_model_matrix() -> None:
     assert providers["openai"].context_windows["gpt-6.1-sol"] == 1_050_000
     assert set(providers["openai"].auto_compact_token_limits) == set()
     assert providers["openai-codex"].context_windows == {
+        "gpt-6.2-sol": 500_000,
+        "gpt-6.2-astra": 272_000,
         "gpt-6.1-sol": 500_000,
-        **{model: 272_000 for model in providers["openai-codex"].models[1:]},
+        "gpt-6-astra": 272_000,
+        "gpt-6-sol": 272_000,
+        "gpt-6-luna": 272_000,
+        "gpt-5.6-sol": 272_000,
+        "gpt-5.6-terra": 272_000,
+        "gpt-5.6-luna": 272_000,
     }
     assert providers["openai-codex"].auto_compact_token_limits == {
+        "gpt-6.2-sol": 450_000,
+        "gpt-6.2-astra": 244_800,
         "gpt-6.1-sol": 475_000,
-        **{model: 258_400 for model in providers["openai-codex"].models[1:]},
+        "gpt-6-astra": 258_400,
+        "gpt-6-sol": 258_400,
+        "gpt-6-luna": 258_400,
+        "gpt-5.6-sol": 258_400,
+        "gpt-5.6-terra": 258_400,
+        "gpt-5.6-luna": 258_400,
     }
 
 
 @pytest.mark.parametrize(
     ("model", "codex_window", "compact_limit", "effective_reserve"),
     [
+        ("gpt-6.2-sol", 500_000, 450_000, 50_000),
+        ("gpt-6.2-astra", 272_000, 244_800, 27_200),
         ("gpt-6.1-sol", 500_000, 475_000, 25_000),
         ("gpt-6-astra", 272_000, 258_400, 16_384),
         ("gpt-6-luna", 272_000, 258_400, 16_384),
@@ -385,13 +405,18 @@ def test_builtin_openai_surfaces_keep_distinct_context_and_compaction_policy(
         )
         == effective_reserve
     )
+    assert registry.effective_context_reserve_tokens(
+        "openai-codex",
+        model,
+        reserve_tokens=32_000,
+    ) == max(32_000, codex_window - compact_limit)
     assert (
         registry.effective_context_reserve_tokens(
             "openai-codex",
             model,
-            reserve_tokens=32_000,
+            reserve_tokens=64_000,
         )
-        == 32_000
+        == 64_000
     )
     assert (
         registry.effective_context_reserve_tokens(
@@ -401,6 +426,24 @@ def test_builtin_openai_surfaces_keep_distinct_context_and_compaction_policy(
         )
         == 16_384
     )
+
+
+@pytest.mark.parametrize("provider", ["openai", "openai-codex"])
+@pytest.mark.parametrize("model", ["gpt-6.2-astra", "gpt-6.2-sol"])
+def test_builtin_gpt_6_2_models_expose_verified_capabilities(provider: str, model: str) -> None:
+    registry = ModelRegistry(builtin_catalog())
+    entry = next(entry for entry in registry.providers() if entry.name == provider)
+
+    assert registry.knows_model(provider, model)
+    assert registry.canonical_model(provider, model) == model
+    assert registry.model_lifecycle(provider, model) == "stable"
+    assert registry.supports_image_input(provider, model)
+    assert entry.effort_levels[model] == ("low", "medium", "high", "xhigh", "max")
+    for effort in ("none", "minimal", "ultra"):
+        assert not registry.supports_effort(provider, model, effort)
+    # The upstream Codex client's selected default is not a backend omission default.
+    assert model not in entry.default_effort
+    assert entry.default_model == "gpt-5.6-sol"
 
 
 def test_builtin_catalog_defaults_match_provider_implementations() -> None:
