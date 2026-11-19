@@ -21,6 +21,19 @@ from pathlib import Path
 import pytest
 from pytest import MonkeyPatch
 
+from tests.support.pytest_sharding import parse_shard_spec, partition_shard
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """Register CLI options shared across the test suite."""
+
+    parser.addoption(
+        "--shard",
+        action="store",
+        default=None,
+        help="Run 1-based shard INDEX/TOTAL of collected tests.",
+    )
+
 
 @pytest.fixture(autouse=True)
 def _isolate_test_environment(
@@ -48,10 +61,32 @@ def _isolate_test_environment(
 def pytest_configure(config: pytest.Config) -> None:
     """Check agent-loop invariants on every loop stream the session drives."""
 
-    del config
+    raw_shard = config.getoption("--shard")
+    if raw_shard is not None:
+        try:
+            parse_shard_spec(str(raw_shard))
+        except ValueError as exc:
+            raise pytest.UsageError(str(exc)) from exc
     from tests.support.loop_stream_checks import install_loop_stream_checks
 
     install_loop_stream_checks()
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(
+    config: pytest.Config,
+    items: list[pytest.Item],
+) -> None:
+    """Filter collected items to the requested ``--shard`` after marker/keyword filtering."""
+
+    raw_shard = config.getoption("--shard")
+    if raw_shard is None:
+        return
+    shard_index, shard_count = parse_shard_spec(str(raw_shard))
+    selected, deselected = partition_shard(items, shard_index, shard_count)
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+        items[:] = selected
 
 
 @pytest.fixture(autouse=True)
