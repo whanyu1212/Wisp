@@ -446,8 +446,8 @@ async fn permissions_require_a_confirmed_snapshot_and_painted_choice() {
     let painted = draw(&mut ui, 80, 24);
     assert!(painted.contains("Project permissions"));
     assert!(painted.contains("1  Ask before changes"));
-    assert!(painted.contains("2  Auto"));
-    assert!(painted.contains("3  Auto commands"));
+    assert!(painted.contains("2  Auto (experimental)"));
+    assert!(painted.contains("3  Auto commands (experimental)"));
     assert!(painted.contains("4  YOLO"));
     ui.handle_input(key(KeyCode::Char('4')), &writer, 8192)
         .await
