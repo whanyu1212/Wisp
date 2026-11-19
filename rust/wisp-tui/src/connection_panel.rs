@@ -1,23 +1,23 @@
 //! Provider connection panel with keyboard activation and pointer selection.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::Style;
-use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, BorderType, Borders, Padding, Paragraph};
-use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
-use wisp_protocol::events::{ConnectionCatalogSnapshot, ConnectionMethodSnapshot};
-
+use crate::dialog::{self, Dialog, Hint, PickerRow};
 use crate::mouse::Rows;
 use crate::reducer::{API_KEY_MAX_BYTES, ApiKey};
 use crate::session_picker::terminal_row;
 use crate::theme::Palette;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::Frame;
+use ratatui::layout::Rect;
+use ratatui::style::Style;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
+use wisp_protocol::events::{ConnectionCatalogSnapshot, ConnectionMethodSnapshot};
 
 const PAGE_STEP: usize = 10;
-/// Rows the docked API-key entry needs: borders, the masked input, a gap, and a note.
-pub const API_KEY_PANEL_HEIGHT: u16 = 5;
+/// Rows the docked API-key entry needs: borders, the masked input, a gap, note, and footer.
+pub const API_KEY_PANEL_HEIGHT: u16 = 6;
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum ConnectionPanelAction {
@@ -339,7 +339,7 @@ pub fn render(
     area: Rect,
     panel: &mut ConnectionPanel,
     palette: Palette,
-) -> Rows {
+) -> dialog::Rendered {
     match &mut panel.mode {
         ConnectionPanelMode::Picker { selected } => {
             render_picker(frame, area, &panel.catalog, *selected, palette)
@@ -348,8 +348,10 @@ pub fn render(
             let method = methods(&panel.catalog)
                 .into_iter()
                 .find(|method| method.provider == *provider && method.kind == "api_key");
-            render_api_key(frame, area, provider, value, method, palette);
-            Rows::default()
+            dialog::Rendered {
+                rows: Rows::default(),
+                controls: render_api_key(frame, area, provider, value, method, palette),
+            }
         }
         ConnectionPanelMode::DeviceCode {
             provider,
@@ -357,8 +359,9 @@ pub fn render(
             user_code,
             attempt,
             scroll,
-        } => {
-            render_device_code(
+        } => dialog::Rendered {
+            rows: Rows::default(),
+            controls: render_device_code(
                 frame,
                 area,
                 provider,
@@ -367,9 +370,8 @@ pub fn render(
                 *attempt,
                 scroll,
                 palette,
-            );
-            Rows::default()
-        }
+            ),
+        },
     }
 }
 
@@ -392,92 +394,127 @@ fn render_picker(
     catalog: &ConnectionCatalogSnapshot,
     selected: Option<usize>,
     palette: Palette,
-) -> Rows {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(2), Constraint::Length(1)])
-        .split(area);
-    let height = usize::from(chunks[0].height.saturating_sub(2)).max(1);
-    let width = usize::from(chunks[0].width.saturating_sub(2)).max(1);
+) -> dialog::Rendered {
     let methods = methods(catalog);
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    let hints = if methods.is_empty() {
+        vec![
+            Hint {
+                label: "r",
+                description: "refresh",
+                key: key(KeyCode::Char('r')),
+            },
+            Hint {
+                label: "Esc",
+                description: "close",
+                key: key(KeyCode::Esc),
+            },
+        ]
+    } else {
+        let mut hints = vec![
+            Hint {
+                label: "Enter",
+                description: "connect",
+                key: key(KeyCode::Enter),
+            },
+            Hint {
+                label: "d",
+                description: "remove",
+                key: key(KeyCode::Char('d')),
+            },
+            Hint {
+                label: "r",
+                description: "refresh",
+                key: key(KeyCode::Char('r')),
+            },
+            Hint {
+                label: "Esc",
+                description: "close",
+                key: key(KeyCode::Esc),
+            },
+        ];
+        if area.width >= 60 {
+            hints.extend([
+                Hint {
+                    label: "↑",
+                    description: "prev",
+                    key: key(KeyCode::Up),
+                },
+                Hint {
+                    label: "↓",
+                    description: "next",
+                    key: key(KeyCode::Down),
+                },
+            ]);
+        }
+        hints
+    };
+    let layout = Dialog {
+        title: "connect provider",
+        tabs: &[],
+        filter: None,
+        hints: &hints,
+    }
+    .render(frame, area, palette);
+    let inner = layout.body;
+    if inner.width == 0 || inner.height == 0 {
+        return dialog::Rendered {
+            rows: Rows::default(),
+            controls: layout.controls,
+        };
+    }
+    let height = usize::from(inner.height);
     let start = selected
         .map(|index| index.saturating_sub(height.saturating_sub(1)))
         .unwrap_or(0);
-    let lines = if methods.is_empty() {
-        vec![Line::styled(
-            "No connection methods reported.",
-            Style::default().fg(palette.muted),
-        )]
+    if methods.is_empty() {
+        let empty = Rect::new(inner.x + 1, inner.y, inner.width.saturating_sub(2), 1);
+        frame.render_widget(
+            Paragraph::new(terminal_row(
+                "No connection methods reported.",
+                usize::from(empty.width),
+            ))
+            .style(Style::default().fg(palette.muted)),
+            empty,
+        );
     } else {
-        methods
+        for (visible_index, (index, method)) in methods
             .iter()
             .enumerate()
             .skip(start)
             .take(height)
-            .map(|(index, method)| method_line(method, selected == Some(index), width, palette))
-            .collect()
-    };
-    frame.render_widget(
-        Paragraph::new(Text::from(lines)).block(
-            Block::default()
-                .title(" connect provider ")
-                .border_style(palette.border())
-                .borders(Borders::ALL),
-        ),
-        chunks[0],
-    );
-    frame.render_widget(
-        Paragraph::new(if methods.is_empty() {
-            "r refresh · Esc close"
-        } else {
-            "↑/↓ move · PgUp/PgDn · Home/End · Enter connect · d remove stored credential · r refresh · Esc close"
-        })
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(palette.muted)),
-        chunks[1],
-    );
-    Rows::new(
-        chunks[0].inner(ratatui::layout::Margin::new(1, 1)),
-        start,
-        methods.len(),
-        1,
-    )
-}
-
-fn method_line(
-    method: &ConnectionMethodSnapshot,
-    selected: bool,
-    width: usize,
-    palette: Palette,
-) -> Line<'static> {
-    let source = format!(
-        "source: {} · environment: {} · stored fallback: {} · OAuth expiry: {}",
-        method.source,
-        method.environment_variable.as_deref().unwrap_or("—"),
-        if method.has_stored_credential {
-            "yes"
-        } else {
-            "no"
-        },
-        method.oauth_expires_at.as_deref().unwrap_or("—"),
-    );
-    let content = terminal_row(
-        &format!(
-            "{} {} / {} ({}) — {}",
-            if selected { ">" } else { " " },
-            method.provider,
-            method.label,
-            method.kind,
-            source,
-        ),
-        width,
-    );
-    let style = if selected {
-        palette.selection()
-    } else {
-        Style::default()
-    };
-    Line::from(Span::styled(content, style))
+            .enumerate()
+        {
+            let source = format!(
+                "source: {} · environment: {} · stored fallback: {} · OAuth expiry: {}",
+                method.source,
+                method.environment_variable.as_deref().unwrap_or("—"),
+                if method.has_stored_credential {
+                    "yes"
+                } else {
+                    "no"
+                },
+                method.oauth_expires_at.as_deref().unwrap_or("—"),
+            );
+            let label = format!(
+                "{} / {} ({}) — {}",
+                method.provider, method.label, method.kind, source
+            );
+            let row = Rect::new(inner.x, inner.y + visible_index as u16, inner.width, 1);
+            PickerRow {
+                label: &label,
+                description: None,
+                tag: None,
+                selected: selected == Some(index),
+                muted: false,
+            }
+            .render(frame, row, palette);
+        }
+    }
+    dialog::Rendered {
+        rows: Rows::new(inner, start, methods.len(), 1),
+        controls: layout.controls,
+    }
 }
 
 /// Draw the masked API-key entry with a terminal cursor after the last character, so
@@ -491,43 +528,48 @@ fn render_api_key(
     value: &ApiKeyInput,
     method: Option<&ConnectionMethodSnapshot>,
     palette: Palette,
-) {
+) -> dialog::Controls {
     let muted = Style::default().fg(palette.muted);
     let count = value.0.chars().count();
-    let mut block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(palette.border())
-        .padding(Padding::horizontal(1))
-        .style(palette.composer())
-        .title(terminal_row(
-            &format!(" API key: {provider} "),
-            usize::from(area.width.saturating_sub(16)),
-        ));
-    if count > 0 {
-        block = block.title_top(
-            Line::from(format!(" {count} chars "))
-                .style(muted)
-                .right_aligned(),
-        );
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    let hints = [
+        Hint {
+            label: "Enter",
+            description: "save",
+            key: key(KeyCode::Enter),
+        },
+        Hint {
+            label: "Esc",
+            description: "cancel",
+            key: key(KeyCode::Esc),
+        },
+    ];
+    let title = format!("API key: {provider}");
+    let layout = Dialog {
+        title: &title,
+        tabs: &[],
+        filter: None,
+        hints: &hints,
     }
-    let hint = if area.width >= 48 {
-        " Enter save · Backspace edit · Esc cancel "
-    } else {
-        " Enter save · Esc cancel "
-    };
-    if hint.width() + 2 <= usize::from(area.width) {
-        block = block.title_bottom(Line::from(hint).style(muted).right_aligned());
-    }
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    .render(frame, area, palette);
+    let body = layout.body;
+    let inner = Rect::new(
+        body.x.saturating_add(1),
+        body.y,
+        body.width.saturating_sub(2),
+        body.height,
+    );
     if inner.height == 0 || inner.width == 0 {
-        return;
+        return layout.controls;
     }
 
     // Keep the end of a long key in view, where the cursor is.
     const PROMPT: &str = "› ";
-    let room = usize::from(inner.width).saturating_sub(PROMPT.width() + 1);
+    let count_badge = (count > 0).then(|| format!("{count} chars"));
+    let badge_reserve = count_badge
+        .as_ref()
+        .map_or(0, |badge| badge.width().saturating_add(2));
+    let room = usize::from(inner.width).saturating_sub(PROMPT.width() + 1 + badge_reserve);
     let masked = if count > room {
         format!("…{}", "•".repeat(room.saturating_sub(1)))
     } else {
@@ -562,7 +604,15 @@ fn render_api_key(
         lines.push(note);
     }
     frame.render_widget(Paragraph::new(lines), inner);
+    if let Some(badge) = count_badge.filter(|badge| badge.width() + 4 <= usize::from(inner.width)) {
+        let badge_width = badge.width() as u16;
+        frame.render_widget(
+            Paragraph::new(Span::styled(badge, muted)),
+            Rect::new(inner.right() - badge_width, inner.y, badge_width, 1),
+        );
+    }
     frame.set_cursor_position((cursor_x.min(inner.right().saturating_sub(1)), inner.y));
+    layout.controls
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -575,15 +625,37 @@ fn render_device_code(
     attempt: Option<u32>,
     scroll: &mut usize,
     palette: Palette,
-) {
-    let title = terminal_row(
-        &format!(" device login: {provider} "),
-        usize::from(area.width.saturating_sub(2)),
-    );
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(2), Constraint::Length(1)])
-        .split(area);
+) -> dialog::Controls {
+    let title = format!("device login: {provider}");
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    let hints = [
+        Hint {
+            label: "Esc",
+            description: "cancel",
+            key: key(KeyCode::Esc),
+        },
+        Hint {
+            label: "↑",
+            description: "up",
+            key: key(KeyCode::Up),
+        },
+        Hint {
+            label: "↓",
+            description: "down",
+            key: key(KeyCode::Down),
+        },
+    ];
+    let layout = Dialog {
+        title: &title,
+        tabs: &[],
+        filter: None,
+        hints: &hints,
+    }
+    .render(frame, area, palette);
+    let body = layout.body;
+    if body.width == 0 || body.height == 0 {
+        return layout.controls;
+    }
     let detail = match (verification_uri, user_code) {
         (Some(uri), Some(code)) => format!(
             "Open\n{uri}\nEnter code\n{code}\nLatest poll attempt: {}",
@@ -591,34 +663,20 @@ fn render_device_code(
         ),
         _ => "Requesting device code…".into(),
     };
-    let rows = wrap_device_challenge(
-        &detail,
-        usize::from(chunks[0].width.saturating_sub(2)).max(1),
-    );
-    let height = usize::from(chunks[0].height.saturating_sub(2));
+    let rows = wrap_device_challenge(&detail, usize::from(body.width).max(1));
+    let height = usize::from(body.height);
     *scroll = (*scroll).min(rows.len().saturating_sub(height));
     frame.render_widget(
-        Paragraph::new(Text::from(
+        Paragraph::new(
             rows.into_iter()
                 .skip(*scroll)
                 .take(height)
                 .map(Line::raw)
                 .collect::<Vec<_>>(),
-        ))
-        .block(
-            Block::default()
-                .title(title)
-                .border_style(palette.border())
-                .borders(Borders::ALL),
         ),
-        chunks[0],
+        body,
     );
-    frame.render_widget(
-        Paragraph::new("↑↓ scroll · Esc/Ctrl-C cancel")
-            .alignment(Alignment::Center)
-            .style(Style::default().fg(palette.muted)),
-        chunks[1],
-    );
+    layout.controls
 }
 
 /// Device URLs and codes must remain readable even in a minimum-size popup.

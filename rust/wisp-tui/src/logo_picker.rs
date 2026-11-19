@@ -1,15 +1,12 @@
 //! Startup-logo preview has no persistence or runtime effects until explicitly applied.
 
+use crate::dialog::{self, Dialog, Hint, PickerRow};
 use crate::mouse::Rows;
+use crate::session_picker::terminal_row;
 use crate::startup_logo::{self, LogoChoice};
 use crate::theme::Palette;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::{
-    Frame,
-    layout::Rect,
-    text::Line,
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
-};
+use ratatui::{Frame, layout::Rect, style::Style, widgets::Paragraph};
 
 const MAX_VISIBLE_CHOICES: usize = 6;
 
@@ -108,26 +105,56 @@ impl LogoPicker {
         area: Rect,
         palette: Palette,
         no_color: bool,
-    ) -> Rows {
+    ) -> dialog::Rendered {
         self.invalidate();
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(palette.border())
-            .title(" Startup logo ")
-            .title_bottom(" ↑↓ preview • Enter apply • Esc cancel ");
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let hints = [
+            Hint {
+                label: "Enter",
+                description: "apply",
+                key: key(KeyCode::Enter),
+            },
+            Hint {
+                label: "Esc",
+                description: "cancel",
+                key: key(KeyCode::Esc),
+            },
+            Hint {
+                label: "↑",
+                description: "prev",
+                key: key(KeyCode::Up),
+            },
+            Hint {
+                label: "↓",
+                description: "next",
+                key: key(KeyCode::Down),
+            },
+        ];
+        let layout = Dialog {
+            title: "Startup logo",
+            tabs: &[],
+            filter: None,
+            hints: &hints,
+        }
+        .render(frame, area, palette);
+        let inner = layout.body;
         if inner.height < 2 || inner.width == 0 {
-            return Rows::default();
+            return dialog::Rendered {
+                rows: Rows::default(),
+                controls: layout.controls,
+            };
         }
 
+        let note = if no_color {
+            "NO_COLOR: monochrome; Enter still applies."
+        } else {
+            "Preview only until Enter."
+        };
+        let note_area = Rect::new(inner.x + 1, inner.y, inner.width.saturating_sub(2), 1);
         frame.render_widget(
-            Paragraph::new(if no_color {
-                "NO_COLOR: monochrome; Enter still applies."
-            } else {
-                "Preview only until Enter."
-            }),
-            Rect { height: 1, ..inner },
+            Paragraph::new(terminal_row(note, usize::from(note_area.width)))
+                .style(Style::default().fg(palette.muted)),
+            note_area,
         );
 
         let content = Rect {
@@ -143,30 +170,40 @@ impl LogoPicker {
             height: list_height,
             ..content
         };
+        let visible_count = usize::from(list_area.height);
         let offset = self
             .selected
-            .saturating_sub(usize::from(list_area.height) - 1);
-        let rows = LogoChoice::ALL
+            .saturating_sub(visible_count.saturating_sub(1));
+        for (visible_index, (index, choice)) in LogoChoice::ALL
             .iter()
+            .enumerate()
             .skip(offset)
-            .take(list_area.height.into())
-            .map(|choice| ListItem::new(Line::raw(choice.label())))
-            .collect::<Vec<_>>();
-        let mut state = ListState::default().with_selected(Some(self.selected - offset));
-        frame.render_stateful_widget(
-            List::new(rows)
-                .highlight_symbol(palette.selection_marker())
-                .highlight_style(palette.selection()),
-            list_area,
-            &mut state,
-        );
+            .take(visible_count)
+            .enumerate()
+        {
+            let row = Rect::new(
+                list_area.x,
+                list_area.y + visible_index as u16,
+                list_area.width,
+                1,
+            );
+            PickerRow {
+                label: choice.label(),
+                description: None,
+                tag: None,
+                selected: index == self.selected,
+                muted: false,
+            }
+            .render(frame, row, palette);
+        }
 
-        let preview_area = Rect {
-            y: content.y + list_height,
-            height: content.height - list_height,
-            ..content
-        };
-        if preview_area.height > 0 {
+        let preview_area = Rect::new(
+            content.x + 1,
+            content.y + list_height,
+            content.width.saturating_sub(2),
+            content.height - list_height,
+        );
+        if preview_area.height > 0 && preview_area.width > 0 {
             frame.render_widget(
                 Paragraph::new(startup_logo::preview_lines(
                     self.preview_logo(),
@@ -181,7 +218,10 @@ impl LogoPicker {
         }
 
         self.rendered = Some(self.selected);
-        Rows::new(list_area, offset + state.offset(), LogoChoice::ALL.len(), 1)
+        dialog::Rendered {
+            rows: Rows::new(list_area, offset, LogoChoice::ALL.len(), 1),
+            controls: layout.controls,
+        }
     }
 }
 

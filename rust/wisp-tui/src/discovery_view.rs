@@ -2,6 +2,7 @@
 //! pickers. The `/subagents` panel is drawn by `subagents_view`.
 
 use crate::{
+    dialog::{self, Dialog, Hint, PickerRow},
     mcp_manager::McpView,
     mouse::Rows,
     reducer::{UiAction, UiState},
@@ -15,8 +16,8 @@ use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
     style::Style,
-    text::{Line, Span},
-    widgets::{Block, BorderType, Borders, List, ListItem, ListState, Padding, Paragraph},
+    text::Line,
+    widgets::Paragraph,
 };
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -320,19 +321,25 @@ impl DiscoveryView {
         state: &UiState,
         notice: Option<&str>,
         palette: Palette,
-    ) -> Rows {
+    ) -> dialog::Rendered {
         match self {
-            Self::Permissions(view) => render_permissions(view, frame, area, state, palette),
-            Self::Codemode(view) => render_codemode(view, frame, area, state, palette),
-            Self::Subagents(view) => {
-                view.render(frame, area, state, palette);
-                Rows::default()
-            }
+            Self::Permissions(view) => dialog::Rendered {
+                rows: Rows::default(),
+                controls: render_permissions(view, frame, area, state, palette),
+            },
+            Self::Codemode(view) => dialog::Rendered {
+                rows: Rows::default(),
+                controls: render_codemode(view, frame, area, state, palette),
+            },
+            Self::Subagents(view) => dialog::Rendered {
+                rows: Rows::default(),
+                controls: view.render(frame, area, state, palette),
+            },
             Self::Skills(view) => view.render(frame, area, state, notice, palette),
-            Self::Mcp(view) => {
-                view.render(frame, area, state, palette);
-                Rows::default()
-            }
+            Self::Mcp(view) => dialog::Rendered {
+                rows: Rows::default(),
+                controls: view.render(frame, area, state, palette),
+            },
         }
     }
 }
@@ -403,23 +410,79 @@ impl SkillsView {
         state: &UiState,
         notice: Option<&str>,
         palette: Palette,
-    ) -> Rows {
+    ) -> dialog::Rendered {
         self.rendered = None;
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(palette.border())
-            .title(if self.diagnostics {
-                " Skill diagnostics "
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let hints = if self.diagnostics {
+            vec![
+                Hint {
+                    label: "d",
+                    description: "skills",
+                    key: key(KeyCode::Char('d')),
+                },
+                Hint {
+                    label: "r",
+                    description: "refresh",
+                    key: key(KeyCode::Char('r')),
+                },
+                Hint {
+                    label: "Esc",
+                    description: "close",
+                    key: key(KeyCode::Esc),
+                },
+                Hint {
+                    label: "↑",
+                    description: "up",
+                    key: key(KeyCode::Up),
+                },
+                Hint {
+                    label: "↓",
+                    description: "down",
+                    key: key(KeyCode::Down),
+                },
+            ]
+        } else {
+            vec![
+                Hint {
+                    label: "Enter",
+                    description: "insert",
+                    key: key(KeyCode::Enter),
+                },
+                Hint {
+                    label: "d",
+                    description: "diagnostics",
+                    key: key(KeyCode::Char('d')),
+                },
+                Hint {
+                    label: "r",
+                    description: "refresh",
+                    key: key(KeyCode::Char('r')),
+                },
+                Hint {
+                    label: "Esc",
+                    description: "close",
+                    key: key(KeyCode::Esc),
+                },
+            ]
+        };
+        let layout = Dialog {
+            title: if self.diagnostics {
+                "Skill diagnostics"
             } else {
-                " Skills "
-            })
-            .title_bottom(if self.diagnostics {
-                " ↑↓ scroll · d skills · r refresh · Esc close "
-            } else {
-                " Enter insert · d diagnostics · r refresh · Esc close "
-            });
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
+                "Skills"
+            },
+            tabs: &[],
+            filter: None,
+            hints: &hints,
+        }
+        .render(frame, area, palette);
+        let inner = layout.body;
+        if inner.width == 0 || inner.height == 0 {
+            return dialog::Rendered {
+                rows: Rows::default(),
+                controls: layout.controls,
+            };
+        }
         let catalog = state.skills.snapshot.as_deref();
         let mut status = Vec::new();
         if state.skills.loading() {
@@ -446,6 +509,12 @@ impl SkillsView {
                 }
             ));
         }
+        let text_area = Rect::new(
+            inner.x + 1,
+            inner.y,
+            inner.width.saturating_sub(2),
+            inner.height,
+        );
         if self.diagnostics {
             if let Some(catalog) = catalog {
                 if catalog.diagnostics.is_empty() {
@@ -467,67 +536,106 @@ impl SkillsView {
             } else {
                 status.push("Skill catalog unavailable.".into());
             }
-            self.report.render(frame, inner, &status);
-            return Rows::default();
+            self.report.render(frame, text_area, &status);
+            return dialog::Rendered {
+                rows: Rows::default(),
+                controls: layout.controls,
+            };
         }
+        let header_rows = u16::try_from(status.len())
+            .unwrap_or(u16::MAX)
+            .min(inner.height);
         let [header, list] =
-            Layout::vertical([Constraint::Length(status.len() as u16), Constraint::Min(0)])
-                .areas(inner);
+            Layout::vertical([Constraint::Length(header_rows), Constraint::Min(0)]).areas(inner);
+        let header_inner = Rect::new(
+            header.x + 1,
+            header.y,
+            header.width.saturating_sub(2),
+            header.height,
+        );
         frame.render_widget(
             Paragraph::new(
                 status
                     .iter()
-                    .map(|row| Line::raw(terminal_row(row, usize::from(inner.width))))
+                    .map(|row| {
+                        Line::styled(
+                            terminal_row(row, usize::from(header_inner.width)),
+                            Style::default().fg(palette.muted),
+                        )
+                    })
                     .collect::<Vec<_>>(),
             ),
-            header,
+            header_inner,
         );
         self.page_size = usize::from(list.height / 2);
+        let list_text_area = Rect::new(
+            list.x + 1,
+            list.y,
+            list.width.saturating_sub(2),
+            list.height,
+        );
         let Some(catalog) = catalog else {
-            frame.render_widget(Paragraph::new("Skill catalog unavailable."), list);
-            return Rows::default();
+            frame.render_widget(Paragraph::new("Skill catalog unavailable."), list_text_area);
+            return dialog::Rendered {
+                rows: Rows::default(),
+                controls: layout.controls,
+            };
         };
         if catalog.entries.is_empty() {
-            frame.render_widget(Paragraph::new("No skills discovered."), list);
-            return Rows::default();
+            frame.render_widget(Paragraph::new("No skills discovered."), list_text_area);
+            return dialog::Rendered {
+                rows: Rows::default(),
+                controls: layout.controls,
+            };
         }
         // A two-line choice must fit completely before Enter can use its identity.
-        if list.height < 2 || list.width < 2 {
-            return Rows::default();
+        if list.height < 2 || list.width < 3 {
+            return dialog::Rendered {
+                rows: Rows::default(),
+                controls: layout.controls,
+            };
         }
-        let width = usize::from(list.width.saturating_sub(2));
-        let items = catalog.entries.iter().map(|entry| {
-            ListItem::new(vec![
-                Line::raw(terminal_row(
-                    &format!(
-                        "/skill:{} [{}]{}",
-                        entry.name,
-                        entry.source.as_str(),
-                        if entry.is_invocable() {
-                            ""
-                        } else {
-                            " (invalid name)"
-                        }
-                    ),
-                    width,
-                )),
-                Line::raw(terminal_row(&entry.description, width)),
-            ])
-        });
-        let mut selection = ListState::default().with_selected(Some(self.selected));
-        frame.render_stateful_widget(
-            List::new(items)
-                .highlight_style(palette.selection())
-                .highlight_symbol(palette.selection_marker()),
-            list,
-            &mut selection,
-        );
+        let visible_items = usize::from(list.height / 2);
+        let offset = self
+            .selected
+            .saturating_sub(visible_items.saturating_sub(1));
+        for (visible_index, (index, entry)) in catalog
+            .entries
+            .iter()
+            .enumerate()
+            .skip(offset)
+            .take(visible_items)
+            .enumerate()
+        {
+            let label = format!("/skill:{}", entry.name);
+            let tag = format!(
+                "[{}]{}",
+                entry.source.as_str(),
+                if entry.is_invocable() {
+                    ""
+                } else {
+                    " (invalid name)"
+                }
+            );
+            let row = Rect::new(list.x, list.y + (visible_index * 2) as u16, list.width, 2);
+            PickerRow {
+                label: &label,
+                description: Some(&entry.description),
+                tag: Some(&tag),
+                selected: index == self.selected,
+                muted: !entry.is_invocable(),
+            }
+            .render(frame, row, palette);
+        }
         self.rendered = catalog
             .entries
             .get(self.selected)
             .filter(|entry| entry.is_invocable())
             .map(|entry| entry.name.clone());
-        Rows::new(list, selection.offset(), catalog.entries.len(), 2)
+        dialog::Rendered {
+            rows: Rows::new(list, offset, catalog.entries.len(), 2),
+            controls: layout.controls,
+        }
     }
 }
 
@@ -587,27 +695,59 @@ impl ReportView {
     }
 }
 
+fn choice_panel_hints(width: u16) -> Vec<Hint<'static>> {
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    let mut hints = vec![
+        Hint {
+            label: "Enter",
+            description: "apply",
+            key: key(KeyCode::Enter),
+        },
+        Hint {
+            label: "Esc",
+            description: "close",
+            key: key(KeyCode::Esc),
+        },
+    ];
+    if width >= 50 {
+        hints.extend([
+            Hint {
+                label: "↑",
+                description: "prev",
+                key: key(KeyCode::Up),
+            },
+            Hint {
+                label: "↓",
+                description: "next",
+                key: key(KeyCode::Down),
+            },
+        ]);
+    }
+    hints
+}
+
 fn render_permissions(
     view: &mut ChoiceView,
     frame: &mut Frame<'_>,
     area: Rect,
     state: &UiState,
     palette: Palette,
-) -> Rows {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .padding(Padding::horizontal(1))
-        .style(palette.composer())
-        .border_style(palette.border())
-        .title(" Project permissions ")
-        .title_bottom(
-            Line::from(" ↑↓ select · Enter apply · Esc close ")
-                .style(Style::default().fg(palette.muted))
-                .right_aligned(),
-        );
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+) -> dialog::Controls {
+    let hints = choice_panel_hints(area.width);
+    let layout = Dialog {
+        title: "Project permissions",
+        tabs: &[],
+        filter: None,
+        hints: &hints,
+    }
+    .render(frame, area, palette);
+    let body = layout.body;
+    let inner = Rect::new(
+        body.x.saturating_add(1),
+        body.y,
+        body.width.saturating_sub(2),
+        body.height,
+    );
     let width = usize::from(inner.width);
     let snapshot = state.permissions.snapshot.as_ref();
     let muted = Style::default().fg(palette.muted);
@@ -667,7 +807,7 @@ fn render_permissions(
     frame.render_widget(Paragraph::new(lines), inner);
     view.painted = inner.height >= 4 && inner.width >= 22 && !state.permissions.loading();
     view.rendered = if view.painted { view.selected } else { None };
-    Rows::default()
+    layout.controls
 }
 
 /// One row per choice, the highlighted one marked and the one in effect labelled.
@@ -678,25 +818,19 @@ fn choice_lines<T: PartialEq>(
     width: usize,
     palette: Palette,
 ) -> Vec<Line<'static>> {
-    let muted = Style::default().fg(palette.muted);
     choices
         .iter()
         .enumerate()
         .map(|(index, (key, label, value))| {
-            let suffix = if current.as_ref() == Some(value) {
-                "  current"
-            } else {
-                ""
-            };
-            let mut line = crate::ui::choice_line(
+            let suffix = (current.as_ref() == Some(value)).then_some("  current");
+            crate::ui::choice_line_with_suffix(
                 &key.to_string(),
                 label,
+                suffix,
                 selected == Some(index),
-                width.saturating_sub(suffix.width()),
+                width,
                 palette,
-            );
-            line.spans.push(Span::styled(suffix, muted));
-            line
+            )
         })
         .collect()
 }
@@ -707,21 +841,22 @@ fn render_codemode(
     area: Rect,
     state: &UiState,
     palette: Palette,
-) -> Rows {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .padding(Padding::horizontal(1))
-        .style(palette.composer())
-        .border_style(palette.border())
-        .title(" Codemode ")
-        .title_bottom(
-            Line::from(" ↑↓ select · Enter apply · Esc close ")
-                .style(Style::default().fg(palette.muted))
-                .right_aligned(),
-        );
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+) -> dialog::Controls {
+    let hints = choice_panel_hints(area.width);
+    let layout = Dialog {
+        title: "Codemode",
+        tabs: &[],
+        filter: None,
+        hints: &hints,
+    }
+    .render(frame, area, palette);
+    let body = layout.body;
+    let inner = Rect::new(
+        body.x.saturating_add(1),
+        body.y,
+        body.width.saturating_sub(2),
+        body.height,
+    );
     let width = usize::from(inner.width);
     let snapshot = state.codemode.snapshot.as_deref();
     let muted = Style::default().fg(palette.muted);
@@ -753,7 +888,7 @@ fn render_codemode(
     frame.render_widget(Paragraph::new(lines), inner);
     view.painted = inner.height >= 7 && inner.width >= 22 && !state.codemode.loading();
     view.rendered = if view.painted { view.selected } else { None };
-    Rows::default()
+    layout.controls
 }
 
 /// The `/codemode` picker's rows below its choices, each flagged when it warns.
@@ -835,22 +970,22 @@ pub(crate) fn codemode_label(setting: CodemodeSetting) -> &'static str {
     }
 }
 
-/// Rows the docked `/codemode` panel needs for `state`, borders included.
+/// Rows the docked `/codemode` panel needs for `state`, borders and footer included.
 pub(crate) fn codemode_panel_height(state: &UiState) -> u16 {
-    // Borders, two headings, five choices and a gap, then the notes.
+    // Borders, footer, two headings, five choices and a gap, then the notes.
     let notes = u16::try_from(codemode_notes(state).len()).unwrap_or(u16::MAX);
-    10_u16.saturating_add(notes)
+    11_u16.saturating_add(notes)
 }
 
-/// Rows the docked `/permissions` panel needs for `state`, borders included.
+/// Rows the docked `/permissions` panel needs for `state`, borders and footer included.
 pub(crate) fn permissions_panel_height(state: &UiState) -> u16 {
     let snapshot = state.permissions.snapshot.as_ref();
     let status = state.permissions.error.is_some()
         || state.permissions.loading()
         || snapshot.is_some_and(|snapshot| snapshot.saved_mode != Some(snapshot.mode));
     let project = snapshot.is_some_and(|snapshot| snapshot.project_path.is_some());
-    // Borders, four choices, a gap and the grants note, then optional rows.
-    8 + u16::from(status) + u16::from(project)
+    // Borders, footer, four choices, a gap and the grants note, then optional rows.
+    9 + u16::from(status) + u16::from(project)
 }
 
 #[cfg(test)]

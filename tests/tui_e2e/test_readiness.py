@@ -532,12 +532,18 @@ def test_ctrl_r_restores_prompt_without_submitting(tmp_path: Path) -> None:
             failure="first prompt did not complete",
         )
         tui.send(b"\x12")
-        tui.wait_for(b"Enter restore", failure="history did not open")
+        tui.wait_until(
+            lambda output: screen_shows(output, "Enter restore"),
+            failure="history did not open",
+        )
         # Enter acts only on a choice that has been painted; a full repaint proves it.
         offset = len(tui.output)
         tui.resize(width=102)
         tui.wait_until(
-            lambda output: b"Enter restore" in (full_repaint_after(output, offset) or b""),
+            lambda output: (
+                (repaint := full_repaint_after(output, offset)) is not None
+                and b"Enterrestore" in rendered_without_spacing(repaint)
+            ),
             failure="history did not repaint",
         )
         tui.send(b"\r")

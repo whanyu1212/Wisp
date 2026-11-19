@@ -1827,7 +1827,7 @@ fn documentation_mcp_capture_shows_synthetic_server_and_tools() {
     assert!(text.contains("demo-docs  connected · 2 tools"));
     assert!(text.contains("search_docs"));
     assert!(text.contains("read_page"));
-    assert!(text.contains("a add · e on/off · d remove"));
+    assert!(text.contains("a add │ e on/off │ d remove"));
 }
 
 #[test]

@@ -1,17 +1,17 @@
 //! Read-only contextual help layered over, without closing, the focused workflow.
 
-use ratatui::{
-    Frame,
-    layout::Rect,
-    text::Line,
-    widgets::{Block, Borders, Paragraph},
-};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::{Frame, layout::Rect, text::Line, widgets::Paragraph};
 
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    OverlayKind, RenderedDecisionContext, commands::Help, keybindings::Bindings, theme::Palette,
+    OverlayKind, RenderedDecisionContext,
+    commands::Help,
+    dialog::{self, Dialog, Hint},
+    keybindings::Bindings,
+    theme::Palette,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -181,18 +181,56 @@ impl KeyHelp {
         bindings: &Bindings,
         palette: Palette,
         connection: Option<&crate::ui::ConnectionInfo>,
-    ) {
+    ) -> dialog::Controls {
         crate::ui::clear_overlay(frame, area, palette);
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(if self.update_guidance {
-                " Update instructions · Ctrl+G / Esc close "
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let mut hints = vec![
+            Hint {
+                label: "Esc",
+                description: "close",
+                key: key(KeyCode::Esc),
+            },
+            Hint {
+                label: "↑",
+                description: "up",
+                key: key(KeyCode::Up),
+            },
+            Hint {
+                label: "↓",
+                description: "down",
+                key: key(KeyCode::Down),
+            },
+        ];
+        if area.width >= 56 {
+            hints.extend([
+                Hint {
+                    label: "PgUp",
+                    description: "page",
+                    key: key(KeyCode::PageUp),
+                },
+                Hint {
+                    label: "PgDn",
+                    description: "page",
+                    key: key(KeyCode::PageDown),
+                },
+            ]);
+        }
+        let layout = Dialog {
+            title: if self.update_guidance {
+                "Update instructions"
             } else {
-                " Keys · Ctrl+G / Esc close "
-            })
-            .style(palette.overlay());
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
+                "Keys"
+            },
+            tabs: &[],
+            filter: None,
+            hints: &hints,
+        }
+        .render(frame, area, palette);
+        let inner = layout.body;
+        if inner.width == 0 || inner.height == 0 {
+            self.rendered_rows = 0;
+            return layout.controls;
+        }
         // Materialize visual rows so even a long configured alias list can be
         // scrolled a row at a time at the minimum supported terminal size.
         let mut rows = Vec::new();
@@ -227,5 +265,6 @@ impl KeyHelp {
             ),
             inner,
         );
+        layout.controls
     }
 }

@@ -487,11 +487,6 @@ impl Palette {
         Style::default().fg(self.muted)
     }
 
-    /// Keep the two-column label inset without a cursor glyph where a band shows selection.
-    pub fn selection_marker(self) -> &'static str {
-        if self.shows_bands() { "  " } else { "› " }
-    }
-
     /// A selected picker or list row: bold text on the selected band, or where a band
     /// cannot show, reversed foreground text, so the row reverses as one bar rather than a
     /// block per span colour.

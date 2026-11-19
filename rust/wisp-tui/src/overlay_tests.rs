@@ -407,7 +407,7 @@ fn popup_clear_is_opaque_and_geometry_stays_bounded() {
             isolated
                 .draw(|frame| {
                     ui::clear_overlay(frame, popup, ui.palette());
-                    commands::render_help(
+                    let _ = commands::render_help(
                         frame,
                         popup,
                         ui.command_help.as_ref().unwrap(),
@@ -416,7 +416,7 @@ fn popup_clear_is_opaque_and_geometry_stays_bounded() {
                         None,
                         ui.palette(),
                         &ui.bindings,
-                    )
+                    );
                 })
                 .unwrap();
             for y in popup.y..popup.bottom() {
@@ -864,7 +864,7 @@ async fn wide_characters_at_popup_edges_do_not_damage_the_popup_or_restored_tran
         isolated
             .draw(|frame| {
                 ui::clear_overlay(frame, popup, ui.palette());
-                commands::render_help(
+                let _ = commands::render_help(
                     frame,
                     popup,
                     ui.command_help.as_ref().unwrap(),
@@ -873,7 +873,7 @@ async fn wide_characters_at_popup_edges_do_not_damage_the_popup_or_restored_tran
                     None,
                     ui.palette(),
                     &ui.bindings,
-                )
+                );
             })
             .unwrap();
         for y in popup.y..popup.bottom() {
@@ -1923,4 +1923,503 @@ async fn help_reload_while_loading_renders() {
         .await
         .unwrap();
     assert!(ui.render_pending);
+}
+
+fn find_cell(terminal: &Terminal<TestBackend>, needle: &str) -> (u16, u16) {
+    let buffer = terminal.backend().buffer();
+    for y in (0..buffer.area.height).rev() {
+        let row: String = (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect();
+        if let Some(byte) = row.find(needle) {
+            return (u16::try_from(row[..byte].chars().count()).unwrap(), y);
+        }
+    }
+    panic!("missing {needle:?} on screen");
+}
+
+#[tokio::test]
+async fn moved_overlays_render_shared_frame_and_clickable_close_hint() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+
+    enum Target {
+        Kind(OverlayKind),
+        Discovery(fn() -> DiscoveryView),
+        ScriptDetail,
+    }
+
+    let cases: [(&str, Target, &str, &str); 17] = [
+        (
+            "theme",
+            Target::Kind(OverlayKind::Theme),
+            "─ Themes ─",
+            "Esc cancel",
+        ),
+        (
+            "logo",
+            Target::Kind(OverlayKind::Logo),
+            "─ Startup logo ─",
+            "Esc cancel",
+        ),
+        (
+            "prompt_history",
+            Target::Kind(OverlayKind::PromptHistory),
+            "─ Prompt history ─",
+            "Esc close",
+        ),
+        (
+            "session_tree",
+            Target::Kind(OverlayKind::SessionTree),
+            "─ session tree ─",
+            "Esc close",
+        ),
+        (
+            "queue",
+            Target::Kind(OverlayKind::Queue),
+            "─ Steering: 0 · ",
+            "Esc close",
+        ),
+        (
+            "skills",
+            Target::Discovery(|| DiscoveryView::skills(None)),
+            "─ Skills ─",
+            "Esc close",
+        ),
+        (
+            "permissions",
+            Target::Discovery(DiscoveryView::permissions),
+            "─ Project permissions ─",
+            "Esc close",
+        ),
+        (
+            "codemode",
+            Target::Discovery(DiscoveryView::codemode),
+            "─ Codemode ─",
+            "Esc close",
+        ),
+        (
+            "subagents",
+            Target::Discovery(DiscoveryView::subagents),
+            "─ Subagents ─",
+            "Esc close",
+        ),
+        (
+            "mcp",
+            Target::Discovery(DiscoveryView::mcp),
+            "─ MCP servers ─",
+            "Esc close",
+        ),
+        (
+            "context",
+            Target::Kind(OverlayKind::Context),
+            "─ Context ─",
+            "Esc close",
+        ),
+        (
+            "connection",
+            Target::Kind(OverlayKind::Connection),
+            "─ connect provider ─",
+            "Esc close",
+        ),
+        (
+            "help",
+            Target::Kind(OverlayKind::Help),
+            "─ Commands ─",
+            "Esc close",
+        ),
+        (
+            "detail",
+            Target::Kind(OverlayKind::Detail),
+            "─ live retained detail ─",
+            "Esc close",
+        ),
+        (
+            "script_detail",
+            Target::ScriptDetail,
+            "─ script details ─",
+            "Esc close",
+        ),
+        (
+            "diff",
+            Target::Kind(OverlayKind::GitDiff),
+            "focus: diff",
+            "Esc close",
+        ),
+        (
+            "model",
+            Target::Kind(OverlayKind::Model),
+            "─ model ─",
+            "Esc close",
+        ),
+    ];
+
+    for (name, target, expected_marker, esc_label) in cases {
+        let mut ui = base();
+        ui.mouse_enabled = true;
+        match target {
+            Target::Kind(kind) => open(&mut ui, kind),
+            Target::Discovery(make) => ui.discovery_view = Some(make()),
+            Target::ScriptDetail => {
+                let target = ui
+                    .state
+                    .transcript
+                    .observe_tool_call(tool_cards::ToolCallInput {
+                        call_id: "script-1".into(),
+                        name: "codemode".into(),
+                        arguments: json!({"code": "print('hi')"}),
+                        detail_source: tool_detail::ToolDetailSource::None,
+                    });
+                let presentation = ToolDetailPresentation {
+                    kind: tool_detail::DetailPresentationKind::Read,
+                    title: "codemode".into(),
+                    summary: String::new(),
+                    additions: 0,
+                    deletions: 0,
+                    rows: vec![],
+                    truncated: false,
+                };
+                ui.detail_view.open(target, &presentation);
+            }
+        }
+        draw(&mut ui, &mut terminal);
+        let text = terminal.backend().to_string();
+        assert!(text.contains(expected_marker), "{name}: {text}");
+
+        let (x, y) = find_cell(&terminal, esc_label);
+        let esc_key = ui
+            .mouse_frame
+            .as_ref()
+            .expect("mouse frame")
+            .dialog_controls
+            .key_at(x, y);
+        assert_eq!(
+            esc_key,
+            Some(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            "{name} missing Esc control at {x},{y}"
+        );
+        ui.handle_input(
+            Input::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: x,
+                row: y,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+        assert!(ui.active_overlay().is_none(), "{name} stayed open");
+    }
+}
+
+#[tokio::test]
+async fn key_help_footer_and_outside_clicks_close_without_answering_decision() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    for trust in [false, true] {
+        let (writer, mut received) = mpsc::channel(16);
+        let mut ui = base();
+        ui.mouse_enabled = true;
+        if trust {
+            ui.state.view_status = ViewStatus::WaitingForTrust;
+            ui.state.pending_trust_request_id = Some("trust-1".into());
+            ui.state.pending_trust_project_path = Some("/repo".into());
+        } else {
+            ui.state.view_status = ViewStatus::WaitingForApproval;
+            ui.state.pending_approval = Some(reducer::PendingApproval {
+                call_id: "call-1".into(),
+                name: "bash".into(),
+                arguments: json!({"command": "echo hi"}),
+                detail_source: tool_detail::ToolDetailSource::None,
+                safety: "ask".into(),
+                grants_allowed: true,
+                session_only_yolo: false,
+            });
+        }
+        let mut terminal = Terminal::new(TestBackend::new(100, 28)).unwrap();
+        draw(&mut ui, &mut terminal);
+
+        ui.handle_input(
+            Input::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL)),
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+        draw(&mut ui, &mut terminal);
+        assert!(terminal.backend().to_string().contains("─ Keys ─"));
+
+        let (x, y) = find_cell(&terminal, "Esc close");
+        ui.handle_input(
+            Input::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: x,
+                row: y,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+        assert!(ui.key_help.is_none());
+        assert!(received.try_recv().is_err());
+        assert_eq!(
+            ui.state.view_status,
+            if trust {
+                ViewStatus::WaitingForTrust
+            } else {
+                ViewStatus::WaitingForApproval
+            }
+        );
+
+        // Outside click also closes KeyHelp without touching the pending decision.
+        ui.handle_input(
+            Input::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL)),
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+        draw(&mut ui, &mut terminal);
+        ui.handle_input(
+            Input::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &writer,
+            8192,
+        )
+        .await
+        .unwrap();
+        assert!(ui.key_help.is_none());
+        assert!(received.try_recv().is_err());
+        assert_eq!(
+            ui.state.view_status,
+            if trust {
+                ViewStatus::WaitingForTrust
+            } else {
+                ViewStatus::WaitingForApproval
+            }
+        );
+    }
+}
+
+#[tokio::test]
+async fn file_picker_footer_hints_switch_modes_and_close() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use std::sync::Arc;
+    use wisp_protocol::events::{ProjectFileEntry, ProjectFileKind, ProjectFileSnapshot};
+
+    let (writer, mut received) = mpsc::channel(16);
+    let mut ui = LiveUi {
+        state: UiState::new("fake".into(), None, None),
+        mouse_enabled: true,
+        ..LiveUi::default()
+    };
+    ui.editor.insert_paste("@");
+    ui.handle_input(Input::Redraw, &writer, 8192).await.unwrap();
+    let WriterMessage::Frame { payload, .. } = received.try_recv().unwrap() else {
+        panic!("expected snapshot command");
+    };
+    let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+    let command_id = value["id"].as_str().unwrap().to_owned();
+    let snapshot = Arc::new(ProjectFileSnapshot {
+        generation: 1,
+        entries: vec![ProjectFileEntry {
+            path: "src/lib.rs".into(),
+            kind: ProjectFileKind::File,
+        }],
+        truncated: false,
+    });
+    ui.dispatch(
+        UiAction::BackendEvent(reducer::BackendEvent::ProjectFilesReported {
+            command_id: command_id.clone(),
+            snapshot: Ok(snapshot),
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    ui.dispatch(
+        UiAction::BackendEvent(reducer::BackendEvent::CommandFinished {
+            command_id,
+            command_type: "get_project_files".into(),
+            ok: true,
+            error: None,
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    draw(&mut ui, &mut terminal);
+    assert!(
+        terminal
+            .backend()
+            .to_string()
+            .contains("─ @ files: fuzzy ─")
+    );
+
+    let (tx, ty) = find_cell(&terminal, "Tab mode");
+    ui.handle_input(
+        Input::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: tx,
+            row: ty,
+            modifiers: KeyModifiers::NONE,
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    draw(&mut ui, &mut terminal);
+    assert!(terminal.backend().to_string().contains("─ @ files: tree ─"));
+
+    let (ex, ey) = find_cell(&terminal, "Esc close");
+    ui.handle_input(
+        Input::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: ex,
+            row: ey,
+            modifiers: KeyModifiers::NONE,
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert!(!ui.file_picker.is_open());
+    assert_eq!(ui.editor.text(), "@");
+}
+
+#[tokio::test]
+async fn esc_closing_key_help_clears_stale_mouse_frame_and_diff_detail_keeps_esc_on_narrow_width() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use std::sync::Arc;
+    use wisp_protocol::events::{ProjectFileEntry, ProjectFileKind, ProjectFileSnapshot};
+
+    let (writer, mut received) = mpsc::channel(16);
+    let mut ui = LiveUi {
+        state: UiState::new("fake".into(), None, None),
+        mouse_enabled: true,
+        ..LiveUi::default()
+    };
+    ui.editor.insert_paste("@");
+    ui.handle_input(Input::Redraw, &writer, 8192).await.unwrap();
+    let WriterMessage::Frame { payload, .. } = received.try_recv().unwrap() else {
+        panic!("expected snapshot command");
+    };
+    let value: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+    let command_id = value["id"].as_str().unwrap().to_owned();
+    let snapshot = Arc::new(ProjectFileSnapshot {
+        generation: 1,
+        entries: vec![ProjectFileEntry {
+            path: "src/lib.rs".into(),
+            kind: ProjectFileKind::File,
+        }],
+        truncated: false,
+    });
+    ui.dispatch(
+        UiAction::BackendEvent(reducer::BackendEvent::ProjectFilesReported {
+            command_id: command_id.clone(),
+            snapshot: Ok(snapshot),
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    ui.dispatch(
+        UiAction::BackendEvent(reducer::BackendEvent::CommandFinished {
+            command_id,
+            command_type: "get_project_files".into(),
+            ok: true,
+            error: None,
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    draw(&mut ui, &mut terminal);
+    ui.handle_input(
+        Input::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL)),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    draw(&mut ui, &mut terminal);
+    let (ex, ey) = find_cell(&terminal, "Esc close");
+
+    ui.handle_input(key(KeyCode::Esc), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(ui.key_help.is_none());
+    assert!(ui.mouse_frame.is_none());
+
+    // Clicking before the next draw must not activate KeyHelp's stale Esc control on Layer::Files.
+    ui.handle_input(
+        Input::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: ex,
+            row: ey,
+            modifiers: KeyModifiers::NONE,
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert!(ui.file_picker.is_open());
+
+    // Diff detail overlay on a 30-column screen still paints and registers Esc close.
+    let target = ui
+        .state
+        .transcript
+        .observe_tool_call(tool_cards::ToolCallInput {
+            call_id: "edit-1".into(),
+            name: "edit".into(),
+            arguments: json!({"path": "README.md"}),
+            detail_source: tool_detail::ToolDetailSource::None,
+        });
+    let presentation = ToolDetailPresentation {
+        kind: tool_detail::DetailPresentationKind::DiffModify,
+        title: "README.md".into(),
+        summary: "+1 -1".into(),
+        additions: 1,
+        deletions: 1,
+        rows: vec![],
+        truncated: false,
+    };
+    ui.detail_view.open(target, &presentation);
+    ui.state.history.active_exact_detail = Some(reducer::ActiveExactDetail {
+        target,
+        presentation,
+    });
+    let mut narrow = Terminal::new(TestBackend::new(30, 12)).unwrap();
+    draw(&mut ui, &mut narrow);
+    assert!(narrow.backend().to_string().contains("Esc close"));
+    let (nx, ny) = find_cell(&narrow, "Esc close");
+    assert_eq!(
+        ui.mouse_frame
+            .as_ref()
+            .unwrap()
+            .dialog_controls
+            .key_at(nx, ny),
+        Some(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+    );
 }

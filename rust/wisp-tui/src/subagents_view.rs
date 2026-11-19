@@ -8,18 +8,19 @@
 //! instructions. Both return to the panel on Esc.
 
 use crate::{
+    dialog::{self, Dialog, Hint},
     discovery_view::{DiscoveryAction, ReportView},
     reducer::{UiAction, UiState},
     session_picker::terminal_row,
     theme::Palette,
 };
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Padding, Paragraph},
+    widgets::Paragraph,
 };
 use unicode_width::UnicodeWidthStr;
 use wisp_protocol::events::{SubagentKind, SubagentsState};
@@ -180,7 +181,7 @@ impl SubagentsView {
         self.invalidate();
     }
 
-    /// Rows the docked panel needs for `state`, borders included.
+    /// Rows the docked panel needs for `state`, borders and footer included.
     pub(crate) fn panel_height(&self, state: &UiState) -> u16 {
         let rows = match &self.page {
             Page::Panel => {
@@ -193,7 +194,7 @@ impl SubagentsView {
             Page::Models { .. } => model_choices(state).len().min(MODELS_SHOWN) + 2,
             Page::Instructions { .. } => usize::from(INSTRUCTION_ROWS),
         };
-        u16::try_from(rows + 2).unwrap_or(u16::MAX)
+        u16::try_from(rows + 3).unwrap_or(u16::MAX)
     }
 
     pub(crate) fn render(
@@ -202,38 +203,122 @@ impl SubagentsView {
         area: Rect,
         state: &UiState,
         palette: Palette,
-    ) {
-        let (title, hint) = match &self.page {
-            Page::Panel => (
-                " Subagents ".to_owned(),
-                " ↑↓ select · Enter change · p instructions · Esc close ",
-            ),
-            Page::Models { .. } => (
-                " Subagent model ".to_owned(),
-                " ↑↓ select · Enter apply · Esc back ",
-            ),
-            Page::Instructions { .. } => (
-                format!(
-                    " {} subagent instructions ",
-                    ROWS[FIRST_KIND_ROW + self.kind]
-                ),
-                " ↑↓ scroll · Esc back ",
-            ),
+    ) -> dialog::Controls {
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let compact = area.width < 58;
+        let (title, hints) = match &self.page {
+            Page::Panel => {
+                let mut hints = vec![
+                    Hint {
+                        label: "Enter",
+                        description: "change",
+                        key: key(KeyCode::Enter),
+                    },
+                    Hint {
+                        label: "Esc",
+                        description: "close",
+                        key: key(KeyCode::Esc),
+                    },
+                ];
+                if area.width >= 56 {
+                    hints.extend([
+                        Hint {
+                            label: "p",
+                            description: "instructions",
+                            key: key(KeyCode::Char('p')),
+                        },
+                        Hint {
+                            label: "r",
+                            description: "refresh",
+                            key: key(KeyCode::Char('r')),
+                        },
+                    ]);
+                }
+                if area.width >= 74 {
+                    hints.extend([
+                        Hint {
+                            label: "↑",
+                            description: "prev",
+                            key: key(KeyCode::Up),
+                        },
+                        Hint {
+                            label: "↓",
+                            description: "next",
+                            key: key(KeyCode::Down),
+                        },
+                    ]);
+                }
+                ("Subagents".to_owned(), hints)
+            }
+            Page::Models { .. } => {
+                let mut hints = vec![
+                    Hint {
+                        label: "Enter",
+                        description: "apply",
+                        key: key(KeyCode::Enter),
+                    },
+                    Hint {
+                        label: "Esc",
+                        description: "back",
+                        key: key(KeyCode::Esc),
+                    },
+                ];
+                if !compact {
+                    hints.extend([
+                        Hint {
+                            label: "↑",
+                            description: "prev",
+                            key: key(KeyCode::Up),
+                        },
+                        Hint {
+                            label: "↓",
+                            description: "next",
+                            key: key(KeyCode::Down),
+                        },
+                    ]);
+                }
+                ("Subagent model".to_owned(), hints)
+            }
+            Page::Instructions { .. } => {
+                let mut hints = vec![Hint {
+                    label: "Esc",
+                    description: "back",
+                    key: key(KeyCode::Esc),
+                }];
+                if !compact {
+                    hints.extend([
+                        Hint {
+                            label: "↑",
+                            description: "up",
+                            key: key(KeyCode::Up),
+                        },
+                        Hint {
+                            label: "↓",
+                            description: "down",
+                            key: key(KeyCode::Down),
+                        },
+                    ]);
+                }
+                (
+                    format!("{} subagent instructions", ROWS[FIRST_KIND_ROW + self.kind]),
+                    hints,
+                )
+            }
         };
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .padding(Padding::horizontal(1))
-            .style(palette.composer())
-            .border_style(palette.border())
-            .title(title)
-            .title_bottom(
-                Line::from(hint)
-                    .style(Style::default().fg(palette.muted))
-                    .right_aligned(),
-            );
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
+        let layout = Dialog {
+            title: &title,
+            tabs: &[],
+            filter: None,
+            hints: &hints,
+        }
+        .render(frame, area, palette);
+        let body = layout.body;
+        let inner = Rect::new(
+            body.x.saturating_add(1),
+            body.y,
+            body.width.saturating_sub(2),
+            body.height,
+        );
         let width = usize::from(inner.width);
         let ready = inner.width >= 22 && !state.subagents.loading();
         match &mut self.page {
@@ -342,6 +427,7 @@ impl SubagentsView {
                     .map(|snapshot| snapshot.enabled);
             }
         }
+        layout.controls
     }
 }
 
@@ -726,6 +812,20 @@ mod tests {
         assert!(row(&rows, "› Fork").contains("starts from this conversation"));
         assert!(row(&rows, "(always the session's)").contains("big"));
         assert!(row(&rows, "Effort").contains("high"));
+
+        // At 60 cols the panel's footer stays on one row so the detail block still fits.
+        let narrow_rows = draw_full(&mut view, &state, 60);
+        assert!(row(&narrow_rows, "Effort").contains("high"));
+        assert!(
+            narrow_rows
+                .iter()
+                .any(|line| line.contains("p instructions"))
+        );
+        assert!(!narrow_rows.iter().any(|line| line.contains("↑ prev")));
+
+        let mid_rows = draw_full(&mut view, &state, 74);
+        assert!(row(&mid_rows, "Effort").contains("high"));
+        assert!(mid_rows.iter().any(|line| line.contains("↑ prev")));
     }
 
     #[test]

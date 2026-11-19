@@ -1772,7 +1772,7 @@ async fn stop_button_click_cancels_active_run_and_respects_overlays_and_prefixes
         modifiers: KeyModifiers::NONE,
     };
 
-    // An open help overlay blocks clicks on the underlying status row.
+    // An open help overlay absorbs outside clicks by closing without touching `[stop]`.
     ui.handle_input(
         Input::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL)),
         &writer,
@@ -1784,12 +1784,10 @@ async fn stop_button_click_cancels_active_run_and_respects_overlays_and_prefixes
     ui.handle_input(Input::Mouse(click_stop), &writer, 8192)
         .await
         .unwrap();
+    assert!(ui.key_help.is_none());
     assert!(commands.try_recv().is_err());
     assert!(!ui.state.cancel_requested);
 
-    ui.handle_input(key(KeyCode::Esc), &writer, 8192)
-        .await
-        .unwrap();
     let _ = screen(&mut ui);
 
     // An incoming decision in the event prefix invalidates a queued `[stop]` click.

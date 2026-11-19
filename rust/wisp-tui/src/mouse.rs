@@ -566,6 +566,8 @@ impl LiveUi {
                     for _ in 0..wheel_steps {
                         self.handle_file_picker_key(KeyEvent::new(code, KeyModifiers::NONE));
                     }
+                } else if let Some(key) = frame.dialog_controls.key_at(event.column, event.row) {
+                    self.handle_file_picker_key(key);
                 } else if let Some(index) = frame.rows.hit(event) {
                     if self.file_picker.select_mouse(index) {
                         self.render_pending = true;

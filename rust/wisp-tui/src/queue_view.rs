@@ -3,14 +3,12 @@
 #[cfg(test)]
 mod tests;
 
+use crate::dialog::{self, Dialog, Hint, PickerRow};
 use crate::reducer::queue_management::Operation;
+use crate::session_picker::terminal_row;
 use crate::{mouse::Rows, reducer::UiState, theme::Palette, ui::sanitize_for_terminal};
-use crossterm::event::KeyCode;
-use ratatui::{
-    Frame,
-    layout::Rect,
-    widgets::{Block, Borders, List, ListItem, ListState},
-};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::{Frame, layout::Rect, style::Style, widgets::Paragraph};
 use wisp_protocol::commands::{QueueKind, QueueMode};
 
 pub(crate) enum Action {
@@ -173,7 +171,7 @@ impl QueueView {
         area: Rect,
         state: &UiState,
         palette: Palette,
-    ) -> Rows {
+    ) -> dialog::Rendered {
         let identity = Identity::of(state);
         if self.confirmation.as_ref().is_some_and(|(_, token)| {
             identity.token.as_ref() != Some(token) || !identity.active || identity.pending
@@ -239,40 +237,109 @@ impl QueueView {
             }
         }
         let status = if identity.pending {
-            "Pending…"
+            Some("Pending…")
         } else if state.queue.management.refresh.is_some() {
-            "Refreshing…"
+            Some("Refreshing…")
         } else if let Some(error) = state.queue.management.error.as_deref() {
-            error
+            Some(error)
         } else if let Some(message) = self.message.as_deref() {
-            message
+            Some(message)
         } else if !identity.active || identity.token.is_none() {
-            "Read-only · Esc close"
+            Some("Read-only")
         } else {
-            "↑↓ select · Enter · Esc"
+            None
         };
-        let status: String = status.chars().take(160).collect();
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title(title)
-            .title_bottom(sanitize_for_terminal(&status))
-            .style(palette.overlay());
-        let inner = block.inner(area);
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let hints = if identity.pending || !identity.active || identity.token.is_none() {
+            vec![Hint {
+                label: "Esc",
+                description: "close",
+                key: key(KeyCode::Esc),
+            }]
+        } else {
+            vec![
+                Hint {
+                    label: "Enter",
+                    description: "select",
+                    key: key(KeyCode::Enter),
+                },
+                Hint {
+                    label: "Esc",
+                    description: "close",
+                    key: key(KeyCode::Esc),
+                },
+                Hint {
+                    label: "↑",
+                    description: "prev",
+                    key: key(KeyCode::Up),
+                },
+                Hint {
+                    label: "↓",
+                    description: "next",
+                    key: key(KeyCode::Down),
+                },
+            ]
+        };
+        let border_style = if self.confirmation.is_some() {
+            Style::default().fg(palette.warning)
+        } else {
+            palette.border()
+        };
+        let layout = Dialog {
+            title: &title,
+            tabs: &[],
+            filter: None,
+            hints: &hints,
+        }
+        .render_with_border(frame, area, palette, border_style);
+        let mut inner = layout.body;
+        if let Some(status) = status.filter(|_| inner.height >= 2 && inner.width > 0) {
+            let status_area = Rect::new(inner.x + 1, inner.y, inner.width.saturating_sub(2), 1);
+            let status: String = status.chars().take(160).collect();
+            frame.render_widget(
+                Paragraph::new(terminal_row(&status, usize::from(status_area.width)))
+                    .style(Style::default().fg(palette.muted)),
+                status_area,
+            );
+            inner.y += 1;
+            inner.height -= 1;
+        }
         self.row_count = rows.len();
         self.selected = self.selected.min(self.row_count.saturating_sub(1));
-        let mut selection = ListState::default()
-            .with_selected(Some(self.selected))
-            .with_offset(self.offset);
-        frame.render_stateful_widget(
-            List::new(rows.into_iter().map(ListItem::new).collect::<Vec<_>>())
-                .block(block)
-                .highlight_style(palette.selection())
-                .highlight_symbol(palette.selection_marker()),
-            area,
-            &mut selection,
-        );
-        self.offset = selection.offset();
+        let height = usize::from(inner.height);
+        if height == 0 || inner.width == 0 {
+            self.offset = 0;
+        } else if self.selected < self.offset {
+            self.offset = self.selected;
+        } else if self.selected >= self.offset + height {
+            self.offset = self.selected + 1 - height;
+        } else if self.row_count <= height {
+            self.offset = 0;
+        } else {
+            self.offset = self.offset.min(self.row_count - height);
+        }
+        let empty_marker = count == 0 && self.confirmation.is_none();
+        for (visible_index, (index, row_text)) in rows
+            .iter()
+            .enumerate()
+            .skip(self.offset)
+            .take(height)
+            .enumerate()
+        {
+            let row_area = Rect::new(inner.x, inner.y + visible_index as u16, inner.width, 1);
+            PickerRow {
+                label: row_text,
+                description: None,
+                tag: None,
+                selected: index == self.selected,
+                muted: empty_marker && index + 1 == self.row_count,
+            }
+            .render(frame, row_area, palette);
+        }
         self.rendered = Some(identity);
-        Rows::new(inner, self.offset, self.row_count, 1)
+        dialog::Rendered {
+            rows: Rows::new(inner, self.offset, self.row_count, 1),
+            controls: layout.controls,
+        }
     }
 }

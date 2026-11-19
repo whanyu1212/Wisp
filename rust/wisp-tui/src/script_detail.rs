@@ -5,17 +5,19 @@
 //! it runs, and wraps only the rows it paints. Everything shown is untrusted backend
 //! text, already bounded by the card; each grapheme is sanitized as it is wrapped.
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph},
+    widgets::Paragraph,
 };
 use serde_json::Value;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use crate::dialog::{self, Dialog, Hint};
 use crate::reducer::UiState;
 use crate::script_card::{NestedHost, SCRIPT_MAX_BYTES, ScriptCallState, ScriptCard};
 use crate::syntax::{SyntaxClass, SyntaxToken};
@@ -291,29 +293,73 @@ pub(crate) fn render(
     view: &mut ScriptDetailView,
     card: &ToolCardSnapshot,
     palette: Palette,
-) {
+) -> dialog::Controls {
     let Some(script) = card.script.as_deref() else {
-        return;
+        return dialog::Controls::default();
     };
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(2),
-            Constraint::Length(1),
-        ])
-        .split(area);
-    frame.render_widget(
-        Paragraph::new(crate::ui::sanitize_for_terminal(&heading(card, script))).block(
-            Block::default()
-                .title(" script details ")
-                .border_style(palette.border())
-                .borders(Borders::ALL),
-        ),
-        chunks[0],
-    );
-    let width = usize::from(chunks[1].width.saturating_sub(2)).max(1);
-    let height = usize::from(chunks[1].height.saturating_sub(2)).max(1);
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    let mut hints = vec![
+        Hint {
+            label: "Esc",
+            description: "close",
+            key: key(KeyCode::Esc),
+        },
+        Hint {
+            label: "↑",
+            description: "up",
+            key: key(KeyCode::Up),
+        },
+        Hint {
+            label: "↓",
+            description: "down",
+            key: key(KeyCode::Down),
+        },
+    ];
+    if area.width >= 56 {
+        hints.extend([
+            Hint {
+                label: "PgUp",
+                description: "page",
+                key: key(KeyCode::PageUp),
+            },
+            Hint {
+                label: "PgDn",
+                description: "page",
+                key: key(KeyCode::PageDown),
+            },
+        ]);
+    }
+    let layout = Dialog {
+        title: "script details",
+        tabs: &[],
+        filter: None,
+        hints: &hints,
+    }
+    .render(frame, area, palette);
+    if layout.body.width == 0 || layout.body.height == 0 {
+        return layout.controls;
+    }
+    let content_area = if layout.body.height >= 3 {
+        let header = crate::ui::sanitize_for_terminal(&heading(card, script)).replace('\n', " ");
+        frame.render_widget(
+            Paragraph::new(header),
+            Rect::new(layout.body.x, layout.body.y, layout.body.width, 1),
+        );
+        frame.render_widget(
+            Paragraph::new("─".repeat(usize::from(layout.body.width))).style(palette.border()),
+            Rect::new(layout.body.x, layout.body.y + 1, layout.body.width, 1),
+        );
+        Rect::new(
+            layout.body.x,
+            layout.body.y + 2,
+            layout.body.width,
+            layout.body.height - 2,
+        )
+    } else {
+        layout.body
+    };
+    let width = usize::from(content_area.width).max(1);
+    let height = usize::from(content_area.height).max(1);
     view.sync(card, script, width, height);
     let lines: Vec<Line<'static>> = view
         .visible_rows()
@@ -326,20 +372,8 @@ pub(crate) fn render(
             )
         })
         .collect();
-    frame.render_widget(
-        Paragraph::new(Text::from(lines)).block(
-            Block::default()
-                .title(" detail ")
-                .borders(Borders::ALL)
-                .border_style(palette.border()),
-        ),
-        chunks[1],
-    );
-    frame.render_widget(
-        Paragraph::new("↑/↓ scroll · PgUp/PgDn · Home/End · Esc close")
-            .style(Style::default().fg(palette.muted)),
-        chunks[2],
-    );
+    frame.render_widget(Paragraph::new(Text::from(lines)), content_area);
+    layout.controls
 }
 
 /// The card's own line: `• Scripted count TODOs  4 calls (1 failed) · read ×3 · 1.2s`.

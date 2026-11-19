@@ -1,14 +1,11 @@
 //! Theme preview has no persistence or runtime effects until explicitly applied.
 
+use crate::dialog::{self, Dialog, Hint, PickerRow};
 use crate::mouse::Rows;
+use crate::session_picker::terminal_row;
 use crate::theme::{self, Palette, Theme};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::{
-    Frame,
-    layout::Rect,
-    text::Line,
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
-};
+use ratatui::{Frame, layout::Rect, style::Style, widgets::Paragraph};
 
 pub(crate) enum ThemePickerAction {
     None,
@@ -86,54 +83,89 @@ impl ThemePicker {
         area: Rect,
         palette: Palette,
         no_color: bool,
-    ) -> Rows {
+    ) -> dialog::Rendered {
         self.invalidate();
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(palette.border())
-            .title(" Themes ")
-            .title_bottom(" ↑↓ preview • Enter apply • Esc cancel ");
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        if inner.height < 2 || inner.width == 0 {
-            return Rows::default();
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let hints = [
+            Hint {
+                label: "Enter",
+                description: "apply",
+                key: key(KeyCode::Enter),
+            },
+            Hint {
+                label: "Esc",
+                description: "cancel",
+                key: key(KeyCode::Esc),
+            },
+            Hint {
+                label: "↑",
+                description: "prev",
+                key: key(KeyCode::Up),
+            },
+            Hint {
+                label: "↓",
+                description: "next",
+                key: key(KeyCode::Down),
+            },
+        ];
+        let layout = Dialog {
+            title: "Themes",
+            tabs: &[],
+            filter: None,
+            hints: &hints,
         }
+        .render(frame, area, palette);
+        let inner = layout.body;
+        if inner.height < 2 || inner.width == 0 {
+            return dialog::Rendered {
+                rows: Rows::default(),
+                controls: layout.controls,
+            };
+        }
+        let note = if no_color {
+            "NO_COLOR: monochrome; Enter still applies."
+        } else {
+            "Preview only until Enter."
+        };
+        let note_area = Rect::new(inner.x + 1, inner.y, inner.width.saturating_sub(2), 1);
         frame.render_widget(
-            Paragraph::new(if no_color {
-                "NO_COLOR: monochrome; Enter still applies."
-            } else {
-                "Preview only until Enter."
-            }),
-            Rect { height: 1, ..inner },
+            Paragraph::new(terminal_row(note, usize::from(note_area.width)))
+                .style(Style::default().fg(palette.muted)),
+            note_area,
         );
         let rows_area = Rect {
             y: inner.y + 1,
             height: inner.height - 1,
             ..inner
         };
-        let offset = self
-            .selected
-            .saturating_sub(usize::from(rows_area.height) - 1);
-        let rows = theme::themes()
+        let height = usize::from(rows_area.height);
+        let offset = self.selected.saturating_sub(height.saturating_sub(1));
+        for (visible_index, (index, theme)) in theme::themes()
             .iter()
+            .enumerate()
             .skip(offset)
-            .take(rows_area.height.into())
-            .map(|theme| {
-                ListItem::new(Line::raw(format!(
-                    "{:<8} {}",
-                    theme.label, theme.description
-                )))
-            })
-            .collect::<Vec<_>>();
-        let mut state = ListState::default().with_selected(Some(self.selected - offset));
-        frame.render_stateful_widget(
-            List::new(rows)
-                .highlight_symbol(palette.selection_marker())
-                .highlight_style(palette.selection()),
-            rows_area,
-            &mut state,
-        );
+            .take(height)
+            .enumerate()
+        {
+            let row = Rect::new(
+                rows_area.x,
+                rows_area.y + visible_index as u16,
+                rows_area.width,
+                1,
+            );
+            PickerRow {
+                label: &theme.label,
+                description: None,
+                tag: Some(&theme.description),
+                selected: index == self.selected,
+                muted: false,
+            }
+            .render(frame, row, palette);
+        }
         self.rendered = Some(self.selected);
-        Rows::new(rows_area, offset + state.offset(), theme::themes().len(), 1)
+        dialog::Rendered {
+            rows: Rows::new(rows_area, offset, theme::themes().len(), 1),
+            controls: layout.controls,
+        }
     }
 }

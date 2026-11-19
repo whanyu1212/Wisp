@@ -64,13 +64,23 @@ pub(crate) struct Layout {
 
 impl Dialog<'_> {
     pub fn render(&self, frame: &mut Frame<'_>, area: Rect, palette: Palette) -> Layout {
+        self.render_with_border(frame, area, palette, palette.border())
+    }
+
+    pub fn render_with_border(
+        &self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        palette: Palette,
+        border_style: Style,
+    ) -> Layout {
         let block = Block::default()
             .title(format!(
                 "─ {} ─",
                 terminal_row(self.title, usize::from(area.width.saturating_sub(6)))
             ))
             .borders(Borders::ALL)
-            .border_style(palette.border());
+            .border_style(border_style);
         let mut body = block.inner(area);
         frame.render_widget(block, area);
         let mut controls = Controls::default();
@@ -115,13 +125,14 @@ impl Dialog<'_> {
 }
 
 /// Paint whole hints only. Each target covers its key and description, never a separator.
-fn render_hints(
+pub(crate) fn render_hints(
     frame: &mut Frame<'_>,
     area: Rect,
     hints: &[Hint<'_>],
     palette: Palette,
     controls: &mut Controls,
 ) -> u16 {
+    let start = controls.0.len();
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut column = 0_u16;
     for hint in hints {
@@ -164,7 +175,7 @@ fn render_hints(
     }
     let height = lines.len() as u16;
     let offset = area.height.saturating_sub(height);
-    for control in &mut controls.0 {
+    for control in &mut controls.0[start..] {
         control.area.y += offset;
     }
     for (index, line) in lines.into_iter().enumerate() {

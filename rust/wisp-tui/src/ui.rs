@@ -1,4 +1,5 @@
 use crate::detail_view::{DetailView, DetailViewRow};
+use crate::dialog::{self, Dialog, Hint};
 use crate::keybindings::{Action as KeyAction, Bindings};
 use crate::markdown::{BlockStyle, InlineStyle, TranscriptSpanStyle};
 use crate::mouse;
@@ -2100,17 +2101,17 @@ pub fn render_detail_overlay(
     state: &UiState,
     view: &mut DetailView,
     palette: Palette,
-) {
+) -> dialog::Controls {
     if let Some(card) = view
         .selected_entry()
         .and_then(|entry_id| crate::script_detail::script_card(state, entry_id))
     {
-        crate::script_detail::render(frame, area, &mut view.script, card, palette);
-        return;
+        return crate::script_detail::render(frame, area, &mut view.script, card, palette);
     }
     if let Some(presentation) = selected_detail(state, view) {
-        render_detail(frame, area, view, presentation, palette);
+        return render_detail(frame, area, view, presentation, palette);
     }
+    dialog::Controls::default()
 }
 
 fn render_detail(
@@ -2119,37 +2120,119 @@ fn render_detail(
     view: &mut DetailView,
     presentation: &ToolDetailPresentation,
     palette: Palette,
-) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(2),
-            Constraint::Length(1),
-        ])
-        .split(area);
-    let heading = if presentation.summary.is_empty() {
-        presentation.title.clone()
-    } else {
-        format!("{}  {}", presentation.title, presentation.summary)
+) -> dialog::Controls {
+    let is_diff = crate::diff_review::is_diff(presentation);
+    let title = match (is_diff, presentation.truncated) {
+        (true, true) => "review · this tool edit · before ↔ after · retained content incomplete",
+        (true, false) => "review · this tool edit · before ↔ after",
+        (false, true) => "live retained detail · retained content incomplete",
+        (false, false) => "live retained detail",
     };
-    frame.render_widget(
-        Paragraph::new(sanitize_for_terminal(&heading)).block(
-            Block::default()
-                .title(if crate::diff_review::is_diff(presentation) {
-                    " review · this tool edit · before ↔ after "
-                } else {
-                    " live retained detail "
-                })
-                .border_style(palette.border())
-                .borders(Borders::ALL),
-        ),
-        chunks[0],
-    );
+    let key = |code| crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE);
+    let hints = if is_diff {
+        vec![
+            Hint {
+                label: "Esc",
+                description: "close",
+                key: key(crossterm::event::KeyCode::Esc),
+            },
+            Hint {
+                label: "s",
+                description: "split",
+                key: key(crossterm::event::KeyCode::Char('s')),
+            },
+            Hint {
+                label: "c",
+                description: "context",
+                key: key(crossterm::event::KeyCode::Char('c')),
+            },
+            Hint {
+                label: "Tab",
+                description: "edit",
+                key: key(crossterm::event::KeyCode::Tab),
+            },
+            Hint {
+                label: "[",
+                description: "prev",
+                key: key(crossterm::event::KeyCode::Char('[')),
+            },
+            Hint {
+                label: "]",
+                description: "next",
+                key: key(crossterm::event::KeyCode::Char(']')),
+            },
+        ]
+    } else {
+        let mut hints = vec![
+            Hint {
+                label: "Esc",
+                description: "close",
+                key: key(crossterm::event::KeyCode::Esc),
+            },
+            Hint {
+                label: "↑",
+                description: "up",
+                key: key(crossterm::event::KeyCode::Up),
+            },
+            Hint {
+                label: "↓",
+                description: "down",
+                key: key(crossterm::event::KeyCode::Down),
+            },
+        ];
+        if area.width >= 56 {
+            hints.extend([
+                Hint {
+                    label: "PgUp",
+                    description: "page",
+                    key: key(crossterm::event::KeyCode::PageUp),
+                },
+                Hint {
+                    label: "PgDn",
+                    description: "page",
+                    key: key(crossterm::event::KeyCode::PageDown),
+                },
+            ]);
+        }
+        hints
+    };
+    let layout = Dialog {
+        title,
+        tabs: &[],
+        filter: None,
+        hints: &hints,
+    }
+    .render(frame, area, palette);
+    if layout.body.width == 0 || layout.body.height == 0 {
+        return layout.controls;
+    }
+    let content_area = if layout.body.height >= 3 {
+        let heading = if presentation.summary.is_empty() {
+            presentation.title.clone()
+        } else {
+            format!("{}  {}", presentation.title, presentation.summary)
+        };
+        frame.render_widget(
+            Paragraph::new(sanitize_for_terminal(&heading).replace('\n', " ")),
+            Rect::new(layout.body.x, layout.body.y, layout.body.width, 1),
+        );
+        frame.render_widget(
+            Paragraph::new("─".repeat(usize::from(layout.body.width))).style(palette.border()),
+            Rect::new(layout.body.x, layout.body.y + 1, layout.body.width, 1),
+        );
+        Rect::new(
+            layout.body.x,
+            layout.body.y + 2,
+            layout.body.width,
+            layout.body.height - 2,
+        )
+    } else {
+        layout.body
+    };
 
-    let width = usize::from(chunks[1].width.saturating_sub(2)).max(1);
-    let height = usize::from(chunks[1].height.saturating_sub(2)).max(1);
-    let lines = if crate::diff_review::is_diff(presentation) {
+    let width = usize::from(content_area.width).max(1);
+    let height = usize::from(content_area.height).max(1);
+    let lines = if is_diff {
         view.review.lines(presentation, width, height, palette)
     } else {
         view.set_geometry(presentation, width, height);
@@ -2165,29 +2248,8 @@ fn render_detail(
                 .collect()
         }
     };
-    let title = if presentation.truncated {
-        " detail • retained content incomplete "
-    } else {
-        " detail "
-    };
-    frame.render_widget(
-        Paragraph::new(Text::from(lines)).block(
-            Block::default()
-                .title(title)
-                .borders(Borders::ALL)
-                .border_style(palette.border()),
-        ),
-        chunks[1],
-    );
-    frame.render_widget(
-        Paragraph::new(if crate::diff_review::is_diff(presentation) {
-            "↑/↓ scroll · [/] hunk · Tab edit · s split · c context · Esc close"
-        } else {
-            "↑/↓ scroll · PgUp/PgDn · Home/End · Esc close"
-        })
-        .style(Style::default().fg(palette.muted)),
-        chunks[2],
-    );
+    frame.render_widget(Paragraph::new(Text::from(lines)), content_area);
+    layout.controls
 }
 
 fn detail_line(row: DetailViewRow, palette: Palette) -> Line<'static> {
@@ -3916,12 +3978,18 @@ fn editable(state: &UiState) -> bool {
     state.editor_editable()
 }
 
+struct DecisionChoice {
+    key: &'static str,
+    label: String,
+    description: Option<&'static str>,
+}
+
 /// What a pending decision shows, before it is fitted to the panel's height.
 struct DecisionPanel {
     title: String,
     tag: Option<String>,
     detail: DecisionDetail,
-    choices: Vec<(&'static str, String)>,
+    choices: Vec<DecisionChoice>,
     footnote: Option<&'static str>,
     /// False when the panel cannot show what confirming would do; it is then
     /// drawn but never armed.
@@ -4063,7 +4131,18 @@ fn confirmation_panel(pending: &crate::reducer::PendingApproval) -> DecisionPane
         detail: DecisionDetail::Complete(
             "This proposal cannot be shown in full, so it cannot be confirmed. Deny it.".into(),
         ),
-        choices: vec![("1", "Confirm".into()), ("2", "Deny".into())],
+        choices: vec![
+            DecisionChoice {
+                key: "1",
+                label: "Confirm".into(),
+                description: None,
+            },
+            DecisionChoice {
+                key: "2",
+                label: "Deny".into(),
+                description: Some("Reject the incomplete proposal."),
+            },
+        ],
         footnote: None,
         confirmable: false,
     };
@@ -4184,7 +4263,18 @@ fn confirmation_panel(pending: &crate::reducer::PendingApproval) -> DecisionPane
         title,
         tag: Some("confirm".into()),
         detail: DecisionDetail::Complete(detail),
-        choices: vec![("1", "Confirm".into()), ("2", "Deny".into())],
+        choices: vec![
+            DecisionChoice {
+                key: "1",
+                label: "Confirm".into(),
+                description: Some("Apply this change once; Wisp asks again next time."),
+            },
+            DecisionChoice {
+                key: "2",
+                label: "Deny".into(),
+                description: Some("Cancel without changing saved servers."),
+            },
+        ],
         footnote: Some("Wisp asks every time; YOLO and session grants never apply."),
         confirmable: true,
     }
@@ -4194,17 +4284,39 @@ fn approval_choices(
     tool_session: String,
     session_only_yolo: bool,
     fitting: &dyn Fn(String, &str) -> String,
-) -> Vec<(&'static str, String)> {
-    let yolo = if session_only_yolo {
-        fitting("YOLO for this session".into(), "YOLO (session)")
+) -> Vec<DecisionChoice> {
+    let (yolo, yolo_desc) = if session_only_yolo {
+        (
+            fitting("YOLO for this session".into(), "YOLO (session)"),
+            "Skip prompts for this session; never saved in this folder.",
+        )
     } else {
-        fitting("YOLO for this project".into(), "YOLO (saved)")
+        (
+            fitting("YOLO for this project".into(), "YOLO (saved)"),
+            "Skip prompts in this project; saved via /permissions.",
+        )
     };
     vec![
-        ("1", "Allow once".into()),
-        ("2", tool_session),
-        ("3", yolo),
-        ("4", "Deny".into()),
+        DecisionChoice {
+            key: "1",
+            label: "Allow once".into(),
+            description: Some("Run only this tool call."),
+        },
+        DecisionChoice {
+            key: "2",
+            label: tool_session,
+            description: Some("Approve this tool for the rest of this session."),
+        },
+        DecisionChoice {
+            key: "3",
+            label: yolo,
+            description: Some(yolo_desc),
+        },
+        DecisionChoice {
+            key: "4",
+            label: "Deny".into(),
+            description: Some("Block this tool call and tell the model."),
+        },
     ]
 }
 
@@ -4246,7 +4358,18 @@ fn trust_panel(state: &UiState) -> DecisionPanel {
         title: "Trust this project?".into(),
         tag: None,
         detail: DecisionDetail::Tail(path),
-        choices: vec![("y", "Trust project".into()), ("n", "Deny".into())],
+        choices: vec![
+            DecisionChoice {
+                key: "y",
+                label: "Trust project".into(),
+                description: Some("Allow project instructions, skills, and tools here."),
+            },
+            DecisionChoice {
+                key: "n",
+                label: "Deny".into(),
+                description: Some("Stay untrusted; block project instructions and tools."),
+            },
+        ],
         footnote: None,
         confirmable: true,
     }
@@ -4321,7 +4444,7 @@ fn decision_panel_width(area: Rect) -> usize {
 }
 
 /// The panel's preferred height: borders, every detail row, a separator, the
-/// choices, and the footnote with its gap.
+/// choices with their descriptions, and the footnote with its gap.
 fn decision_panel_height(state: &UiState, area: Rect) -> u16 {
     let width = decision_panel_width(area);
     let Some(panel) = decision_panel(state, width) else {
@@ -4331,8 +4454,13 @@ fn decision_panel_height(state: &UiState, area: Rect) -> u16 {
         DecisionDetail::Complete(content) => complete_detail_rows(content, width).len(),
         detail => decision_detail_rows(detail, width, DECISION_DETAIL_MAX_ROWS).len(),
     };
+    let description_rows = panel
+        .choices
+        .iter()
+        .filter(|choice| choice.description.is_some())
+        .count();
     let footnote = if panel.footnote.is_some() { 2 } else { 0 };
-    let preferred = 2 + details + 1 + panel.choices.len() + footnote;
+    let preferred = 2 + details + 1 + panel.choices.len() + description_rows + footnote;
     u16::try_from(preferred)
         .unwrap_or(u16::MAX)
         .min(area.height.saturating_sub(DECISION_PANEL_RESERVED_ROWS))
@@ -4345,7 +4473,20 @@ pub(crate) fn choice_line(
     width: usize,
     palette: Palette,
 ) -> Line<'static> {
-    let label = decision_row(label, width.saturating_sub(key.width() + 4));
+    choice_line_with_suffix(key, label, None, selected, width, palette)
+}
+
+pub(crate) fn choice_line_with_suffix(
+    key: &str,
+    label: &str,
+    suffix: Option<&str>,
+    selected: bool,
+    width: usize,
+    palette: Palette,
+) -> Line<'static> {
+    let suffix_text = suffix.unwrap_or_default();
+    let suffix_w = suffix_text.width();
+    let label = decision_row(label, width.saturating_sub(key.width() + 4 + suffix_w));
     // The selected row is drawn in the selection style, so its key keeps that
     // style's colours instead of the primary accent.
     let key_style = if selected {
@@ -4355,24 +4496,38 @@ pub(crate) fn choice_line(
             .fg(palette.primary)
             .add_modifier(Modifier::BOLD)
     };
-    let line = Line::from(vec![
+    let mut spans = vec![
         Span::raw(if selected { "› " } else { "  " }),
         Span::styled(key.to_owned(), key_style),
         Span::raw("  "),
-        Span::raw(label),
-    ]);
+        Span::raw(label.clone()),
+    ];
+    if !suffix_text.is_empty() {
+        let suffix_style = if selected {
+            palette
+                .selected_row(Style::default().fg(palette.muted))
+                .remove_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(palette.muted)
+        };
+        spans.push(Span::styled(suffix_text.to_owned(), suffix_style));
+    }
     if selected {
-        line.style(palette.selection())
+        let used = 2 + key.width() + 2 + label.width() + suffix_w;
+        if width > used {
+            spans.push(Span::raw(" ".repeat(width - used)));
+        }
+        Line::from(spans).style(palette.selection())
     } else {
-        line
+        Line::from(spans)
     }
 }
 
 /// Draw the pending approval or trust decision as a panel docked at the bottom
 /// of `area`. Rows are kept in priority order as the panel shrinks: the first
 /// detail row and the choices always, then a separator, further detail rows,
-/// and the footnote. A pending exit or skipped-response warning replaces the
-/// choices so it is never hidden.
+/// all choice descriptions, and the footnote. A pending exit or skipped-response
+/// warning replaces the choices so it is never hidden.
 /// `pulse_frame` makes the border breathe at that activity frame; `None` keeps it solid.
 fn render_decision_panel(
     frame: &mut Frame<'_>,
@@ -4432,31 +4587,78 @@ fn render_decision_panel(
     frame.render_widget(block, area);
 
     let alert = decision_alert(notice);
-    let bottom: Vec<Line<'static>> = match alert {
-        Some(alert) => wrapped_decision_rows(alert, width, usize::from(inner.height))
-            .into_iter()
-            .map(|row| Line::styled(row, Style::default().fg(palette.warning)))
-            .collect(),
-        None => panel
-            .choices
-            .iter()
-            .enumerate()
-            .map(|(index, (key, label))| {
-                choice_line(key, label, choice == Some(index), width, palette)
-            })
-            .collect(),
-    };
     let height = usize::from(inner.height);
-    let mut spare = height.saturating_sub(1 + bottom.len());
-    let separator = spare > 0;
-    spare = spare.saturating_sub(usize::from(separator));
-    let max_detail_rows = match panel.detail {
-        DecisionDetail::Complete(_) => 1 + spare,
-        _ => (1 + spare).min(DECISION_DETAIL_MAX_ROWS),
+    let (details, separator, bottom, footnote) = match alert {
+        Some(alert) => {
+            let bottom: Vec<Line<'static>> = wrapped_decision_rows(alert, width, height)
+                .into_iter()
+                .map(|row| Line::styled(row, Style::default().fg(palette.warning)))
+                .collect();
+            let mut spare = height.saturating_sub(1 + bottom.len());
+            let separator = spare > 0;
+            spare = spare.saturating_sub(usize::from(separator));
+            let max_detail_rows = match panel.detail {
+                DecisionDetail::Complete(_) => 1 + spare,
+                _ => (1 + spare).min(DECISION_DETAIL_MAX_ROWS),
+            };
+            let details = decision_detail_rows(&panel.detail, width, max_detail_rows);
+            (details, separator, bottom, None)
+        }
+        None => {
+            let mut spare = height.saturating_sub(1 + panel.choices.len());
+            let separator = spare > 0;
+            spare = spare.saturating_sub(usize::from(separator));
+            let max_detail_rows = match panel.detail {
+                DecisionDetail::Complete(_) => 1 + spare,
+                _ => (1 + spare).min(DECISION_DETAIL_MAX_ROWS),
+            };
+            let details = decision_detail_rows(&panel.detail, width, max_detail_rows);
+            spare = spare.saturating_sub(details.len().saturating_sub(1));
+            let description_rows = panel
+                .choices
+                .iter()
+                .filter(|item| item.description.is_some())
+                .count();
+            let show_descriptions = description_rows > 0 && spare >= description_rows;
+            if show_descriptions {
+                spare -= description_rows;
+            }
+            let footnote = panel.footnote.filter(|_| spare >= 2);
+
+            let mut bottom = Vec::with_capacity(
+                panel.choices.len()
+                    + if show_descriptions {
+                        description_rows
+                    } else {
+                        0
+                    },
+            );
+            for (index, item) in panel.choices.iter().enumerate() {
+                let selected = choice == Some(index);
+                bottom.push(choice_line(item.key, &item.label, selected, width, palette));
+                if show_descriptions {
+                    if let Some(desc) = item.description {
+                        let indent_w = item.key.width() + 4;
+                        let text = decision_row(desc, width.saturating_sub(indent_w));
+                        let mut row = format!("{}{}", " ".repeat(indent_w), text);
+                        let style = if selected {
+                            let row_w = row.width();
+                            if width > row_w {
+                                row.push_str(&" ".repeat(width - row_w));
+                            }
+                            palette
+                                .selected_row(Style::default().fg(palette.muted))
+                                .remove_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(palette.muted)
+                        };
+                        bottom.push(Line::styled(row, style));
+                    }
+                }
+            }
+            (details, separator, bottom, footnote)
+        }
     };
-    let details = decision_detail_rows(&panel.detail, width, max_detail_rows);
-    spare = spare.saturating_sub(details.len().saturating_sub(1));
-    let footnote = panel.footnote.filter(|_| alert.is_none() && spare >= 2);
 
     let mut lines: Vec<Line<'static>> = details.into_iter().map(Line::from).collect();
     if separator {
@@ -10005,5 +10207,137 @@ mod tests {
         assert!(text.contains("⠋ Compacting context… 4.0s"), "{text}");
         assert!(!text.contains('⇣'), "{text}");
         assert!(text.ends_with("4.0s · ctx ~?  [stop]"), "{text}");
+    }
+
+    #[test]
+    fn decision_choices_show_explanations_and_collapse_gracefully() {
+        let palette = Palette::default();
+        let mut state = UiState::unconfigured();
+        state.view_status = ViewStatus::WaitingForApproval;
+        state.pending_approval = Some(PendingApproval {
+            call_id: "call-1".into(),
+            name: "bash".into(),
+            arguments: json!({"command": "cargo test"}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+            safety: "command".into(),
+            grants_allowed: true,
+            session_only_yolo: false,
+        });
+
+        // Normal screen shows muted explanations and a contiguous full-width selection band.
+        let mut terminal = Terminal::new(TestBackend::new(100, 28)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_decision_panel(
+                    frame,
+                    Rect::new(0, 12, 100, 16),
+                    &state,
+                    None,
+                    Some(1),
+                    None,
+                    palette,
+                );
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let screen: String = (12..28)
+            .map(|y| (0..100).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        for expected in [
+            "Run only this tool call.",
+            "Approve this tool for the rest of this session.",
+            "Skip prompts in this project; saved via /permissions.",
+            "Block this tool call and tell the model.",
+        ] {
+            assert!(screen.contains(expected), "{screen}");
+        }
+        let option_row = (12..28)
+            .find(|&y| {
+                (0..100)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    .contains("› 2  Allow bash for this session")
+            })
+            .unwrap();
+        let desc_row = option_row + 1;
+        assert!(
+            (0..100)
+                .map(|x| buf[(x, desc_row)].symbol())
+                .collect::<String>()
+                .contains("Approve this tool for the rest of this session.")
+        );
+        for x in 2..98 {
+            assert_eq!(buf[(x, option_row)].bg, palette.selected);
+            assert_eq!(buf[(x, desc_row)].bg, palette.selected);
+        }
+        assert!(!buf[(7, desc_row)].modifier.contains(Modifier::BOLD));
+
+        // session_only_yolo never promises project persistence in its choice explanation.
+        state.pending_approval.as_mut().unwrap().session_only_yolo = true;
+        let yolo_session = render_to_string(100, 28, &state, &PromptEditor::default());
+        assert!(
+            yolo_session.contains("Skip prompts for this session; never saved in this folder.")
+        );
+        assert!(!yolo_session.contains("for this project"));
+
+        // Short screen (30x8) collapses choice descriptions to keep all 4 options + detail visible.
+        state.pending_approval.as_mut().unwrap().session_only_yolo = false;
+        let compact = render_to_string(30, 8, &state, &PromptEditor::default());
+        assert!(!compact.contains("Run only this tool call."));
+        for choice in [
+            "1  Allow once",
+            "2  Allow for session",
+            "3  YOLO (saved)",
+            "4  Deny",
+        ] {
+            assert!(compact.contains(choice), "{compact}");
+        }
+
+        // Confirm-every-call prioritizes Complete details over choice descriptions when tight.
+        state.pending_approval = Some(PendingApproval {
+            call_id: "mcp-1".into(),
+            name: "propose_mcp_server".into(),
+            arguments: json!({"name": "docs", "command": "npx", "args": ["docs"]}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+            safety: "confirm".into(),
+            grants_allowed: false,
+            session_only_yolo: false,
+        });
+        let wide_confirm = render_to_string(100, 28, &state, &PromptEditor::default());
+        assert!(wide_confirm.contains("Apply this change once; Wisp asks again next time."));
+        assert!(wide_confirm.contains("Cancel without changing saved servers."));
+        assert!(decision_panel_complete(
+            &state,
+            Rect::new(0, 0, 100, 28),
+            None
+        ));
+        // Tight height where Complete details (2 rows) + separator (1) + 2 choices (2) fit,
+        // so descriptions collapse without breaking decision_panel_complete.
+        let mut tight = Terminal::new(TestBackend::new(80, 10)).unwrap();
+        tight
+            .draw(|frame| {
+                render_decision_panel(
+                    frame,
+                    Rect::new(0, 0, 80, 7),
+                    &state,
+                    None,
+                    None,
+                    None,
+                    palette,
+                );
+            })
+            .unwrap();
+        let tight_text = tight.backend().to_string();
+        assert!(tight_text.contains("Wisp runs this command every time it starts."));
+        assert!(!tight_text.contains("Apply this change once"));
+
+        // Trust prompt shows option explanations when room allows.
+        state.view_status = ViewStatus::WaitingForTrust;
+        state.pending_approval = None;
+        state.pending_trust_project_path = Some("/repo".into());
+        let trust = render_to_string(80, 24, &state, &PromptEditor::default());
+        assert!(trust.contains("Allow project instructions, skills, and tools here."));
+        assert!(trust.contains("Stay untrusted; block project instructions and tools."));
     }
 }
