@@ -524,6 +524,10 @@ impl BackendEvent {
                 turn: u64_field(value, &event_type, "turn")?,
                 content: string_field(value, &event_type, "content")?,
                 cost: crate::web_search::message_cost(value),
+                output_tokens: value
+                    .get("usage")
+                    .and_then(|usage| usage.get("output_tokens"))
+                    .and_then(Value::as_u64),
             },
             "tool.call" => {
                 let raw_name = string_field_ref(value, &event_type, "name")?;

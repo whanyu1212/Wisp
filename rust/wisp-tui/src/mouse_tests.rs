@@ -106,13 +106,13 @@ fn capture_defaults_on_with_an_explicit_opt_out_and_filters_reports() {
         MouseEventKind::Down(MouseButton::Left),
         MouseEventKind::Drag(MouseButton::Left),
         MouseEventKind::Up(MouseButton::Left),
+        MouseEventKind::Moved,
         MouseEventKind::ScrollUp,
         MouseEventKind::ScrollDown,
     ] {
         assert!(mouse::supported(event(kind, 1, 1)));
     }
     for kind in [
-        MouseEventKind::Moved,
         MouseEventKind::Drag(MouseButton::Right),
         MouseEventKind::Up(MouseButton::Right),
         MouseEventKind::Down(MouseButton::Right),

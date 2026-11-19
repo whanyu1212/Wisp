@@ -783,13 +783,33 @@ impl QueueSubmissionPreflightError {
     }
 }
 
-/// The run in progress, as the status line counts it: the prompt that started it and
-/// the agent turn it has reached. Steers and follow-ups injected mid-run join the run
-/// rather than starting a new one.
+/// The run in progress, as the status line counts it: the prompt that started it,
+/// the agent turn it has reached, and output tokens streamed so far. Steers and
+/// follow-ups injected mid-run join the run rather than starting a new one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct RunProgress {
     pub prompt: crate::transcript::TranscriptEntryId,
     pub turn: u64,
+    /// Provider-reported (or fallback-estimated) output tokens from completed responses in this run.
+    pub completed_output_tokens: u64,
+    /// UTF-8 bytes received on `message.delta` (text + thinking) for the current in-flight response.
+    pub streaming_bytes: u64,
+}
+
+impl RunProgress {
+    pub(crate) fn new(prompt: crate::transcript::TranscriptEntryId) -> Self {
+        Self {
+            prompt,
+            turn: 0,
+            completed_output_tokens: 0,
+            streaming_bytes: 0,
+        }
+    }
+
+    pub(crate) fn streamed_tokens(self) -> u64 {
+        self.completed_output_tokens
+            .saturating_add(self.streaming_bytes.div_ceil(4))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1331,6 +1351,7 @@ pub enum BackendEvent {
         turn: u64,
         content: String,
         cost: Option<crate::web_search::MessageCost>,
+        output_tokens: Option<u64>,
     },
     /// Where the session's commands run and the branch checked out there.
     WorkspaceReported {
@@ -2027,7 +2048,7 @@ fn submit(
     let prompt = state
         .transcript
         .append_prompt_with_display(content.clone(), local_display);
-    state.run_progress = Some(RunProgress { prompt, turn: 0 });
+    state.run_progress = Some(RunProgress::new(prompt));
     state.finished_run_cost = None;
     let mut effects = vec![UiEffect::SendCommand(command)];
     // An image-only prompt has no text worth recalling from history.
@@ -2101,7 +2122,7 @@ fn init_project(
     state.cancel_requested = false;
     state.context.operation_started();
     let prompt = state.transcript.append_prompt("/init".into());
-    state.run_progress = Some(RunProgress { prompt, turn: 0 });
+    state.run_progress = Some(RunProgress::new(prompt));
     state.finished_run_cost = None;
     Ok(vec![
         UiEffect::SendCommand(command),
@@ -3256,6 +3277,7 @@ fn commit_session_and_hydrate(
     state.last_command_error = None;
     state.last_command_failed = false;
     state.transcript = SharedTranscript::default();
+    state.run_progress = None;
     state.finished_run_cost = None;
     state.history = HistoryWindow::default();
     clear_queue_cache(state);
@@ -4393,6 +4415,7 @@ fn finish_new_session(
             state.last_command_error = None;
             state.last_command_failed = false;
             state.transcript = SharedTranscript::default();
+            state.run_progress = None;
             state.finished_run_cost = None;
             state.selected_session = None;
             state.last_session = None;
@@ -5464,6 +5487,7 @@ fn handle_backend_event(
         BackendEvent::MessageStarted { turn } => {
             if let Some(run) = state.run_progress.as_mut() {
                 run.turn = run.turn.max(turn);
+                run.streaming_bytes = 0;
             }
             state.transcript.begin_message(turn);
             Ok(vec![UiEffect::RequestRender])
@@ -5473,6 +5497,9 @@ fn handle_backend_event(
             delta,
             content_kind: MessageContentKind::Text,
         } => {
+            if let Some(run) = state.run_progress.as_mut() {
+                run.streaming_bytes = run.streaming_bytes.saturating_add(delta.len() as u64);
+            }
             if state.stream_pacing {
                 state.transcript.append_paced_message_delta(turn, &delta);
             } else {
@@ -5485,6 +5512,9 @@ fn handle_backend_event(
             delta,
             content_kind: MessageContentKind::Thinking,
         } => {
+            if let Some(run) = state.run_progress.as_mut() {
+                run.streaming_bytes = run.streaming_bytes.saturating_add(delta.len() as u64);
+            }
             state.transcript.append_thinking_delta(turn, &delta);
             Ok(vec![UiEffect::RequestRender])
         }
@@ -5506,10 +5536,9 @@ fn handle_backend_event(
             turn,
             content,
             cost,
+            output_tokens,
         } => {
-            state
-                .transcript
-                .complete_message_with_cost(turn, content, cost);
+            record_message_completed(state, turn, content, cost, output_tokens);
             Ok(vec![UiEffect::RequestRender])
         }
         BackendEvent::DirectoryChanged { previous, cwd } => {
@@ -5812,7 +5841,7 @@ fn adopt_wake_run(state: &mut UiState, command_id: String) -> Vec<UiEffect> {
     let prompt = state
         .transcript
         .append_prompt(background_processes::WAKE_PROMPT_LABEL.to_owned());
-    state.run_progress = Some(RunProgress { prompt, turn: 0 });
+    state.run_progress = Some(RunProgress::new(prompt));
     state.finished_run_cost = None;
     vec![UiEffect::RequestRender]
 }
@@ -5910,6 +5939,25 @@ fn observe_connection_event(
     Ok(Some(effects))
 }
 
+fn record_message_completed(
+    state: &mut UiState,
+    turn: u64,
+    content: String,
+    cost: Option<crate::web_search::MessageCost>,
+    output_tokens: Option<u64>,
+) -> Option<crate::transcript::TranscriptEntryId> {
+    if let Some(run) = state.run_progress.as_mut() {
+        let fallback = run.streaming_bytes.div_ceil(4);
+        run.completed_output_tokens = run
+            .completed_output_tokens
+            .saturating_add(output_tokens.unwrap_or(fallback));
+        run.streaming_bytes = 0;
+    }
+    state
+        .transcript
+        .complete_message_with_cost(turn, content, cost)
+}
+
 /// Applies the wrapped event, then records which transcript entry the backend's
 /// `entry_id` names. Events with no entry to attach go through
 /// `handle_backend_event` unchanged.
@@ -5926,9 +5974,8 @@ fn observe_message_origin(
             turn,
             content,
             cost,
-        } => state
-            .transcript
-            .complete_message_with_cost(*turn, content.clone(), cost.clone()),
+            output_tokens,
+        } => record_message_completed(state, *turn, content.clone(), cost.clone(), *output_tokens),
         BackendEvent::ToolResult(input) => {
             clear_settled_child_approval(state, &input.call_id);
             let target = state.transcript.observe_tool_result(*input.clone());
@@ -6161,6 +6208,10 @@ fn finish_current_command(
     state.pending_trust_request_id = None;
     state.pending_trust_project_path = None;
     state.cancel_requested = false;
+    if let Some(run) = state.run_progress.as_mut() {
+        run.completed_output_tokens = 0;
+        run.streaming_bytes = 0;
+    }
     state.transcript.finish_active_response();
     state.transcript.settle_unresolved_tools(if ok {
         "tool result missing"
@@ -6317,6 +6368,7 @@ mod tests {
                 turn: 1,
                 content: "authoritative".into(),
                 cost: None,
+                output_tokens: None,
             }),
             &mut ids,
         )
@@ -11348,6 +11400,7 @@ mod tests {
                     turn: 1,
                     content: "new reply".into(),
                     cost: None,
+                    output_tokens: None,
                 }),
                 &mut ids,
             )
@@ -13882,5 +13935,151 @@ mod tests {
             );
             assert_eq!(actual, expected, "{command_type:?} ok={ok} {error:?}");
         }
+    }
+
+    #[test]
+    fn run_progress_tracks_live_and_completed_tokens() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+        reduce(&mut state, UiAction::Submit("hello".into()), &mut ids).unwrap();
+        assert_eq!(state.run_progress.unwrap().streamed_tokens(), 0);
+
+        for event in [
+            BackendEvent::MessageStarted { turn: 1 },
+            BackendEvent::MessageDelta {
+                turn: 1,
+                delta: "123456".into(),
+                content_kind: MessageContentKind::Thinking,
+            },
+            BackendEvent::MessageDelta {
+                turn: 1,
+                delta: "abcdef".into(),
+                content_kind: MessageContentKind::Text,
+            },
+        ] {
+            reduce(&mut state, UiAction::BackendEvent(event), &mut ids).unwrap();
+        }
+        assert_eq!(state.run_progress.unwrap().streamed_tokens(), 3);
+
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::MessageCompleted {
+                turn: 1,
+                content: "abcdef".into(),
+                cost: None,
+                output_tokens: Some(42),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(state.run_progress.unwrap().completed_output_tokens, 42);
+        assert_eq!(state.run_progress.unwrap().streaming_bytes, 0);
+        assert_eq!(state.run_progress.unwrap().streamed_tokens(), 42);
+
+        // Wrapped message completions reconcile reported usage or fall back to byte ceiling.
+        for event in [
+            BackendEvent::MessageStarted { turn: 2 },
+            BackendEvent::MessageDelta {
+                turn: 2,
+                delta: "12345".into(),
+                content_kind: MessageContentKind::Text,
+            },
+        ] {
+            reduce(&mut state, UiAction::BackendEvent(event), &mut ids).unwrap();
+        }
+        assert_eq!(state.run_progress.unwrap().streamed_tokens(), 44);
+
+        let wrapped_without_usage = BackendEvent::MessageOrigin {
+            entry_id: "origin-2".into(),
+            tool_call_ids: Vec::new(),
+            event: Box::new(
+                BackendEvent::from_projection_value(&serde_json::json!({
+                    "type": "message.completed",
+                    "turn": 2,
+                    "content": "12345"
+                }))
+                .unwrap(),
+            ),
+        };
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(wrapped_without_usage),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(state.run_progress.unwrap().completed_output_tokens, 44);
+        assert_eq!(state.run_progress.unwrap().streamed_tokens(), 44);
+
+        for event in [
+            BackendEvent::MessageStarted { turn: 3 },
+            BackendEvent::MessageDelta {
+                turn: 3,
+                delta: "123456789".into(),
+                content_kind: MessageContentKind::Text,
+            },
+        ] {
+            reduce(&mut state, UiAction::BackendEvent(event), &mut ids).unwrap();
+        }
+        assert_eq!(state.run_progress.unwrap().streamed_tokens(), 47);
+
+        let wrapped_with_usage = BackendEvent::MessageOrigin {
+            entry_id: "origin-3".into(),
+            tool_call_ids: Vec::new(),
+            event: Box::new(
+                BackendEvent::from_projection_value(&serde_json::json!({
+                    "type": "message.completed",
+                    "turn": 3,
+                    "content": "123456789",
+                    "usage": { "output_tokens": 10 }
+                }))
+                .unwrap(),
+            ),
+        };
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(wrapped_with_usage),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(state.run_progress.unwrap().completed_output_tokens, 54);
+        assert_eq!(state.run_progress.unwrap().streamed_tokens(), 54);
+
+        // Mid-stream deltas followed by cancellation/completion reset token counters
+        // while keeping `run_progress.prompt` so turn rails stay anchored.
+        let prompt = state.run_progress.unwrap().prompt;
+        let command_id = state.current_command.as_ref().unwrap().id.clone();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::MessageStarted { turn: 4 }),
+            &mut ids,
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::MessageDelta {
+                turn: 4,
+                delta: "partial text".into(),
+                content_kind: MessageContentKind::Text,
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(state.run_progress.unwrap().streamed_tokens(), 57);
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::CommandFinished {
+                command_id,
+                command_type: "prompt".into(),
+                ok: false,
+                error: Some("cancelled: user interrupted".into()),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        let finished = state.run_progress.unwrap();
+        assert_eq!(finished.prompt, prompt);
+        assert_eq!(finished.completed_output_tokens, 0);
+        assert_eq!(finished.streaming_bytes, 0);
+        assert_eq!(finished.streamed_tokens(), 0);
     }
 }

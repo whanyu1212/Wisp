@@ -1,6 +1,8 @@
 //! Read-only presentation of backend context budgets and session totals.
 
-use crate::context_split::{self, Split, abbreviated, approximate, budget_tokens};
+use crate::context_split::{
+    self, Split, abbreviated, approximate, budget_tokens, compact_tokens_upper,
+};
 use crate::reducer::UiState;
 use crate::side_panel::{clip_spans, spread};
 use crate::theme::Palette;
@@ -123,6 +125,25 @@ pub(crate) fn indicator(state: &UiState, width: usize) -> String {
         meter
     } else {
         format!("ctx {percent}")
+    }
+}
+
+/// Compact context text for the running status row (`55.5K / 400K`, `~55.5K / 400K`,
+/// `ctx ~55.5K` without a known window, or `ctx ~…` / `ctx ~?` before a budget).
+pub(crate) fn status_text(state: &UiState) -> String {
+    let Some(budget) = &state.context.budget else {
+        return if state.context.loading() {
+            "ctx ~…"
+        } else {
+            "ctx ~?"
+        }
+        .into();
+    };
+    let prefix = if approximate(budget) { "~" } else { "" };
+    let used = compact_tokens_upper(budget_tokens(budget));
+    match budget.context_window.filter(|window| *window > 0) {
+        Some(window) => format!("{prefix}{used} / {}", compact_tokens_upper(window)),
+        None => format!("ctx {prefix}{used}"),
     }
 }
 

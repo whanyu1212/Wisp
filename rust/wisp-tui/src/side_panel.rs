@@ -1906,6 +1906,7 @@ mod tests {
                     },
                     None,
                     ui::Motion::default(),
+                    ui::StatusTimers::default(),
                     None,
                     Some(panel),
                 );
@@ -2128,7 +2129,12 @@ mod tests {
         let text = panel_text(&screen(&lone, &mut SidePanel::default(), 200), 200);
         assert!(text.contains("Changed files"), "{text}");
         assert!(!text.contains("Recent turns"), "{text}");
-        lone.run_progress = Some(crate::reducer::RunProgress { prompt, turn: 1 });
+        lone.run_progress = Some(crate::reducer::RunProgress {
+            prompt,
+            turn: 1,
+            completed_output_tokens: 0,
+            streaming_bytes: 0,
+        });
         lone.view_status = ViewStatus::Running;
         let text = panel_text(&screen(&lone, &mut SidePanel::default(), 200), 200);
         assert!(!text.contains("Recent turns"), "{text}");
@@ -2611,7 +2617,12 @@ mod tests {
     fn running() -> UiState {
         let mut state = session();
         let prompt = state.transcript.append_prompt("now push it".into());
-        state.run_progress = Some(crate::reducer::RunProgress { prompt, turn: 6 });
+        state.run_progress = Some(crate::reducer::RunProgress {
+            prompt,
+            turn: 6,
+            completed_output_tokens: 0,
+            streaming_bytes: 0,
+        });
         state.view_status = ViewStatus::Running;
         state.transcript.observe_tool_call(push_call());
         state
@@ -2869,10 +2880,15 @@ mod tests {
         for expected in ["▸ Recent turns 3", "collapsed while running"] {
             assert!(panel.contains(expected), "{expected}\n{panel}");
         }
-        // The status line above the composer names the run's turn; the panel does not.
+        // The status line above the composer carries live run activity; the panel does not.
         assert!(!has_now(&panel), "{panel}");
+        assert!(!panel.contains("Bash git push"), "{panel}");
         assert!(!panel.contains("turn 6"), "{panel}");
-        assert!(rows.iter().any(|row| row.contains("turn 6")), "{rows:#?}");
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("⠋ Bash git push -u origin fix/timeouts")),
+            "{rows:#?}"
+        );
         // The turn list folds, and an empty queue takes no rows.
         assert!(!panel.contains("4m 12s ✓"), "{panel}");
         assert!(!panel.contains("Queue"), "{panel}");
@@ -3356,6 +3372,8 @@ mod tests {
         state.run_progress = Some(crate::reducer::RunProgress {
             prompt: first,
             turn: 1,
+            completed_output_tokens: 0,
+            streaming_bytes: 0,
         });
         assert_eq!(
             crate::context_view::turn_cost(&state).as_deref(),
@@ -3383,7 +3401,12 @@ mod tests {
         };
         let mut state = session();
         let prompt = state.transcript.append_prompt("push it".into());
-        state.run_progress = Some(crate::reducer::RunProgress { prompt, turn: 3 });
+        state.run_progress = Some(crate::reducer::RunProgress {
+            prompt,
+            turn: 3,
+            completed_output_tokens: 0,
+            streaming_bytes: 0,
+        });
         state
             .transcript
             .complete_message_with_cost(3, "Pushing.".into(), priced(210_000_000));

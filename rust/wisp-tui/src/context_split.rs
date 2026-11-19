@@ -53,6 +53,32 @@ pub(crate) fn abbreviated(value: u64) -> String {
     }
 }
 
+/// `55.5K`, `400K`, `1.2M`, or the plain count under a thousand (trimming `.0`).
+pub(crate) fn compact_tokens_upper(value: u64) -> String {
+    if value < 1_000 {
+        return value.to_string();
+    }
+    let tenths_k = value.saturating_add(50) / 100;
+    if tenths_k < 10_000 {
+        let whole = tenths_k / 10;
+        let frac = tenths_k % 10;
+        if frac == 0 {
+            format!("{whole}K")
+        } else {
+            format!("{whole}.{frac}K")
+        }
+    } else {
+        let tenths_m = value.saturating_add(50_000) / 100_000;
+        let whole = tenths_m / 10;
+        let frac = tenths_m % 10;
+        if frac == 0 {
+            format!("{whole}M")
+        } else {
+            format!("{whole}.{frac}M")
+        }
+    }
+}
+
 /// The current context, with its split when the backend reported one.
 pub(crate) struct Split<'a> {
     /// Tokens in use, from the latest request or statistics.
@@ -233,8 +259,10 @@ pub(crate) fn bar(split: &Split<'_>, width: usize, palette: Palette) -> Line<'st
     }
     let sources = split.sources();
     let segments: Vec<(u64, Color)> = if sources.is_empty() {
-        let pressured = split.total as f64 / window as f64 >= crate::ui::CONTEXT_WARNING_FILL;
-        let color = if pressured {
+        let fill = split.total as f64 / window as f64;
+        let color = if fill >= crate::ui::CONTEXT_CRITICAL_FILL {
+            palette.error
+        } else if fill >= crate::ui::CONTEXT_WARNING_FILL {
             palette.warning
         } else {
             palette.secondary

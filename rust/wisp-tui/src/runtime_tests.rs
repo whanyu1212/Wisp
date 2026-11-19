@@ -532,3 +532,64 @@ async fn input_failure_restores_terminal_and_wins_over_cleanup_errors() {
     assert!(restored.load(Ordering::SeqCst));
     assert!(state.escalated.load(Ordering::SeqCst));
 }
+
+#[test]
+fn input_coalesces_pointer_motion_without_dropping_trailing_events() {
+    let moved = |column, row| {
+        Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    };
+    let source = ScriptedEvents::new([
+        moved(1, 2),
+        moved(12, 8),
+        moved(77, 19),
+        Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 77,
+            row: 19,
+            modifiers: KeyModifiers::NONE,
+        }),
+    ]);
+    let (result, received) = inputs(source, true);
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(received.len(), 2);
+    assert!(matches!(
+        received[0],
+        Input::Mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 77,
+            row: 19,
+            ..
+        })
+    ));
+    assert!(matches!(
+        received[1],
+        Input::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 77,
+            row: 19,
+            ..
+        })
+    ));
+
+    // A motion burst exceeding MOVE_BATCH_MAX_EVENTS still forwards the trailing key.
+    let mut events: Vec<Event> = (0..100).map(|idx| moved(idx, idx % 20)).collect();
+    events.push(Event::Key(KeyEvent::new(
+        KeyCode::Char('x'),
+        KeyModifiers::NONE,
+    )));
+    let (result, received) = inputs(ScriptedEvents::new(events), true);
+    assert!(result.is_ok(), "{result:?}");
+    assert!(received.iter().any(|input| matches!(
+        input,
+        Input::Key(KeyEvent {
+            code: KeyCode::Char('x'),
+            ..
+        })
+    )));
+    assert!(received.len() < 10);
+}

@@ -337,6 +337,7 @@ async fn decision_arrow_keys_survive_tool_output_during_the_same_decision() {
             turn: 2,
             content: "parallel tool output".into(),
             cost: None,
+            output_tokens: None,
         }),
         &writer,
         8192,
@@ -390,6 +391,7 @@ async fn ordinary_typing_and_paste_survive_unrelated_workflow_revision_changes()
                 turn: 1,
                 content: "tool output".into(),
                 cost: None,
+                output_tokens: None,
             }),
             &writer,
             8192,
@@ -435,6 +437,7 @@ async fn wheel_scroll_survives_workflow_revision_changes_during_a_run() {
                 turn: 2,
                 content: "tool output".into(),
                 cost: None,
+                output_tokens: None,
             }),
             &writer,
             8192,
@@ -595,6 +598,7 @@ async fn selection_with_file_completion_survives_workflow_revision_changes() {
             turn: 1,
             content: "tool output".into(),
             cost: None,
+            output_tokens: None,
         }),
         &writer,
         8192,
@@ -1641,7 +1645,7 @@ fn working_indicator_breathes() {
         ui.activity_frame = frame;
         // Frames 0 and 8 show the same spinner glyph, so only the breath differs.
         let cell = working_indicator(&screen(ui));
-        assert_eq!(cell.symbol(), "◐");
+        assert_eq!(cell.symbol(), "⠋");
         (cell.fg, cell.modifier)
     };
     let mut ui = active_ui();
@@ -1744,4 +1748,267 @@ async fn finished_card_needs_smooth_motion() {
         assert!(ui.finished_cards.is_empty());
         assert!(!ui.activity_animation_active());
     }
+}
+
+#[tokio::test]
+async fn stop_button_click_cancels_active_run_and_respects_overlays_and_prefixes() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
+    let (writer, mut commands) = mpsc::channel(16);
+    let mut ui = active_ui();
+    ui.mouse_enabled = true;
+    let _ = screen(&mut ui);
+    let stop_rect = ui
+        .mouse_frame
+        .as_ref()
+        .unwrap()
+        .conversation
+        .stop_button
+        .expect("stop button rect");
+    let click_stop = MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: stop_rect.x,
+        row: stop_rect.y,
+        modifiers: KeyModifiers::NONE,
+    };
+
+    // An open help overlay blocks clicks on the underlying status row.
+    ui.handle_input(
+        Input::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL)),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    let _ = screen(&mut ui);
+    ui.handle_input(Input::Mouse(click_stop), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(commands.try_recv().is_err());
+    assert!(!ui.state.cancel_requested);
+
+    ui.handle_input(key(KeyCode::Esc), &writer, 8192)
+        .await
+        .unwrap();
+    let _ = screen(&mut ui);
+
+    // An incoming decision in the event prefix invalidates a queued `[stop]` click.
+    let stale_click = PendingInput::capture(Input::Mouse(click_stop), &ui, 1);
+    ui.dispatch(approval("call-stop-guard"), &writer, 8192)
+        .await
+        .unwrap();
+    stale_click.apply(&mut ui, &writer, 8192).await.unwrap();
+    assert!(commands.try_recv().is_err());
+    assert!(!ui.state.cancel_requested);
+
+    // A queued tool call in the prefix leaves `[stop]` valid on a clean running frame.
+    let mut ui = active_ui();
+    ui.mouse_enabled = true;
+    let _ = screen(&mut ui);
+    let surviving_click = PendingInput::capture(Input::Mouse(click_stop), &ui, 1);
+    ui.dispatch(
+        UiAction::BackendEvent(
+            BackendEvent::from_projection_value(&json!({
+                "type": "tool.call",
+                "call_id": "tool-stop-1",
+                "name": "bash",
+                "arguments": {"command": "cargo test"}
+            }))
+            .unwrap(),
+        ),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    surviving_click.apply(&mut ui, &writer, 8192).await.unwrap();
+
+    let WriterMessage::Frame { payload, .. } = commands.try_recv().expect("cancel RPC") else {
+        panic!("expected frame");
+    };
+    let sent: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+    assert_eq!(sent["type"], "cancel");
+    assert!(ui.state.cancel_requested);
+
+    let cancelling = screen(&mut ui);
+    let text = cancelling
+        .content
+        .iter()
+        .map(ratatui::buffer::Cell::symbol)
+        .collect::<String>();
+    assert!(text.contains("Cancelling…"), "{text}");
+    assert!(
+        ui.mouse_frame
+            .as_ref()
+            .unwrap()
+            .conversation
+            .stop_button
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn pointer_hover_highlights_stop_without_idle_repaints() {
+    use crossterm::event::{MouseEvent, MouseEventKind};
+    use ratatui::style::Modifier;
+
+    let (writer, _commands) = mpsc::channel(16);
+    let mut ui = active_ui();
+    ui.mouse_enabled = true;
+    let palette = ui.palette();
+    let initial = screen(&mut ui);
+    let stop_rect = ui
+        .mouse_frame
+        .as_ref()
+        .unwrap()
+        .conversation
+        .stop_button
+        .expect("stop rect");
+    assert_eq!(initial[(stop_rect.x, stop_rect.y)].fg, palette.muted);
+    assert!(
+        !initial[(stop_rect.x, stop_rect.y)]
+            .modifier
+            .contains(Modifier::BOLD)
+    );
+
+    let moved = |column, row| {
+        Input::Mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    };
+
+    // Moving outside `[stop]` never requests a repaint.
+    ui.handle_input(moved(0, 0), &writer, 8192).await.unwrap();
+    assert!(!ui.render_pending);
+
+    // Moving onto `[stop]` repaints with error foreground + bold.
+    ui.handle_input(moved(stop_rect.x, stop_rect.y), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(ui.render_pending);
+    let hovered = screen(&mut ui);
+    assert_eq!(hovered[(stop_rect.x, stop_rect.y)].fg, palette.error);
+    assert!(
+        hovered[(stop_rect.x, stop_rect.y)]
+            .modifier
+            .contains(Modifier::BOLD)
+    );
+
+    // Moving within `[stop]` avoids redundant repaints.
+    ui.handle_input(moved(stop_rect.x + 1, stop_rect.y), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(!ui.render_pending);
+
+    // Focus loss clears hover and suppresses hover while unfocused.
+    ui.handle_input(Input::Focus(false), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(ui.render_pending);
+    let unfocused = screen(&mut ui);
+    assert_eq!(unfocused[(stop_rect.x, stop_rect.y)].fg, palette.muted);
+    ui.handle_input(moved(stop_rect.x, stop_rect.y), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(!ui.render_pending);
+
+    // Regaining focus restores hover; leaving `[stop]` clears highlight again.
+    ui.handle_input(Input::Focus(true), &writer, 8192)
+        .await
+        .unwrap();
+    ui.handle_input(moved(stop_rect.x, stop_rect.y), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(ui.render_pending);
+    let rehovered = screen(&mut ui);
+    assert_eq!(rehovered[(stop_rect.x, stop_rect.y)].fg, palette.error);
+    ui.handle_input(moved(0, stop_rect.y), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(ui.render_pending);
+    let unhovered = screen(&mut ui);
+    assert_eq!(unhovered[(stop_rect.x, stop_rect.y)].fg, palette.muted);
+    assert!(
+        !unhovered[(stop_rect.x, stop_rect.y)]
+            .modifier
+            .contains(Modifier::BOLD)
+    );
+
+    // Idle screens never mark render_pending on pointer motion.
+    ui.state.view_status = ViewStatus::Idle;
+    ui.state.interaction_status = InteractionStatus::Idle;
+    ui.state.current_command = None;
+    let _ = screen(&mut ui);
+    ui.handle_input(moved(stop_rect.x, stop_rect.y), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(!ui.render_pending);
+}
+
+#[tokio::test]
+async fn motion_still_freezes_braille_spinner_across_ticks() {
+    let (writer, _commands) = mpsc::channel(16);
+    for case in ["no_color", "motion_off", "unfocused"] {
+        let mut ui = active_ui();
+        match case {
+            "no_color" => ui.no_color = true,
+            "motion_off" => ui.motion_allowed = false,
+            "unfocused" => {
+                ui.handle_input(Input::Focus(false), &writer, 8192)
+                    .await
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(ui.motion_mode(), MotionMode::Still, "{case}");
+        ui.activity_frame = 0;
+        let first = working_indicator(&screen(&mut ui));
+        ui.activity_frame = 3;
+        let later = working_indicator(&screen(&mut ui));
+        assert_eq!(first.symbol(), "⠋", "{case}");
+        assert_eq!(later.symbol(), "⠋", "{case}");
+    }
+}
+
+#[tokio::test]
+async fn phase_clock_resets_while_waiting_on_decision() {
+    let (writer, _commands) = mpsc::channel(16);
+    let mut ui = active_ui();
+    let _ = screen(&mut ui);
+    assert!(ui.activity_clock.is_some());
+    assert!(ui.phase_clock.is_some());
+
+    // Blocking on an approval prompt clears the phase timer while keeping the total
+    // run timer intact.
+    ui.dispatch(approval("call-clock-1"), &writer, 8192)
+        .await
+        .unwrap();
+    let _ = screen(&mut ui);
+    assert!(ui.activity_clock.is_some());
+    assert!(ui.phase_clock.is_none());
+
+    // Denying the approval resumes execution with a fresh phase timer.
+    ui.dispatch(
+        UiAction::BackendEvent(
+            BackendEvent::from_projection_value(&json!({
+                "type": "tool.approval.resolved",
+                "call_id": "call-clock-1",
+                "name": "shell",
+                "approved": false,
+                "reason": "denied"
+            }))
+            .unwrap(),
+        ),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ui.state.view_status, ViewStatus::Running);
+    let _ = screen(&mut ui);
+    assert!(ui.activity_clock.is_some());
+    assert!(ui.phase_clock.is_some());
 }

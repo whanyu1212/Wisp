@@ -891,6 +891,7 @@ mod tests {
                     turn,
                     content,
                     cost,
+                    ..
                 } = BackendEvent::from_projection_value(&reply).unwrap()
                 else {
                     panic!("expected a completed message");
