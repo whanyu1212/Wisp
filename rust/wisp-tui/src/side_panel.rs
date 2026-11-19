@@ -1197,8 +1197,10 @@ struct BackgroundRows {
 
 /// `Background`: processes the agent started that are still running, numbered as
 /// `/ps` and `/kill` number them, with how long each has run, then those that ended
-/// with their outcome; past `shown` rows the rest are counted. The open peek follows
-/// its process's row. Nothing while none are listed.
+/// with their outcome; past `shown` rows the rest are counted. The docked panel
+/// leaves clean exits to that count, so only a process that still runs or went wrong
+/// takes a row; with focus every process is listed. The open peek follows its
+/// process's row. Nothing while none are listed.
 fn background_lines(
     state: &UiState,
     panel: &SidePanel,
@@ -1267,7 +1269,11 @@ fn background_lines(
             peek_span = Some((first, lines.len() - 1));
         }
     }
-    for process in finished.iter().take(shown.saturating_sub(running.len())) {
+    let finished_rows = finished
+        .iter()
+        .filter(|process| panel.overlay_open() || process.state != ProcessDisplayState::Completed)
+        .take(shown.saturating_sub(running.len()));
+    for process in finished_rows {
         let (mark, color) = match process.state {
             ProcessDisplayState::Completed => ("✓ ", palette.success),
             ProcessDisplayState::Cancelled => ("■ ", palette.muted),
@@ -1298,12 +1304,9 @@ fn background_lines(
             peek_span = Some((first, lines.len() - 1));
         }
     }
-    let listed = running.len() + finished.len();
-    if listed > shown {
-        lines.push(Line::styled(
-            format!("+{} more · /ps", listed - shown),
-            muted,
-        ));
+    let unlisted = (running.len() + finished.len()).saturating_sub(process_rows.len());
+    if unlisted > 0 {
+        lines.push(Line::styled(format!("+{unlisted} more · /ps"), muted));
     }
     Some(BackgroundRows {
         lines,
@@ -2913,6 +2916,36 @@ mod tests {
         focus_section(&mut panel, &state, Section::Background);
         assert_eq!(panel.key(KeyCode::Enter, &state), OverlayKey::Moved);
         assert_eq!(panel.peek.as_deref(), Some("server"));
+    }
+
+    #[test]
+    fn docked_lists_only_failed_exits() {
+        let mut state = session();
+        for (process_id, exit_code) in [("lint", 0), ("tests", 1)] {
+            backend(
+                &mut state,
+                crate::reducer::BackendEvent::from_projection_value(&serde_json::json!({
+                    "type": "process.ended", "timestamp": "2026-11-13T09:00:00Z",
+                    "process_id": process_id, "command": format!("make {process_id}"),
+                    "state": "completed", "exit_code": exit_code,
+                    "duration_ms": 1_000, "notify": true,
+                }))
+                .unwrap(),
+            );
+        }
+
+        // Docked, the clean exit is only counted.
+        let docked = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
+        assert!(docked.contains("Background 2 ended"), "{docked}");
+        assert!(docked.contains("✗ make tests"), "{docked}");
+        assert!(!docked.contains("make lint"), "{docked}");
+        assert!(docked.contains("+1 more · /ps"), "{docked}");
+
+        // Opened over the conversation, as `/ps` opens it, both are listed.
+        let focused = overlay_text(&state);
+        assert!(focused.contains("✓ make lint"), "{focused}");
+        assert!(focused.contains("✗ make tests"), "{focused}");
+        assert!(!focused.contains("more · /ps"), "{focused}");
     }
 
     #[test]

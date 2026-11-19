@@ -5679,9 +5679,13 @@ fn handle_backend_event(
             exit_code,
             duration_ms,
         } => {
-            state
-                .transcript
-                .observe_process_ended(&process_id, ended, exit_code, duration_ms);
+            state.transcript.observe_process_ended(
+                &process_id,
+                &background_processes::command_line(&command),
+                ended,
+                exit_code,
+                duration_ms,
+            );
             background_processes::observe_process_ended(
                 state,
                 &process_id,

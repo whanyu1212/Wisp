@@ -101,7 +101,8 @@ Tool calls read as a list of actions. Each is one line: a status mark (`•` don
 denied or cancelled, `?` awaiting approval, a spinner while it runs), a verb and what it acted on,
 such as `• Ran cargo test 3.2s` or `• Read src/retry.rs`, then how long it took. Shell commands
 are shown as typed, with syntax highlighting. Consecutive reads, searches and listings fold into
-one `Explored` line, successful repeated commands into `Ran N commands`, and repeated MCP calls
+one `Explored` line, successful repeated commands into `Ran N commands`, adjacent background
+processes that exited cleanly into `Background N commands · passed`, and repeated MCP calls
 into one line with a count; opening a group hangs its calls under it on `└` rows. Exploration and
 MCP groups with non-success states spell out their outcomes, such as `11 succeeded · 1 failed`,
 with denied, cancelled, pending, running and awaiting-approval calls counted separately. A narrow
@@ -272,12 +273,12 @@ folder and branch, compact context usage, MCP servers, skills, changed files, an
 earlier turns. The latest turn is left out because its prompt stays pinned above its reply, so a
 session with one turn has no turn list. While processes the agent started with
 `bash operation=start` are running, a **Background** section lists them, numbered, with how long
-each has run (the first five, until the panel has focus). A process that ended stays listed with how
-it ended (finished, failed with its exit code, timed out, stopped) for as long as the backend keeps
-it. Selecting a row opens its peek: its latest output under the row, read again each second while it
+each has run (the first five, until the panel has focus). A process that failed, timed out, or was
+stopped stays listed with how it ended for as long as the backend keeps it; one that finished
+cleanly is only counted in the heading until the panel has focus, which lists every process. Selecting a row opens its peek: its latest output under the row, read again each second while it
 runs, without moving the transcript. In the peek, Enter opens the process's card in the transcript,
-`x` asks to stop it and `y` confirms, and Esc closes the peek. While any are running, a strip under the composer
-shows how many and their commands, at any terminal width; Down from an empty composer, a click
+`x` asks to stop it and `y` confirms, and Esc closes the peek. While any are running and the sidebar is not docked, a strip under the composer
+shows how many and their commands; Down from an empty composer, a click
 on the strip, or `/ps` focuses the panel on the first one. Stopping one tells the agent
 with its next prompt if it asked to hear when the process stops, and never wakes it. Model, effort, and YOLO remain in the composer,
 and the panel's keys join the main footer. Context's **Breakdown** expands source totals and costs; `/context` opens

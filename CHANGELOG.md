@@ -51,6 +51,11 @@ use the same release.
   (#1066)
 - Finished TUI selection bands and readable ANSI diffs, shared model and session picker dialog
   frames, and fixed a docs-search close/reopen race. (#1064, #1065, #1072)
+- The TUI shows each background process in fewer places: the status line no longer names one,
+  the strip under the composer hides beside a docked side panel, the docked panel lists only
+  processes that are running or went wrong, and adjacent clean exits fold into one
+  `Background N commands · passed` transcript row. A process row with no label takes the
+  command from its exit event. (#1078)
 
 ### Compatibility
 
