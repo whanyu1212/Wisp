@@ -357,6 +357,20 @@ def test_builtin_gemini_prices_change_after_introductory_period(
     ) == tuple(Decimal(rate) for rate in rates)
 
 
+def test_builtin_gemini_4_neon_price() -> None:
+    selected = ModelRegistry(builtin_catalog()).pricing(
+        "google", "gemini-4-neon", input_tokens=500_000, at=date(2026, 11, 19)
+    )
+
+    assert selected is not None
+    band = selected[1]
+    assert (
+        band.input_usd_per_million,
+        band.cache_read_usd_per_million,
+        band.output_usd_per_million,
+    ) == (Decimal("3"), Decimal("0.15"), Decimal("15"))
+
+
 @pytest.mark.parametrize(
     ("model", "rates"),
     [

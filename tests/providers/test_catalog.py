@@ -307,6 +307,7 @@ def test_builtin_catalog_is_a_complete_checked_in_agent_model_matrix() -> None:
             "deepseek-flash",
         ),
         "google": (
+            "gemini-4-neon",
             "gemini-4-hydrogen",
             "gemini-4-carbon",
             "gemini-4-argon",
@@ -455,6 +456,22 @@ def test_builtin_gpt_6_2_models_expose_verified_capabilities(provider: str, mode
     assert entry.default_model == "gpt-5.6-sol"
 
 
+def test_builtin_gemini_4_neon_capabilities() -> None:
+    registry = ModelRegistry(builtin_catalog())
+    entry = next(entry for entry in registry.providers() if entry.name == "google")
+    model = "gemini-4-neon"
+
+    assert registry.canonical_model("google", model) == model
+    assert registry.model_lifecycle("google", model) == "stable"
+    assert registry.supports_image_input("google", model)
+    assert registry.context_window("google", model) == 1_048_576
+    assert entry.default_effort[model] == "HIGH"
+    # Gemini 4 models take no MINIMAL thinking level.
+    assert not registry.supports_effort("google", model, "MINIMAL")
+    # Adding a model does not move the provider's default.
+    assert entry.default_model == "gemini-3.6-flash"
+
+
 def test_builtin_catalog_defaults_match_provider_implementations() -> None:
     defaults = {
         "openai": DEFAULT_OPENAI_MODEL,
@@ -511,6 +528,7 @@ def test_builtin_anthropic_and_google_defaults_expose_documented_effort_levels()
         ),
         ("google", "gemini-4-carbon", ("LOW", "MEDIUM", "HIGH")),
         ("google", "gemini-4-hydrogen", ("LOW", "MEDIUM", "HIGH", "XHIGH")),
+        ("google", "gemini-4-neon", ("LOW", "MEDIUM", "HIGH", "XHIGH")),
         ("xai", "grok-4.7", ("low", "medium", "high", "xhigh")),
     ],
 )

@@ -46,6 +46,9 @@ use the same release.
 
 - Added GPT-6.2 Astra and Sol for OpenAI API and Codex, including API input ceiling enforcement
   while preserving full context windows. (#1067)
+- Gemini 4 Neon (`gemini-4-neon`) is in the model catalog, with its thinking levels, default
+  thinking level, context window and prices, so `/model` offers it and its cost is counted. The
+  entry comes from Google's documentation; it was not checked with a live request. (#1079)
 - Tool cards and print mode explain failed attempts from typed failure metadata and report
   grouped outcomes accurately, including mixed exploration/MCP results and script child status.
   (#1066)
