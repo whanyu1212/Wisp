@@ -482,9 +482,10 @@ async fn run_with_interrupts<B: FrameBackend>(
             ui.poll_session_catalog(writer, limit).await?;
         }
         let now = Instant::now();
+        ui.expire_notice(now.into_std());
         if now >= next_activity {
             ui.advance_activity_animation();
-            ui.advance_notice(now.into_std());
+            ui.advance_notice_ticker();
             // Keep a fixed cadence so wake-up lag does not build up and make the
             // notice ticker skip a column; restart it after a long stall.
             next_activity += ACTIVITY_INTERVAL;
@@ -533,6 +534,7 @@ async fn run_with_interrupts<B: FrameBackend>(
                     && ui.state.input_ready
                     && !ui.state.configuration_active()
             });
+        let notice_deadline = ui.notice_deadline().map(Instant::from_std);
         tokio::select! {
             biased;
             result = receive_writer(sources.writer) => {
@@ -560,6 +562,8 @@ async fn run_with_interrupts<B: FrameBackend>(
             }
             _ = tokio::time::sleep_until(next_paint), if ui.render_pending || ui.stream_reveal_pending() => {}
             _ = tokio::time::sleep_until(next_activity), if ui.activity_animation_active() || ui.notice_scrolling => {}
+            // An idle UI has no other timer, so a notice's deadline needs its own.
+            _ = tokio::time::sleep_until(notice_deadline.unwrap_or(next_paint)), if notice_deadline.is_some() => {}
             _ = tokio::time::sleep_until(next_age_tick), if ui.diff_age_shown() => {}
             _ = tokio::time::sleep_until(next_peek_poll), if ui.state.background_processes.peek_polling() => {}
             _ = tokio::time::sleep_until(catalog_deadline.unwrap_or(next_paint).max(Instant::now() + FRAME_INTERVAL)), if catalog_deadline.is_some() => {}

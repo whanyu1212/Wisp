@@ -2526,24 +2526,33 @@ impl LiveUi {
             .map_or(std::time::Duration::ZERO, |(_, shown)| shown.elapsed())
     }
 
-    /// Dismiss a footer notice that has been on screen for its lifetime; otherwise
-    /// repaint a scrolling one so its ticker moves on.
+    /// When the footer notice is due to be dismissed, which the event loop sleeps
+    /// until: no other timer runs while the UI is idle.
     ///
     /// The clock starts when a notice is first drawn and restarts only when its text
-    /// changes, so a notice raised again with the same text keeps its first deadline.
-    /// The live-history wait notice describes a wait still going on, and leaves when
-    /// that wait ends instead.
-    fn advance_notice(&mut self, now: std::time::Instant) {
-        if let (Some(notice), Some((shown, since))) = (&self.notice, &self.notice_clock)
-            && shown == notice
-            && notice != LIVE_HISTORY_WAITS_NOTICE
-            && now.saturating_duration_since(*since)
-                >= ui::notice_lifetime(notice, self.notice_scrolling)
+    /// changes, so a notice raised again with the same text keeps its first deadline;
+    /// before that draw there is no deadline yet. The live-history wait notice
+    /// describes a wait still going on, and leaves when that wait ends instead.
+    fn notice_deadline(&self) -> Option<std::time::Instant> {
+        let notice = self.notice.as_deref()?;
+        let (shown, since) = self.notice_clock.as_ref()?;
+        (shown == notice && notice != LIVE_HISTORY_WAITS_NOTICE)
+            .then(|| *since + ui::notice_lifetime(notice, self.notice_scrolling))
+    }
+
+    /// Dismiss the footer notice once its deadline has passed.
+    fn expire_notice(&mut self, now: std::time::Instant) {
+        if self
+            .notice_deadline()
+            .is_some_and(|deadline| now >= deadline)
         {
             self.notice = None;
             self.render_pending = true;
-            return;
         }
+    }
+
+    /// Repaint a scrolling footer notice so its ticker moves on.
+    fn advance_notice_ticker(&mut self) {
         if self.notice_scrolling {
             self.render_pending = true;
         }
@@ -12810,11 +12819,14 @@ mod tests {
     fn notice_expires_after_lifetime() {
         let (mut ui, shown) = ui_showing_notice("Model selection applied.", false);
 
-        ui.advance_notice(shown + Duration::from_millis(7_999));
+        // The loop sleeps until this instant, since nothing else wakes an idle UI.
+        assert_eq!(ui.notice_deadline(), Some(shown + Duration::from_secs(8)));
+
+        ui.expire_notice(shown + Duration::from_millis(7_999));
         assert!(ui.notice.is_some());
         assert!(!ui.render_pending);
 
-        ui.advance_notice(shown + Duration::from_secs(8));
+        ui.expire_notice(shown + Duration::from_secs(8));
         assert_eq!(ui.notice, None);
         assert!(ui.render_pending);
     }
@@ -12823,9 +12835,10 @@ mod tests {
     fn history_wait_notice_outlasts_lifetime() {
         let (mut ui, shown) = ui_showing_notice(LIVE_HISTORY_WAITS_NOTICE, false);
 
-        ui.advance_notice(shown + Duration::from_secs(60));
+        ui.expire_notice(shown + Duration::from_secs(60));
 
         assert_eq!(ui.notice.as_deref(), Some(LIVE_HISTORY_WAITS_NOTICE));
+        assert_eq!(ui.notice_deadline(), None);
     }
 
     #[test]
@@ -12833,10 +12846,10 @@ mod tests {
         // 100 columns, the 16-step hold and the 6-column gap, at 125 ms a step.
         let (mut ui, shown) = ui_showing_notice(&"x".repeat(100), true);
 
-        ui.advance_notice(shown + Duration::from_millis(15_249));
+        ui.expire_notice(shown + Duration::from_millis(15_249));
         assert!(ui.notice.is_some());
 
-        ui.advance_notice(shown + Duration::from_millis(15_250));
+        ui.expire_notice(shown + Duration::from_millis(15_250));
         assert_eq!(ui.notice, None);
     }
 
@@ -12846,7 +12859,7 @@ mod tests {
         // Raised after the last draw, so the clock still times the notice it replaced.
         ui.notice = Some("Session selection cancelled.".into());
 
-        ui.advance_notice(shown + Duration::from_secs(60));
+        ui.expire_notice(shown + Duration::from_secs(60));
 
         assert_eq!(ui.notice.as_deref(), Some("Session selection cancelled."));
     }
