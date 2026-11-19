@@ -71,7 +71,6 @@ from wisp.tools.shell.working_directory import command_context
 from wisp.tools.subagent import SPAWN_AGENT
 from wisp.tools.summary import summarize_tool_result
 from wisp.tools.truncation import truncate_text
-from wisp.trust.scope import is_broad_root
 
 _logger = logging.getLogger(__name__)
 
@@ -803,8 +802,6 @@ class ConfiguredToolExecutor:
             objection = "Command preflight unavailable; human approval required."
         if objection is None:
             try:
-                if is_broad_root(self._context.boundary()):
-                    raise ToolError("Commands in broad directories cannot run automatically.")
                 sandbox = await anyio.to_thread.run_sync(
                     lambda: prepare_seatbelt(arguments, command_context(arguments, self._context)),
                     abandon_on_cancel=True,

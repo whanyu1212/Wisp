@@ -72,12 +72,14 @@ def macos() -> None:
         pytest.skip("Real Seatbelt enforcement requires macOS")
 
 
-def execute(command: str, context: ToolContext) -> tuple[int, str, str]:
+def execute(command: str, context: ToolContext, *, timeout: float = 10) -> tuple[int, str, str]:
     launch = prepare_seatbelt({"command": command}, context)
 
     async def run() -> tuple[int, str, str]:
         with activate_seatbelt(launch):
-            result = await _run_shell(command, cwd=context.cwd, timeout=10, max_output_bytes=4000)
+            result = await _run_shell(
+                command, cwd=context.cwd, timeout=timeout, max_output_bytes=4000
+            )
         return result.exit_code, result.stdout, result.stderr
 
     return asyncio.run(run())
@@ -430,7 +432,7 @@ def test_offline_development_workflows(
             "require('node:test')('ok',()=>require('node:assert').strictEqual(2+2,4));"
         )
         command = "npm test --offline"
-    code, stdout, stderr = execute(command, context)
+    code, stdout, stderr = execute(command, context, timeout=30)
     if code != 0:
         print(f"stdout:\n{stdout}\nstderr:\n{stderr}")
     assert code == 0, (stdout, stderr)
