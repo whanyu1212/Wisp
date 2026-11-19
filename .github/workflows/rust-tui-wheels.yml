@@ -82,8 +82,12 @@ jobs:
         with:
           toolchain: 1.88.0
 
+      # v2.9.3 preserves PATH/HOME for cargo metadata during post-save cleanup;
+      # keep cache-bin enabled (default) so cargo-cyclonedx stays cached.
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: manylinux-x86-64-wheel-v2
 
       - name: Build and verify candidate
         shell: bash
@@ -229,13 +233,26 @@ jobs:
         with:
           python-version-file: .python-version
 
+      # The macOS image ships Homebrew's rustup. Remove it so the toolchain step
+      # installs standard rustup into ~/.cargo/bin alongside cargo-cyclonedx.
+      - name: Remove Homebrew rustup
+        run: |
+          if brew list rustup &>/dev/null; then
+            brew uninstall --ignore-dependencies rustup
+          fi
+          rm -rf "$HOME/.cargo/bin"
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
         with:
           toolchain: 1.88.0
 
+      # v2.9.3 preserves PATH/HOME for cargo metadata during post-save cleanup;
+      # keep cache-bin enabled (default) so cargo-cyclonedx stays cached.
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ matrix.architecture }}-wheel-v2
 
       - name: Build and verify candidate
         shell: bash
