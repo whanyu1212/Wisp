@@ -10,7 +10,62 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.13.0 — Unreleased
+## 0.14.0 — Unreleased
+
+0.14.0 graduates opt-in automatic approval modes (`Auto edits` on macOS/Linux and macOS Seatbelt
+`Auto commands`), adds GPT-6.2 Astra and Sol models, explains tool failures and grouped outcomes,
+and finishes TUI selection bands and shared picker dialogs. The backend and every frontend must
+use the same release.
+
+### Auto approval and macOS Seatbelt sandboxing
+
+- `/permissions auto` (`Auto edits`) automatically approves eligible built-in `write`/`edit`
+  calls inside the workspace or session scratch on macOS and Linux using atomic replacement,
+  excluding shared hardlinks, `.git`, agent-control files, protected paths, and broad folders,
+  with persisted `workspace_edit_v1` consent and live/reopened audit labels. (#1068)
+- `/permissions auto-commands` (`Auto commands`) adds separately consented (`sandbox_commands_v1`)
+  macOS Seatbelt containment for exact built-in `bash` calls. Supported `pytest`/`unittest`,
+  Cargo `test`/`check`/`build`, and npm `test`/`run test`/`run build` forms run sandboxed without
+  model review; other eligible development and Git inspection commands use a bounded, fresh,
+  no-tools model review (up to 8 requests per run, 20s deadline) that fails closed on uncertainty
+  or revocation. (#1069, #1070, #1073, #1076)
+- Fast-path test commands (`pytest`, `python -m pytest`/`unittest`, `uv run --no-sync pytest`,
+  `npm test`/`run test`, and `cargo test` with an ancestor `Cargo.lock`) run with a read-only
+  workspace and per-command ephemeral `TMPDIR`/`HOME`/`UV_CACHE_DIR` deleted on exit, plus an
+  isolated Cargo target cache (`CARGO_NET_OFFLINE=true`), temp-scoped Unix sockets,
+  `PYTHONUNBUFFERED=1` with partial timeout output, macOS `O_SEARCH` traversal in `secure_fs`,
+  and safe combined short options (`-rN`, `-ra`, `-qq`, `-vv`, `-n4`, `-j4`, `git status -sb`).
+  Validated per-call Bash `cwd` and automatic `poll`/`cancel` for owned sandboxed jobs remove
+  unnecessary shell composition and prompts. (#1071, #1074, #1075)
+- Independent security hardening closes non-ASCII SBPL escaping, nested/Unicode/control symlink
+  target-binding, `.venv`/`pyvenv.cfg` planting, cross-run ephemeral/Cargo-target isolation,
+  `chmod`/`chflags` cleanup, and broad-root `bash.cwd` checks. Pre-existing hardlinks, TCP
+  localhost/network, and Linux/Windows `Auto commands` remain documented boundaries. (#1074–#1076)
+
+### Models, tools, and terminal UI
+
+- Added GPT-6.2 Astra and Sol for OpenAI API and Codex, including API input ceiling enforcement
+  while preserving full context windows. (#1067)
+- Tool cards and print mode explain failed attempts from typed failure metadata and report
+  grouped outcomes accurately, including mixed exploration/MCP results and script child status.
+  (#1066)
+- Finished TUI selection bands and readable ANSI diffs, shared model and session picker dialog
+  frames, and fixed a docs-search close/reopen race. (#1064, #1065, #1072)
+
+### Compatibility
+
+- Session schema 6 and event-envelope format 1 remain unchanged. `0.14.0` reads existing
+  `0.13.0` sessions, while `0.13.0` rejects sessions containing `tool.approval.reviewed` events
+  or new permission/audit fields (`auto`, `auto_commands`, `source`, `rule_id`, `auto_approved`,
+  `approval_note`). Back up sessions before upgrading if downgrade is required.
+- `schemas/live-rpc/` and `tests/fixtures/event_decoding_conformance.json` are regenerated for the
+  new permission modes, `tool.approval.reviewed`, and audit fields; external RPC clients must
+  match the `0.14.0` release.
+
+<!-- Keeps links to the pre-release "0.13.0 — Unreleased" heading working. -->
+<a id="0130--unreleased"></a>
+
+## 0.13.0 — 2026-11-17
 
 0.13.0 expands codemode into complete tool workflows, with durable script state, recoverable
 text output, unified discovery and per-child-call policy enforcement. Direct tools plus codemode
