@@ -61,6 +61,72 @@ def test_cold_uv_cache_and_installed_provider_import(context: ToolContext) -> No
     assert "1 passed" in output
 
 
+@pytest.mark.parametrize(
+    ("marker", "allowed"),
+    [
+        ("uv-cache/sdists-v9/.git", True),
+        ("uv-cache/sdists-v11/.git", True),
+        ("uv-cache/sdists-v/.git", False),
+        ("uv-cache/sdists-v11x/.git", False),
+        ("uv-cache/sdists-v11/nested/.git", False),
+        ("uv-cache/wheels-v11/.git", False),
+        ("other/uv-cache/sdists-v11/.git", False),
+        ("uv-cache/sdists-v11/.git/config", False),
+        ("{scratch}/uv-cache/sdists-v11/.git", False),
+    ],
+)
+def test_uv_marker_bucket_versions(context: ToolContext, marker: str, allowed: bool) -> None:
+    """UV renames its sdist bucket between releases; only that bucket's marker is writable."""
+    assert context.scratch_root is not None
+    scratch = context.scratch_root
+    path = scratch / marker.format(scratch=str(scratch).lstrip("/"))
+    path.parent.mkdir(parents=True)
+    code, output = execute(f"printf marker > {shlex.quote(str(path))}", context)
+    assert (code == 0) is allowed, output
+    assert path.exists() is allowed
+
+
+@pytest.mark.parametrize("moved", ["uv-cache/sdists-v11", "uv-cache"])
+def test_uv_marker_cannot_be_planted_in_workspace(context: ToolContext, moved: str) -> None:
+    """Renaming a directory moves the exempt marker without checking the marker's path."""
+    assert context.scratch_root is not None
+    bucket = shlex.quote(str(context.scratch_root / "uv-cache/sdists-v11"))
+    source = shlex.quote(str(context.scratch_root / moved))
+    code, output = execute(
+        f"mkdir -p {bucket} && printf 'gitdir: ../evil' > {bucket}/.git && mv {source} planted",
+        context,
+    )
+    assert code != 0, output
+    # The marker was written, so the failure is the move and not an earlier step.
+    assert (context.scratch_root / "uv-cache/sdists-v11/.git").read_text() == "gitdir: ../evil"
+    assert not (context.cwd / "planted").exists()
+
+
+def test_uv_cache_contents_stay_removable(context: ToolContext) -> None:
+    """Only the cache and its buckets are pinned; UV still manages what is inside them."""
+    assert context.scratch_root is not None
+    build = shlex.quote(str(context.scratch_root / "uv-cache/sdists-v11/build"))
+    code, output = execute(
+        f"mkdir -p {build} && mv {build} {build}-moved && rmdir {build}-moved", context
+    )
+    assert code == 0, output
+
+
+def test_uv_marker_cannot_rewrite_workspace_gitfile(context: ToolContext) -> None:
+    """A nested gitfile must not round-trip through the exempt bucket."""
+    assert context.scratch_root is not None
+    gitfile = context.cwd / "sub/.git"
+    gitfile.parent.mkdir()
+    gitfile.write_text("gitdir: ../real")
+    cache = shlex.quote(str(context.scratch_root / "uv-cache"))
+    execute(
+        f"mkdir -p {cache} && mv sub {cache}/sdists-v11 && "
+        f"printf 'gitdir: ../evil' > {cache}/sdists-v11/.git; mv {cache}/sdists-v11 sub",
+        context,
+    )
+    assert not gitfile.exists() or gitfile.read_text() == "gitdir: ../real"
+
+
 @pytest.mark.parametrize("attack", ["directory", "elsewhere", "symlink", "hardlink", "explicit"])
 def test_uv_marker_exception_cannot_modify_git_or_secrets(
     context: ToolContext, attack: str

@@ -37,7 +37,8 @@ persisted separately from the acting context. Sandboxed children inherit filesys
 network denial and a controlled environment. Sandbox failure never silently runs unrestricted;
 broader authority requires explicit human approval. Pre-existing hardlink aliases remain a known
 limitation: pathname restrictions are not complete credential isolation, and tests may modify
-allowed workspace files. Old command-review consent does not enable the fast path. Explicit sensitive
+allowed workspace files. UV's cache sentinel is a second one: a command can write its content and
+symlink the pinned cache folder into the workspace, exposing a `.git` file it wrote. Old command-review consent does not enable the fast path. Explicit sensitive
 operations, unsupported shell syntax, MCP mutations, replacement tools, and mandatory
 confirmations retain human approval. A tool that sets
 `confirm_every_call` (the MCP proposal tools) is never approved by Auto, YOLO, `--yes`, or a

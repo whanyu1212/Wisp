@@ -392,6 +392,10 @@ Ask approvals, and YOLO are not sandboxed by this mode.
 **Known limitation:** a pre-existing hardlink under an allowed name can expose or modify the
 same file even when its other name is protected or outside the workspace. Seatbelt is not a VM
 or complete file/credential isolation guarantee.
+A command can also write its own content into UV's cache sentinel and create a workspace symlink
+to that cache folder, so a `.git` file it wrote becomes reachable through a workspace path. The
+cache folder itself cannot be moved into the workspace. Avoid running Git inside an unexpected
+symlinked directory.
 Model review does not close this gap. Network-dependent tests, dependency downloads, and tools
 needing writes to shared caches may need explicit human approval. Localhost servers are also
 blocked, and tests creating synthetic protected configuration paths are not automatically exempt. Use Ask if this residual risk

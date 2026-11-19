@@ -454,11 +454,25 @@ def _filesystem_profile(
         regex = _protected_regex(name).replace('"', '\\"')
         if name == ".git":
             # UV initializes this regular-file cache sentinel even with --no-sync.
-            # Only this exact private-cache file is exempt, never a Git directory.
-            marker = json.dumps(str(scratch / "uv-cache/sdists-v9/.git"))
-            exception = f"(require-all (literal {marker}) (vnode-type REGULAR-FILE))"
+            # UV numbers the bucket and renumbers it between releases. Only that
+            # private-cache file is exempt, never a Git directory.
+            marker = "^" + re.escape(str(scratch / "uv-cache")) + r"/sdists-v[0-9]+/\.git$"
+            marker = marker.replace('"', '\\"')
+            exception = f'(require-all (regex #"{marker}") (vnode-type REGULAR-FILE))'
             rules.append(
                 f'(deny file-write* (require-all (regex #"{regex}") (require-not {exception})))'
+            )
+            # A rename checks only the moved directory's own path, so a movable
+            # cache or bucket would carry the exempt marker into the workspace.
+            pinned = (
+                "^"
+                + _case_literal(str(scratch / "uv-cache"))
+                + "(/"
+                + _case_literal("sdists-v")
+                + "[0-9]+)?$"
+            ).replace('"', '\\"')
+            rules.append(
+                f'(deny file-write-unlink (require-all (vnode-type DIRECTORY) (regex #"{pinned}")))'
             )
         else:
             rules.append(f'(deny file-write* (regex #"{regex}"))')
