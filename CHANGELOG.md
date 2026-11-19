@@ -10,6 +10,29 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
+## 0.14.2 — Unreleased
+
+0.14.2 is a patch release on 0.14.0 with two terminal UI improvements: a redesigned live status
+row with a clickable `[stop]` control, and the remaining pickers and overlays moved onto the
+shared dialog frame. It changes no command, event, handshake, session, settings, credential, or
+trust format, so 0.14.0, 0.14.1, and 0.14.2 read each other's sessions. The backend and frontend
+must come from the same release.
+
+### Terminal UI
+
+- The live status row above the composer now shows an animated braille spinner (pinned to `⠋`
+  under `MotionMode::Still`), active phase and tool elapsed timers, total run duration, live
+  streamed output tokens (`⇣`), queued prompt count, width-invariant three-tier context usage
+  colouring (`<70%` muted, `>=70%` warning, `>=90%` error), and a clickable `[stop]` button that
+  highlights on pointer hover via `?1003` mouse-motion capture. (#1084)
+- The remaining TUI pickers and overlays (theme, logo, prompt history, session tree, queue,
+  connection, skills, permissions, codemode, subagents, MCP, context, help, detail/script
+  detail, file picker, and `Ctrl+G` key help) now share the `dialog.rs` frame and clickable hint
+  footers; `/diff` uses the shared hint renderer; slash completion highlights matched characters
+  in a full-width selection band with aligned descriptions; and approval, confirm-every-call,
+  and trust decision panels show muted per-choice explanations that collapse to one-line choices
+  on short screens. (#1085)
+
 <!-- Keeps links to the pre-release "0.14.1 — Unreleased" heading working. -->
 <a id="0141--unreleased"></a>
 
