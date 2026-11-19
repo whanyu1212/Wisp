@@ -82,6 +82,23 @@ _SENSITIVE_OPTIONS = frozenset(
     }
 )
 _LONG_SENSITIVE_OPTIONS = tuple(option for option in _SENSITIVE_OPTIONS if option.startswith("--"))
+# Per-runner allowlists for short option clusters (zero-argument boolean flags only)
+# and strict value-taking short options that cannot pass paths or config overrides.
+_SAFE_SHORT_FLAG_CLUSTERS: dict[str, frozenset[str]] = {
+    "pytest": frozenset("qvxls"),
+    "unittest": frozenset("vqf"),
+    "cargo": frozenset("qv"),
+    "ruff": frozenset("qvs"),
+    "mypy": frozenset("v"),
+    "git_status": frozenset("sb"),
+}
+_SAFE_SHORT_VALUE_OPTIONS: dict[str, tuple[re.Pattern[str], ...]] = {
+    "pytest": (
+        re.compile(r"^-r[fEsxXpPwaAN]+$"),
+        re.compile(r"^-n(?:[0-9]+|auto|logical)$"),
+    ),
+    "cargo": (re.compile(r"^-j[0-9]+$"),),
+}
 
 
 class CommandReviewer(Protocol):
@@ -197,9 +214,50 @@ def _is_private_path(path: Path, resolved: Path) -> bool:
     )
 
 
+def _python_runner(tokens: list[str]) -> str | None:
+    if not tokens:
+        return None
+    executable, *args = tokens
+    if executable in {"python", "python3"}:
+        if len(args) >= 2 and args[0] == "-m" and args[1] in {"pytest", "ruff", "mypy", "unittest"}:
+            return args[1]
+        return None
+    return executable if executable in _RUNNERS else None
+
+
+def _effective_runner(tokens: list[str]) -> str | None:
+    """Identify the underlying runner for safe short-option checks."""
+    if not tokens:
+        return None
+    executable, *args = tokens
+    if executable == "uv":
+        if len(args) < 3 or args[:2] != ["run", "--no-sync"]:
+            return None
+        return _python_runner(args[2:])
+    python_runner = _python_runner(tokens)
+    if python_runner is not None:
+        return python_runner
+    if executable == "git" and args[:1] == ["status"]:
+        return "git_status"
+    if executable in {"cargo", "npm", "pnpm", "yarn", "go"}:
+        return executable
+    return None
+
+
+def _is_allowed_combined_short_option(token: str, runner: str | None) -> bool:
+    if runner is None or not token.startswith("-") or token.startswith("--") or len(token) <= 2:
+        return False
+    allowed_flags = _SAFE_SHORT_FLAG_CLUSTERS.get(runner)
+    if allowed_flags is not None and all(char in allowed_flags for char in token[1:]):
+        return True
+    patterns = _SAFE_SHORT_VALUE_OPTIONS.get(runner, ())
+    return any(pattern.fullmatch(token) is not None for pattern in patterns)
+
+
 def _argument_objection(
     tokens: list[str], context: ToolContext, cwd: Path, boundary: Path
 ) -> str | None:
+    runner = _effective_runner(tokens)
     for token in tokens:
         if "://" in token or token.startswith("@"):
             return "Network destinations and response files need human approval."
@@ -208,7 +266,12 @@ def _argument_objection(
             r"(?:password|token|secret|api[-_]?key|credential|authorization)[:=]", token, re.I
         ):
             return "Credential arguments need human approval and are not sent to the reviewer."
-        if token.startswith("-") and not token.startswith("--") and len(token) > 2:
+        if (
+            token.startswith("-")
+            and not token.startswith("--")
+            and len(token) > 2
+            and not _is_allowed_combined_short_option(token, runner)
+        ):
             return "Combined or attached short options need human approval."
         if _is_sensitive_option(option):
             return "Execution/configuration overrides and output redirection need human approval."
@@ -244,14 +307,7 @@ def _argument_objection(
 
 
 def _python_command(tokens: list[str]) -> bool:
-    if not tokens:
-        return False
-    executable, *args = tokens
-    if executable in {"python", "python3"}:
-        return (
-            len(args) >= 2 and args[0] == "-m" and args[1] in {"pytest", "ruff", "mypy", "unittest"}
-        )
-    return executable in _RUNNERS
+    return _python_runner(tokens) is not None
 
 
 def _development_command(tokens: list[str]) -> bool:

@@ -64,64 +64,80 @@ def test_cold_uv_cache_and_installed_provider_import(context: ToolContext) -> No
 @pytest.mark.parametrize(
     ("marker", "allowed"),
     [
-        ("uv-cache/sdists-v9/.git", True),
-        ("uv-cache/sdists-v11/.git", True),
-        ("uv-cache/sdists-v/.git", False),
-        ("uv-cache/sdists-v11x/.git", False),
-        ("uv-cache/sdists-v11/nested/.git", False),
-        ("uv-cache/wheels-v11/.git", False),
-        ("other/uv-cache/sdists-v11/.git", False),
-        ("uv-cache/sdists-v11/.git/config", False),
+        ("$UV_CACHE_DIR/sdists-v9/.git", True),
+        ("$UV_CACHE_DIR/sdists-v11/.git", True),
+        ("$UV_CACHE_DIR/sdists-v/.git", False),
+        ("$UV_CACHE_DIR/sdists-v11x/.git", False),
+        ("$UV_CACHE_DIR/sdists-v11/nested/.git", False),
+        ("$UV_CACHE_DIR/wheels-v11/.git", False),
+        ("$UV_CACHE_DIR/../other/uv-cache/sdists-v11/.git", False),
+        ("$UV_CACHE_DIR/sdists-v11/.git/config", False),
         ("{scratch}/uv-cache/sdists-v11/.git", False),
     ],
 )
 def test_uv_marker_bucket_versions(context: ToolContext, marker: str, allowed: bool) -> None:
-    """UV renames its sdist bucket between releases; only that bucket's marker is writable."""
+    """UV renames its sdist bucket between releases; only this run's bucket marker is writable."""
     assert context.scratch_root is not None
     scratch = context.scratch_root
-    path = scratch / marker.format(scratch=str(scratch).lstrip("/"))
-    path.parent.mkdir(parents=True)
-    code, output = execute(f"printf marker > {shlex.quote(str(path))}", context)
+    target = marker.format(scratch=str(scratch))
+    code, output = execute(
+        f'mkdir -p "$(dirname "{target}")" && printf marker > "{target}" && test -f "{target}"',
+        context,
+    )
     assert (code == 0) is allowed, output
-    assert path.exists() is allowed
 
 
-@pytest.mark.parametrize("moved", ["uv-cache/sdists-v11", "uv-cache"])
+@pytest.mark.parametrize("moved", ["$UV_CACHE_DIR/sdists-v11", "$UV_CACHE_DIR"])
 def test_uv_marker_cannot_be_planted_in_workspace(context: ToolContext, moved: str) -> None:
     """Renaming a directory moves the exempt marker without checking the marker's path."""
-    assert context.scratch_root is not None
-    bucket = shlex.quote(str(context.scratch_root / "uv-cache/sdists-v11"))
-    source = shlex.quote(str(context.scratch_root / moved))
     code, output = execute(
-        f"mkdir -p {bucket} && printf 'gitdir: ../evil' > {bucket}/.git && mv {source} planted",
+        'mkdir -p "$UV_CACHE_DIR/sdists-v11" && '
+        'printf "gitdir: ../evil" > "$UV_CACHE_DIR/sdists-v11/.git" && '
+        'printf "WROTE_MARKER\\n" && '
+        f'mv "{moved}" planted',
         context,
     )
     assert code != 0, output
     # The marker was written, so the failure is the move and not an earlier step.
-    assert (context.scratch_root / "uv-cache/sdists-v11/.git").read_text() == "gitdir: ../evil"
+    assert "WROTE_MARKER" in output
     assert not (context.cwd / "planted").exists()
+
+
+def test_uv_cache_symlink_dangles_after_command_exits(context: ToolContext) -> None:
+    """Per-command UV_CACHE_DIR cleanup neutralizes workspace symlinks on exit."""
+    code, output = execute(
+        'mkdir -p "$UV_CACHE_DIR/sdists-v11" && '
+        'printf "gitdir: ../evil" > "$UV_CACHE_DIR/sdists-v11/.git" && '
+        'ln -s "$UV_CACHE_DIR/sdists-v11" linked-cache',
+        context,
+    )
+    assert code == 0, output
+    link = context.cwd / "linked-cache"
+    assert link.is_symlink()
+    assert not link.exists()
+    assert not (link / ".git").exists()
 
 
 def test_uv_cache_contents_stay_removable(context: ToolContext) -> None:
     """Only the cache and its buckets are pinned; UV still manages what is inside them."""
-    assert context.scratch_root is not None
-    build = shlex.quote(str(context.scratch_root / "uv-cache/sdists-v11/build"))
     code, output = execute(
-        f"mkdir -p {build} && mv {build} {build}-moved && rmdir {build}-moved", context
+        'mkdir -p "$UV_CACHE_DIR/sdists-v11/build" && '
+        'mv "$UV_CACHE_DIR/sdists-v11/build" "$UV_CACHE_DIR/sdists-v11/build-moved" && '
+        'rmdir "$UV_CACHE_DIR/sdists-v11/build-moved"',
+        context,
     )
     assert code == 0, output
 
 
 def test_uv_marker_cannot_rewrite_workspace_gitfile(context: ToolContext) -> None:
     """A nested gitfile must not round-trip through the exempt bucket."""
-    assert context.scratch_root is not None
     gitfile = context.cwd / "sub/.git"
     gitfile.parent.mkdir()
     gitfile.write_text("gitdir: ../real")
-    cache = shlex.quote(str(context.scratch_root / "uv-cache"))
     execute(
-        f"mkdir -p {cache} && mv sub {cache}/sdists-v11 && "
-        f"printf 'gitdir: ../evil' > {cache}/sdists-v11/.git; mv {cache}/sdists-v11 sub",
+        'mkdir -p "$UV_CACHE_DIR" && mv sub "$UV_CACHE_DIR/sdists-v11" && '
+        'printf "gitdir: ../evil" > "$UV_CACHE_DIR/sdists-v11/.git"; '
+        'mv "$UV_CACHE_DIR/sdists-v11" sub',
         context,
     )
     assert not gitfile.exists() or gitfile.read_text() == "gitdir: ../real"
@@ -131,27 +147,31 @@ def test_uv_marker_cannot_rewrite_workspace_gitfile(context: ToolContext) -> Non
 def test_uv_marker_exception_cannot_modify_git_or_secrets(
     context: ToolContext, attack: str
 ) -> None:
-    assert context.scratch_root is not None
-    cache = context.scratch_root / "uv-cache/sdists-v9"
-    cache.mkdir(parents=True)
-    marker = cache / ".git"
     git = context.cwd / ".git"
     git.mkdir()
     config = git / "config"
     config.write_text("synthetic git config")
-    quoted = shlex.quote(str(marker))
     if attack == "directory":
-        command = f"mkdir {quoted}"
+        command = 'mkdir -p "$UV_CACHE_DIR/sdists-v9" && mkdir "$UV_CACHE_DIR/sdists-v9/.git"'
     elif attack == "elsewhere":
         command = "printf changed > .git/config"
     elif attack == "symlink":
-        marker.symlink_to(config)
-        command = f"printf changed > {quoted}"
+        command = (
+            'mkdir -p "$UV_CACHE_DIR/sdists-v9" && '
+            'ln -s "$PWD/.git/config" "$UV_CACHE_DIR/sdists-v9/.git" && '
+            'printf changed > "$UV_CACHE_DIR/sdists-v9/.git"'
+        )
     elif attack == "hardlink":
-        command = f"ln .git/config {quoted} && printf changed > {quoted}"
+        command = (
+            'mkdir -p "$UV_CACHE_DIR/sdists-v9" && '
+            'ln .git/config "$UV_CACHE_DIR/sdists-v9/.git" && '
+            'printf changed > "$UV_CACHE_DIR/sdists-v9/.git"'
+        )
     else:
-        context = replace(context, protected_paths=(*context.protected_paths, str(marker)))
-        command = f"printf changed > {quoted}"
+        context = replace(context, protected_paths=(*context.protected_paths, "sdists-v9/.git"))
+        command = (
+            'mkdir -p "$UV_CACHE_DIR/sdists-v9" && printf changed > "$UV_CACHE_DIR/sdists-v9/.git"'
+        )
     code, output = execute(command, context)
     assert code != 0, output
     assert config.read_text() == "synthetic git config"

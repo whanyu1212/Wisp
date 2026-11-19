@@ -33,6 +33,11 @@ class PreparedToolExecution:
         repr=False,
         compare=False,
     )
+    cleanup: Callable[[], None] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         if type(self.call_id) is not str or not self.call_id:
@@ -43,11 +48,19 @@ class PreparedToolExecution:
             raise TypeError("Prepared tool parallel_safe must be a boolean")
         if not callable(self.runner):
             raise TypeError("Prepared tool runner must be callable")
+        if self.cleanup is not None and not callable(self.cleanup):
+            raise TypeError("Prepared tool cleanup must be callable or None")
 
     async def run(self) -> ToolExecutionEnded:
         """Execute the prepared call and return its only terminal event."""
 
         return await self.runner()
+
+    def close(self) -> None:
+        """Release any unclaimed preparation resources if this call never ran."""
+
+        if self.cleanup is not None:
+            self.cleanup()
 
 
 ToolPreparationEvent = TypeAliasType(

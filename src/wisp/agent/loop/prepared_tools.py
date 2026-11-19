@@ -141,14 +141,18 @@ class _PreparedToolBatch:
                 successful results can be published before its stored runner error is raised.
         """
 
-        async with closing_stream(self._prepare_calls()) as preparation_events:
-            async for event in preparation_events:
-                yield event
-        if self.cancelled:
-            return
-        async with closing_stream(self._run_prepared_calls()) as execution_events:
-            async for event in execution_events:
-                yield event
+        try:
+            async with closing_stream(self._prepare_calls()) as preparation_events:
+                async for event in preparation_events:
+                    yield event
+            if self.cancelled:
+                return
+            async with closing_stream(self._run_prepared_calls()) as execution_events:
+                async for event in execution_events:
+                    yield event
+        finally:
+            for item in self._prepared_calls:
+                item.execution.close()
 
     def _cancellation_requested(self) -> bool:
         """Check the run's token until a request to stop this batch is remembered.
@@ -210,6 +214,8 @@ class _PreparedToolBatch:
                 if cancellation.absorbed:
                     self.cancelled = True
             if self.cancelled:
+                if prepared is not None:
+                    prepared.close()
                 return
             if prepared is None:
                 raise ToolExecutionProtocolError(

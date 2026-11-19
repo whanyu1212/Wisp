@@ -226,17 +226,24 @@ class BashTool:
             self._process_grants[process_id] = context.process_authority
 
     async def run(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
-        context = command_context(arguments, context)
-        authority = context.process_authority
-        if authority is not None:
-            if not authority.active(context):
-                raise ToolError("Automatic command consent was revoked before execution.")
-            if arguments.get("operation") in {"poll", "cancel"} and not self.can_control(
-                arguments, context, authority
-            ):
-                raise ToolError("Automatic process control no longer owns this job.")
-        with activate_seatbelt(context.command_sandbox):
-            return await self._dispatch(arguments, context)
+        sandbox = context.command_sandbox
+        try:
+            context = command_context(arguments, context)
+            authority = context.process_authority
+            if authority is not None:
+                if not authority.active(context):
+                    raise ToolError("Automatic command consent was revoked before execution.")
+                if arguments.get("operation") in {"poll", "cancel"} and not self.can_control(
+                    arguments, context, authority
+                ):
+                    raise ToolError("Automatic process control no longer owns this job.")
+            with activate_seatbelt(sandbox):
+                return await self._dispatch(arguments, context)
+        finally:
+            # No-op once _create_shell_process claimed the ephemeral dir onto the process;
+            # guarantees cleanup on any pre-spawn validation, capacity, or launch error.
+            if sandbox is not None:
+                sandbox.cleanup()
 
     async def _dispatch(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
         operation = _bash_operation(arguments)
