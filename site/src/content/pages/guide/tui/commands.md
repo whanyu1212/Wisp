@@ -90,6 +90,7 @@ session-scratch edits on macOS/Linux, but still asks before commands and other m
 metadata, agent-control files, shared hard-linked files, and mandatory confirmations do not qualify;
 protected-path and stale-write checks still apply. Each automatic grant is recorded and labelled
 on the tool card. Auto checks the operation and destination, not the safety of the content.
+Auto and Auto commands are experimental, and the panel labels them so.
 The panel docks above the composer and marks the current mode; choose with
 `1` (Ask), `2` (Auto), `3` (Auto commands), or `4` (YOLO), or highlight with `↑`/`↓` and press `Enter` (there is no default highlight, because
 saving a mode also clears temporary grants). Saved defaults apply to subsequent launches in the same canonical

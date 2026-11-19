@@ -92,12 +92,12 @@ const PERMISSION_CHOICES: [(char, &str, PermissionMode); 4] = [
     ('1', "Ask before changes", PermissionMode::Ask),
     (
         '2',
-        "Auto — workspace edits; ask before commands",
+        "Auto (experimental) — workspace edits; ask before commands",
         PermissionMode::Auto,
     ),
     (
         '3',
-        "Auto commands — macOS sandbox; tests auto",
+        "Auto commands (experimental) — macOS sandbox; tests auto",
         PermissionMode::AutoCommands,
     ),
     (
