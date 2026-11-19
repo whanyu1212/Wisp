@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 import anyio
 
 from wisp.tools.result import ToolError
-from wisp.tools.shell.seatbelt import active_seatbelt
+from wisp.tools.shell.seatbelt import active_seatbelt, cleanup_ephemeral_dir
 from wisp.tools.shell.watchdog import WatchedCommand, release_command, watch_command
 from wisp.tools.truncation import TruncatedText, truncate_text_middle, truncate_text_tail
 from wisp.tools.utf8 import decode_utf8_with_source_byte_lengths
@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 _WINDOWS_JOB_HANDLE_ATTR = "_wisp_windows_job_handle"
 _POSIX_JOBS_FILE_ATTR = "_wisp_posix_jobs_file"
 _POSIX_EXIT_PIPE_ATTR = "_wisp_posix_exit_pipe"
+_POSIX_SEATBELT_DIR_ATTR = "_wisp_seatbelt_cleanup_dir"
 # Every POSIX command's environment carries a random token. A daemon that leaves the
 # process group, closes its descriptors, and is adopted by init is otherwise out of
 # reach, but it keeps its environment, so the token both finds it and proves that a
@@ -58,6 +59,8 @@ _POSIX_JOBS_FD_MIN = 100
 # How long output may keep arriving after the shell exits. A background job that
 # inherited the pipes would otherwise hold a one-shot command open until it exits.
 _OUTPUT_DRAIN_GRACE_SECONDS = 0.2
+_TIMEOUT_TAIL_BYTES = 1_000
+_TIMEOUT_TAIL_LINES = 20
 _EXIT_POLL_INTERVAL_SECONDS = 0.05
 _POSIX_TERMINATION_GRACE_SECONDS = 0.05
 # Cleanup lists processes with pgrep, ps, lsof, or fuser. On a busy machine these take
@@ -285,12 +288,12 @@ async def _run_shell(
     env: Mapping[str, str] | None = None,
 ) -> ProcessResult:
     process = await _create_shell_process(command, cwd=cwd, env=env)
+    stdout_tail = _StreamTail(max_output_bytes)
+    stderr_tail = _StreamTail(max_output_bytes)
 
     try:
         captured = await asyncio.wait_for(
-            _collect_limited_output(
-                process, _StreamTail(max_output_bytes), _StreamTail(max_output_bytes)
-            ),
+            _collect_limited_output(process, stdout_tail, stderr_tail),
             timeout=timeout,
         )
     except TimeoutError as exc:
@@ -298,7 +301,7 @@ async def _run_shell(
         if not cleanup_succeeded:
             raise ToolError("Failed to terminate process tree") from exc
         raise ToolError(
-            f"Command timed out after {timeout:g} seconds",
+            _format_timeout_error_message(timeout, stdout_tail, stderr_tail),
             failure_code="timeout",
             retryable=True,
             recovery_hint=(
@@ -343,6 +346,22 @@ async def _run_shell(
         stderr_head=decode_stream_head(stderr_result.head),
         background_stopped=captured.pipes_held_after_exit or stopped_detached_processes(process),
     )
+
+
+def _format_timeout_error_message(timeout: float, stdout: _StreamTail, stderr: _StreamTail) -> str:
+    lines = [f"Command timed out after {timeout:g} seconds"]
+    parts = _process_output_parts(
+        stdout.result().output.decode("utf-8", errors="replace"),
+        stderr.result().output.decode("utf-8", errors="replace"),
+    )
+    if parts:
+        tail = truncate_text_tail(
+            "\n".join(parts),
+            max_bytes=_TIMEOUT_TAIL_BYTES,
+            max_lines=_TIMEOUT_TAIL_LINES,
+        )
+        lines.append(f"Last output:\n{tail.text}")
+    return "\n".join(lines)
 
 
 async def _create_shell_process(
@@ -438,11 +457,15 @@ async def _create_shell_process(
         _release_unstarted_posix_tracking(
             posix_jobs_file, posix_inherited_fds, posix_exit_pipe_read_fd
         )
+        if sandbox is not None:
+            sandbox.cleanup()
         raise ToolError(f"Failed to start command: {exc}") from exc
     except BaseException:
         _release_unstarted_posix_tracking(
             posix_jobs_file, posix_inherited_fds, posix_exit_pipe_read_fd
         )
+        if sandbox is not None:
+            sandbox.cleanup()
         raise
 
     # Only the started process tree may hold the inherited descriptors; keeping a copy
@@ -452,6 +475,8 @@ async def _create_shell_process(
 
     if posix_jobs_file is not None:
         setattr(process, _POSIX_JOBS_FILE_ATTR, posix_jobs_file)
+    if sandbox is not None and (claimed := sandbox.claim_cleanup_dir()) is not None:
+        setattr(process, _POSIX_SEATBELT_DIR_ATTR, claimed)
     if command_token is not None:
         setattr(process, _POSIX_COMMAND_TOKEN_ATTR, command_token)
         setattr(process, _POSIX_STARTED_AT_ATTR, started_at)
@@ -1472,6 +1497,9 @@ def _parse_posix_pid_tokens(tokens: Sequence[str]) -> tuple[int, ...]:
 def _release_posix_tracking(process: _PosixCommandLeader) -> None:
     release_command(process.pid)
     _remove_posix_jobs_file(getattr(process, _POSIX_JOBS_FILE_ATTR, None))
+    seatbelt_dir = getattr(process, _POSIX_SEATBELT_DIR_ATTR, None)
+    if isinstance(seatbelt_dir, Path):
+        cleanup_ephemeral_dir(seatbelt_dir)
     exit_pipe = getattr(process, _POSIX_EXIT_PIPE_ATTR, None)
     if isinstance(exit_pipe, _PosixExitPipe):
         exit_pipe.close()

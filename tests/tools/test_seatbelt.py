@@ -48,6 +48,8 @@ def test_fast_path_forms(command: str) -> None:
         "uv run --no-sync",
         "uv run --no-sync cargo test",
         "uv run --no-sync npm test",
+        "",
+        "'unterminated",
         "npm run deploy",
         "pnpm test",
         "cargo fmt",
@@ -638,3 +640,444 @@ def test_venv_symlink_loop_fails_closed_with_tool_error(macos: None, context: To
     (context.cwd / "venv_loop").symlink_to(context.cwd / ".venv")
     with pytest.raises(ToolError, match="resolved safely"):
         prepare_seatbelt({"command": "pytest"}, context)
+
+
+@pytest.mark.process
+def test_read_only_test_fast_path_allows_synthetic_tmpdir_fixtures_and_protects_workspace(
+    macos: None, context: ToolContext
+) -> None:
+    from dataclasses import replace
+
+    # Real workspace secrets must stay unreadable and workspace itself read-only.
+    (context.cwd / ".env").write_text("REAL_ENV_SECRET")
+    (context.cwd / ".wisp").mkdir()
+    (context.cwd / ".wisp/settings.json").write_text('{"secret": true}')
+    (context.cwd / "credentials").mkdir()
+    (context.cwd / "credentials/keys.py").write_text("KEY = 'real'")
+    (context.cwd / "test_sandbox.py").write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        "import pytest\n"
+        "\n"
+        "def test_synthetic_fixtures_and_workspace_isolation(tmp_path: Path) -> None:\n"
+        "    # Synthetic protected/control fixtures in TMPDIR succeed.\n"
+        "    (tmp_path / '.git').mkdir()\n"
+        "    (tmp_path / '.git/HEAD').write_text('ref: refs/heads/main\\n')\n"
+        "    (tmp_path / '.wisp').mkdir()\n"
+        "    (tmp_path / '.wisp/settings.json').write_text('{}')\n"
+        "    (tmp_path / 'AGENTS.md').write_text('# fixture\\n')\n"
+        "    (tmp_path / '.env').write_text('FAKE=1\\n')\n"
+        "    (tmp_path / 'credentials').mkdir()\n"
+        "    (tmp_path / 'credentials/keys.py').write_text('FAKE = 1\\n')\n"
+        "    assert (tmp_path / '.env').read_text() == 'FAKE=1\\n'\n"
+        "    # Workspace is read-only.\n"
+        "    with pytest.raises(PermissionError):\n"
+        "        Path('mutated.txt').write_text('nope')\n"
+        "    # Real workspace secrets stay blocked, even through a tmp_path symlink.\n"
+        "    secrets = (Path('.env'), Path('.wisp/settings.json'), Path('credentials/keys.py'))\n"
+        "    for secret in secrets:\n"
+        "        with pytest.raises(PermissionError):\n"
+        "            secret.read_text()\n"
+        "    escape = tmp_path / 'link_to_real_env'\n"
+        "    escape.symlink_to(Path('.env').resolve())\n"
+        "    with pytest.raises(PermissionError):\n"
+        "        escape.read_text()\n"
+    )
+    command = "python -m pytest -rN -q test_sandbox.py"
+    launch = prepare_seatbelt({"command": command}, context)
+    assert launch.read_only_workspace is True
+    assert launch.cleanup_dir is not None and launch.cleanup_dir.is_dir()
+
+    async def run() -> tuple[int, str, str]:
+        with activate_seatbelt(launch):
+            result = await _run_shell(command, cwd=context.cwd, timeout=20, max_output_bytes=8000)
+        return result.exit_code, result.stdout, result.stderr
+
+    code, stdout, stderr = asyncio.run(run())
+    assert code == 0, (stdout, stderr)
+    assert not (context.cwd / "mutated.txt").exists()
+    # Ephemeral per-command directory is removed once the process tree exits.
+    assert not launch.cleanup_dir.exists()
+    # Non-test writable commands keep writable workspace.
+    writable = prepare_seatbelt({"command": "npm run build"}, replace(context))
+    try:
+        assert writable.read_only_workspace is False
+    finally:
+        writable.cleanup()
+
+
+@pytest.mark.process
+def test_secure_fs_o_search_traversal_works_inside_seatbelt(
+    macos: None, context: ToolContext
+) -> None:
+    from wisp.tools.files.secure_fs import _TRAVERSAL_FLAGS
+
+    # Verify secure_fs's exact traversal flags walk every ancestor from / down to
+    # TMPDIR under Seatbelt's (allow file-read-metadata) without file-read-data on /private.
+    (context.cwd / "test_secure_fs_in_sandbox.py").write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        f"FLAGS = {_TRAVERSAL_FLAGS!r}\n"
+        "\n"
+        "def test_o_search_traversal(tmp_path: Path) -> None:\n"
+        "    target = (tmp_path / 'sub').resolve()\n"
+        "    target.mkdir()\n"
+        "    fd = os.open(target.anchor, FLAGS)\n"
+        "    try:\n"
+        "        for part in target.relative_to(target.anchor).parts:\n"
+        "            nxt = os.open(part, FLAGS, dir_fd=fd)\n"
+        "            os.close(fd)\n"
+        "            fd = nxt\n"
+        "        leaf = os.open('a.txt', os.O_CREAT | os.O_WRONLY, 0o600, dir_fd=fd)\n"
+        "        os.write(leaf, b'ok')\n"
+        "        os.close(leaf)\n"
+        "        os.fsync(fd)\n"
+        "    finally:\n"
+        "        os.close(fd)\n"
+        "    assert (target / 'a.txt').read_text() == 'ok'\n"
+    )
+    code, stdout, stderr = execute(
+        "python -m pytest -q test_secure_fs_in_sandbox.py", context, timeout=20
+    )
+    assert code == 0, (stdout, stderr)
+
+
+@pytest.mark.process
+def test_unix_sockets_allowed_only_inside_ephemeral_tmpdir(
+    macos: None, context: ToolContext
+) -> None:
+    before = Path.cwd()
+    with socket.socket(socket.AF_UNIX) as outside_listener:
+        try:
+            os.chdir(context.cwd)
+            outside_listener.bind("outside.sock")
+            outside_listener.listen(1)
+        finally:
+            os.chdir(before)
+        script = (
+            "import os, socket, errno\n"
+            "tmp = os.environ['TMPDIR']\n"
+            "ws_sock = os.path.abspath('outside.sock')\n"
+            "# Binding & connecting inside TMPDIR succeeds.\n"
+            "os.chdir(tmp)\n"
+            "srv = socket.socket(socket.AF_UNIX)\n"
+            "srv.bind('ok.sock')\n"
+            "srv.listen(1)\n"
+            "cli = socket.socket(socket.AF_UNIX)\n"
+            "cli.connect('ok.sock')\n"
+            "conn, _ = srv.accept()\n"
+            "conn.close(); cli.close(); srv.close()\n"
+            "# Symlink inside TMPDIR pointing to outside Unix socket is still denied.\n"
+            "os.symlink(ws_sock, 'escape.sock')\n"
+            "try:\n"
+            "    socket.socket(socket.AF_UNIX).connect('escape.sock')\n"
+            "except OSError as exc:\n"
+            "    assert exc.errno == errno.EPERM, exc\n"
+            "else:\n"
+            "    raise AssertionError('symlinked outside unix socket allowed')\n"
+        )
+        command = f"{shlex.quote(sys.executable)} -c {shlex.quote(script)}"
+        code, stdout, stderr = execute(command, context)
+        assert code == 0, (stdout, stderr)
+
+
+@pytest.mark.process
+def test_sandboxed_buffered_python_timeout_preserves_partial_output_and_cleans_up(
+    macos: None, context: ToolContext
+) -> None:
+    from dataclasses import replace
+
+    from wisp.tools.shell.supervisor import ProcessSupervisor
+
+    command = (
+        f"{shlex.quote(sys.executable)} -c "
+        "'import time; print(\"partial-before-timeout\"); time.sleep(10)'"
+    )
+    # Direct _run_shell path
+    launch_direct = prepare_seatbelt({"command": command}, context)
+    assert dict(launch_direct.environment)["PYTHONUNBUFFERED"] == "1"
+    assert launch_direct.cleanup_dir is not None
+
+    async def run_direct() -> str:
+        with activate_seatbelt(launch_direct):
+            with pytest.raises(ToolError) as caught:
+                await _run_shell(command, cwd=context.cwd, timeout=1.0, max_output_bytes=4000)
+            return str(caught.value)
+
+    direct_msg = asyncio.run(run_direct())
+    assert "partial-before-timeout" in direct_msg
+    assert not launch_direct.cleanup_dir.exists()
+
+    # Supervised BashTool path
+    launch_sup = prepare_seatbelt({"command": command}, context)
+    assert launch_sup.cleanup_dir is not None
+
+    async def run_supervised() -> str:
+        tool = BashTool(ProcessSupervisor())
+        try:
+            with pytest.raises(ToolError) as caught:
+                await tool.run(
+                    {"command": command, "timeout": 1},
+                    replace(context, command_sandbox=launch_sup),
+                )
+            return str(caught.value)
+        finally:
+            await tool.aclose()
+
+    sup_msg = asyncio.run(run_supervised())
+    assert "partial-before-timeout" in sup_msg
+    assert not launch_sup.cleanup_dir.exists()
+
+
+@pytest.mark.process
+def test_cargo_test_with_lockfile_uses_read_only_workspace_and_scratch_target(
+    macos: None, context: ToolContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import pwd
+    import shutil
+    import subprocess
+
+    home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    if shutil.which("cargo") is None:
+        pytest.skip("cargo is not installed")
+    (context.cwd / "Cargo.toml").write_text(
+        '[package]\nname="ro-probe"\nversion="0.1.0"\nedition="2021"\n'
+    )
+    (context.cwd / "src").mkdir()
+    (context.cwd / "src/lib.rs").write_text(
+        "#[test]\n"
+        "fn temp_git_and_wisp_allowed_while_workspace_read_only() {\n"
+        '    let dir = std::env::temp_dir().join("ro-probe-fixture");\n'
+        '    std::fs::create_dir_all(dir.join(".git")).unwrap();\n'
+        '    std::fs::create_dir_all(dir.join(".wisp")).unwrap();\n'
+        '    std::fs::write(dir.join(".wisp/tui.json"), b"{}").unwrap();\n'
+        '    assert!(std::fs::write("mutated.txt", b"no").is_err());\n'
+        "}\n"
+    )
+    subprocess.run(
+        ["cargo", "generate-lockfile", "--offline"],
+        cwd=context.cwd,
+        env={
+            **os.environ,
+            "CARGO_HOME": str(home / ".cargo"),
+            "RUSTUP_HOME": str(home / ".rustup"),
+        },
+        check=True,
+        capture_output=True,
+    )
+    command = "cargo test"
+    launch = prepare_seatbelt({"command": command}, context)
+    assert launch.read_only_workspace is True
+    assert "CARGO_TARGET_DIR" in dict(launch.environment)
+
+    async def run() -> tuple[int, str, str]:
+        with activate_seatbelt(launch):
+            result = await _run_shell(command, cwd=context.cwd, timeout=30, max_output_bytes=8000)
+        return result.exit_code, result.stdout, result.stderr
+
+    code, stdout, stderr = asyncio.run(run())
+    assert code == 0, (stdout, stderr)
+    assert not (context.cwd / "target").exists()
+    assert not (context.cwd / "mutated.txt").exists()
+
+
+def test_revoked_or_unapproved_launch_cleans_up_ephemeral_dir(
+    macos: None, context: ToolContext
+) -> None:
+    from wisp.coding.tool_execution import ConfiguredToolExecutor
+    from wisp.events import ToolApprovalReviewed
+    from wisp.providers.events import ToolCall
+    from wisp.runtime.registry import ToolRegistry
+    from wisp.tools.approval import ToolApprovalPolicy
+    from wisp.tools.policy import ToolPolicy
+
+    assert context.scratch_root is not None
+
+    class AskReviewer:
+        async def review(self, *, call_id, arguments, context, still_authorized):
+            return ToolApprovalReviewed(call_id=call_id, name="bash", verdict="ask", reason="ask")
+
+    tool = BashTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    executor = ConfiguredToolExecutor(
+        registry=registry,
+        context=context,
+        policy=ToolPolicy.allow_all_tools(),
+        approval_policy=ToolApprovalPolicy.auto_commands(),
+        command_reviewer=AskReviewer(),
+    )
+
+    async def run() -> None:
+        try:
+            _ = [
+                event
+                async for event in executor.execute(
+                    ToolCall(
+                        call_id="ask-cleanup", name="bash", arguments={"command": "ruff check ."}
+                    )
+                )
+            ]
+        finally:
+            await tool.aclose()
+
+    asyncio.run(run())
+    runs_root = context.scratch_root / ".seatbelt-runs"
+    assert list(runs_root.glob("run-*")) == []
+
+
+@pytest.mark.process
+def test_cargo_target_is_isolated_from_non_cargo_and_writable_runs(
+    macos: None, context: ToolContext
+) -> None:
+    """Neither non-Cargo tests nor writable-workspace commands may touch .seatbelt-cargo-target."""
+    assert context.scratch_root is not None
+    # Non-Cargo read-only tests do not get CARGO_TARGET_DIR.
+    py_launch = prepare_seatbelt({"command": "pytest -q"}, context)
+    try:
+        assert py_launch.read_only_workspace is True
+        assert "CARGO_TARGET_DIR" not in dict(py_launch.environment)
+    finally:
+        py_launch.cleanup()
+
+    # Writable-workspace commands cannot plant a symlink at .seatbelt-cargo-target
+    # or move a payload staged there by a prior cargo test run into the workspace.
+    code, _, stderr = execute('ln -s "$PWD" "$WISP_SCRATCH_DIR/.seatbelt-cargo-target"', context)
+    assert code != 0, stderr
+    assert not (context.scratch_root / ".seatbelt-cargo-target").exists()
+
+    staged = context.scratch_root / ".seatbelt-cargo-target/payload"
+    staged.mkdir(parents=True)
+    (staged / ".git").write_text("gitdir: ../evil")
+    (staged / "AGENTS.md").write_text("evil")
+    code, _, stderr = execute(
+        'mv "$WISP_SCRATCH_DIR/.seatbelt-cargo-target/payload" "$PWD/planted"', context
+    )
+    assert code != 0, stderr
+    assert not (context.cwd / "planted").exists()
+
+
+@pytest.mark.process
+def test_chmod_and_chflags_cannot_defeat_cleanup_or_cross_run_isolation(
+    macos: None, context: ToolContext
+) -> None:
+    """Tightened permissions still clean up, chflags is denied, and other runs stay hidden."""
+    assert context.scratch_root is not None
+    # chflags uchg is denied by (deny file-write-flags).
+    code, _, stderr = execute(
+        'touch "$TMPDIR/flagtest" && chflags uchg "$TMPDIR/flagtest"', context
+    )
+    assert code != 0, stderr
+
+    # A read-only test run that chmods a TMPDIR subtree to 0000/0500 is still cleaned up on exit.
+    (context.cwd / "test_chmod_cleanup.py").write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        "\n"
+        "def test_lock_tmpdir(tmp_path: Path) -> None:\n"
+        "    locked = tmp_path / 'locked'\n"
+        "    locked.mkdir()\n"
+        "    (locked / '.git').write_text('gitdir: ../evil')\n"
+        "    os.chmod(locked, 0o500)\n"
+    )
+    command = "python -m pytest -q test_chmod_cleanup.py"
+    launch = prepare_seatbelt({"command": command}, context)
+    assert launch.cleanup_dir is not None
+
+    async def run_ro() -> int:
+        with activate_seatbelt(launch):
+            result = await _run_shell(command, cwd=context.cwd, timeout=20, max_output_bytes=4000)
+        return result.exit_code
+
+    assert asyncio.run(run_ro()) == 0
+    assert not launch.cleanup_dir.exists()
+
+    # Even if another run directory is live under .seatbelt-runs, a writable-workspace
+    # command cannot read, chmod, or move anything out of it into the workspace.
+    other_run = context.scratch_root / ".seatbelt-runs/run-other/tmp/payload"
+    other_run.mkdir(parents=True)
+    (other_run / ".git").write_text("gitdir: ../evil")
+    code, _, stderr = execute(
+        'mv "$WISP_SCRATCH_DIR/.seatbelt-runs/run-other/tmp/payload" "$PWD/planted"', context
+    )
+    assert code != 0, stderr
+    assert not (context.cwd / "planted").exists()
+
+
+def test_unexecuted_prepared_call_and_prespawn_error_clean_up_ephemeral_dir(
+    macos: None, context: ToolContext
+) -> None:
+    from dataclasses import replace
+
+    from wisp.agent.tool_contracts import PreparedToolExecution
+    from wisp.coding.tool_execution import ConfiguredToolExecutor
+    from wisp.providers.events import ToolCall
+    from wisp.runtime.registry import ToolRegistry
+    from wisp.tools.approval import ToolApprovalPolicy
+    from wisp.tools.policy import ToolPolicy
+
+    assert context.scratch_root is not None
+    runs_root = context.scratch_root / ".seatbelt-runs"
+
+    # 1. Prepared call that never runs (e.g., batch cancelled) cleans up on close().
+    tool = BashTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    executor = ConfiguredToolExecutor(
+        registry=registry,
+        context=context,
+        policy=ToolPolicy.allow_all_tools(),
+        approval_policy=ToolApprovalPolicy.auto_commands(),
+    )
+
+    async def run_prepare_only() -> None:
+        try:
+            events = [
+                event
+                async for event in executor.prepare(
+                    ToolCall(call_id="unrun", name="bash", arguments={"command": "pytest -q"})
+                )
+            ]
+            prepared = events[-1]
+            assert isinstance(prepared, PreparedToolExecution)
+            assert len(list(runs_root.glob("run-*"))) == 1
+            prepared.close()
+        finally:
+            await tool.aclose()
+
+    asyncio.run(run_prepare_only())
+    assert list(runs_root.glob("run-*")) == []
+
+    # 2. Pre-spawn validation error in BashTool.run() cleans up the unclaimed launch.
+    launch = prepare_seatbelt({"command": "pytest -q"}, context)
+    assert launch.cleanup_dir is not None and launch.cleanup_dir.exists()
+
+    async def run_prespawn_error() -> None:
+        bash = BashTool()
+        try:
+            with pytest.raises(ToolError):
+                await bash.run(
+                    {"command": "pytest -q", "timeout": 0},
+                    replace(context, command_sandbox=launch),
+                )
+        finally:
+            await bash.aclose()
+
+    asyncio.run(run_prespawn_error())
+    assert not launch.cleanup_dir.exists()
+
+
+def test_nested_cargo_subcrate_detects_ancestor_lockfile(macos: None, context: ToolContext) -> None:
+    from dataclasses import replace
+
+    nested = context.cwd / "rust/subcrate"
+    nested.mkdir(parents=True)
+    (context.cwd / "rust/Cargo.lock").write_text("version = 4\n")
+    scoped = replace(context, cwd=nested, workspace_root=context.cwd)
+    launch = prepare_seatbelt({"command": "cargo test"}, scoped)
+    try:
+        assert launch.read_only_workspace is True
+        assert "CARGO_TARGET_DIR" in dict(launch.environment)
+    finally:
+        launch.cleanup()

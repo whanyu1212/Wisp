@@ -11,8 +11,10 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -54,6 +56,7 @@ _BASE = """(version 1)
 (allow file-write-data (require-all (literal "/dev/null") (vnode-type CHARACTER-DEVICE)))
 (allow ipc-posix-sem)
 (deny mach-lookup (xpc-service-name-prefix ""))
+(deny file-write-flags)
 (deny system-fcntl (fcntl-command 80 110))
 """
 # F_MAKECOMPRESSED/F_TRANSFEREXTENTS can mutate read-only descriptors. This
@@ -117,6 +120,28 @@ class ProcessAuthority:
         )
 
 
+@dataclass(slots=True)
+class _EphemeralDirLease:
+    """Single-owner lifecycle handle for a per-command sandbox temp directory."""
+
+    path: Path
+    claimed: bool = False
+
+    def claim(self) -> Path | None:
+        """Transfer ownership to a spawned subprocess; subsequent cleanups no-op."""
+        if self.claimed:
+            return None
+        self.claimed = True
+        return self.path
+
+    def release(self) -> None:
+        """Delete the directory if ownership has not been transferred."""
+        if self.claimed:
+            return
+        self.claimed = True
+        cleanup_ephemeral_dir(self.path)
+
+
 @dataclass(frozen=True, slots=True)
 class SeatbeltLaunch:
     """Immutable authority bound to the exact command and working directory."""
@@ -127,6 +152,22 @@ class SeatbeltLaunch:
     environment: tuple[tuple[str, str], ...]
     roots: tuple[Path, ...]
     authority: ProcessAuthority | None = None
+    cleanup_dir: Path | None = None
+    read_only_workspace: bool = False
+    _lease: _EphemeralDirLease | None = None
+
+    def claim_cleanup_dir(self) -> Path | None:
+        """Transfer ephemeral directory cleanup responsibility to a spawned process."""
+        if self._lease is not None:
+            return self._lease.claim()
+        return self.cleanup_dir
+
+    def cleanup(self) -> None:
+        """Remove this launch's ephemeral directory if ownership was not transferred."""
+        if self._lease is not None:
+            self._lease.release()
+            return
+        cleanup_ephemeral_dir(self.cleanup_dir)
 
     def validate(self, command: str, cwd: Path) -> None:
         """Reject rebinding or symlinked roots before spawning any command."""
@@ -144,6 +185,56 @@ class SeatbeltLaunch:
         """Add only the host-owned job recorder to the prepared policy."""
         recorder = f"(allow file-write-data (literal {_sbpl_string(str(jobs_file.resolve()))}))"
         return [_EXECUTABLE, "-p", self.profile + recorder, "/bin/sh", "-c", wrapped_command]
+
+
+def _make_tree_removable(root: Path) -> None:
+    """Restore owner permissions and clear UF_IMMUTABLE without following symlinks."""
+    chflags = getattr(os, "chflags", None)
+    uf_immutable = getattr(stat, "UF_IMMUTABLE", 0)
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        if current.is_symlink():
+            continue
+        if chflags is not None and uf_immutable:
+            try:
+                info = current.lstat()
+                if getattr(info, "st_flags", 0) & uf_immutable:
+                    chflags(current, info.st_flags & ~uf_immutable)
+            except OSError:
+                pass
+        try:
+            os.chmod(current, 0o700)
+        except OSError:
+            pass
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    if entry.is_symlink():
+                        continue
+                    entry_path = Path(entry.path)
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(entry_path)
+                    elif chflags is not None and uf_immutable:
+                        try:
+                            info = entry.stat(follow_symlinks=False)
+                            if getattr(info, "st_flags", 0) & uf_immutable:
+                                chflags(entry_path, info.st_flags & ~uf_immutable)
+                        except OSError:
+                            pass
+        except OSError:
+            pass
+
+
+def cleanup_ephemeral_dir(path: Path | None) -> None:
+    """Remove an ephemeral sandbox directory even if the child tightened permissions."""
+    if path is None or path.is_symlink() or not path.exists():
+        return
+    try:
+        shutil.rmtree(path)
+    except OSError:
+        _make_tree_removable(path)
+        shutil.rmtree(path, ignore_errors=True)
 
 
 @contextmanager
@@ -174,7 +265,12 @@ def sandbox_development_command(arguments: Mapping[str, object]) -> bool:
     command = arguments.get("command")
     if not isinstance(command, str):
         return False
-    tokens = shlex.split(command)
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False
+    if not tokens:
+        return False
     if tokens[:2] == ["uv", "run"]:
         if tokens[2:3] != ["--no-sync"]:
             return False
@@ -189,6 +285,43 @@ def sandbox_development_command(arguments: Mapping[str, object]) -> bool:
             ["run", "build"],
         )
     return False
+
+
+def _has_ancestor_cargo_lock(cwd: Path, workspace: Path) -> bool:
+    current = cwd
+    while True:
+        if (current / "Cargo.lock").is_file():
+            return True
+        if current == workspace or current.parent == current:
+            return False
+        current = current.parent
+
+
+def _sandbox_test_profile(command: str, cwd: Path, workspace: Path) -> tuple[bool, bool]:
+    """Return ``(read_only_workspace, needs_cargo_target)`` for a sandboxed command.
+
+    Tests write fixtures into their fresh per-command TMPDIR, keeping the
+    workspace read-only. Only ``cargo test`` with an existing workspace Cargo.lock
+    receives the isolated session Cargo target directory; crates without a
+    Cargo.lock keep writable-workspace mode so Cargo can generate Cargo.lock.
+    """
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False, False
+    if tokens[:2] == ["uv", "run"]:
+        if tokens[2:3] != ["--no-sync"]:
+            return False, False
+        return _sandbox_python_test(tokens[3:]), False
+    if _sandbox_python_test(tokens):
+        return True, False
+    if tokens[:2] == ["cargo", "test"]:
+        if _has_ancestor_cargo_lock(cwd, workspace):
+            return True, True
+        return False, False
+    if tokens[:2] == ["npm", "test"] or tokens[:3] == ["npm", "run", "test"]:
+        return True, False
+    return False, False
 
 
 def _has_control_chars(text: str) -> bool:
@@ -301,27 +434,98 @@ def prepare_seatbelt(arguments: Mapping[str, object], context: ToolContext) -> S
     roots = (workspace, scratch)
     for root in roots:
         _validate_root(root)
-    reads, environment = _runtime_access(roots)
-    for key in context.withheld_environment:
-        environment.pop(key, None)
-    profile = _filesystem_profile(reads, roots, context.protected_paths)
+    read_only_workspace, needs_cargo_target = _sandbox_test_profile(command, cwd, workspace)
+    runs_root = scratch / ".seatbelt-runs"
+    cargo_target_root = scratch / ".seatbelt-cargo-target"
     try:
-        probe = subprocess.run(
-            [_EXECUTABLE, "-p", profile, "/usr/bin/true"],
-            cwd=cwd,
-            env=environment,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            timeout=3,
+        if runs_root.is_symlink():
+            raise ToolError("Sandbox run directory cannot be a symbolic link.")
+        runs_root.mkdir(mode=0o700, exist_ok=True)
+        _validate_root(runs_root)
+        run_dir = Path(tempfile.mkdtemp(prefix="run-", dir=runs_root)).resolve()
+    except ToolError:
+        raise
+    except OSError as exc:
+        raise ToolError("Could not create private sandbox temp directory.") from exc
+    try:
+        tmp_dir = run_dir / "tmp"
+        home_dir = run_dir / "home"
+        tmp_dir.mkdir(mode=0o700)
+        home_dir.mkdir(mode=0o700)
+        cargo_target: Path | None = None
+        if needs_cargo_target:
+            if cargo_target_root.is_symlink():
+                raise ToolError("Sandbox Cargo target directory cannot be a symbolic link.")
+            cargo_target_root.mkdir(mode=0o700, exist_ok=True)
+            _validate_root(cargo_target_root)
+            cargo_target = cargo_target_root.resolve()
+        _validate_root(run_dir)
+        reads, environment = _runtime_access(
+            roots,
+            run_dir=run_dir,
+            tmp_dir=tmp_dir,
+            home_dir=home_dir,
+            cargo_target=cargo_target,
+            read_only_workspace=read_only_workspace,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise ToolError("Seatbelt capability probe failed; automatic execution stopped.") from exc
-    if probe.returncode != 0:
-        raise ToolError("Seatbelt policy could not be applied; automatic execution stopped.")
-    return SeatbeltLaunch(command, cwd, profile, tuple(environment.items()), roots)
+        for key in context.withheld_environment:
+            environment.pop(key, None)
+        profile = _filesystem_profile(
+            reads,
+            roots,
+            context.protected_paths,
+            runs_root=runs_root.resolve(),
+            run_dir=run_dir,
+            tmp_dir=tmp_dir,
+            home_dir=home_dir,
+            cargo_target_root=cargo_target_root,
+            cargo_target=cargo_target,
+            read_only_workspace=read_only_workspace,
+        )
+        try:
+            probe = subprocess.run(
+                [_EXECUTABLE, "-p", profile, "/usr/bin/true"],
+                cwd=cwd,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=3,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ToolError(
+                "Seatbelt capability probe failed; automatic execution stopped."
+            ) from exc
+        if probe.returncode != 0:
+            raise ToolError("Seatbelt policy could not be applied; automatic execution stopped.")
+    except BaseException:
+        cleanup_ephemeral_dir(run_dir)
+        raise
+    validated_roots = (
+        (workspace, scratch, runs_root.resolve(), run_dir, cargo_target)
+        if cargo_target is not None
+        else (workspace, scratch, runs_root.resolve(), run_dir)
+    )
+    return SeatbeltLaunch(
+        command,
+        cwd,
+        profile,
+        tuple(environment.items()),
+        validated_roots,
+        cleanup_dir=run_dir,
+        read_only_workspace=read_only_workspace,
+        _lease=_EphemeralDirLease(run_dir),
+    )
 
 
-def _runtime_access(roots: tuple[Path, Path]) -> tuple[set[Path], dict[str, str]]:
+def _runtime_access(
+    roots: tuple[Path, Path],
+    *,
+    run_dir: Path,
+    tmp_dir: Path,
+    home_dir: Path,
+    cargo_target: Path | None,
+    read_only_workspace: bool,
+) -> tuple[set[Path], dict[str, str]]:
     """Resolve installed toolchains and construct a secret-free environment."""
     workspace, scratch = roots
     home = Path.home()
@@ -356,7 +560,12 @@ def _runtime_access(roots: tuple[Path, Path]) -> tuple[set[Path], dict[str, str]
             "/dev/fd",
         )
     }
-    reads.update(roots)
+    reads.add(workspace)
+    reads.add(run_dir)
+    if cargo_target is not None:
+        reads.add(cargo_target)
+    if not read_only_workspace:
+        reads.add(scratch)
     reads.update((Path(sys.prefix).resolve(), Path(sys.base_prefix).resolve()))
     # uv overlays can reuse another environment's installed packages via .pth.
     # Admit package directories, never arbitrary project entries from sys.path.
@@ -413,21 +622,24 @@ def _runtime_access(roots: tuple[Path, Path]) -> tuple[set[Path], dict[str, str]
     paths = [directory for directory in os.get_exec_path() if directory in paths] + paths
     paths.insert(0, str(Path(sys.prefix) / "bin"))
     paths.insert(0, str(workspace / ".venv/bin"))
-    # Cache/home writes stay in the existing private session scratch. Programs may
-    # create these directories; preparation itself does not mutate the workspace.
+    # Cache/home writes stay in the per-command ephemeral directory under scratch.
+    # Programs may create caches there; preparation itself does not mutate the workspace.
     environment = {
         "PATH": os.pathsep.join(dict.fromkeys(paths)),
-        "HOME": str(scratch),
-        "TMPDIR": str(scratch),
-        "WISP_SCRATCH_DIR": str(scratch),
+        "HOME": str(home_dir),
+        "TMPDIR": str(tmp_dir),
+        "WISP_SCRATCH_DIR": str(tmp_dir if read_only_workspace else scratch),
         "LANG": "en_US.UTF-8",
+        "PYTHONUNBUFFERED": "1",
         "PYTHONDONTWRITEBYTECODE": "1",
-        "UV_CACHE_DIR": str(scratch / "uv-cache"),
-        "npm_config_cache": str(scratch / "npm-cache"),
+        "UV_CACHE_DIR": str(run_dir / "uv-cache"),
+        "npm_config_cache": str(run_dir / "npm-cache"),
         "CARGO_HOME": str(home / ".cargo"),
         "CARGO_NET_OFFLINE": "true",
         "RUSTUP_HOME": str(home / ".rustup"),
     }
+    if cargo_target is not None:
+        environment["CARGO_TARGET_DIR"] = str(cargo_target)
     return reads, environment
 
 
@@ -438,7 +650,9 @@ def _resolve_safely(path: Path, message: str) -> Path:
         raise ToolError(message) from exc
 
 
-def _package_roots(reads: set[Path], roots: tuple[Path, Path]) -> tuple[Path, ...]:
+def _package_roots(
+    reads: set[Path], roots: tuple[Path, Path], *, excluded_prefixes: set[Path]
+) -> tuple[Path, ...]:
     """Locate installed Python packages, not arbitrary project source directories."""
     workspace, scratch = roots
     venv = workspace / ".venv"
@@ -449,8 +663,8 @@ def _package_roots(reads: set[Path], roots: tuple[Path, Path]) -> tuple[Path, ..
         else None
     )
     candidates = {path for path in reads if path.name in {"site-packages", "dist-packages"}}
-    # Never treat writable workspace or scratch roots themselves as virtualenv prefixes.
-    for prefix in (*(reads - set(roots)), venv):
+    # Never treat writable workspace, scratch, or ephemeral roots as virtualenv prefixes.
+    for prefix in (*(reads - excluded_prefixes), venv):
         if (prefix / "pyvenv.cfg").is_file():
             candidates.update((prefix / "lib").glob("python*/site-packages"))
     packages: set[Path] = set()
@@ -471,12 +685,20 @@ def _package_roots(reads: set[Path], roots: tuple[Path, Path]) -> tuple[Path, ..
     return tuple(sorted(packages))
 
 
-def _package_protections(packages: tuple[Path, ...], workspace: Path) -> list[str]:
+def _package_protections(
+    packages: tuple[Path, ...],
+    workspace: Path,
+    *,
+    ephemeral_exception: str | None = None,
+) -> list[str]:
     """Allow public credential-module source only in pinned, read-only packages.
 
     Explicit configured protections are applied separately and still win. All
     workspace .venv writes, package writes, and ancestor moves are denied so a
     workspace secret cannot be relocated into this read exception across calls.
+    In read-only-workspace test runs, the fresh ephemeral temp/home directories
+    are exempt so tests can build synthetic fixtures without exposing workspace
+    or host credentials.
     Pre-existing hardlink aliases remain the documented shared-workspace limitation.
     """
     rules: list[str] = []
@@ -492,16 +714,31 @@ def _package_protections(packages: tuple[Path, ...], workspace: Path) -> list[st
                 f"(literal {_sbpl_string(str(ancestor))})))"
             )
     credentials = _sbpl_regex(_protected_regex("credentials"))
-    rules.append(f"(deny file-write* (regex {credentials}))")
+    if ephemeral_exception is not None:
+        rules.append(
+            f"(deny file-write* (require-all (regex {credentials}) "
+            f"(require-not {ephemeral_exception})))"
+        )
+    else:
+        rules.append(f"(deny file-write* (regex {credentials}))")
+    read_exceptions: list[str] = []
     if packages:
         locations = " ".join(f"(subpath {_sbpl_string(str(path))})" for path in packages)
-        public_source = (
+        read_exceptions.append(
             f"(require-all (require-any {locations}) "
             "(require-any (vnode-type DIRECTORY) "
             '(require-all (vnode-type REGULAR-FILE) (regex #"[.]py$"))))'
         )
+    if ephemeral_exception is not None:
+        read_exceptions.append(ephemeral_exception)
+    if read_exceptions:
+        allowed = (
+            read_exceptions[0]
+            if len(read_exceptions) == 1
+            else f"(require-any {' '.join(read_exceptions)})"
+        )
         rules.append(
-            f"(deny file-read* (require-all (regex {credentials}) (require-not {public_source})))"
+            f"(deny file-read* (require-all (regex {credentials}) (require-not {allowed})))"
         )
     else:
         rules.append(f"(deny file-read* (regex {credentials}))")
@@ -575,59 +812,124 @@ def _bind_workspace_symlinks(
 
 
 def _filesystem_profile(
-    reads: set[Path], roots: tuple[Path, Path], protected_paths: tuple[str, ...]
+    reads: set[Path],
+    roots: tuple[Path, Path],
+    protected_paths: tuple[str, ...],
+    *,
+    runs_root: Path,
+    run_dir: Path,
+    tmp_dir: Path,
+    home_dir: Path,
+    cargo_target_root: Path,
+    cargo_target: Path | None,
+    read_only_workspace: bool,
 ) -> str:
     """Compile read/write grants with final path and ancestor protections."""
     workspace, scratch = roots
-    packages = _package_roots(reads, roots)
+    excluded_prefixes = {workspace, scratch, runs_root, run_dir}
+    if cargo_target is not None:
+        excluded_prefixes.add(cargo_target)
+    packages = _package_roots(reads, roots, excluded_prefixes=excluded_prefixes)
     rules = [_BASE]
     for root in sorted(reads):
         resolved_root = root.resolve()
         if is_broad_root(resolved_root):
             raise ToolError("A sandbox read root resolves to a broad directory.")
         rules.append(f"(allow file-read* (subpath {_sbpl_string(str(resolved_root))}))")
-    for root in roots:
+    writable_roots: tuple[Path, ...] = (
+        (run_dir, cargo_target)
+        if read_only_workspace and cargo_target is not None
+        else ((run_dir,) if read_only_workspace else (workspace, scratch, run_dir))
+    )
+    for root in writable_roots:
         quoted = _sbpl_string(str(root))
         rules.append(f"(allow file-write* (subpath {quoted}))")
+    pinned_roots = (*roots, runs_root, run_dir, tmp_dir, home_dir) + (
+        (cargo_target,) if cargo_target is not None else ()
+    )
+    for root in dict.fromkeys(pinned_roots):
         for ancestor in (root, *root.parents):
             rules.append(
                 "(deny file-write-unlink (require-all (vnode-type DIRECTORY) "
                 f"(literal {_sbpl_string(str(ancestor))})))"
             )
+    # Isolate per-command run directories and the read-only Cargo test target
+    # cache from writable-workspace commands so nothing created under a
+    # read-only test's ephemeral TMPDIR can ever cross into the workspace.
+    if not read_only_workspace:
+        rules.append(
+            "(deny file-read* file-write* "
+            f"(require-all (subpath {_sbpl_string(str(runs_root))}) "
+            f"(require-not (subpath {_sbpl_string(str(run_dir))}))))"
+        )
+    if cargo_target is None:
+        cargo_regex = _sbpl_regex("^" + _case_literal(str(cargo_target_root)) + "(/.*)?$")
+        rules.append(f"(deny file-read* file-write* (regex {cargo_regex}))")
+        rules.append(
+            f"(deny file-write-unlink (require-all (vnode-type DIRECTORY) (regex {cargo_regex})))"
+        )
+    # Scope Unix domain sockets strictly to this command's fresh private TMPDIR so
+    # tests can use local IPC without touching host daemons or TCP loopback.
+    quoted_tmp = _sbpl_string(str(tmp_dir))
+    rules.append(f"(allow network-bind (local unix-socket (subpath {quoted_tmp})))")
+    rules.append(f"(allow network-inbound (local unix-socket (subpath {quoted_tmp})))")
+    rules.append(f"(allow network-outbound (remote unix-socket (subpath {quoted_tmp})))")
+
+    # On read-only-workspace test runs, the fresh ephemeral tmp/home directories
+    # start empty, cannot be moved into the workspace, and are deleted on exit, so
+    # synthetic test fixtures (.git, .wisp, AGENTS.md, .env, settings.json) can
+    # live there without weakening workspace or host protections.
+    ephemeral_exception = (
+        f"(require-any (subpath {quoted_tmp}) (subpath {_sbpl_string(str(home_dir))}))"
+        if read_only_workspace
+        else None
+    )
+    uv_cache = run_dir / "uv-cache"
     for name in _CONTROL_NAMES:
         regex = _sbpl_regex(_protected_regex(name))
         if name == ".git":
             # UV initializes this regular-file cache sentinel even with --no-sync.
             # UV numbers the bucket and renumbers it between releases. Only that
             # private-cache file is exempt, never a Git directory.
-            marker = _sbpl_regex(
-                "^" + re.escape(str(scratch / "uv-cache")) + r"/sdists-v[0-9]+/\.git$"
+            marker = _sbpl_regex("^" + re.escape(str(uv_cache)) + r"/sdists-v[0-9]+/\.git$")
+            git_exceptions = [f"(require-all (regex {marker}) (vnode-type REGULAR-FILE))"]
+            if ephemeral_exception is not None:
+                git_exceptions.append(ephemeral_exception)
+            allowed = (
+                git_exceptions[0]
+                if len(git_exceptions) == 1
+                else f"(require-any {' '.join(git_exceptions)})"
             )
-            exception = f"(require-all (regex {marker}) (vnode-type REGULAR-FILE))"
             rules.append(
-                f"(deny file-write* (require-all (regex {regex}) (require-not {exception})))"
+                f"(deny file-write* (require-all (regex {regex}) (require-not {allowed})))"
             )
             # A rename checks only the moved directory's own path, so a movable
             # cache or bucket would carry the exempt marker into the workspace.
             pinned = _sbpl_regex(
-                "^"
-                + _case_literal(str(scratch / "uv-cache"))
-                + "(/"
-                + _case_literal("sdists-v")
-                + "[0-9]+)?$"
+                "^" + _case_literal(str(uv_cache)) + "(/" + _case_literal("sdists-v") + "[0-9]+)?$"
             )
             rules.append(
                 f"(deny file-write-unlink (require-all (vnode-type DIRECTORY) (regex {pinned})))"
             )
+        elif ephemeral_exception is not None:
+            rules.append(
+                f"(deny file-write* (require-all (regex {regex}) "
+                f"(require-not {ephemeral_exception})))"
+            )
         else:
             rules.append(f"(deny file-write* (regex {regex}))")
     # Seatbelt evaluates ordered rules: restrictions must follow workspace grants.
-    rules.extend(_package_protections(packages, workspace))
+    rules.extend(_package_protections(packages, workspace, ephemeral_exception=ephemeral_exception))
     # Scratch lives under ~/.wisp, but .wisp descendants of either writable root
     # are configuration, not scratch. Protect every nested project directory too.
-    for root in roots:
+    for root in (workspace,) if read_only_workspace else roots:
         regex = _sbpl_regex(
             "^" + _case_literal(str(root)) + "(/.*)?/" + _case_literal(".wisp") + "(/.*)?$"
+        )
+        rules.append(f"(deny file-read* file-write* (regex {regex}))")
+    if read_only_workspace and cargo_target is not None:
+        regex = _sbpl_regex(
+            "^" + _case_literal(str(cargo_target)) + "(/.*)?/" + _case_literal(".wisp") + "(/.*)?$"
         )
         rules.append(f"(deny file-read* file-write* (regex {regex}))")
     patterns = (*protected_paths, ".env*", *_PRIVATE_NAMES, str(workspace / ".wisp"))
@@ -635,9 +937,15 @@ def _filesystem_profile(
     bound_targets: set[Path] = set()
     for pattern in patterns:
         raw_regex = _protected_regex(pattern)
-        rules.append(f"(deny file-read* file-write* (regex {_sbpl_regex(raw_regex)}))")
         expanded = _protected_pattern(pattern)
         expanded_patterns.append(expanded)
+        if ephemeral_exception is not None and not expanded.startswith("/"):
+            rules.append(
+                f"(deny file-read* file-write* (require-all (regex {_sbpl_regex(raw_regex)}) "
+                f"(require-not {ephemeral_exception})))"
+            )
+        else:
+            rules.append(f"(deny file-read* file-write* (regex {_sbpl_regex(raw_regex)}))")
         if "*" not in expanded and "?" not in expanded:
             if "/" in expanded:
                 # Also protect ancestors of suffix matches in nested directories and
@@ -646,10 +954,16 @@ def _filesystem_profile(
                     if ancestor in (Path("."), Path("/")):
                         continue
                     ancestor_regex = _sbpl_regex(_protected_regex(str(ancestor), subtree=False))
-                    rules.append(
-                        "(deny file-write-unlink (require-all (vnode-type DIRECTORY) "
-                        f"(regex {ancestor_regex})))"
-                    )
+                    if ephemeral_exception is not None and not expanded.startswith("/"):
+                        rules.append(
+                            "(deny file-write-unlink (require-all (vnode-type DIRECTORY) "
+                            f"(regex {ancestor_regex}) (require-not {ephemeral_exception})))"
+                        )
+                    else:
+                        rules.append(
+                            "(deny file-write-unlink (require-all (vnode-type DIRECTORY) "
+                            f"(regex {ancestor_regex})))"
+                        )
             path = Path(expanded).expanduser()
             path = path if path.is_absolute() else workspace / path
             if "/" in expanded or path.is_symlink():

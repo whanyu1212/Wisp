@@ -1381,3 +1381,22 @@ def test_command_shell_choice(
         assert process_tools_module._command_shell() == expected  # noqa: SLF001
     finally:
         process_tools_module._command_shell.cache_clear()  # noqa: SLF001
+
+
+@pytest.mark.process
+def test_direct_bash_timeout_includes_partial_output(tmp_path: Path) -> None:
+    bash = BashTool(None)
+    command = (
+        f"{shlex.quote(sys.executable)} -c "
+        "'import time; print(\"direct-partial-line\", flush=True); time.sleep(10)'"
+    )
+
+    async def run() -> str:
+        with pytest.raises(ToolError) as caught:
+            await bash.run({"command": command, "timeout": 1}, ToolContext(cwd=tmp_path))
+        assert caught.value.failure_code == "timeout"
+        return str(caught.value)
+
+    message = anyio.run(run)
+    assert "Command timed out after 1 seconds" in message
+    assert "Last output:\ndirect-partial-line" in message

@@ -11,6 +11,7 @@ from __future__ import annotations
 import errno
 import os
 import stat
+import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -26,8 +27,15 @@ _DIRECTORY_FLAGS = (
     | getattr(os, "O_NOFOLLOW", 0)
     | getattr(os, "O_CLOEXEC", 0)
 )
+# macOS has no O_PATH; O_EXEC (0x40000000 in <sys/fcntl.h>) OR'd with O_DIRECTORY
+# produces O_SEARCH, opening an ancestor directory for traversal without file-read-data.
+_DARWIN_O_EXEC = 0x40000000
 _TRAVERSAL_FLAGS = (
-    getattr(os, "O_PATH", os.O_RDONLY)
+    getattr(
+        os,
+        "O_PATH",
+        getattr(os, "O_SEARCH", _DARWIN_O_EXEC) if sys.platform == "darwin" else os.O_RDONLY,
+    )
     | getattr(os, "O_DIRECTORY", 0)
     | getattr(os, "O_NOFOLLOW", 0)
     | getattr(os, "O_CLOEXEC", 0)

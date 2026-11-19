@@ -651,42 +651,49 @@ class ConfiguredToolExecutor:
                 tool
             ):
                 automatic = await self._automatic_approval(tool_call, tool, arguments, target)
-                if automatic.review is not None:
-                    yield automatic.review
-                    automatic = self._current_approval(automatic)
-                if automatic.resolution is not None:
-                    yield automatic.resolution
-                    decision = automatic.resolution
-                elif automatic.review is None and self._approval_policy.approves(tool):
-                    # A concurrent explicit user grant needs no human prompt.
-                    yield self._prepare_tool(tool_call, tool, arguments, target=target)
-                    return
-                else:
-                    async with aclosing(
-                        self._approval_events(tool_call, tool, target)
-                    ) as approvals:
-                        async for event in approvals:
-                            yield event
-                            if isinstance(event, ToolApprovalResolved):
-                                decision = event
-                if decision.approved:
-                    yield self._prepare_tool(
-                        tool_call,
-                        tool,
-                        arguments,
-                        target=target,
-                        auto_approved=decision.rule_id == "workspace_edit_v1",
-                        sandbox=automatic.sandbox if decision.source == "auto" else None,
-                        process_authority=(
-                            automatic.process_authority if decision.source == "auto" else None
-                        ),
-                        generation=automatic.generation,
+                transferred = False
+                try:
+                    if automatic.review is not None:
+                        yield automatic.review
+                        automatic = self._current_approval(automatic)
+                    if automatic.resolution is not None:
+                        yield automatic.resolution
+                        decision = automatic.resolution
+                    elif automatic.review is None and self._approval_policy.approves(tool):
+                        # A concurrent explicit user grant needs no human prompt.
+                        yield self._prepare_tool(tool_call, tool, arguments, target=target)
+                        return
+                    else:
+                        async with aclosing(
+                            self._approval_events(tool_call, tool, target)
+                        ) as approvals:
+                            async for event in approvals:
+                                yield event
+                                if isinstance(event, ToolApprovalResolved):
+                                    decision = event
+                    if decision.approved:
+                        prepared = self._prepare_tool(
+                            tool_call,
+                            tool,
+                            arguments,
+                            target=target,
+                            auto_approved=decision.rule_id == "workspace_edit_v1",
+                            sandbox=automatic.sandbox if decision.source == "auto" else None,
+                            process_authority=(
+                                automatic.process_authority if decision.source == "auto" else None
+                            ),
+                            generation=automatic.generation,
+                        )
+                        transferred = True
+                        yield prepared
+                        return
+                    outcome = _failure_outcome(
+                        decision.reason or "Tool execution was not approved",
+                        failure_code="approval_denied",
                     )
-                    return
-                outcome = _failure_outcome(
-                    decision.reason or "Tool execution was not approved",
-                    failure_code="approval_denied",
-                )
+                finally:
+                    if not transferred and automatic.sandbox is not None:
+                        automatic.sandbox.cleanup()
             else:
                 yield self._prepare_tool(tool_call, tool, arguments, target=target)
                 return
@@ -813,81 +820,97 @@ class ConfiguredToolExecutor:
                 objection = (
                     "Seatbelt containment unavailable; explicit unrestricted approval required."
                 )
-        if not still_authorized():
-            objection = "Permissions changed during review; human approval required."
-        if objection is None and sandbox_development_command(arguments):
-            return _ApprovalEvaluation(
-                generation=generation,
-                sandbox=sandbox,
-                process_authority=authority,
-                resolution=ToolApprovalResolved(
-                    call_id=tool_call.call_id,
-                    name=tool_call.name,
-                    approved=True,
-                    source="auto",
-                    rule_id="sandbox_development_v1",
-                    reason="Auto-approved: Seatbelt test/build; network blocked; no model review.",
-                ),
-            )
-        if objection is None and self._command_reviewer is None:
-            return _ApprovalEvaluation()
-        if objection is not None:
-            review = ToolApprovalReviewed(
-                call_id=tool_call.call_id,
-                name=tool_call.name,
-                verdict="ask",
-                reason=objection,
-            )
-        else:
-            try:
-                assert self._command_reviewer is not None
-                review = await self._command_reviewer.review(
-                    call_id=tool_call.call_id,
-                    arguments=dict(arguments),
-                    context=self._context,
-                    still_authorized=still_authorized,
+        try:
+            if not still_authorized():
+                objection = "Permissions changed during review; human approval required."
+            if objection is None and sandbox_development_command(arguments):
+                return _ApprovalEvaluation(
+                    generation=generation,
+                    sandbox=sandbox,
+                    process_authority=authority,
+                    resolution=ToolApprovalResolved(
+                        call_id=tool_call.call_id,
+                        name=tool_call.name,
+                        approved=True,
+                        source="auto",
+                        rule_id="sandbox_development_v1",
+                        reason=(
+                            "Auto-approved: Seatbelt test/build; network blocked; no model review."
+                        ),
+                    ),
                 )
-                if (
-                    review.call_id != tool_call.call_id
-                    or review.name != tool_call.name
-                    or review.target is not None
-                ):
-                    raise ValueError("Reviewer changed the call identity")
-            except Exception:  # noqa: BLE001 - no callback failure may grant execution
+            if objection is None and self._command_reviewer is None:
+                if sandbox is not None:
+                    sandbox.cleanup()
+                return _ApprovalEvaluation()
+            if objection is not None:
+                if sandbox is not None:
+                    sandbox.cleanup()
                 review = ToolApprovalReviewed(
                     call_id=tool_call.call_id,
                     name=tool_call.name,
                     verdict="ask",
-                    reason="Command reviewer unavailable; human approval required.",
+                    reason=objection,
                 )
-        if not still_authorized():
-            review = review.model_copy(
-                update={
-                    "verdict": "deny",
-                    "reason": _REVOKED_COMMAND_REVIEW,
-                }
-            )
-        if review.verdict == "ask":
-            return _ApprovalEvaluation(review=review, generation=generation)
-        approved = review.verdict == "allow"
-        return _ApprovalEvaluation(
-            review=review,
-            generation=generation,
-            sandbox=sandbox if approved else None,
-            process_authority=authority if approved else None,
-            resolution=ToolApprovalResolved(
-                call_id=tool_call.call_id,
-                name=tool_call.name,
-                approved=approved,
-                source="auto",
-                rule_id="command_review_v1",
-                reason=(
-                    f"Auto-approved: command review + Seatbelt (network blocked) — {review.reason}"
-                    if approved
-                    else f"Command review denied: {review.reason}"
+            else:
+                try:
+                    assert self._command_reviewer is not None
+                    review = await self._command_reviewer.review(
+                        call_id=tool_call.call_id,
+                        arguments=dict(arguments),
+                        context=self._context,
+                        still_authorized=still_authorized,
+                    )
+                    if (
+                        review.call_id != tool_call.call_id
+                        or review.name != tool_call.name
+                        or review.target is not None
+                    ):
+                        raise ValueError("Reviewer changed the call identity")
+                except Exception:  # noqa: BLE001 - no callback failure may grant execution
+                    review = ToolApprovalReviewed(
+                        call_id=tool_call.call_id,
+                        name=tool_call.name,
+                        verdict="ask",
+                        reason="Command reviewer unavailable; human approval required.",
+                    )
+            if not still_authorized():
+                review = review.model_copy(
+                    update={
+                        "verdict": "deny",
+                        "reason": _REVOKED_COMMAND_REVIEW,
+                    }
+                )
+            if review.verdict == "ask":
+                if sandbox is not None:
+                    sandbox.cleanup()
+                return _ApprovalEvaluation(review=review, generation=generation)
+            approved = review.verdict == "allow"
+            if not approved and sandbox is not None:
+                sandbox.cleanup()
+            return _ApprovalEvaluation(
+                review=review,
+                generation=generation,
+                sandbox=sandbox if approved else None,
+                process_authority=authority if approved else None,
+                resolution=ToolApprovalResolved(
+                    call_id=tool_call.call_id,
+                    name=tool_call.name,
+                    approved=approved,
+                    source="auto",
+                    rule_id="command_review_v1",
+                    reason=(
+                        "Auto-approved: command review + Seatbelt (network blocked) — "
+                        f"{review.reason}"
+                        if approved
+                        else f"Command review denied: {review.reason}"
+                    ),
                 ),
-            ),
-        )
+            )
+        except BaseException:
+            if sandbox is not None:
+                sandbox.cleanup()
+            raise
 
     def _command_consent_active(self, generation: int) -> bool:
         return (
@@ -904,6 +927,8 @@ class ConfiguredToolExecutor:
             and evaluation.generation is not None
             and not self._command_consent_active(evaluation.generation)
         ):
+            if evaluation.sandbox is not None:
+                evaluation.sandbox.cleanup()
             return replace(
                 evaluation,
                 sandbox=None,
@@ -1092,114 +1117,124 @@ class ConfiguredToolExecutor:
                 failure_code="policy_denied",
             )
         automatic = _ApprovalEvaluation()
-        if self._approval_policy.requires_approval(tool) and not self._approval_policy.approves(
-            tool
-        ):
-            if origin == "subagent":
-                return _failure_outcome(
-                    f"{tool.name} needs approval, which a subagent cannot ask for. "
-                    "Call it directly instead.",
-                    failure_code="approval_denied",
-                )
-            automatic = await self._automatic_approval(
-                tool_call,
-                tool,
-                arguments,
-                target,
-                review_commands=self._progress_sink is not None,
-            )
-            log = _SCRIPT_CALLS.get()
-            if log is not None and log.closed:
-                return _failure_outcome(log.ended_first, failure_code="approval_denied")
-            if automatic.review is not None and self._progress_sink is not None:
-                review = automatic.review
-                await self._progress_sink(review)
-                automatic = self._current_approval(automatic)
-                if log is not None:
-                    log.mark_approval(
-                        tool_call.call_id,
-                        auto_approved=False,
-                        note=f"Command review ({review.verdict}): {review.reason}"[:500],
-                    )
-            if automatic.resolution is not None:
-                resolution = automatic.resolution
-                if self._progress_sink is not None:
-                    # Delivery must succeed before mutation. Without a sink only
-                    # edit-only grants qualify, audited by the parent's result.
-                    await self._progress_sink(resolution)
-                if not resolution.approved:
-                    return replace(
-                        _failure_outcome(
-                            resolution.reason or "Auto approval denied",
-                            failure_code="approval_denied",
-                        ),
-                        approval_note=automatic.note,
-                    )
-                if log is not None:
-                    log.mark_approval(tool_call.call_id, auto_approved=True, note=automatic.note)
-            else:
-                async with self._nested_approval_lock:
-                    denied = await self._approve_codemode_call(tool_call, tool, target)
-                if denied is not None:
-                    return replace(denied, approval_note=automatic.note)
-        name = target or tool_call.name
-        parallel_safe = (
-            tool.safety == "read" and self._registry.execution_metadata_for(name).parallel_safe
-            if self._registry is not None
-            else False
-        )
-        context = replace(
-            self._context,
-            command_sandbox=automatic.sandbox or self._context.command_sandbox,
-            process_authority=automatic.process_authority,
-        )
-        if automatic.resolution is not None and automatic.resolution.rule_id == "workspace_edit_v1":
-            context = replace(context, atomic_writes_only=True)
-        log = _SCRIPT_CALLS.get()
-        if origin == "codemode":
-            # The parent's progress forwarder owns sequencing and delivery. Nested
-            # foreground commands cannot be moved through an invisible child id;
-            # explicit managed starts remain owned by the shared supervisor.
-            context = replace(
-                context,
-                progress=_ChildProgress(log.progress)
-                if log is not None and log.progress is not None
-                else None,
-                background_request=None,
-            )
-        if result_limits is not None:
-            # The tool caps its own output from the context too, so both steps get it.
-            context = replace(
-                context,
-                max_output_bytes=max(context.max_output_bytes, result_limits.max_bytes),
-                max_output_lines=max(context.max_output_lines, result_limits.max_lines),
-            )
-        async with self._nested_parallel_limit if parallel_safe else self._nested_serial_lock:
-            if (automatic.sandbox is not None or automatic.process_authority is not None) and (
-                automatic.generation is None
-                or not self._command_consent_active(automatic.generation)
+        try:
+            if self._approval_policy.requires_approval(tool) and not self._approval_policy.approves(
+                tool
             ):
-                return _failure_outcome(_REVOKED_COMMAND_REVIEW, failure_code="approval_denied")
-            if log is not None and log.closed:
-                return _failure_outcome(log.ended_first, failure_code="policy_denied")
-            if origin == "codemode" and tool.safety != "read" and log is not None:
-                outcome = await self._run_codemode_mutation(
-                    tool, arguments, tool_call.call_id, name, context, log
-                )
-            else:
-                outcome = await self._run_tool(
+                if origin == "subagent":
+                    return _failure_outcome(
+                        f"{tool.name} needs approval, which a subagent cannot ask for. "
+                        "Call it directly instead.",
+                        failure_code="approval_denied",
+                    )
+                automatic = await self._automatic_approval(
+                    tool_call,
                     tool,
                     arguments,
-                    call_id=tool_call.call_id,
-                    tool_name=name,
-                    nested=True,
-                    context=context,
+                    target,
+                    review_commands=self._progress_sink is not None,
                 )
-            return replace(
-                outcome,
-                auto_approved=automatic.resolution is not None and automatic.resolution.approved,
-                approval_note=automatic.note,
+                log = _SCRIPT_CALLS.get()
+                if log is not None and log.closed:
+                    return _failure_outcome(log.ended_first, failure_code="approval_denied")
+                if automatic.review is not None and self._progress_sink is not None:
+                    review = automatic.review
+                    await self._progress_sink(review)
+                    automatic = self._current_approval(automatic)
+                    if log is not None:
+                        log.mark_approval(
+                            tool_call.call_id,
+                            auto_approved=False,
+                            note=f"Command review ({review.verdict}): {review.reason}"[:500],
+                        )
+                if automatic.resolution is not None:
+                    resolution = automatic.resolution
+                    if self._progress_sink is not None:
+                        # Delivery must succeed before mutation. Without a sink only
+                        # edit-only grants qualify, audited by the parent's result.
+                        await self._progress_sink(resolution)
+                    if not resolution.approved:
+                        return replace(
+                            _failure_outcome(
+                                resolution.reason or "Auto approval denied",
+                                failure_code="approval_denied",
+                            ),
+                            approval_note=automatic.note,
+                        )
+                    if log is not None:
+                        log.mark_approval(
+                            tool_call.call_id, auto_approved=True, note=automatic.note
+                        )
+                else:
+                    async with self._nested_approval_lock:
+                        denied = await self._approve_codemode_call(tool_call, tool, target)
+                    if denied is not None:
+                        return replace(denied, approval_note=automatic.note)
+            name = target or tool_call.name
+            parallel_safe = (
+                tool.safety == "read" and self._registry.execution_metadata_for(name).parallel_safe
+                if self._registry is not None
+                else False
             )
+            context = replace(
+                self._context,
+                command_sandbox=automatic.sandbox or self._context.command_sandbox,
+                process_authority=automatic.process_authority,
+            )
+            if (
+                automatic.resolution is not None
+                and automatic.resolution.rule_id == "workspace_edit_v1"
+            ):
+                context = replace(context, atomic_writes_only=True)
+            log = _SCRIPT_CALLS.get()
+            if origin == "codemode":
+                # The parent's progress forwarder owns sequencing and delivery. Nested
+                # foreground commands cannot be moved through an invisible child id;
+                # explicit managed starts remain owned by the shared supervisor.
+                context = replace(
+                    context,
+                    progress=_ChildProgress(log.progress)
+                    if log is not None and log.progress is not None
+                    else None,
+                    background_request=None,
+                )
+            if result_limits is not None:
+                # The tool caps its own output from the context too, so both steps get it.
+                context = replace(
+                    context,
+                    max_output_bytes=max(context.max_output_bytes, result_limits.max_bytes),
+                    max_output_lines=max(context.max_output_lines, result_limits.max_lines),
+                )
+            async with self._nested_parallel_limit if parallel_safe else self._nested_serial_lock:
+                if (automatic.sandbox is not None or automatic.process_authority is not None) and (
+                    automatic.generation is None
+                    or not self._command_consent_active(automatic.generation)
+                ):
+                    return _failure_outcome(_REVOKED_COMMAND_REVIEW, failure_code="approval_denied")
+                if log is not None and log.closed:
+                    return _failure_outcome(log.ended_first, failure_code="policy_denied")
+                if origin == "codemode" and tool.safety != "read" and log is not None:
+                    outcome = await self._run_codemode_mutation(
+                        tool, arguments, tool_call.call_id, name, context, log
+                    )
+                else:
+                    outcome = await self._run_tool(
+                        tool,
+                        arguments,
+                        call_id=tool_call.call_id,
+                        tool_name=name,
+                        nested=True,
+                        context=context,
+                    )
+                return replace(
+                    outcome,
+                    auto_approved=automatic.resolution is not None
+                    and automatic.resolution.approved,
+                    approval_note=automatic.note,
+                )
+        finally:
+            if automatic.sandbox is not None:
+                automatic.sandbox.cleanup()
 
     async def _run_codemode_mutation(
         self,
@@ -1369,59 +1404,65 @@ class ConfiguredToolExecutor:
         generation: int | None = None,
     ) -> PreparedToolExecution:
         async def run() -> ToolExecutionEnded:
-            if (sandbox is not None or process_authority is not None) and (
-                generation is None or not self._command_consent_active(generation)
-            ):
-                return _execution_ended(
-                    tool_call,
-                    _failure_outcome(_REVOKED_COMMAND_REVIEW, failure_code="approval_denied"),
-                    target=target,
-                )
-            if tool_call.name not in _NESTED_CALL_HOSTS:
-                outcome = await self._run_tool(
-                    tool,
-                    arguments,
-                    call_id=tool_call.call_id,
-                    tool_name=target or tool_call.name,
-                    context=replace(
-                        self._context,
-                        atomic_writes_only=auto_approved or self._context.atomic_writes_only,
-                        command_sandbox=sandbox or self._context.command_sandbox,
-                        process_authority=process_authority,
+            try:
+                if (sandbox is not None or process_authority is not None) and (
+                    generation is None or not self._command_consent_active(generation)
+                ):
+                    return _execution_ended(
+                        tool_call,
+                        _failure_outcome(_REVOKED_COMMAND_REVIEW, failure_code="approval_denied"),
+                        target=target,
+                    )
+                if tool_call.name not in _NESTED_CALL_HOSTS:
+                    outcome = await self._run_tool(
+                        tool,
+                        arguments,
+                        call_id=tool_call.call_id,
+                        tool_name=target or tool_call.name,
+                        context=replace(
+                            self._context,
+                            atomic_writes_only=auto_approved or self._context.atomic_writes_only,
+                            command_sandbox=sandbox or self._context.command_sandbox,
+                            process_authority=process_authority,
+                        ),
+                    )
+                    return _execution_ended(tool_call, outcome, target=target)
+                log = _ScriptCallLog(
+                    tool_call.call_id,
+                    ended_first=(
+                        _SUBAGENT_ENDED_FIRST
+                        if tool_call.name == SPAWN_AGENT
+                        else _SCRIPT_ENDED_FIRST
                     ),
                 )
-                return _execution_ended(tool_call, outcome, target=target)
-            log = _ScriptCallLog(
-                tool_call.call_id,
-                ended_first=(
-                    _SUBAGENT_ENDED_FIRST if tool_call.name == SPAWN_AGENT else _SCRIPT_ENDED_FIRST
-                ),
-            )
-            token = _SCRIPT_CALLS.set(log)
-            try:
-                outcome = await self._run_tool(
-                    tool, arguments, call_id=tool_call.call_id, tool_name=tool_call.name
-                )
-            finally:
-                # Closed before anything reads it, on every path: a cancelled call
-                # that stops only later can neither change the result nor publish
-                # after it.
-                log.close()
-                _SCRIPT_CALLS.reset(token)
-                await log.finish_children()
-                if tool_call.name == CODEMODE:
-                    self._unsaved_nested_calls[tool_call.call_id] = _NestedCallAudit(
-                        calls=log.calls(), omitted=log.omitted
+                token = _SCRIPT_CALLS.set(log)
+                try:
+                    outcome = await self._run_tool(
+                        tool, arguments, call_id=tool_call.call_id, tool_name=tool_call.name
                     )
-                if log.model_usage:
-                    self._unsaved_model_usage[tool_call.call_id] = tuple(log.model_usage)
-            outcome = replace(
-                outcome,
-                nested_calls=log.calls(),
-                nested_calls_omitted=log.omitted,
-                model_usage=tuple(log.model_usage),
-            )
-            return _execution_ended(tool_call, outcome, target=target)
+                finally:
+                    # Closed before anything reads it, on every path: a cancelled call
+                    # that stops only later can neither change the result nor publish
+                    # after it.
+                    log.close()
+                    _SCRIPT_CALLS.reset(token)
+                    await log.finish_children()
+                    if tool_call.name == CODEMODE:
+                        self._unsaved_nested_calls[tool_call.call_id] = _NestedCallAudit(
+                            calls=log.calls(), omitted=log.omitted
+                        )
+                    if log.model_usage:
+                        self._unsaved_model_usage[tool_call.call_id] = tuple(log.model_usage)
+                outcome = replace(
+                    outcome,
+                    nested_calls=log.calls(),
+                    nested_calls_omitted=log.omitted,
+                    model_usage=tuple(log.model_usage),
+                )
+                return _execution_ended(tool_call, outcome, target=target)
+            finally:
+                if sandbox is not None:
+                    sandbox.cleanup()
 
         # Scheduling follows the tool that runs: a proxied call is as parallel-safe
         # as its target, never as the proxy.
@@ -1435,6 +1476,7 @@ class ConfiguredToolExecutor:
             name=tool_call.name,
             parallel_safe=parallel_safe,
             runner=run,
+            cleanup=sandbox.cleanup if sandbox is not None else None,
         )
 
     @staticmethod
