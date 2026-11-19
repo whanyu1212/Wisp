@@ -37,7 +37,6 @@ uv run wisp -p "hello"
 
 ## Checklist
 
-- [ ] The change matches the current Wisp direction: CLI/core first, TUI later.
 - [ ] No secrets, API keys, or local-only files are committed.
 - [ ] User-facing behavior is documented when it changes.
 - [ ] Tests or a clear manual verification note cover the change.
