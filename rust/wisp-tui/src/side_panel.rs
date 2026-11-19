@@ -1484,7 +1484,7 @@ fn permission_mode(state: &UiState) -> Option<&'static str> {
         .map(|permissions| match permissions.mode {
             PermissionMode::Ask => "ask",
             PermissionMode::Auto => "auto (edits)",
-            PermissionMode::AutoCommands => "auto (reviewed commands)",
+            PermissionMode::AutoCommands => "auto (commands)",
             PermissionMode::Yolo => "YOLO",
         })
 }

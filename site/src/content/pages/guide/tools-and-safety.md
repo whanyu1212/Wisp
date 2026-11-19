@@ -352,9 +352,13 @@ its exact command, working directory, and sandbox policy, without granting a com
 
 The sandbox fast path runs supported `pytest`, `python -m pytest`/`unittest`, Cargo
 `test`/`check`/`build`, and npm `test`/`run test`/`run build` forms without model review or a
-human prompt. Eligible `uv run --no-sync` wrappers use the same fast path. Tests/builds execute
-arbitrary repository code and can modify allowed workspace files: this is containment, not a
-judgment that their contents are safe. Other eligible commands retain independent model review.
+human prompt. Eligible `uv run --no-sync` Python test wrappers use the same fast path. Fast-path
+test commands (`pytest`, `python -m pytest`/`unittest`, `uv run --no-sync pytest`/`unittest`,
+`npm test`/`run test`, and `cargo test` when an ancestor `Cargo.lock` exists) run with a
+**read-only workspace** and a fresh per-command `TMPDIR`/`HOME`/`UV_CACHE_DIR` deleted on exit,
+plus an isolated session Cargo target directory for `cargo test`. Build commands and reviewed
+commands keep a writable workspace and can modify allowed workspace files: this is containment,
+not a judgment that their contents are safe. Other eligible commands retain independent model review.
 Deterministic restrictions run first; the reviewer cannot override them. Simple supported local
 development commands may reach a fresh, no-tools request on the active provider/model (at most
 eight requests per run, with a 20-second deadline each). The reviewer receives the current user
@@ -364,9 +368,10 @@ Allow approves only that call, Ask opens the ordinary human dialog, and Deny pre
 Malformed, incomplete, truncated, unavailable, and timed-out answers ask the user. Revoking or
 changing consent invalidates an outstanding assessment, even if the same mode is re-enabled.
 
-Shell composition/expansion, redirects, unsupported commands/options, publishing, explicit
+Common safe short options (`-rN`, `-ra`, `-qq`, `-vv`, `-n4`, `-j4`, `git status -sb`) are allowed;
+shell composition/expansion, redirects, sensitive/unsupported options, publishing, explicit
 credential/control paths, and outside-workspace paths require human approval without asking a
-model. `uv run` must use `--no-sync`; dependencies must already be installed. For a subproject,
+model. `uv run` must use `--no-sync` (for supported Python runners only); dependencies must already be installed. For a subproject,
 pass Bash `cwd: "site"` with `command: "npm test"` instead of `cd site && npm test`.
 The directory must remain inside the workspace and outside protected/control paths; it applies
 only to this call, not to the session or subsequent file operations. Output is captured already,
@@ -378,27 +383,30 @@ neither control of other sessions' jobs nor unrestricted jobs. Changing permissi
 revokes the grant. MCP mutations, custom/replacement tools, Plan, read-only subagents, and mandatory
 confirmations retain their boundaries.
 
-Seatbelt restricts writes to the workspace/session scratch, excludes protected paths, limits
-runtime/toolchain reads, blocks network and local sockets, and starts commands with a controlled
-environment. Installed Python package directories are read-only and cannot be moved into or out
-of the read exception for public Python source in `credentials` modules; credential data and explicit
-configured protections remain blocked. UV uses a private cache with a narrowly scoped regular-file
-sentinel exception, not permission to modify project Git metadata. Foreground/background children
+Seatbelt restricts writes to the per-command ephemeral run directory (and workspace for non-test
+builds/reviewed commands, or an isolated Cargo target cache for `cargo test`), excludes protected
+paths and bound protected/control symlink targets, limits runtime/toolchain reads, denies file
+flags (`chflags`) and TCP/UDP network access while allowing Unix domain sockets strictly inside
+the command's private `TMPDIR`, and starts commands with a controlled environment
+(`PYTHONUNBUFFERED=1`, `CARGO_NET_OFFLINE=true`). On read-only-workspace test runs, tests can
+freely create synthetic `.git`, `.wisp`, `AGENTS.md`, `.env`, and `credentials` fixtures inside
+their fresh `TMPDIR` without weakening workspace or host protections. Installed Python package
+directories and `workspace/.venv` are read-only and cannot be moved into or out of the read
+exception for public Python source in `credentials` modules; credential data and explicit
+configured protections remain blocked. UV uses a per-command private cache with a narrowly scoped
+regular-file sentinel exception that is deleted as soon as the command exits, isolating runs from
+each other and from project Git metadata. Foreground/background children
 inherit containment. Unsupported protected-path
 patterns or unavailable sandboxing stop automatic execution and require explicit unrestricted
 approval. A failed command is never silently retried outside the sandbox. Existing human grants,
 Ask approvals, and YOLO are not sandboxed by this mode.
 
-**Known limitation:** a pre-existing hardlink under an allowed name can expose or modify the
-same file even when its other name is protected or outside the workspace. Seatbelt is not a VM
-or complete file/credential isolation guarantee.
-A command can also write its own content into UV's cache sentinel and create a workspace symlink
-to that cache folder, so a `.git` file it wrote becomes reachable through a workspace path. The
-cache folder itself cannot be moved into the workspace. Avoid running Git inside an unexpected
-symlinked directory.
-Model review does not close this gap. Network-dependent tests, dependency downloads, and tools
-needing writes to shared caches may need explicit human approval. Localhost servers are also
-blocked, and tests creating synthetic protected configuration paths are not automatically exempt. Use Ask if this residual risk
+**Known limitation:** a pre-existing hardlink under an allowed name can expose or (on writable
+commands) modify the same file even when its other name is protected or outside the workspace.
+Seatbelt is not a VM or complete file/credential isolation guarantee.
+Model review does not close this gap. TCP localhost servers, network-dependent tests, PTY/`ps`
+tests, dependency downloads, and tools needing writes to shared host caches may need explicit
+human approval. Use Ask if this residual risk
 is unacceptable. Each assessment and available usage/cost is persisted separately from the acting
 model's context; interrupted requests with unknown cost are not counted as free. Tool cards show
 the sandbox fast-path or model-review reason live and after reopening.

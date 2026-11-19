@@ -85,26 +85,30 @@ allow that tool for the session, choose a saved
 project YOLO default, or deny.
 
 Use `/permissions` in Rust to inspect and change the project default, or `/permissions ask`,
-`/permissions auto`, `/permissions auto-commands`, and `/permissions yolo`. Auto approves eligible built-in workspace and
+`/permissions auto`, `/permissions auto-commands`, and `/permissions yolo`. Auto edits approves eligible built-in workspace and
 session-scratch edits on macOS/Linux, but still asks before commands and other mutations. Git
 metadata, agent-control files, shared hard-linked files, and mandatory confirmations do not qualify;
 protected-path and stale-write checks still apply. Each automatic grant is recorded and labelled
-on the tool card. Auto checks the operation and destination, not the safety of the content.
-Auto and Auto commands are experimental, and the panel labels them so.
+on the tool card. Auto edits checks the operation and destination, not the safety of the content.
 The panel docks above the composer and marks the current mode; choose with
-`1` (Ask), `2` (Auto), `3` (Auto commands), or `4` (YOLO), or highlight with `↑`/`↓` and press `Enter` (there is no default highlight, because
+`1` (Ask), `2` (Auto edits), `3` (Auto commands), or `4` (YOLO), or highlight with `↑`/`↓` and press `Enter` (there is no default highlight, because
 saving a mode also clears temporary grants). Saved defaults apply to subsequent launches in the same canonical
 project directory and live in user-owned `~/.wisp/permissions/` files, outside the repository.
 Allow-once and tool-session choices do not persist; temporary session grants expire on `/new` or
 switching to another session. Changing the default clears temporary grants. Startup `--yes` alone
 is not saved. These choices do not change project trust or protected paths. In the home folder or a
-folder above it, Auto, Auto commands, and YOLO apply for the session only and the panel says so; Ask is still saved.
-Auto never grants arbitrary edits throughout a broad folder, though the session scratch remains
-eligible. Saved Auto consent is edit-only and never enables command review.
+folder above it, Auto edits, Auto commands, and YOLO apply for the session only and the panel says so; Ask is still saved.
+Auto edits never grants arbitrary edits throughout a broad folder, though the session scratch remains
+eligible. Saved Auto edits consent is edit-only and never enables command review.
 
 **Auto commands is a separate macOS-only opt-in with mandatory Seatbelt containment.** It keeps
-Auto's edit behavior and runs supported pytest/unittest, Cargo test/check/build, and npm test/build
-forms inside the sandbox without model review. Other eligible exact built-in `bash` run/start
+Auto edits' file behavior and runs supported pytest/unittest, Cargo test/check/build, and npm test/build
+forms inside the sandbox without model review. Fast-path test commands (`pytest`, `python -m pytest`/`unittest`,
+`uv run --no-sync pytest`, `npm test`/`run test`, and `cargo test` when an ancestor `Cargo.lock` exists) run
+with a **read-only workspace** and a fresh per-command `TMPDIR`/`HOME`/`UV_CACHE_DIR` deleted on exit, so
+tests can create synthetic `.git`, `.wisp`, `AGENTS.md`, or `.env` fixtures and bind local Unix sockets
+inside `TMPDIR` without weakening workspace protections. `cargo test` writes build artifacts to an isolated
+session target cache with `CARGO_NET_OFFLINE=true`. Other eligible exact built-in `bash` run/start
 calls go to an independent reviewer. The reviewer makes a
 fresh, no-tools request on the active provider/model, without conversation history, project
 instructions, or repository file contents. Each run allows at most eight review requests, each
@@ -114,20 +118,22 @@ truncated, failed, or timed-out answers ask you. Changing permissions/project in
 in-flight assessment; it does not become a grant if the same mode is re-enabled.
 
 Only a conservative subset of simple local test/build and Git inspection commands is eligible.
-Shell composition, expansions, redirects, unsupported commands/options, publishing, explicit
+Common safe short options such as `-rN`, `-ra`, `-qq`, `-vv`, `-n4`, `-j4`, and `git status -sb` are
+accepted; shell composition, expansions, redirects, sensitive/unsupported options, publishing, explicit
 credential/control paths, and outside-workspace paths require human approval before any model
-review. `uv run` needs `--no-sync`; use Bash's `cwd` argument for a workspace subdirectory rather
+review. `uv run` needs `--no-sync` (for supported Python runners only); use Bash's `cwd` argument for a workspace subdirectory rather
 than shell composition. Poll/cancel is automatic only for sandboxed jobs owned by this conversation
 under the original, still-active consent. Other jobs, MCP mutations, custom/replacement tools,
 and mandatory confirmations retain their existing approval flow. Automatically approved commands
-and their children have restricted filesystem access, a controlled environment, and no network
+and their children have restricted filesystem access, a controlled environment (`PYTHONUNBUFFERED=1`,
+`CARGO_NET_OFFLINE=true`), and no TCP/UDP network
 access. Sandbox setup failure or requests for broader access require explicit human approval;
 there is no silent unrestricted retry. Ask, explicit grants, and YOLO retain unrestricted execution.
 
-Tests can still modify allowed workspace files. **Pre-existing hardlink aliases remain a known
-limitation**: an allowed alias can read or modify a file whose other name is protected or outside
-the workspace. This is not complete file/credential isolation. Shared-cache writes and network-dependent
-tests may need human approval. Saved consent is `sandbox_commands_v1`; earlier command-review
+Build commands and reviewed commands can still modify allowed workspace files. **Pre-existing hardlink aliases remain a known
+limitation**: an allowed alias can read or (on writable commands) modify a file whose other name is protected or outside
+the workspace. This is not complete file/credential isolation. TCP localhost servers, network-dependent
+tests, PTY/`ps` tests, and shared-cache writes may need human approval. Saved consent is `sandbox_commands_v1`; earlier command-review
 consent is not reused, so select this mode again to opt in. Reviews, reasons, and available
 usage/cost are saved; incomplete/cancelled requests remain cost-unknown, not zero-cost. Tool cards
 distinguish sandboxed test/build grants, reviewed commands, and automatic file edits.
