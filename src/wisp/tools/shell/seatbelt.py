@@ -198,9 +198,9 @@ def _make_tree_removable(root: Path) -> None:
             continue
         if chflags is not None and uf_immutable:
             try:
-                info = current.lstat()
-                if getattr(info, "st_flags", 0) & uf_immutable:
-                    chflags(current, info.st_flags & ~uf_immutable)
+                flags = getattr(current.lstat(), "st_flags", 0)
+                if isinstance(flags, int) and flags & uf_immutable:
+                    chflags(current, flags & ~uf_immutable)
             except OSError:
                 pass
         try:
@@ -217,9 +217,9 @@ def _make_tree_removable(root: Path) -> None:
                         stack.append(entry_path)
                     elif chflags is not None and uf_immutable:
                         try:
-                            info = entry.stat(follow_symlinks=False)
-                            if getattr(info, "st_flags", 0) & uf_immutable:
-                                chflags(entry_path, info.st_flags & ~uf_immutable)
+                            flags = getattr(entry.stat(follow_symlinks=False), "st_flags", 0)
+                            if isinstance(flags, int) and flags & uf_immutable:
+                                chflags(entry_path, flags & ~uf_immutable)
                         except OSError:
                             pass
         except OSError:
