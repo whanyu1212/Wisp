@@ -85,3 +85,36 @@ def test_docs_has_one_verified_serialized_deployment_path() -> None:
     smoke = jobs["smoke"]["steps"][-1]
     assert smoke["env"]["WISP_DOCS_REVISION"] == "${{ github.sha }}"
     assert smoke["run"] == "npm run test:deployed"
+
+
+def test_wheel_caches_use_fixed_action() -> None:
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/rust-tui-wheels.yml").read_text())
+    expected_action = "Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0"
+    for job_name in ("linux-x86-64", "macos"):
+        steps = workflow["jobs"][job_name]["steps"]
+        cache_step = next(step for step in steps if step.get("uses") == expected_action)
+        assert cache_step["with"]["key"]
+
+    macos_steps = workflow["jobs"]["macos"]["steps"]
+    remove_idx = next(
+        i for i, step in enumerate(macos_steps) if step.get("name") == "Remove Homebrew rustup"
+    )
+    install_idx = next(
+        i
+        for i, step in enumerate(macos_steps)
+        if str(step.get("uses", "")).startswith("dtolnay/rust-toolchain@")
+    )
+    cache_idx = next(i for i, step in enumerate(macos_steps) if step.get("uses") == expected_action)
+    assert remove_idx < install_idx < cache_idx
+
+
+def test_fuzz_warms_main_cache() -> None:
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/rust-fuzz.yml").read_text())
+    triggers = workflow.get("on") or workflow[True]
+    assert triggers["push"]["branches"] == ["main"]
+    assert triggers["push"]["paths"] == triggers["pull_request"]["paths"]
+    steps = workflow["jobs"]["fuzz"]["steps"]
+    assert any(
+        step.get("uses") == "Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0"
+        for step in steps
+    )

@@ -1,6 +1,24 @@
 name: Rust protocol fuzzing
 
 on:
+  # Also run on main so the ASAN build cache and cargo-fuzz binary are saved on
+  # the default branch and reused by pull requests instead of missing every time.
+  push:
+    branches:
+      - main
+    paths:
+      - 'rust/wisp-protocol/**'
+      - 'rust/wisp-tui/src/framing.rs'
+      - 'rust/wisp-tui/src/framing/**'
+      - 'rust/wisp-tui/Cargo.toml'
+      - 'schemas/**'
+      - 'fuzz/**'
+      - 'scripts/prepare_fuzz_corpus.py'
+      - 'tests/repository/test_fuzz_corpus.py'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/rust-fuzz.yml'
   pull_request:
     paths:
       - 'rust/wisp-protocol/**'
@@ -52,7 +70,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version-file: .python-version
-      - uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: fuzz -> target
           key: protocol-fuzz-${{ matrix.target }}
