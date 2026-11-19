@@ -1687,6 +1687,7 @@ impl TranscriptRowCache {
                 CardGroupKey::Explore if outcomes.is_open() => "Exploring".to_owned(),
                 CardGroupKey::Explore => "Explored".to_owned(),
                 CardGroupKey::Tool(_) => entry.tool_card()?.action_verb(),
+                CardGroupKey::Process => PROCESS_LABEL.to_owned(),
                 CardGroupKey::Mcp(_) => unreachable!("MCP has its own header"),
             };
             let counts = group_counts(transcript, &kind, &members);
@@ -1698,10 +1699,16 @@ impl TranscriptRowCache {
                 (width, FoldHint::None)
             };
             let (row_width, trailing) = group_span_trailing(transcript, &members, row_width);
-            let outcome_note = outcomes.note(row_width.saturating_sub(16));
+            // Every member of a process group passed, so the header carries the note
+            // each member's own row shows.
+            let outcome_note = match kind {
+                CardGroupKey::Process => entry.process_card()?.status_note().map(str::to_owned),
+                _ => outcomes.note(row_width.saturating_sub(16)),
+            };
             let outcome_width = outcome_note.as_ref().map_or(0, |note| note.width() + 3);
             // Keep the outcome counts ahead of argument previews in the width budget.
-            if !expanded {
+            // Process members have no arguments to preview.
+            if !expanded && kind != CardGroupKey::Process {
                 let budget = row_width.saturating_sub(self.action_columns(&source) + outcome_width);
                 source.push_str(&self.group_preview(transcript, &members, budget));
             }
@@ -4549,8 +4556,8 @@ fn group_preview_items(transcript: &Transcript, members: &[TranscriptEntryId]) -
 
 /// What a group's line says it covers, in the terms of what its calls touched:
 /// `4 files, 1 search` for exploration, `2 files` for edits and writes, `3 commands` for
-/// shell calls, and `3 times` for any other tool. Files and folders count once however
-/// often a call names them.
+/// shell calls and background processes, and `3 times` for any other tool. Files and
+/// folders count once however often a call names them.
 fn group_counts(
     transcript: &Transcript,
     kind: &CardGroupKey,
@@ -4597,6 +4604,7 @@ fn group_counts(
             .join(", ")
         }
         CardGroupKey::Tool(name) if name == "bash" => format!("{} commands", members.len()),
+        CardGroupKey::Process => format!("{} commands", members.len()),
         CardGroupKey::Tool(name) if matches!(name.as_str(), "edit" | "write") => {
             counted(targets(&[name.as_str()]), "file", "files").unwrap_or_default()
         }
@@ -4619,7 +4627,7 @@ fn card_group_signature(transcript: &Transcript, entry: &TranscriptEntry) -> Opt
         return None;
     }
     let header = match card_group_key(entry)? {
-        CardGroupKey::Explore | CardGroupKey::Tool(_) => {
+        CardGroupKey::Explore | CardGroupKey::Tool(_) | CardGroupKey::Process => {
             // A closed group counts and previews its members, so both key the row too.
             let key = card_group_key(entry)?;
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -4641,7 +4649,8 @@ fn card_group_signature(transcript: &Transcript, entry: &TranscriptEntry) -> Opt
 
 /// The wall-clock time a group's calls took together, from the first start to the
 /// last end. Calls can run side by side, so this is not the sum of their durations.
-/// `None` until every member has finished with a known start and duration.
+/// `None` until every member has finished with a known start and duration, and always
+/// `None` for a process group, whose cards record how long they ran but not when.
 fn group_span_ms(transcript: &Transcript, members: &[TranscriptEntryId]) -> Option<u64> {
     let mut first_start = i64::MAX;
     let mut last_end = i64::MIN;
@@ -4679,23 +4688,32 @@ fn group_outcomes(
     members: &[TranscriptEntryId],
 ) -> crate::tool_presentation::OutcomeCounts {
     let mut outcomes = crate::tool_presentation::OutcomeCounts::default();
-    for card in members
+    for status in members
         .iter()
-        .filter_map(|id| transcript.entry(*id)?.tool_card())
+        .filter_map(|id| member_status(transcript, *id))
     {
-        outcomes.record(card.status);
+        outcomes.record(status);
     }
     outcomes
+}
+
+/// The status a group member's marker shows, for a tool card or a process card.
+fn member_status(transcript: &Transcript, id: TranscriptEntryId) -> Option<ToolStatus> {
+    let entry = transcript.entry(id)?;
+    entry
+        .tool_card()
+        .map(|card| card.status)
+        .or_else(|| entry.process_card().map(|card| card.display_state.status()))
 }
 
 fn explore_group_tone(transcript: &Transcript, members: &[TranscriptEntryId]) -> TranscriptRowTone {
     let mut tone = TranscriptRowTone::Pending;
     let mut saw_card = false;
     for id in members {
-        let Some(card) = transcript.entry(*id).and_then(TranscriptEntry::tool_card) else {
+        let Some(status) = member_status(transcript, *id) else {
             continue;
         };
-        let member = tool_status_tone(card.status);
+        let member = tool_status_tone(status);
         if !saw_card || explore_tone_rank(member) > explore_tone_rank(tone) {
             tone = member;
         }
@@ -6062,7 +6080,7 @@ fn spacer_next(transcript: &Transcript, entry: &TranscriptEntry) -> Option<RowAn
         })
 }
 
-/// What lets adjacent tool cards share one collapsed row.
+/// What lets adjacent tool or process cards share one collapsed row.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum CardGroupKey {
     /// Reads, searches and listings, mixed freely: `Explore N actions`.
@@ -6071,10 +6089,18 @@ enum CardGroupKey {
     Mcp(String),
     /// Consecutive successful calls to exactly the same tool.
     Tool(String),
+    /// Background processes that exited with code 0. A process in any other state keeps
+    /// its own row, so a failure is never folded away.
+    Process,
 }
 
 /// The specialized group a card can join.
 fn card_group_key(entry: &TranscriptEntry) -> Option<CardGroupKey> {
+    if let Some(process) = entry.process_card() {
+        let passed =
+            process.display_state == ProcessDisplayState::Completed && process.exit_code == Some(0);
+        return passed.then_some(CardGroupKey::Process);
+    }
     let card = entry.tool_card()?;
     if card.script.is_some() {
         None
@@ -6090,8 +6116,9 @@ fn card_group_key(entry: &TranscriptEntry) -> Option<CardGroupKey> {
 }
 
 /// Find a collapsible sequence. Specialized exploration/MCP runs retain their live
-/// summaries; other groups contain successful calls to one tool only. A different
-/// tool, a reply that draws rows, a process card, or an unfinished call ends the
+/// summaries; other groups contain only successful calls to one tool, or only
+/// background processes that passed. A different tool, a process card in a tool run (or a
+/// tool card in a process run), a reply that draws rows, or an unfinished call ends the
 /// sequence; a reply that draws none (see [`ReplyLead::Hidden`]) does not.
 pub(crate) fn card_run(
     transcript: &Transcript,
@@ -7976,6 +8003,162 @@ mod tests {
             rows.iter()
                 .any(|row| row.anchor.entry_id == ids[5]
                     && row.kind == TranscriptRowKind::CardAction)
+        );
+    }
+
+    /// One background process card per `(state, exit code)`, in order after a prompt.
+    fn process_cards(
+        transcript: &mut Transcript,
+        outcomes: &[(&str, Option<i64>)],
+    ) -> Vec<TranscriptEntryId> {
+        transcript.append_prompt("run".into());
+        let mut ids = Vec::new();
+        for (index, (state, exit_code)) in outcomes.iter().enumerate() {
+            let call_id = format!("poll-{index}");
+            let process_id = format!("process-{index}");
+            ids.push(
+                transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+                    call_id: call_id.clone(),
+                    name: "bash".into(),
+                    detail_source: crate::tool_detail::ToolDetailSource::None,
+                    arguments: serde_json::json!({"operation": "poll", "process_id": process_id}),
+                }),
+            );
+            let mut result = tool_result(&call_id, "");
+            result.name = "bash".into();
+            result.process_id = Some(process_id);
+            result.process_state = Some((*state).into());
+            result.exit_code = *exit_code;
+            transcript.observe_tool_result(result);
+        }
+        ids
+    }
+
+    fn rows_of(transcript: &Transcript, cache: &mut TranscriptRowCache) -> Vec<TranscriptRow> {
+        let mut viewport = TranscriptViewport::default();
+        viewport.set_geometry(transcript, cache, 80, 20);
+        viewport.visible_rows(transcript, cache)
+    }
+
+    const PASSED: (&str, Option<i64>) = ("completed", Some(0));
+
+    #[test]
+    fn passed_processes_share_row() {
+        let mut transcript = Transcript::default();
+        let ids = process_cards(&mut transcript, &[PASSED, PASSED]);
+        let rows = rows_of(&transcript, &mut TranscriptRowCache::default());
+        let groups = rows
+            .iter()
+            .filter(|row| row.kind == TranscriptRowKind::CardGroup)
+            .collect::<Vec<_>>();
+        assert_eq!(groups.len(), 1, "{rows:?}");
+        let group = groups[0];
+        assert_eq!(group.plain_text(), "• Background 2 commands · passed");
+        assert_eq!(group.anchor.entry_id, ids[0]);
+        assert_eq!(group.tone, TranscriptRowTone::Success);
+        assert_eq!(group.fold_hint, FoldHint::Expand);
+        assert!(
+            !rows
+                .iter()
+                .any(|row| row.kind == TranscriptRowKind::CardAction)
+        );
+        // The label and the note are styled as on a lone process's row.
+        let mut lone = Transcript::default();
+        process_cards(&mut lone, &[PASSED]);
+        let lone_rows = rows_of(&lone, &mut TranscriptRowCache::default());
+        let single = lone_rows
+            .iter()
+            .find(|row| row.kind == TranscriptRowKind::CardAction)
+            .unwrap();
+        assert_eq!(single.plain_text(), "• Background command · passed");
+        let style_of = |row: &TranscriptRow, text: &str| {
+            row.spans
+                .iter()
+                .find(|span| span.text.contains(text))
+                .map(|span| span.style)
+        };
+        for text in ["Background", "passed"] {
+            assert!(style_of(group, text).is_some(), "{text}");
+            assert_eq!(style_of(group, text), style_of(single, text), "{text}");
+        }
+    }
+
+    #[test]
+    fn failed_process_splits_run() {
+        let mut transcript = Transcript::default();
+        let ids = process_cards(
+            &mut transcript,
+            &[PASSED, ("completed", Some(1)), PASSED, PASSED],
+        );
+        assert!(card_run(&transcript, ids[0]).is_none());
+        assert!(card_run(&transcript, ids[1]).is_none());
+        assert_eq!(
+            card_run(&transcript, ids[3]),
+            Some((ids[2], ids[2..].to_vec()))
+        );
+        let rows = rows_of(&transcript, &mut TranscriptRowCache::default());
+        let actions = rows
+            .iter()
+            .filter(|row| row.kind == TranscriptRowKind::CardAction)
+            .map(|row| row.anchor.entry_id)
+            .collect::<Vec<_>>();
+        assert_eq!(actions, ids[..2].to_vec());
+        assert!(rows.iter().any(|row| {
+            row.kind == TranscriptRowKind::CardGroup
+                && row.plain_text() == "• Background 2 commands · passed"
+        }));
+    }
+
+    #[test]
+    fn running_process_stays_apart() {
+        let mut transcript = Transcript::default();
+        let ids = process_cards(&mut transcript, &[PASSED, PASSED, ("running", None)]);
+        assert!(card_run(&transcript, ids[2]).is_none());
+        assert_eq!(
+            card_run(&transcript, ids[0]),
+            Some((ids[0], ids[..2].to_vec()))
+        );
+        let rows = rows_of(&transcript, &mut TranscriptRowCache::default());
+        assert!(rows.iter().any(|row| {
+            row.anchor.entry_id == ids[2] && row.kind == TranscriptRowKind::CardAction
+        }));
+    }
+
+    #[test]
+    fn open_process_group_hangs_members() {
+        let mut transcript = Transcript::default();
+        let ids = process_cards(&mut transcript, &[PASSED, PASSED]);
+        let mut cache = TranscriptRowCache::default();
+        cache.fold_mut().expand_group(ids[0]);
+        let rows = rows_of(&transcript, &mut cache)
+            .into_iter()
+            .filter(|row| {
+                matches!(
+                    row.kind,
+                    TranscriptRowKind::CardGroup | TranscriptRowKind::CardAction
+                )
+            })
+            .map(|row| (row.plain_text(), row.group_gutter, row.fold_hint))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rows,
+            [
+                (
+                    "• Background 2 commands · passed".to_owned(),
+                    RowGutter::None,
+                    FoldHint::Collapse
+                ),
+                (
+                    "• Background command · passed".to_owned(),
+                    RowGutter::Connector,
+                    FoldHint::Expand
+                ),
+                (
+                    "• Background command · passed".to_owned(),
+                    RowGutter::Indent,
+                    FoldHint::Expand
+                ),
+            ]
         );
     }
 

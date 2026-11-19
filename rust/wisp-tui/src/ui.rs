@@ -59,14 +59,19 @@ pub fn decision_context_visible(area: Rect) -> bool {
     area.width >= MIN_TERMINAL_WIDTH && area.height >= MIN_TERMINAL_HEIGHT
 }
 
-fn composer_height(area: Rect, state: &UiState, layout: Option<&ComposerLayout>) -> u16 {
+fn composer_height(
+    area: Rect,
+    state: &UiState,
+    layout: Option<&ComposerLayout>,
+    panel_docked: bool,
+) -> u16 {
     let framed = area.height >= 16;
     // A draft grows to half the conversation, and never past the transcript's two
     // rows and the rows around the composer.
     let ceiling = (area.height / 2)
         .min(
             area.height
-                .saturating_sub(2 + rows_around_composer(area, state)),
+                .saturating_sub(2 + rows_around_composer(area, state, panel_docked)),
         )
         .max(2);
     if editable(state) {
@@ -113,6 +118,7 @@ pub(crate) fn file_picker_area(
     state: &UiState,
     editor: &PromptEditor,
     layout_cache: &mut ComposerLayoutCache,
+    panel_docked: bool,
 ) -> Option<Rect> {
     if !decision_context_visible(area) {
         return None;
@@ -125,7 +131,8 @@ pub(crate) fn file_picker_area(
     let bottom = area
         .bottom()
         .saturating_sub(
-            composer_height(composer, state, layout) + rows_around_composer(composer, state),
+            composer_height(composer, state, layout, panel_docked)
+                + rows_around_composer(composer, state, panel_docked),
         )
         .max(area.y + 4);
     let height = (bottom - area.y).min(12);
@@ -145,6 +152,7 @@ pub(crate) fn docked_popup_area(
     editor: &PromptEditor,
     layout_cache: &mut ComposerLayoutCache,
     height: u16,
+    panel_docked: bool,
 ) -> Option<Rect> {
     if !decision_context_visible(area) {
         return None;
@@ -155,7 +163,8 @@ pub(crate) fn docked_popup_area(
     let bottom = surface
         .bottom()
         .saturating_sub(
-            composer_height(surface, state, layout) + rows_around_composer(surface, state),
+            composer_height(surface, state, layout, panel_docked)
+                + rows_around_composer(surface, state, panel_docked),
         )
         .max(surface.y + 4);
     let height = (bottom - surface.y).min(height);
@@ -277,6 +286,7 @@ pub fn render_interactive(
         }
         None => area,
     };
+    let panel_docked = column.width < area.width;
     let area = conversation_surface(column);
 
     // A pending approval or trust decision docks above the footer in place of the
@@ -350,15 +360,15 @@ pub fn render_interactive(
     let editor_is_empty = editor.text().is_empty();
     let composer_layout =
         editable(state).then(|| composer_layout_cache.layout(editor, editor_width));
-    let composer_height = composer_height(area, state, composer_layout);
+    let composer_height = composer_height(area, state, composer_layout, panel_docked);
     let status_height = status_line_height(state);
-    let strip_height = background_strip_height(area, state);
-    let completion_height = completion.map_or(0, |view| {
-        (view.items.len().min(5) as u16).min(
-            area.height
-                .saturating_sub(composer_height + rows_around_composer(area, state) + 2),
-        )
-    });
+    let strip_height = background_strip_height(area, state, panel_docked);
+    let completion_height =
+        completion.map_or(0, |view| {
+            (view.items.len().min(5) as u16).min(area.height.saturating_sub(
+                composer_height + rows_around_composer(area, state, panel_docked) + 2,
+            ))
+        });
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1204,10 +1214,12 @@ fn status_line_height(state: &UiState) -> u16 {
 }
 
 /// One row under the composer while background processes run, on a conversation
-/// tall enough to spare it.
-fn background_strip_height(area: Rect, state: &UiState) -> u16 {
+/// tall enough to spare it. A docked side panel lists the same processes, so the
+/// strip leaves its row to the transcript then.
+fn background_strip_height(area: Rect, state: &UiState, panel_docked: bool) -> u16 {
     u16::from(
-        !state.background_processes.running().is_empty()
+        !panel_docked
+            && !state.background_processes.running().is_empty()
             && area.height >= BACKGROUND_STRIP_MIN_HEIGHT,
     )
 }
@@ -1215,8 +1227,8 @@ fn background_strip_height(area: Rect, state: &UiState) -> u16 {
 /// The rows stacked against the composer: the status line above it, and the
 /// background strip and the footer below it. Popups docked above the composer and
 /// the composer's own ceiling both leave room for them.
-fn rows_around_composer(area: Rect, state: &UiState) -> u16 {
-    status_line_height(state) + background_strip_height(area, state) + 1
+fn rows_around_composer(area: Rect, state: &UiState, panel_docked: bool) -> u16 {
+    status_line_height(state) + background_strip_height(area, state, panel_docked) + 1
 }
 
 /// The strip under the composer: how many background processes run and their
@@ -1403,7 +1415,8 @@ fn render_status_line(
 
 /// What the run in progress is doing, as the status line and the side panel show it.
 pub(crate) struct RunActivity {
-    /// The call or background process that names the run, if one is going.
+    /// The call that names the run, if one is going. A background process never
+    /// does: the side panel and the strip under the composer list those.
     pub(crate) item: Option<RunningItem>,
     /// The session turn the run has reached, or 0 before the model answers.
     pub(crate) turn: u64,
@@ -1413,9 +1426,8 @@ pub(crate) struct RunActivity {
 
 pub(crate) fn run_activity(state: &UiState) -> RunActivity {
     let turn = current_turn(state);
-    // Only calls after the latest reply name the run: once the model answers again, a
-    // background process started earlier no longer says what is happening. Cancelling
-    // outranks everything, since that is what the user is waiting on.
+    // Only calls after the latest reply name the run. Cancelling outranks everything,
+    // since that is what the user is waiting on.
     let item = turn
         .iter()
         .rev()
@@ -1464,28 +1476,13 @@ pub(crate) struct RunningItem {
 }
 
 fn running_item(entry: &TranscriptEntry) -> Option<RunningItem> {
-    let (label, detail) = if let Some(card) = entry.tool_card() {
-        if !matches!(card.status, ToolStatus::Requested | ToolStatus::Running) {
-            return None;
-        }
-        (card.action_label(), card.display_arguments())
-    } else {
-        let card = entry.process_card()?;
-        if !matches!(
-            card.display_state,
-            ProcessDisplayState::Running | ProcessDisplayState::Polling
-        ) {
-            return None;
-        }
-        (
-            "Process".to_owned(),
-            card.task_label
-                .clone()
-                .unwrap_or_else(|| "Background command".to_owned()),
-        )
-    };
+    let card = entry.tool_card()?;
+    if !matches!(card.status, ToolStatus::Requested | ToolStatus::Running) {
+        return None;
+    }
+    let detail = card.display_arguments();
     Some(RunningItem {
-        label: sanitize_for_terminal(&label),
+        label: sanitize_for_terminal(&card.action_label()),
         detail: sanitize_for_terminal(&detail.split_whitespace().collect::<Vec<_>>().join(" ")),
         elapsed: entry.running_elapsed(),
     })
@@ -5514,7 +5511,7 @@ mod tests {
         let mut height = |rows: u16| {
             let area = Rect::new(0, 0, 60, rows);
             let layout = cache.layout(&editor, composer_editor_width(area.width));
-            composer_height(area, &state, Some(layout))
+            composer_height(area, &state, Some(layout), false)
         };
         // A 21-row draft takes half the screen, until its 21 rows and two borders fit.
         assert_eq!(height(14), 7);
@@ -5525,7 +5522,7 @@ mod tests {
         let mut short = ComposerLayoutCache::default();
         let area = Rect::new(0, 0, 60, 30);
         let layout = short.layout(&PromptEditor::default(), composer_editor_width(area.width));
-        assert_eq!(composer_height(area, &state, Some(layout)), 3);
+        assert_eq!(composer_height(area, &state, Some(layout), false), 3);
     }
 
     #[test]
@@ -5539,7 +5536,7 @@ mod tests {
             let layout = cache.layout(&editor, composer_editor_width(area.width));
             // The transcript keeps two rows beside the status line and the footer.
             assert!(
-                composer_height(area, &state, Some(layout)) + status_line_height(&state) + 3
+                composer_height(area, &state, Some(layout), false) + status_line_height(&state) + 3
                     <= height,
                 "height {height}"
             );
@@ -9511,15 +9508,10 @@ mod tests {
         process_result.process_id = Some("process-1".into());
         process_result.process_state = Some("running".into());
         state.transcript.observe_tool_result(process_result);
+        // A background process never names the run, even one the agent just polled.
         let process = render_to_string_with_activity(80, 18, &state, 3);
-        assert!(
-            status(&process).contains(" Process Background command"),
-            "{process}"
-        );
-        // Once the model answers again, the background process no longer names the run.
-        state.transcript.append_message_delta(3, "Checking again.");
-        let answering = render_to_string_with_activity(80, 18, &state, 3);
-        assert!(status(&answering).contains("◒ Working"), "{answering}");
+        assert!(status(&process).contains("◒ Working"), "{process}");
+        assert!(!status(&process).contains("Process"), "{process}");
 
         for status in [
             ViewStatus::Idle,

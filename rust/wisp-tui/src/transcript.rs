@@ -1133,11 +1133,13 @@ impl Transcript {
     /// Close a background process's card when the backend says it stopped on its own.
     ///
     /// The card is created when nothing polled the process, so the exit still shows
-    /// as a row, labelled from the call that started it. Returns None when the
-    /// process cannot be tracked.
+    /// as a row, labelled from the call that started it. A card that call did not
+    /// label takes `command_label`, the command the backend reported with the exit,
+    /// unless it is empty. Returns None when the process cannot be tracked.
     pub fn observe_process_ended(
         &mut self,
         process_id: &str,
+        command_label: &str,
         ended: ProcessDisplayState,
         exit_code: Option<i32>,
         duration_ms: u64,
@@ -1163,6 +1165,9 @@ impl Transcript {
             card.display_state = ended;
             card.exit_code = exit_code;
             card.elapsed_ms = Some(duration_ms);
+            if card.task_label.is_none() && !command_label.is_empty() {
+                card.task_label = Some(command_label.to_owned());
+            }
             self.bump_card(entry_id);
         }
         live.or(historical)
@@ -3157,6 +3162,7 @@ mod tests {
 
         let ended = transcript.observe_process_ended(
             "process-test",
+            "uv run pytest -q",
             ProcessDisplayState::Completed,
             Some(0),
             9_000,
@@ -3171,12 +3177,48 @@ mod tests {
     }
 
     #[test]
+    fn unlabelled_process_takes_exit_command() {
+        let mut transcript = Transcript::default();
+        // No `start` call names this process, as when it began in a script.
+        let ended = |transcript: &mut Transcript, process_id: &str, command: &str| {
+            let card = transcript
+                .observe_process_ended(
+                    process_id,
+                    command,
+                    ProcessDisplayState::Completed,
+                    Some(0),
+                    1,
+                )
+                .unwrap();
+            transcript
+                .entry(card)
+                .unwrap()
+                .process_card()
+                .unwrap()
+                .task_label
+                .clone()
+        };
+
+        assert_eq!(
+            ended(&mut transcript, "process-lint", "uv run ruff check ."),
+            Some("uv run ruff check .".into())
+        );
+        assert_eq!(ended(&mut transcript, "process-unnamed", ""), None);
+    }
+
+    #[test]
     fn process_end_keeps_reply_whole() {
         let mut transcript = Transcript::default();
         transcript.append_prompt("watch CI".into());
         let reply = transcript.append_message_delta(1, "CI is ");
 
-        transcript.observe_process_ended("process-ci", ProcessDisplayState::Completed, Some(0), 1);
+        transcript.observe_process_ended(
+            "process-ci",
+            "",
+            ProcessDisplayState::Completed,
+            Some(0),
+            1,
+        );
 
         assert_eq!(transcript.append_message_delta(1, "green"), reply);
         assert_eq!(transcript.entry(reply).unwrap().content, "CI is green");
@@ -3191,7 +3233,7 @@ mod tests {
             serde_json::json!({"operation": "poll", "process_id": "process-test"}),
         ));
         let card = transcript
-            .observe_process_ended("process-test", ProcessDisplayState::Failed, Some(2), 5)
+            .observe_process_ended("process-test", "", ProcessDisplayState::Failed, Some(2), 5)
             .unwrap();
         let mut polled = result("poll", "");
         polled.name = "bash".into();

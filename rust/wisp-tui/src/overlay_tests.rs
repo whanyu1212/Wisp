@@ -216,6 +216,7 @@ async fn every_overlay_preserves_background_cells_draft_and_viewport_on_close() 
                 &ui.editor,
                 &mut ui.composer_layout_cache,
                 screen.height,
+                false,
             )
             .map(side_panel::overlay_area)
         } else {

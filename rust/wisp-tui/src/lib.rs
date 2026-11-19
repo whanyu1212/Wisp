@@ -1994,7 +1994,8 @@ impl LiveUi {
                 std::mem::take(&mut self.transcript_row_cache.painted_links);
             // Popups docked to the composer lay out in the conversation's column, beside
             // a docked side panel; centred popups still centre on the whole screen.
-            let column = if self.side_panel.docked() {
+            let panel_docked = self.side_panel.docked();
+            let column = if panel_docked {
                 let (column, panel) = self.side_panel.split(frame.area());
                 painted.panel_border = Some(side_panel::border_hit_area(panel));
                 column
@@ -2049,6 +2050,7 @@ impl LiveUi {
                     &self.state,
                     &self.editor,
                     &mut self.composer_layout_cache,
+                    panel_docked,
                 ) {
                     painted.popup = Some(area);
                     painted.rows =
@@ -2075,6 +2077,7 @@ impl LiveUi {
                     &self.editor,
                     &mut self.composer_layout_cache,
                     1,
+                    panel_docked,
                 )
                 .map_or(column.width, |area| area.width);
                 self.discovery_view
@@ -2117,6 +2120,7 @@ impl LiveUi {
                     &self.editor,
                     &mut self.composer_layout_cache,
                     height,
+                    panel_docked,
                 ),
                 // The side panel lies over the right of the transcript, down to the
                 // composer, so the prompt stays in view.
@@ -2129,6 +2133,7 @@ impl LiveUi {
                     &self.editor,
                     &mut self.composer_layout_cache,
                     column.height,
+                    panel_docked,
                 )
                 .map(side_panel::overlay_area),
                 None => ui::overlay_area(frame.area()),

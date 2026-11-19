@@ -116,18 +116,30 @@ async fn press(ui: &mut LiveUi, input: Input, width: u16) {
 
 #[test]
 fn strip_sits_under_composer() {
-    for width in [DOCKED, NARROW] {
-        let mut ui = two_running("");
-        let buffer = draw(&mut ui, width, HEIGHT);
-        let (y, row) = strip_row(&buffer).expect("strip painted");
-        assert!(row.contains("● 2 background · npm run dev"), "{row}");
-        assert!(row.contains(", cargo watch -x test"), "{row}");
-        assert!(row.contains("↓ open"), "{row}");
-        // Command text is untrusted: the escape sequence is neutralized.
-        assert!(!row.contains('\u{1b}') && !row.contains('\u{7}'), "{row:?}");
-        // The footer is the last row; the strip is directly above it.
-        assert_eq!(y, HEIGHT - 2, "{:#?}", rows(&buffer));
-    }
+    let mut ui = two_running("");
+    let buffer = draw(&mut ui, NARROW, HEIGHT);
+    let (y, row) = strip_row(&buffer).expect("strip painted");
+    assert!(row.contains("● 2 background · npm run dev"), "{row}");
+    assert!(row.contains(", cargo watch -x test"), "{row}");
+    assert!(row.contains("↓ open"), "{row}");
+    // Command text is untrusted: the escape sequence is neutralized.
+    assert!(!row.contains('\u{1b}') && !row.contains('\u{7}'), "{row:?}");
+    // The footer is the last row; the strip is directly above it.
+    assert_eq!(y, HEIGHT - 2, "{:#?}", rows(&buffer));
+}
+
+#[test]
+fn docked_panel_replaces_strip() {
+    let mut ui = two_running("");
+    let buffer = draw(&mut ui, DOCKED, HEIGHT);
+    assert_eq!(strip_row(&buffer), None, "{:#?}", rows(&buffer));
+    // The panel beside the conversation lists the same processes.
+    let rows = rows(&buffer);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("2 ● cargo watch -x test")),
+        "{rows:#?}"
+    );
 }
 
 #[test]
