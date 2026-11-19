@@ -116,6 +116,25 @@ with `write_constraint`, under the exception below. Tool behavior changes are li
 `bash` runs commands in bash rather than `/bin/sh`, and that the read-only file tools follow
 symbolic links whose targets stay inside the workspace.
 
+## Wisp 0.14 compatibility
+
+0.14.0 reads existing 0.13.0 sessions. Session `schema_version` remains 6 and the event-envelope
+format remains 1. Automatic approval adds the `tool.approval.reviewed` event, `auto` and
+`auto_commands` permission modes, and optional/defaulted audit fields (`source`, `rule_id`,
+`auto_approved`, `approval_note`) on approval resolutions, tool results, and nested call records.
+Older entries omit these fields and remain readable.
+
+**Downgrade limit:** 0.13.0 rejects sessions or frames containing `tool.approval.reviewed` or the
+new permission/audit fields as unknown fields. Keep a backup of sessions before upgrading if you
+may need to return to 0.13.0. Unchanged schema stamps do not imply reverse compatibility.
+
+Saved project permission defaults live in `~/.wisp/permissions/` with explicit scopes
+(`workspace_edit_v1` for `Auto edits`, `sandbox_commands_v1` for macOS `Auto commands`). Older
+0.13.0 permission readers ignore unknown modes and fail closed to `ask`. The backend and every
+frontend must be the same release; external RPC clients should use the 0.14.0 schema bundle.
+Credentials and trust formats are unchanged. See the
+[0.14.0 release checklist](../maintainers/releases/0.14.0-release.md).
+
 ## Wisp 0.13 compatibility
 
 0.13.0 reads existing 0.12.0 sessions. Session `schema_version` remains 6 and the event-envelope
