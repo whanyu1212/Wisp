@@ -3630,14 +3630,33 @@ const NOTICE_TICKER_STEP_MS: u128 = 125;
 const NOTICE_TICKER_PAUSE_STEPS: u128 = 16;
 /// Blank columns between the notice's end and its next lap entering from the right.
 const NOTICE_TICKER_GAP: usize = 6;
+/// How long a footer notice that fits its row stays before it is dismissed.
+const NOTICE_LIFETIME: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// Ticker steps in one lap of `text`: the hold at its start, then every column of the
+/// notice and the gap after it.
+fn notice_lap_steps(text: &str) -> u128 {
+    NOTICE_TICKER_PAUSE_STEPS + (text.width() + NOTICE_TICKER_GAP) as u128
+}
+
+/// How long a footer notice stays on screen before it is dismissed. A notice too
+/// long for its row, which `scrolls`, stays for one lap of its ticker when that is
+/// longer, so its end can be read before it goes.
+pub(crate) fn notice_lifetime(text: &str, scrolls: bool) -> std::time::Duration {
+    if !scrolls {
+        return NOTICE_LIFETIME;
+    }
+    let lap_ms = notice_lap_steps(text).saturating_mul(NOTICE_TICKER_STEP_MS);
+    NOTICE_LIFETIME.max(std::time::Duration::from_millis(
+        u64::try_from(lap_ms).unwrap_or(u64::MAX),
+    ))
+}
 
 /// The `room` columns of a notice too long for them, after it has been shown for
 /// `shown_for`. The notice holds at its start, scrolls left one column per step until
 /// its end has passed, and enters again from the right after a short gap.
 fn notice_ticker_window(text: &str, room: usize, shown_for: std::time::Duration) -> String {
-    let lap = text.width() + NOTICE_TICKER_GAP;
-    let lap_steps = NOTICE_TICKER_PAUSE_STEPS + lap as u128;
-    let step = (shown_for.as_millis() / NOTICE_TICKER_STEP_MS) % lap_steps;
+    let step = (shown_for.as_millis() / NOTICE_TICKER_STEP_MS) % notice_lap_steps(text);
     let offset = usize::try_from(step.saturating_sub(NOTICE_TICKER_PAUSE_STEPS))
         .expect("the offset is below one lap's width");
     // Two laps cover the window: the offset stays within the first, and `room` is
