@@ -22,7 +22,7 @@ derivatives.
 - **Regenerate the banner, don't edit it.** `site/scripts/render-banner.ts` takes the Braille
   mascot from the synthetic captures in [`docs/`](docs/README.md#regenerate) and shows the
   terminal of the session reference screenshot in a tilted window, in the Ember palette, so it
-  stays in step with the TUI. The wordmark uses the local Georgia font, as the site's headings do.
+  stays in step with the TUI. The lowercase wordmark uses bundled JetBrains Mono (600) to match the TUI.
 - **Markdown links the banner here** by its `raw.githubusercontent.com` URL; Astro rewrites that URL
   to its local asset endpoint. Do not add another tracked copy.
 - **Sizes are not copies.** The favicon and touch icon are smaller renderings of the mascot that

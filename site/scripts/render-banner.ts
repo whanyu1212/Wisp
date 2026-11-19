@@ -49,6 +49,12 @@ const mono = dataUrl(
   join(fontFiles, "jetbrains-mono-latin-400-normal.woff2"),
   "font/woff2",
 );
+const wordmarkMono = dataUrl(
+  join(fontFiles, "jetbrains-mono-latin-600-normal.woff2"),
+  "font/woff2",
+);
+const mascotRightEdge = 76 + Math.round(220 * (mascot.width / mascot.height));
+const windowLeftEdge = 758 + 14;
 const welcomeImage = dataUrl(
   join(repoRoot, "assets/docs/tui-welcome.png"),
   "image/png",
@@ -69,7 +75,8 @@ const screenHeight = Math.round(terminal.height * screenScale);
 // Ember palette from rust/wisp-tui/src/theme_catalog.json.
 const html = `<!doctype html>
 <style>
-  @font-face { font-family: "Banner Mono"; src: url(${mono}); }
+  @font-face { font-family: "Banner Mono"; src: url(${mono}) format("woff2"); font-weight: 400; }
+  @font-face { font-family: "Banner Mono"; src: url(${wordmarkMono}) format("woff2"); font-weight: 600; }
   html, body { margin: 0; }
   body {
     width: 1200px; height: 300px; overflow: hidden; position: relative;
@@ -85,12 +92,16 @@ const html = `<!doctype html>
     mix-blend-mode: lighten;
   }
   .copy {
-    position: absolute; left: 342px; top: 0; height: 300px;
-    display: flex; align-items: center;
+    position: absolute; left: ${mascotRightEdge}px; width: ${windowLeftEdge - mascotRightEdge}px;
+    top: 0; height: 300px; display: flex; align-items: center; justify-content: center;
   }
   h1 {
-    margin: 0 0 6px; font: 400 96px/1 Georgia, "Times New Roman", serif;
-    letter-spacing: -0.045em; color: #fab283;
+    margin: 0 0 6px; padding: 0.14em 0.08em;
+    font: 600 86px/1 "Banner Mono", monospace; letter-spacing: -0.04em;
+    -webkit-font-smoothing: antialiased;
+    background: linear-gradient(180deg, #ffd4b4 0%, #fab283 58%, #e48c62 100%);
+    -webkit-background-clip: text; color: transparent;
+    filter: drop-shadow(0 0 26px rgba(250, 178, 131, 0.2));
   }
   /* The terminal floats in a gentle perspective tilt, as in the promo video. */
   .stage { position: absolute; left: 758px; top: 0; width: 442px; height: 300px; perspective: 1300px; }
@@ -130,7 +141,7 @@ const html = `<!doctype html>
 </style>
 <canvas class="mascot"></canvas>
 <div class="copy">
-  <h1>Wisp</h1>
+  <h1>wisp</h1>
 </div>
 <div class="stage">
   <div class="orbit"></div>

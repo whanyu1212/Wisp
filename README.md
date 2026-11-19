@@ -2,96 +2,18 @@
 
 # Wisp
 
-My personal terminal coding agent in Python and Rust, built as a testbed for agent runtime
-design—exploring agent engineering from the loop up.
+My personal terminal coding agent in Python and Rust — one typed runtime behind a Rust TUI, CLI, JSONL-RPC, and Python SDK. Built for daily work and as a playground for agent runtime engineering.
 
-I use Wisp for day-to-day work in the terminal and to study the parts of coding agents that are
-easy to hand-wave until you build them end to end: keeping the model/tool loop independent of
-persistence and UI, steering or cancelling a run mid-flight without corrupting history, enforcing
-tool approvals outside the model's control, compacting context, and driving a native Rust TUI over
-a typed RPC boundary.
+## Try it
 
-The codebase and its companion write-ups—including the
-[architecture notes](https://whanyu1212.github.io/Wisp/architecture/) and
-[Crafting Coding Agents](https://whanyu1212.github.io/Wisp/crafting-agents/), a runnable walkthrough
-of the design trade-offs—are public in case they are useful to read, borrow from, or fork.
-
-## How it's built
-
-Every interface is a thin adapter over one event-driven runtime:
-
-```text
-CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarness -> run_agent_loop
-```
-
-- **`run_agent_loop`** runs the provider request and tool-execution cycle within a single turn and
-  knows nothing about disk persistence or frontends.
-- **`AgentHarness`** owns the in-memory transcript across runs, queued user messages, and boundary
-  decisions between model requests.
-- **`CodingSession`** adds append-only JSONL persistence, context compaction, project trust, and
-  tool approval policy.
-- **Typed `WispEvent` stream & JSONL-RPC.** The Rust TUI (`rust/wisp-tui`), print/JSON CLI modes,
-  and Python SDK (`wisp.sdk`) all consume the same typed event stream rather than maintaining
-  separate agent loops.
-- **Deterministic offline testing.** A built-in `fake` provider exercises the full runtime,
-  protocol, and test suite without API keys or network access.
-
-## Runtime mechanics
-
-- **Mid-run steering.** Corrections sent during an active run apply at the next safe boundary
-  between model requests while preserving completed tool work (`Alt+Enter` steers in the TUI;
-  `Enter` queues a follow-up).
-- **Approval and trust gates.** Read-only tools run directly; file writes, edits, and shell
-  commands require approval outside the acting model's control. `/permissions auto` automatically
-  approves eligible built-in workspace and session-scratch edits on macOS/Linux, but still asks
-  before commands and other mutations. Git metadata, agent-control files, shared hard-linked
-  files, protected paths, and mandatory confirmations are not automatically granted. Auto is
-  saved per project (session-only in broad folders); `/permissions ask` revokes it. Automatic
-  decisions are recorded in the session and shown on tool cards. This checks where and how an
-  edit runs, not whether its contents are safe. Separately opt into `/permissions auto-commands`
-  for macOS Seatbelt containment: supported tests/builds run without prompts or model review;
-  other eligible commands receive independent review. Use `uv run --no-sync pytest` for installed
-  Python environments and Bash's `cwd` argument for subprojects. Polling/cancelling a sandboxed
-  job needs no further approval while its session and consent remain active. Network is blocked,
-  filesystem access is restricted, and sandbox failure never silently runs unrestricted. Pre-existing hardlink aliases
-  can still expose or modify protected/outside files: this is not complete file isolation. Existing Auto or earlier
-  command-review consent does not enable this mode; select it again to opt in. Project-local settings, `AGENTS.md`, and skills
-  stay inert until a repository is trusted.
-- **Unwindable cancellation.** Cancelling unwinds in-flight tool processes cleanly and leaves the
-  session log valid so `--continue` resumes from the last committed state.
-- **Append-only session trees.** Runs are recorded as typed `WispEvent` entries in JSONL files that
-  can be resumed, branched, or inspected after the fact.
-
-See [Staying in sync](https://whanyu1212.github.io/Wisp/guide/staying-in-sync.html) and
-[Tools & safety](https://whanyu1212.github.io/Wisp/guide/tools-and-safety.html) for how those
-invariants are enforced.
-
-## Interfaces
-
-| Surface | Command / entry point | Role |
-|---------|-----------------------|------|
-| TUI | `wisp` | Fullscreen Rust terminal UI over JSONL-RPC |
-| Print | `wisp -p "…"` | Assistant text on stdout, events on stderr (`--yes` required for writes/shell) |
-| JSON | `wisp -p "…" --mode json` | One `WispEvent` JSON object per line |
-| RPC | `wisp --mode rpc` | Long-lived typed JSONL command/event process |
-| Python SDK | `wisp.sdk` (`InProcessWisp`) | In-process or subprocess embedding; see [`examples/sdk/`](examples/sdk/) |
-
-## Running it
-
-Wisp targets Python 3.11+ on macOS and Linux (Windows is best-effort). It supports OpenAI
-(including ChatGPT Plus/Pro device sign-in via `/connect`), Anthropic, Google, xAI, and DeepSeek,
-plus the offline `fake` provider.
-
-Install the published package with `uv` (native macOS arm64 and Linux x86_64 glibc 2.28+ wheels
-bundle the Rust TUI):
+Requires Python 3.11+ on macOS or Linux (Windows is best-effort). Prebuilt macOS arm64 and Linux x86_64 wheels include the Rust TUI:
 
 ```bash
 uv tool install --python 3.12 wisp-ai
 wisp -p "hello" --provider fake
 ```
 
-Or run directly from a source checkout (requires Python 3.11+, `uv`, and the Rust toolchain pinned
-in `rust-toolchain.toml` for the TUI):
+From a source checkout (needs `uv` and the Rust toolchain in `rust-toolchain.toml` for the TUI):
 
 ```bash
 uv sync --locked
@@ -101,27 +23,17 @@ cargo build -p wisp-tui
 WISP_RUST_TUI_BINARY="$(pwd)/target/debug/wisp-tui" uv run wisp tui
 ```
 
-Full usage details live in the [documentation](https://whanyu1212.github.io/Wisp/):
-[Installation](https://whanyu1212.github.io/Wisp/guide/installation.html) ·
-[Quickstart](https://whanyu1212.github.io/Wisp/guide/quickstart.html) ·
-[TUI guide](https://whanyu1212.github.io/Wisp/guide/tui.html) ·
-[Python SDK](https://whanyu1212.github.io/Wisp/guide/sdk.html) ·
-[Reference](https://whanyu1212.github.io/Wisp/reference/) ·
-[Changelog](CHANGELOG.md)
+Supports OpenAI (including ChatGPT Plus/Pro via `/connect`), Anthropic, Google, xAI, DeepSeek, and the offline `fake` provider.
 
-## Project status & issues
+## Links
 
-Wisp is personal software maintained for my own use and learning rather than as a community-driven
-product. Interfaces and internals may change as experiments evolve.
+- **[Docs & quickstart](https://whanyu1212.github.io/Wisp/)** — install, TUI guide, safety & permissions, SDK, and reference
+- **[Architecture](https://whanyu1212.github.io/Wisp/architecture/)** — how the loop, harness, session, and Rust TUI fit together
+- **[Crafting Coding Agents](https://whanyu1212.github.io/Wisp/crafting-agents/)** — runnable walkthrough of the design trade-offs
+- **[Examples](examples/)** · **[Changelog](CHANGELOG.md)**
 
-- **Bug reports:** GitHub issues are open for reproducible bug reports.
-- **Feature requests & PRs:** I'm not looking for feature requests or external pull requests. Feel
-  free to fork the repository if you want to take it in a different direction.
-- **Development notes:** Local setup and verification gates are documented in
-  [CONTRIBUTING.md](CONTRIBUTING.md).
-- **Security:** Please report security vulnerabilities privately as described in
-  [SECURITY.md](SECURITY.md).
+## Note
 
-## License
+Wisp is personal software built for my own use, so things may change without much ceremony. Reproducible bug reports are welcome in issues; I'm not taking feature requests or unsolicited PRs, though it's [MIT-licensed](LICENSE) if you want to read, borrow, or fork it.
 
-[MIT](LICENSE)
+Local dev commands are in [CONTRIBUTING.md](CONTRIBUTING.md). Please report security issues privately via [SECURITY.md](SECURITY.md).
