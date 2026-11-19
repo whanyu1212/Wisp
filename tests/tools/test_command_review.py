@@ -20,6 +20,7 @@ pytestmark = pytest.mark.skipif(os.name != "posix", reason="Command review is PO
         "git status --short",
         "git diff --stat",
         "pytest tests/unit -q",
+        "pytest tests/unit.py::TestClass::test_bar",
         "uv run --no-sync pytest tests/unit -q",
         "python -m pytest tests/unit",
         "cargo test --workspace",
@@ -60,11 +61,28 @@ def test_eligible_commands_still_require_independent_review(tmp_path: Path, comm
         "cargo publish",
         "uv run pytest",
         "uv run --no-sync bash -c pytest",
+        "uv run --no-sync git show HEAD:.env",
+        "uv run --no-sync git status",
+        "uv run --no-sync cargo test",
+        "uv run --no-sync uv run --no-sync pytest",
         "mypy --install-types .",
+        "mypy --install-type .",
+        "mypy --c .",
+        "mypy --config-fil foo.ini .",
+        "git diff --out=../outside",
+        "ruff check -o out.txt .",
+        "npm -g test",
         "pytest --api-key literal-private-value",
         "pytest --password=private-value",
         "pytest ../outside",
         "pytest /etc/passwd",
+        "pytest -/../../.env",
+        "pytest --opt=-/../../.env",
+        "pytest ::../../.env",
+        "pytest tests/unit.py::../../.env",
+        "pytest tests/unit.py::foo::/etc/passwd",
+        "pytest tests/unit.py::foo::../outside.txt",
+        "pytest tests/unit.py::",
         "pytest .env",
         "pytest .env::node",
         "pytest .ssh/id_rsa",
@@ -136,7 +154,11 @@ def test_windows_never_reaches_the_reviewer(
 
 
 def test_broad_folder_is_never_a_command_auto_grant() -> None:
-    assert command_review_objection({"command": "pwd"}, ToolContext(cwd=Path.home()))
+    home = Path.home()
+    (home / "project").mkdir()
+    assert command_review_objection({"command": "pwd"}, ToolContext(cwd=home))
+    # Passing bash.cwd into a subdirectory of a broad root must not bypass the broad-root check.
+    assert command_review_objection({"cwd": "project", "command": "pytest"}, ToolContext(cwd=home))
 
 
 @pytest.mark.parametrize(

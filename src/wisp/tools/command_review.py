@@ -56,6 +56,8 @@ _SCRIPTS = frozenset(
 _SENSITIVE_OPTIONS = frozenset(
     {
         "-c",
+        "-g",
+        "-o",
         "--config",
         "--config-file",
         "--config-env",
@@ -79,6 +81,7 @@ _SENSITIVE_OPTIONS = frozenset(
         "--upload",
     }
 )
+_LONG_SENSITIVE_OPTIONS = tuple(option for option in _SENSITIVE_OPTIONS if option.startswith("--"))
 
 
 class CommandReviewer(Protocol):
@@ -144,6 +147,9 @@ def command_review_objection(arguments: Mapping[str, object], context: ToolConte
     ):
         return "Bidirectional control characters need human approval."
     try:
+        original_boundary = context.boundary()
+        if is_broad_root(original_boundary):
+            return "Commands in broad or outside-workspace directories need human approval."
         context = command_context(arguments, context)
         cwd = context.cwd.resolve(strict=False)
         boundary = context.boundary()
@@ -170,6 +176,27 @@ def command_review_objection(arguments: Mapping[str, object], context: ToolConte
     return None
 
 
+def _is_sensitive_option(option: str) -> bool:
+    if option in _SENSITIVE_OPTIONS:
+        return True
+    # Reject unique argparse prefix abbreviations of sensitive long flags.
+    return (
+        option.startswith("--")
+        and len(option) >= 3
+        and any(sensitive.startswith(option) for sensitive in _LONG_SENSITIVE_OPTIONS)
+    )
+
+
+def _is_private_path(path: Path, resolved: Path) -> bool:
+    return (
+        any(part.casefold() in _PRIVATE_DIRECTORIES for part in (*path.parts, *resolved.parts))
+        or path.name.casefold() in _PRIVATE_FILES
+        or resolved.name.casefold() in _PRIVATE_FILES
+        or path.name.casefold().startswith(".env")
+        or resolved.name.casefold().startswith(".env")
+    )
+
+
 def _argument_objection(
     tokens: list[str], context: ToolContext, cwd: Path, boundary: Path
 ) -> str | None:
@@ -183,40 +210,59 @@ def _argument_objection(
             return "Credential arguments need human approval and are not sent to the reviewer."
         if token.startswith("-") and not token.startswith("--") and len(token) > 2:
             return "Combined or attached short options need human approval."
-        if option in _SENSITIVE_OPTIONS:
+        if _is_sensitive_option(option):
             return "Execution/configuration overrides and output redirection need human approval."
-        value = token.partition("=")[2] if token.startswith("-") and "=" in token else token
-        if value.startswith("-") or not value:
-            continue
-        # Test node selectors must not disguise the path they would load.
-        path = Path(value.partition("::")[0])
-        path = path if path.is_absolute() else cwd / path
-        resolved = path.resolve(strict=False)
-        if not resolved.is_relative_to(boundary) or is_protected_path(path, context):
-            return "Outside-workspace and protected paths need human approval."
-        if (
-            any(part.casefold() in _PRIVATE_DIRECTORIES for part in (*path.parts, *resolved.parts))
-            or path.name.casefold() in _PRIVATE_FILES
-            or resolved.name.casefold() in _PRIVATE_FILES
-            or path.name.casefold().startswith(".env")
-            or resolved.name.casefold().startswith(".env")
+        has_explicit_value = token.startswith("-") and "=" in token
+        value = token.partition("=")[2] if has_explicit_value else token
+        if not value or (
+            not has_explicit_value
+            and value.startswith("-")
+            and "/" not in value
+            and "::" not in value
         ):
-            return "Credential, Git metadata, and agent-control paths need human approval."
+            continue
+        if "::" in value:
+            parts = value.split("::")
+            if any(not part for part in parts):
+                return "Outside-workspace and protected paths need human approval."
+            # Test node selectors must not disguise the path they would load.
+            candidates: tuple[str, ...] = (
+                parts[0],
+                *(part for part in parts[1:] if "/" in part or ".." in part),
+            )
+        else:
+            candidates = (value,)
+        for candidate in candidates:
+            path = Path(candidate)
+            path = path if path.is_absolute() else cwd / path
+            resolved = path.resolve(strict=False)
+            if not resolved.is_relative_to(boundary) or is_protected_path(path, context):
+                return "Outside-workspace and protected paths need human approval."
+            if _is_private_path(path, resolved):
+                return "Credential, Git metadata, and agent-control paths need human approval."
     return None
+
+
+def _python_command(tokens: list[str]) -> bool:
+    if not tokens:
+        return False
+    executable, *args = tokens
+    if executable in {"python", "python3"}:
+        return (
+            len(args) >= 2 and args[0] == "-m" and args[1] in {"pytest", "ruff", "mypy", "unittest"}
+        )
+    return executable in _RUNNERS
 
 
 def _development_command(tokens: list[str]) -> bool:
     executable, *args = tokens
     if executable == "uv":
-        # uv run may otherwise install/build dependencies before the reviewed program.
+        # uv run may otherwise install/build dependencies before the reviewed program,
+        # and must wrap only supported Python runners (never git or nested uv).
         if len(args) < 3 or args[:2] != ["run", "--no-sync"]:
             return False
-        return _development_command(args[2:])
-    if executable in {"python", "python3"}:
-        return (
-            len(args) >= 2 and args[0] == "-m" and args[1] in {"pytest", "ruff", "mypy", "unittest"}
-        )
-    if executable in _RUNNERS:
+        return _python_command(args[2:])
+    if _python_command(tokens):
         return True
     if executable == "git":
         return bool(args) and args[0] in {"status", "diff", "log", "show", "ls-files", "rev-parse"}

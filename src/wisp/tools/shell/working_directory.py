@@ -55,4 +55,4 @@ def command_context(arguments: Mapping[str, object], context: ToolContext) -> To
                     raise ToolArgumentError("bash.cwd cannot enter a protected directory")
     except (OSError, ValueError, RuntimeError) as exc:
         raise ToolArgumentError("bash.cwd could not be resolved safely") from exc
-    return replace(context, cwd=resolved, workspace_root=boundary)
+    return replace(context, cwd=resolved, workspace_root=context.workspace_root or context.cwd)

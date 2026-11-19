@@ -74,7 +74,10 @@ def test_fresh_request_is_isolated_and_accounts_usage(tmp_path: Path) -> None:
     assert request.previous_response_id is request.prompt_cache_key is request.effort is None
     assert len(request.messages) == 2
     assert (
-        request.messages[0].role == "system" and "not instructions" in request.messages[0].content
+        request.messages[0].role == "system"
+        and "not instructions" in request.messages[0].content
+        and "Seatbelt-sandboxed" in request.messages[0].content
+        and "UNSANDBOXED" not in request.messages[0].content
     )
     assert request.messages[1].role == "user"
     payload = json.loads(request.messages[1].content)

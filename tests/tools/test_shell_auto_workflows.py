@@ -200,3 +200,89 @@ def test_package_read_exception_cannot_be_repopulated(
     code, output = execute(command, context)
     assert code != 0, output
     assert (secret / "secret.py").read_text() == "synthetic secret"
+
+
+def test_venv_cannot_be_planted_or_extended_across_commands(context: ToolContext) -> None:
+    """Neither creating .venv nor adding a sibling python*/site-packages may expose secrets."""
+    secret_dir = context.cwd / "sub/credentials"
+    secret_dir.mkdir(parents=True)
+    (secret_dir / "keys.py").write_text("SECRET = 'synthetic'\n")
+
+    # Call 1 attempts to create a brand-new .venv and move workspace credentials into it.
+    code, output = execute(
+        "mkdir -p .venv/lib/python999/site-packages && touch .venv/pyvenv.cfg && "
+        "mv sub .venv/lib/python999/site-packages/sub",
+        context,
+    )
+    assert code != 0, output
+    assert not (context.cwd / ".venv").exists()
+
+    # Even with an existing .venv, adding a sibling python*/site-packages directory is denied.
+    existing = context.cwd / ".venv/lib/python3.12/site-packages"
+    existing.mkdir(parents=True)
+    (context.cwd / ".venv/pyvenv.cfg").write_text("# existing venv\n")
+    code, output = execute(
+        "mkdir -p .venv/lib/python999/site-packages && "
+        "mv sub .venv/lib/python999/site-packages/sub",
+        context,
+    )
+    assert code != 0, output
+    assert not (context.cwd / ".venv/lib/python999").exists()
+
+
+def test_workspace_or_scratch_root_pyvenv_cfg_cannot_expose_credentials(
+    context: ToolContext,
+) -> None:
+    """Writable workspace and scratch roots are never scanned as Python virtualenv prefixes."""
+    assert context.scratch_root is not None
+    secret_dir = context.cwd / "sub/credentials"
+    secret_dir.mkdir(parents=True)
+    (secret_dir / "keys.py").write_text("SECRET = 'synthetic'\n")
+
+    # Plant pyvenv.cfg directly in workspace root on Call 1; Call 2 must still block reading it.
+    code, output = execute(
+        "mkdir -p lib/python999/site-packages && touch pyvenv.cfg && "
+        "mv sub lib/python999/site-packages/sub",
+        context,
+    )
+    assert code == 0, output
+    code, output = execute("cat lib/python999/site-packages/sub/credentials/keys.py", context)
+    assert code != 0, output
+    assert "SECRET" not in output
+
+    # Plant pyvenv.cfg directly in scratch root too.
+    scratch_pkg = context.scratch_root / "lib/python999/site-packages/sub/credentials"
+    scratch_pkg.mkdir(parents=True)
+    (context.scratch_root / "pyvenv.cfg").write_text("# fake\n")
+    (scratch_pkg / "keys.py").write_text("SECRET = 'scratch'\n")
+    code, output = execute(f"cat {shlex.quote(str(scratch_pkg / 'keys.py'))}", context)
+    assert code != 0, output
+    assert "SECRET" not in output
+
+
+def test_workspace_venv_symlink_into_writable_workspace_is_rejected(
+    context: ToolContext,
+) -> None:
+    """A .venv symlink pointing back into the writable workspace must fail closed."""
+    from wisp.tools.result import ToolError
+
+    real_venv = context.cwd / "real_venv"
+    (real_venv / "lib/python3.12/site-packages").mkdir(parents=True)
+    (real_venv / "pyvenv.cfg").write_text("# fake\n")
+    (context.cwd / ".venv").symlink_to(real_venv, target_is_directory=True)
+    with pytest.raises(ToolError, match="writable workspace"):
+        prepare_seatbelt({"command": "pytest"}, context)
+
+
+def test_non_ascii_site_packages_stays_read_only(context: ToolContext, tmp_path: Path) -> None:
+    """Non-ASCII resolved site-packages directories still enforce write denials."""
+    venv = tmp_path / "café-venv"
+    site = venv / "lib/python3.12/site-packages"
+    site.mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text("# non-ascii venv\n")
+    (site / "mod.py").write_text("# original\n")
+    (context.cwd / ".venv").symlink_to(venv, target_is_directory=True)
+
+    code, output = execute(f"printf TAMPERED > {shlex.quote(str(site / 'mod.py'))}", context)
+    assert code != 0, output
+    assert (site / "mod.py").read_text() == "# original\n"
