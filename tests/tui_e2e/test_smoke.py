@@ -215,11 +215,10 @@ def test_rust_tui_cross_language_smoke(
 
     assert prompt_sent, bytes(output)
     assert quit_sent, bytes(output)
-    for mode in (1000, 1002, 1006):
+    for mode in (1000, 1002, 1003, 1006):
         assert (f"\x1b[?{mode}h".encode() in terminal_output) is mouse_enabled
         if mouse_enabled:
             assert f"\x1b[?{mode}l".encode() in terminal_output
-    assert b"\x1b[?1003h" not in terminal_output, "navigation must not request all-motion reports"
     if exercise_prompt:
         assert response_seen, bytes(output)
         # Ratatui may place cursor-control sequences between adjacent cells, so

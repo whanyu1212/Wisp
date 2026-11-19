@@ -20,16 +20,17 @@ pub(crate) fn enabled(value: Option<&str>) -> bool {
     })
 }
 
-/// Left-button press, drag, and release, plus the wheel. Other buttons are dropped by the reader
-/// so they never fill the input queue.
+/// Left-button press, drag, release, plain pointer motion, and the wheel. Other buttons are
+/// dropped by the reader so they never fill the input queue.
 ///
-/// A modified press or wheel report is dropped too. A drag or release keeps its modifiers: it
-/// only continues a selection an unmodified press started, and dropping a release because a key
-/// was held would leave that selection live.
+/// A modified press, move, or wheel report is dropped too. A drag or release keeps its
+/// modifiers: it only continues a selection an unmodified press started, and dropping a release
+/// because a key was held would leave that selection live.
 pub(crate) fn supported(event: MouseEvent) -> bool {
     match event.kind {
         MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left) => true,
         MouseEventKind::Down(MouseButton::Left)
+        | MouseEventKind::Moved
         | MouseEventKind::ScrollUp
         | MouseEventKind::ScrollDown => event.modifiers.is_empty(),
         _ => false,
@@ -317,6 +318,8 @@ pub(crate) struct Conversation {
     pub jump_to_latest: Option<Rect>,
     /// The background strip under the composer, painted while processes run.
     pub background_strip: Option<Rect>,
+    /// The `[stop]` control in the status row while a command is cancellable.
+    pub stop_button: Option<Rect>,
     pub editor: Option<Editor>,
     pub completion: Rows,
     pub completion_visible: bool,
@@ -387,7 +390,10 @@ impl LiveUi {
     ) -> Result<LoopControl, Error> {
         if !self.mouse_enabled
             || !supported(event)
-            || matches!(event.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_))
+            || matches!(
+                event.kind,
+                MouseEventKind::Drag(_) | MouseEventKind::Up(_) | MouseEventKind::Moved
+            )
             || self.unsendable_current_response()
         {
             return Ok(LoopControl::Continue);
@@ -586,6 +592,13 @@ impl LiveUi {
                 {
                     self.focus_background_processes();
                     return Ok(LoopControl::Continue);
+                }
+                if frame
+                    .conversation
+                    .stop_button
+                    .is_some_and(|area| contains(area, event))
+                {
+                    return self.interrupt(writer, limit, false).await;
                 }
                 // A press on a welcome menu row opens what it names.
                 if self.welcome_menu_rows() > 0 {

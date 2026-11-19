@@ -237,6 +237,7 @@ pub fn render(
         },
         None,
         Motion::default(),
+        StatusTimers::default(),
         None,
         None,
     );
@@ -261,7 +262,8 @@ pub fn render_interactive(
     welcome: Welcome,
     decision_choice: Option<usize>,
     motion: Motion<'_>,
-    activity_elapsed: Option<std::time::Duration>,
+    timers: StatusTimers,
+    pointer: Option<(u16, u16)>,
     side_panel: Option<&SidePanel>,
 ) -> mouse::Conversation {
     let area = frame.area();
@@ -399,18 +401,21 @@ pub fn render_interactive(
         .filter(|_| completion_height > 0)
         .map(|view| crate::commands::render_completion(frame, chunks[1], view, palette))
         .unwrap_or_default();
-    if status_height > 0 {
+    let stop_button = if status_height > 0 {
         render_status_line(
             frame,
             content_area(chunks[2]),
             state,
             activity_frame,
             motion.mode,
-            activity_elapsed,
+            timers,
             column.width < frame.area().width,
+            pointer,
             palette,
-        );
-    }
+        )
+    } else {
+        None
+    };
     let padded = area.height >= 16;
     let editor = render_composer(
         frame,
@@ -463,6 +468,7 @@ pub fn render_interactive(
         },
         jump_to_latest,
         background_strip,
+        stop_button,
         editor,
         completion: completion_rows,
         completion_visible: completion_height > 0,
@@ -1056,7 +1062,11 @@ fn render_transcript(
             let user_surface = row.role == TranscriptRole::User;
             let pulse = (state.view_status == ViewStatus::Running
                 && row_tool_in_progress(state, row))
-            .then_some(activity_frame);
+            .then_some(if motion.mode == MotionMode::Still {
+                0
+            } else {
+                activity_frame
+            });
             let live_elapsed = pulse
                 .filter(|_| row.live_timer)
                 .and_then(|_| state.transcript.entry(row.anchor.entry_id))
@@ -1274,11 +1284,52 @@ fn render_background_strip(
     area
 }
 
-/// The run's status line: what is running and for how long, the session turn, and
-/// the run's tool count and time on the left; queued messages and the context on the
-/// right. The running item's text is clipped first, then the turn details drop.
-/// Beside a docked side panel, which shows the context, the context appears here
-/// only once the window is mostly full.
+/// Run-total and active-phase timers shown in the live status row.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct StatusTimers {
+    pub run: Option<std::time::Duration>,
+    pub phase: Option<std::time::Duration>,
+}
+
+/// Format streamed output tokens compactly for the live status row (`⇣420`, `⇣9.45k`,
+/// `⇣12.3k`, `⇣1.23m`).
+pub(crate) fn format_streamed_tokens(tokens: u64) -> String {
+    if tokens < 1_000 {
+        return format!("⇣{tokens}");
+    }
+    let hundredths_k = tokens.saturating_add(5) / 10;
+    if hundredths_k < 1_000 {
+        return format!("⇣{}.{:02}k", hundredths_k / 100, hundredths_k % 100);
+    }
+    let tenths_k = tokens.saturating_add(50) / 100;
+    if tenths_k < 10_000 {
+        return format!("⇣{}.{}k", tenths_k / 10, tenths_k % 10);
+    }
+    let hundredths_m = tokens.saturating_add(5_000) / 10_000;
+    format!("⇣{}.{:02}m", hundredths_m / 100, hundredths_m % 100)
+}
+
+fn right_rendered_width(telemetry: &[(u8, Span<'_>)], include_stop: bool) -> usize {
+    let telemetry_width = if telemetry.is_empty() {
+        0
+    } else {
+        telemetry
+            .iter()
+            .map(|(_, span)| span.width())
+            .sum::<usize>()
+            + 3 * (telemetry.len() - 1)
+    };
+    if !include_stop {
+        return telemetry_width;
+    }
+    let gap = usize::from(telemetry_width > 0) * 2;
+    telemetry_width + gap + "[stop]".width()
+}
+
+/// The live status row above the composer: spinner, activity (`Responding…`,
+/// `Thinking…`, or the running tool), and activity elapsed on the left; run total
+/// time, streamed tokens, queued count, compact context figure, and clickable `[stop]`
+/// on the right. Returns the painted `[stop]` rectangle when shown.
 #[allow(clippy::too_many_arguments)]
 fn render_status_line(
     frame: &mut Frame<'_>,
@@ -1286,124 +1337,201 @@ fn render_status_line(
     state: &UiState,
     activity_frame: u8,
     motion: MotionMode,
-    run_elapsed: Option<std::time::Duration>,
+    timers: StatusTimers,
     panel_docked: bool,
+    pointer: Option<(u16, u16)>,
     palette: Palette,
-) {
+) -> Option<Rect> {
+    if area.width == 0 || area.height == 0 {
+        return None;
+    }
     let width = usize::from(area.width);
     let running = Style::default().fg(palette.secondary);
     let muted = Style::default().fg(palette.muted);
     let dim = muted.add_modifier(Modifier::DIM);
-
-    let mut right = Vec::new();
-    let queued = state
-        .queued_steering()
-        .saturating_add(state.queued_follow_ups());
-    if queued > 0 {
-        right.push(Span::styled(format!("{queued} queued"), running));
-    }
-    let pressured =
-        crate::context_view::fill(state).is_some_and(|fill| fill >= CONTEXT_WARNING_FILL);
-    if pressured || !panel_docked {
-        if !right.is_empty() {
-            right.push(Span::styled(" · ", dim));
-        }
-        let context = crate::context_view::indicator(state, 0);
-        right.push(Span::styled("ctx ", muted));
-        right.push(Span::styled(
-            context.strip_prefix("ctx ").unwrap_or(&context).to_owned(),
-            if pressured {
-                Style::default().fg(palette.warning)
-            } else {
-                muted
-            },
-        ));
-    }
-    let right = Line::from(right);
 
     let activity = run_activity(state);
     // The indicator breathes beside its spinner; the label beside it stays solid,
     // so it keeps its contrast.
     let mut lead = vec![
         Span::styled(
-            spinner_frame(activity_frame),
+            spinner_frame_for(activity_frame, motion),
             palette.breathe(running, motion, activity_frame),
         ),
         Span::raw(" "),
     ];
     let mut detail = String::new();
-    let mut timer = None;
-    match activity.item {
+    let (mut timer_text, timer_style) = match activity.item {
         Some(item) => {
             lead.push(Span::styled(item.label.clone(), palette.chip(&item.label)));
-            lead.push(Span::raw(" "));
-            detail = item.detail;
-            timer = item.elapsed.map(|elapsed| {
+            if !item.detail.is_empty() {
+                lead.push(Span::raw(" "));
+                detail = item.detail;
+            }
+            let elapsed = item.elapsed.map(|elapsed| {
                 crate::tool_cards::format_duration(
                     u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
                 )
             });
+            (elapsed, running)
         }
-        None => lead.push(Span::styled(activity_phase(state), running)),
-    }
-    let turn_number = activity.turn;
-    let tools = activity.tools;
-    let mut totals = format!("{tools} tool{}", if tools == 1 { "" } else { "s" });
-    if let Some(elapsed) = run_elapsed {
-        totals.push_str(" · ");
-        totals.push_str(&crate::tool_cards::format_duration(
-            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        None => {
+            lead.push(Span::styled(activity_phase(state), running));
+            let elapsed = timers.phase.map(|elapsed| {
+                crate::tool_cards::format_duration(
+                    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+                )
+            });
+            (elapsed, muted)
+        }
+    };
+
+    let mut telemetry: Vec<(u8, Span<'static>)> = Vec::new();
+    if let Some(elapsed) = timers.run {
+        telemetry.push((
+            1,
+            Span::styled(
+                crate::tool_cards::format_duration(
+                    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+                ),
+                muted,
+            ),
         ));
     }
-    let mut tail = vec![Span::styled(" · ", dim)];
-    if turn_number > 0 {
-        tail.push(Span::styled(format!("turn {turn_number} "), muted));
+    let manual_compact = state
+        .current_command
+        .as_ref()
+        .is_some_and(|command| command.command_type == crate::reducer::ActiveCommandType::Compact);
+    if !manual_compact {
+        if let Some(tokens) = state
+            .run_progress
+            .map(|progress| progress.streamed_tokens())
+            .filter(|tokens| *tokens > 0)
+        {
+            telemetry.push((2, Span::styled(format_streamed_tokens(tokens), muted)));
+        }
     }
-    tail.push(Span::styled(totals, dim));
+    let queued = state
+        .queued_steering()
+        .saturating_add(state.queued_follow_ups());
+    if queued > 0 {
+        telemetry.push((3, Span::styled(format!("{queued} queued"), running)));
+    }
+    let fill = crate::context_view::fill(state);
+    let pressured = fill.is_some_and(|fill| fill >= CONTEXT_WARNING_FILL);
+    if pressured || !panel_docked {
+        telemetry.push((
+            4,
+            Span::styled(
+                crate::context_view::status_text(state),
+                Style::default().fg(context_fill_color(fill, palette)),
+            ),
+        ));
+    }
+    let mut include_stop = state.current_command.is_some() && !state.cancel_requested;
 
-    // Fit the left side beside the right one, keeping at least a little of the
-    // running item's text before the turn details are shown.
+    // Protect the spinner, label, and at least a short preview of a running tool's
+    // argument before sizing the right-hand telemetry and `[stop]`.
     const MIN_DETAIL_COLUMNS: usize = 8;
-    let right_width = right.width();
-    let mut budget = width.saturating_sub(right_width + 2);
     let lead_width = Line::from(lead.clone()).width();
-    let show_right = lead_width <= budget;
-    if !show_right {
-        budget = width;
-    }
-    let timer_width = timer.as_ref().map_or(0, |timer| timer.width() + 1);
-    let tail_width = Line::from(tail.clone()).width();
-    let detail_floor = if detail.is_empty() {
+    let min_detail = if detail.is_empty() {
         0
     } else {
         detail.width().min(MIN_DETAIL_COLUMNS)
     };
-    // The queue and context outrank the turn details, which show only beside them.
-    let show_tail = show_right && lead_width + detail_floor + timer_width + tail_width <= budget;
-    let detail_room = budget
-        .saturating_sub(lead_width + timer_width)
-        .saturating_sub(if show_tail { tail_width } else { 0 });
+    let left_floor = lead_width + min_detail;
+    let right_budget = width.saturating_sub(left_floor + 2);
+    loop {
+        if right_rendered_width(&telemetry, include_stop) <= right_budget {
+            break;
+        }
+        if let Some((pos, _)) = telemetry
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, (priority, _))| *priority)
+        {
+            telemetry.remove(pos);
+        } else if include_stop {
+            include_stop = false;
+        } else {
+            break;
+        }
+    }
+
+    let right_width = right_rendered_width(&telemetry, include_stop);
+    let left_budget = if right_width > 0 {
+        width.saturating_sub(right_width + 2)
+    } else {
+        width
+    };
     let mut left = lead;
-    if !detail.is_empty() && detail_room > 0 {
-        left.push(Span::styled(
-            clip_columns(&detail, detail_room),
-            Style::default().fg(palette.foreground),
-        ));
+    if !detail.is_empty() {
+        let timer_width = timer_text.as_ref().map_or(0, |timer| timer.width() + 1);
+        let detail_room_with_timer = left_budget
+            .saturating_sub(lead_width)
+            .saturating_sub(timer_width);
+        if detail_room_with_timer >= min_detail {
+            left.push(Span::styled(
+                clip_columns(&detail, detail_room_with_timer),
+                Style::default().fg(palette.foreground),
+            ));
+        } else {
+            timer_text = None;
+            let detail_room = left_budget.saturating_sub(lead_width);
+            if detail_room > 0 {
+                left.push(Span::styled(
+                    clip_columns(&detail, detail_room),
+                    Style::default().fg(palette.foreground),
+                ));
+            }
+        }
     }
-    if let Some(timer) = timer.filter(|_| lead_width + timer_width <= budget) {
+    if let Some(timer) = timer_text
+        .filter(|timer| Line::from(left.clone()).width() + 1 + timer.width() <= left_budget)
+    {
         left.push(Span::raw(" "));
-        left.push(Span::styled(timer, running));
-    }
-    if show_tail {
-        left.extend(tail);
+        left.push(Span::styled(timer, timer_style));
     }
     frame.render_widget(Paragraph::new(Line::from(left)), area);
-    if show_right {
-        let columns = u16::try_from(right_width)
+
+    let mut stop_rect = None;
+    if right_width > 0 {
+        let mut right_spans: Vec<Span<'static>> = Vec::new();
+        for (index, (_, span)) in telemetry.into_iter().enumerate() {
+            if index > 0 {
+                right_spans.push(Span::styled(" · ", dim));
+            }
+            right_spans.push(span);
+        }
+        if include_stop {
+            const STOP_LABEL: &str = "[stop]";
+            let stop_width = u16::try_from(STOP_LABEL.width()).unwrap_or(6);
+            let rect = Rect::new(
+                area.right().saturating_sub(stop_width),
+                area.y,
+                stop_width,
+                1,
+            );
+            stop_rect = Some(rect);
+            if !right_spans.is_empty() {
+                right_spans.push(Span::raw("  "));
+            }
+            let hovered = pointer.is_some_and(|(column, row)| rect.contains((column, row).into()));
+            let stop_style = if hovered {
+                Style::default()
+                    .fg(palette.error)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                muted
+            };
+            right_spans.push(Span::styled(STOP_LABEL, stop_style));
+        }
+        let right_line = Line::from(right_spans);
+        let columns = u16::try_from(right_line.width())
             .unwrap_or(u16::MAX)
             .min(area.width);
         frame.render_widget(
-            Paragraph::new(right),
+            Paragraph::new(right_line),
             Rect {
                 x: area.right() - columns,
                 width: columns,
@@ -1411,6 +1539,7 @@ fn render_status_line(
             },
         );
     }
+    stop_rect
 }
 
 /// What the run in progress is doing, as the status line and the side panel show it.
@@ -1418,10 +1547,6 @@ pub(crate) struct RunActivity {
     /// The call that names the run, if one is going. A background process never
     /// does: the side panel and the strip under the composer list those.
     pub(crate) item: Option<RunningItem>,
-    /// The session turn the run has reached, or 0 before the model answers.
-    pub(crate) turn: u64,
-    /// Calls and background processes the run has started.
-    pub(crate) tools: usize,
 }
 
 pub(crate) fn run_activity(state: &UiState) -> RunActivity {
@@ -1434,14 +1559,7 @@ pub(crate) fn run_activity(state: &UiState) -> RunActivity {
         .take_while(|entry| !matches!(entry.kind, crate::transcript::TranscriptEntryKind::Message))
         .find_map(running_item)
         .filter(|_| !state.cancel_requested);
-    RunActivity {
-        item,
-        turn: state.run_progress.map_or(0, |run| run.turn),
-        tools: turn
-            .iter()
-            .filter(|entry| entry.tool_card().is_some() || entry.process_card().is_some())
-            .count(),
-    }
+    RunActivity { item }
 }
 
 /// The entries of the run in progress: everything after the prompt that started it,
@@ -1504,35 +1622,62 @@ fn failure_lines(state: &UiState, width: usize, palette: Palette) -> Vec<Line<'s
         .collect()
 }
 
-/// What the run is doing when no call names it: compacting, cancelling, thinking, or
-/// otherwise working.
-pub(crate) fn activity_phase(state: &UiState) -> String {
+/// Non-tool activity phase displayed by the live status row.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ActivityPhase {
+    Compacting,
+    Cancelling,
+    Thinking,
+    Responding,
+    Working,
+}
+
+/// Which non-tool phase the active run is currently in.
+pub(crate) fn activity_phase_kind(state: &UiState) -> ActivityPhase {
     // Automatic compaction runs inside a prompt, so only the compaction event marks it.
     if state.interaction_status == crate::reducer::InteractionStatus::Compacting
         || state.context.compaction.is_some()
     {
-        return "Compacting context".into();
+        return ActivityPhase::Compacting;
     }
     if state.cancel_requested {
-        return "Cancelling".into();
+        return ActivityPhase::Cancelling;
     }
-    let thinking = state
+    let mut thinking = false;
+    for entry in state
         .transcript
         .entries()
         .iter()
         .rev()
         .take_while(|entry| entry.role != TranscriptRole::User)
-        .any(|entry| {
-            entry.role == TranscriptRole::Assistant
-                && entry.state == crate::transcript::TranscriptEntryState::Streaming
-                && !entry.thinking().is_empty()
-        });
-    // A call or background process still running is named by the status line itself.
-    if thinking {
-        "Thinking".into()
-    } else {
-        "Working".into()
+    {
+        if entry.role == TranscriptRole::Assistant {
+            if entry.is_responding() {
+                return ActivityPhase::Responding;
+            }
+            if entry.is_thinking() {
+                thinking = true;
+            }
+        }
     }
+    if thinking {
+        ActivityPhase::Thinking
+    } else {
+        ActivityPhase::Working
+    }
+}
+
+/// What the run is doing when no call names it: compacting, cancelling, thinking,
+/// responding, or otherwise working.
+pub(crate) fn activity_phase(state: &UiState) -> String {
+    match activity_phase_kind(state) {
+        ActivityPhase::Compacting => "Compacting context…",
+        ActivityPhase::Cancelling => "Cancelling…",
+        ActivityPhase::Thinking => "Thinking…",
+        ActivityPhase::Responding => "Responding…",
+        ActivityPhase::Working => "Working…",
+    }
+    .into()
 }
 
 fn tone_style(tone: TranscriptRowTone, palette: Palette) -> Style {
@@ -1891,11 +2036,19 @@ fn finished_age(state: &UiState, row: &TranscriptRow, motion: Motion<'_>, frame:
 }
 
 /// Braille spinner frames, one per 125 ms activity tick.
-/// A turning half circle marks work in progress, by shape rather than brightness.
-pub(crate) const SPINNER_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
+/// Each frame is one display column wide so active lines never jitter horizontally.
+pub(crate) const SPINNER_FRAMES: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
 
 pub(crate) fn spinner_frame(frame: u8) -> &'static str {
     SPINNER_FRAMES[usize::from(frame) % SPINNER_FRAMES.len()]
+}
+
+pub(crate) fn spinner_frame_for(frame: u8, motion: MotionMode) -> &'static str {
+    if motion == MotionMode::Still {
+        SPINNER_FRAMES[0]
+    } else {
+        spinner_frame(frame)
+    }
 }
 
 /// Whether `row` is the note under a diff card's preview that stands for its hidden
@@ -3698,8 +3851,7 @@ fn status_spans(state: &UiState, status_line: &str, palette: Palette) -> Vec<Spa
         ),
         None => (Vec::new(), status_line),
     };
-    let pressured =
-        crate::context_view::fill(state).is_some_and(|fill| fill >= CONTEXT_WARNING_FILL);
+    let fill = crate::context_view::fill(state);
     let yolo = yolo_label(state);
     // After a label the tail starts with a separator, so its first part is empty.
     for (index, part) in tail.split(" · ").enumerate() {
@@ -3708,8 +3860,8 @@ fn status_spans(state: &UiState, status_line: &str, palette: Palette) -> Vec<Spa
         }
         let style = if Some(part) == yolo {
             yolo_style(palette)
-        } else if pressured && part.starts_with("ctx ") {
-            Style::default().fg(palette.warning)
+        } else if part.starts_with("ctx ") {
+            Style::default().fg(context_fill_color(fill, palette))
         } else {
             muted
         };
@@ -3718,8 +3870,18 @@ fn status_spans(state: &UiState, status_line: &str, palette: Palette) -> Vec<Spa
     spans
 }
 
-/// The context meter turns to the warning colour from this fill.
+/// The context meter turns to the warning colour from this fill, and error from
+/// [`CONTEXT_CRITICAL_FILL`].
 pub(crate) const CONTEXT_WARNING_FILL: f64 = 0.7;
+pub(crate) const CONTEXT_CRITICAL_FILL: f64 = 0.9;
+
+pub(crate) fn context_fill_color(fill: Option<f64>, palette: Palette) -> Color {
+    match fill {
+        Some(fill) if fill >= CONTEXT_CRITICAL_FILL => palette.error,
+        Some(fill) if fill >= CONTEXT_WARNING_FILL => palette.warning,
+        _ => palette.muted,
+    }
+}
 
 /// Style joined `key action` hints with each key as a keycap. Keys never contain
 /// spaces, so the first space ends the key; widths match the plain string.
@@ -4614,6 +4776,7 @@ mod tests {
                     },
                     None,
                     Motion::default(),
+                    StatusTimers::default(),
                     None,
                     None,
                 );
@@ -4655,7 +4818,11 @@ mod tests {
                         ..Welcome::default()
                     },
                     None,
-                    Motion::default(),
+                    Motion {
+                        mode: MotionMode::Smooth,
+                        ..Motion::default()
+                    },
+                    StatusTimers::default(),
                     None,
                     None,
                 );
@@ -5074,6 +5241,7 @@ mod tests {
                     },
                     None,
                     Motion::default(),
+                    StatusTimers::default(),
                     None,
                     None,
                 );
@@ -5136,9 +5304,9 @@ mod tests {
         let running = render_to_string(80, 18, &state, &PromptEditor::default());
         let status = running
             .lines()
-            .find(|line| line.contains("◐"))
+            .find(|line| line.contains("⠋"))
             .unwrap_or_else(|| panic!("status line: {running}"));
-        assert!(status.contains("ctx ~40%"), "{running}");
+        assert!(status.contains("~4K / 10K"), "{running}");
 
         state.view_status = ViewStatus::Idle;
         state.interaction_status = InteractionStatus::Idle;
@@ -5345,8 +5513,12 @@ mod tests {
                     state,
                     0,
                     MotionMode::Still,
-                    elapsed.map(std::time::Duration::from_secs),
+                    StatusTimers {
+                        run: elapsed.map(std::time::Duration::from_secs),
+                        phase: None,
+                    },
                     panel_docked,
+                    None,
                     Palette::default(),
                 );
             })
@@ -5369,7 +5541,12 @@ mod tests {
         state.transcript.append_prompt("first".into());
         state.transcript.complete_message(1, "done".into());
         let prompt = state.transcript.append_prompt("check ci".into());
-        state.run_progress = Some(crate::reducer::RunProgress { prompt, turn: 6 });
+        state.run_progress = Some(crate::reducer::RunProgress {
+            prompt,
+            turn: 6,
+            completed_output_tokens: 0,
+            streaming_bytes: 0,
+        });
         state
     }
 
@@ -5380,13 +5557,21 @@ mod tests {
             state.context.compaction = Some(reason);
             let (compacting, _) = status_row(&state, 100, Some(5));
             assert!(
-                compacting.starts_with("◐ Compacting context · turn 6"),
+                compacting.starts_with("⠋ Compacting context…"),
+                "{compacting}"
+            );
+            assert!(
+                compacting.trim_end().ends_with("5.0s · ctx ~?  [stop]"),
                 "{compacting}"
             );
         }
         state.context.compaction = None;
         let (working, _) = status_row(&state, 100, Some(5));
-        assert!(working.starts_with("◐ Working · turn 6"), "{working}");
+        assert!(working.starts_with("⠋ Working…"), "{working}");
+        assert!(
+            working.trim_end().ends_with("5.0s · ctx ~?  [stop]"),
+            "{working}"
+        );
     }
 
     #[test]
@@ -5394,8 +5579,9 @@ mod tests {
         let mut state = running_state();
         // Between steps the phase stands in for a running call.
         let (idle_step, _) = status_row(&state, 100, Some(151));
+        assert!(idle_step.starts_with("⠋ Working…"), "{idle_step}");
         assert!(
-            idle_step.starts_with("◐ Working · turn 6 0 tools · 2m 31s"),
+            idle_step.trim_end().ends_with("2m 31s · ctx ~?  [stop]"),
             "{idle_step}"
         );
 
@@ -5409,34 +5595,35 @@ mod tests {
             });
         let (text, backend) = status_row(&state, 100, Some(151));
         assert!(
-            text.starts_with("◐ Bash gh pr checks 766 --watch "),
+            text.starts_with("⠋ Bash gh pr checks 766 --watch "),
             "{text}"
         );
-        assert!(text.contains(" · turn 6 1 tool · 2m 31s"), "{text}");
-        assert!(text.trim_end().ends_with("ctx ~?"), "{text}");
+        assert!(
+            text.trim_end().ends_with("2m 31s · ctx ~?  [stop]"),
+            "{text}"
+        );
         let palette = Palette::default();
-        assert_eq!(style_at_text(&backend, "◐").unwrap().0, palette.secondary);
+        assert_eq!(style_at_text(&backend, "⠋").unwrap().0, palette.secondary);
         let (chip_fg, _, chip_modifiers) = style_at_text(&backend, "Bash").unwrap();
         assert_eq!(Some(chip_fg), palette.chip("Bash").fg);
         assert!(chip_modifiers.contains(Modifier::BOLD));
 
-        // A short row clips the command, then drops the turn details, and keeps
-        // the context on the right.
+        // A short row clips the command while keeping context and [stop] on the right.
         let (narrow, _) = status_row(&state, 40, Some(151));
         assert!(narrow.contains('…'), "{narrow}");
-        assert!(!narrow.contains("turn 6"), "{narrow}");
-        assert!(narrow.trim_end().ends_with("ctx ~?"), "{narrow}");
+        assert!(
+            narrow.trim_end().ends_with("2m 31s · ctx ~?  [stop]"),
+            "{narrow}"
+        );
 
-        // Cancelling outranks the call still running.
+        // Cancelling outranks the call still running and hides [stop].
         state.cancel_requested = true;
         let (cancelling, _) = status_row(&state, 100, None);
-        assert!(
-            cancelling.starts_with("◐ Cancelling · turn 6 1 tool"),
-            "{cancelling}"
-        );
+        assert!(cancelling.starts_with("⠋ Cancelling…"), "{cancelling}");
+        assert!(!cancelling.contains("[stop]"), "{cancelling}");
         state.cancel_requested = false;
 
-        // A follow-up the run takes in joins it, so the tool count carries on.
+        // A follow-up the run takes in joins it.
         state.transcript.observe_tool_result({
             let mut result = tool_result("b1", "ok");
             result.name = "bash".into();
@@ -5444,7 +5631,8 @@ mod tests {
         });
         state.transcript.append_prompt("follow-up".into());
         let (joined, _) = status_row(&state, 100, None);
-        assert!(joined.contains("turn 6 1 tool"), "{joined}");
+        assert!(joined.starts_with("⠋ Working…"), "{joined}");
+        assert!(joined.trim_end().ends_with("ctx ~?  [stop]"), "{joined}");
     }
 
     #[test]
@@ -5482,6 +5670,7 @@ mod tests {
                     },
                     None,
                     Motion::default(),
+                    StatusTimers::default(),
                     None,
                     None,
                 );
@@ -5589,13 +5778,19 @@ mod tests {
             reserve_tokens: 1000,
         });
         let (text, backend) = status_row(&state, 100, None);
-        assert!(text.trim_end().ends_with("2 queued · ctx ~71%"), "{text}");
+        assert!(
+            text.trim_end().ends_with("2 queued · ~7.1K / 10K  [stop]"),
+            "{text}"
+        );
         let palette = Palette::default();
         assert_eq!(
             style_at_text(&backend, "2 queued").unwrap().0,
             palette.secondary
         );
-        assert_eq!(style_at_text(&backend, "~71%").unwrap().0, palette.warning);
+        assert_eq!(
+            style_at_text(&backend, "~7.1K / 10K").unwrap().0,
+            palette.warning
+        );
     }
 
     #[test]
@@ -5613,13 +5808,16 @@ mod tests {
         state.context.budget = Some(budget(3_000));
         let (alone, _) = status_row_with_panel(&state, 100, None, false);
         let (docked, _) = status_row_with_panel(&state, 100, None, true);
-        assert!(alone.contains("ctx ~30%"), "{alone}");
-        assert!(!docked.contains("ctx"), "{docked}");
+        assert!(alone.contains("~3K / 10K"), "{alone}");
+        assert!(!docked.contains("/ 10K"), "{docked}");
 
         // A mostly full window is a warning the status line keeps.
         state.context.budget = Some(budget(7_100));
         let (docked, _) = status_row_with_panel(&state, 100, None, true);
-        assert!(docked.trim_end().ends_with("ctx ~71%"), "{docked}");
+        assert!(
+            docked.trim_end().ends_with("~7.1K / 10K  [stop]"),
+            "{docked}"
+        );
     }
 
     #[test]
@@ -5629,12 +5827,12 @@ mod tests {
         state.interaction_status = InteractionStatus::Running;
         let first = render_to_string_with_activity(80, 18, &state, 0);
         let second = render_to_string_with_activity(80, 18, &state, 1);
-        assert!(first.contains("◐ Working"), "{first}");
-        assert!(second.contains("◓ Working"), "{second}");
+        assert!(first.contains("⠋ Working…"), "{first}");
+        assert!(second.contains("⠙ Working…"), "{second}");
 
         state.interaction_status = InteractionStatus::Compacting;
         let compacting = render_to_string_with_activity(80, 18, &state, 2);
-        assert!(compacting.contains("◑ Compacting context"), "{compacting}");
+        assert!(compacting.contains("⠹ Compacting context…"), "{compacting}");
 
         state.view_status = ViewStatus::Idle;
         state.interaction_status = InteractionStatus::Idle;
@@ -5650,8 +5848,8 @@ mod tests {
         state.view_status = ViewStatus::Running;
         for width in [30, 60] {
             for (interaction, label) in [
-                (InteractionStatus::Running, "◐ Working"),
-                (InteractionStatus::Compacting, "◐ Compacting context"),
+                (InteractionStatus::Running, "⠋ Working…"),
+                (InteractionStatus::Compacting, "⠋ Compacting context…"),
             ] {
                 state.interaction_status = interaction;
                 let rendered = render_to_string_with_notice(
@@ -5758,7 +5956,7 @@ mod tests {
         // Too narrow for the queue beside the phase: what is running stays.
         let tiny = render_to_string(30, 8, &state, &editor);
         assert!(!tiny.contains("terminal too"), "{tiny}");
-        assert!(tiny.contains("◐ Working"), "{tiny}");
+        assert!(tiny.contains("⠋ Working…"), "{tiny}");
         assert!(!tiny.contains("turn 6"), "{tiny}");
     }
 
@@ -6314,6 +6512,7 @@ mod tests {
                     },
                     None,
                     Motion::default(),
+                    StatusTimers::default(),
                     None,
                     None,
                 );
@@ -6568,6 +6767,7 @@ mod tests {
                         },
                         None,
                         Motion::default(),
+                        StatusTimers::default(),
                         None,
                         None,
                     );
@@ -6664,6 +6864,7 @@ mod tests {
                     },
                     None,
                     Motion::default(),
+                    StatusTimers::default(),
                     None,
                     None,
                 );
@@ -7934,6 +8135,7 @@ mod tests {
                     },
                     None,
                     Motion::default(),
+                    StatusTimers::default(),
                     None,
                     None,
                 );
@@ -8162,6 +8364,7 @@ mod tests {
                     },
                     None,
                     Motion::default(),
+                    StatusTimers::default(),
                     None,
                     None,
                 );
@@ -8224,6 +8427,7 @@ mod tests {
                     },
                     None,
                     Motion::default(),
+                    StatusTimers::default(),
                     None,
                     None,
                 );
@@ -8926,6 +9130,7 @@ mod tests {
                     },
                     None,
                     Motion::default(),
+                    StatusTimers::default(),
                     None,
                     None,
                 );
@@ -9298,7 +9503,7 @@ mod tests {
     #[test]
     fn only_active_tool_markers_spin_and_terminal_results_stay_steady() {
         use crate::tool_cards::ToolCallInput;
-        let draw = |state: &UiState, tick, palette, selected| {
+        let draw_with_motion = |state: &UiState, tick, palette, selected, mode| {
             let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
             let mut viewport = TranscriptViewport::default();
             let mut cache = TranscriptRowCache::default();
@@ -9325,13 +9530,20 @@ mod tests {
                             ..Welcome::default()
                         },
                         None,
-                        Motion::default(),
+                        Motion {
+                            mode,
+                            ..Motion::default()
+                        },
+                        StatusTimers::default(),
                         None,
                         None,
                     );
                 })
                 .unwrap();
             terminal.backend().buffer().clone()
+        };
+        let draw = |state: &UiState, tick, palette, selected| {
+            draw_with_motion(state, tick, palette, selected, MotionMode::Smooth)
         };
         // Spinner cells that turn between two ticks. Live timers read the wall clock and
         // may also tick, but nothing else may change.
@@ -9390,6 +9602,13 @@ mod tests {
                             &draw(&state, 1, palette, None)
                         ),
                         2
+                    );
+                    assert_eq!(
+                        spinning(
+                            &draw_with_motion(&state, 0, palette, None, MotionMode::Still),
+                            &draw_with_motion(&state, 3, palette, None, MotionMode::Still)
+                        ),
+                        0
                     );
                     // Awaiting approval, the card's `?` holds still.
                     state.transcript.observe_approval_requested(call);
@@ -9470,7 +9689,7 @@ mod tests {
         state.interaction_status = crate::reducer::InteractionStatus::Running;
         state.transcript.append_prompt("check this".into());
         let waiting = render_to_string_with_activity(80, 18, &state, 0);
-        assert!(status(&waiting).contains("◐ Working"), "{waiting}");
+        assert!(status(&waiting).contains("⠋ Working…"), "{waiting}");
         state
             .transcript
             .append_message_delta(1, "I will check that.");
@@ -9479,7 +9698,7 @@ mod tests {
             .complete_message(1, "I will check that.".into());
         state.transcript.append_thinking_delta(2, "Next step");
         let thinking = render_to_string_with_activity(80, 18, &state, 1);
-        assert!(status(&thinking).contains("◓ Thinking"), "{thinking}");
+        assert!(status(&thinking).contains("⠙ Thinking…"), "{thinking}");
         for index in 0..20 {
             state
                 .transcript
@@ -9506,11 +9725,7 @@ mod tests {
         }
         let between_steps = render_to_string_with_activity(80, 18, &state, 2);
         assert!(
-            status(&between_steps).contains("◑ Working"),
-            "{between_steps}"
-        );
-        assert!(
-            status(&between_steps).contains("20 tools"),
+            status(&between_steps).contains("⠹ Working…"),
             "{between_steps}"
         );
 
@@ -9529,7 +9744,7 @@ mod tests {
         state.transcript.observe_tool_result(process_result);
         // A background process never names the run, even one the agent just polled.
         let process = render_to_string_with_activity(80, 18, &state, 3);
-        assert!(status(&process).contains("◒ Working"), "{process}");
+        assert!(status(&process).contains("⠸ Working…"), "{process}");
         assert!(!status(&process).contains("Process"), "{process}");
 
         for status in [
@@ -9541,7 +9756,254 @@ mod tests {
             state.view_status = status;
             state.interaction_status = crate::reducer::InteractionStatus::Idle;
             let done = render_to_string_with_activity(80, 18, &state, 1);
-            assert!(!done.contains("◓"), "{done}");
+            assert!(!done.contains("⠙"), "{done}");
         }
+    }
+
+    #[test]
+    fn status_line_responding_and_tool_telemetry() {
+        let mut state = running_state();
+        state.run_progress = Some(crate::reducer::RunProgress {
+            prompt: state.transcript.entries()[1].id,
+            turn: 2,
+            completed_output_tokens: 9_000,
+            streaming_bytes: 1_800,
+        });
+        state.context.budget = Some(ContextBudget {
+            estimate: ContextEstimate {
+                total_tokens: 55_500,
+            },
+            observed_tokens: Some(55_500),
+            observed_is_current: true,
+            effective_tokens: None,
+            accounting_method: ContextAccountingMethod::ProviderObserved,
+            context_window: Some(400_000),
+            reserve_tokens: 20_000,
+        });
+        state.transcript.begin_message(2);
+        state.transcript.append_message_delta(2, "Here is the fix");
+
+        let draw_row = |state: &UiState, width: u16, frame_idx: u8, timers: StatusTimers| {
+            let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+            let mut stop_rect = None;
+            terminal
+                .draw(|frame| {
+                    stop_rect = render_status_line(
+                        frame,
+                        frame.area(),
+                        state,
+                        frame_idx,
+                        MotionMode::Smooth,
+                        timers,
+                        false,
+                        None,
+                        Palette::default(),
+                    );
+                })
+                .unwrap();
+            let text = (0..width)
+                .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
+                .collect::<String>();
+            (text, stop_rect)
+        };
+
+        let (responding, stop) = draw_row(
+            &state,
+            100,
+            2,
+            StatusTimers {
+                run: Some(std::time::Duration::from_secs(12)),
+                phase: Some(std::time::Duration::from_secs(3)),
+            },
+        );
+        assert!(stop.is_some());
+        assert!(responding.starts_with("⠹ Responding… 3.0s"), "{responding}");
+        assert!(
+            responding.ends_with("12s · ⇣9.45k · 55.5K / 400K  [stop]"),
+            "{responding}"
+        );
+
+        state
+            .transcript
+            .complete_message(2, "Running checks.".into());
+        state
+            .transcript
+            .observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: "cargo-check".into(),
+                name: "bash".into(),
+                arguments: json!({
+                    "command": "cargo test --workspace --all-features -- --nocapture"
+                }),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+            });
+        let (tool_row, tool_stop) = draw_row(
+            &state,
+            72,
+            3,
+            StatusTimers {
+                run: Some(std::time::Duration::from_secs(18)),
+                phase: None,
+            },
+        );
+        assert!(tool_stop.is_some());
+        assert!(tool_row.starts_with("⠸ Bash Rust tests "), "{tool_row}");
+        assert!(tool_row.contains("s "), "{tool_row}");
+        assert!(
+            tool_row.contains("18s · ⇣9.45k · 55.5K / 400K  [stop]"),
+            "{tool_row}"
+        );
+
+        state
+            .transcript
+            .observe_tool_result(tool_result("cargo-check", "ok"));
+        state
+            .transcript
+            .observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: "read-long".into(),
+                name: "read".into(),
+                arguments: json!({
+                    "path": "src/wisp/agent/loop/boundary_transitions.rs"
+                }),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+            });
+        let (clipped_row, clipped_stop) = draw_row(
+            &state,
+            55,
+            3,
+            StatusTimers {
+                run: Some(std::time::Duration::from_secs(18)),
+                phase: None,
+            },
+        );
+        assert!(clipped_stop.is_some());
+        assert!(clipped_row.starts_with("⠸ Read src/"), "{clipped_row}");
+        assert!(clipped_row.contains('…'), "{clipped_row}");
+        assert!(clipped_row.ends_with("[stop]"), "{clipped_row}");
+    }
+
+    #[test]
+    fn context_thresholds_and_alignment() {
+        let mut state = running_state();
+        let make_budget = |used| ContextBudget {
+            estimate: ContextEstimate { total_tokens: used },
+            observed_tokens: Some(used),
+            observed_is_current: true,
+            effective_tokens: None,
+            accounting_method: ContextAccountingMethod::ProviderObserved,
+            context_window: Some(400_000),
+            reserve_tokens: 20_000,
+        };
+        let palette = Palette::default();
+        let draw_with_panel = |state: &UiState, panel_docked| {
+            let mut terminal = Terminal::new(TestBackend::new(100, 1)).unwrap();
+            let mut stop_rect = None;
+            terminal
+                .draw(|frame| {
+                    stop_rect = render_status_line(
+                        frame,
+                        frame.area(),
+                        state,
+                        0,
+                        MotionMode::Still,
+                        StatusTimers::default(),
+                        panel_docked,
+                        None,
+                        palette,
+                    );
+                })
+                .unwrap();
+            let text = (0..100)
+                .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
+                .collect::<String>();
+            (text, terminal, stop_rect)
+        };
+
+        let cases = [
+            (200_000, "200K / 400K", palette.muted, false),
+            (320_000, "320K / 400K", palette.warning, true),
+            (380_000, "380K / 400K", palette.error, true),
+        ];
+        let mut stop_positions = Vec::new();
+        for (used, label, expected_color, shown_when_docked) in cases {
+            state.context.budget = Some(make_budget(used));
+            let (undocked_text, backend, stop_rect) = draw_with_panel(&state, false);
+            assert!(undocked_text.contains(label), "{undocked_text}");
+            assert_eq!(
+                style_at_text(backend.backend(), label).unwrap().0,
+                expected_color
+            );
+            stop_positions.push(stop_rect.expect("stop rect").x);
+
+            let (docked_text, _, _) = draw_with_panel(&state, true);
+            assert_eq!(
+                docked_text.contains(label),
+                shown_when_docked,
+                "{docked_text}"
+            );
+        }
+        assert_eq!(stop_positions, vec![stop_positions[0]; 3]);
+    }
+
+    #[test]
+    fn compact_token_and_stream_formatters() {
+        for (tokens, expected) in [
+            (0, "0"),
+            (999, "999"),
+            (1_000, "1K"),
+            (55_500, "55.5K"),
+            (400_000, "400K"),
+            (1_200_000, "1.2M"),
+        ] {
+            assert_eq!(crate::context_split::compact_tokens_upper(tokens), expected);
+        }
+        for (tokens, expected) in [
+            (420, "⇣420"),
+            (9_450, "⇣9.45k"),
+            (12_340, "⇣12.3k"),
+            (1_230_000, "⇣1.23m"),
+        ] {
+            assert_eq!(format_streamed_tokens(tokens), expected);
+        }
+    }
+
+    #[test]
+    fn manual_compaction_omits_streamed_tokens() {
+        let mut state = running_state();
+        state.interaction_status = crate::reducer::InteractionStatus::Compacting;
+        state.current_command = Some(ActiveCommand {
+            id: "compact-1".into(),
+            command_type: ActiveCommandType::Compact,
+        });
+        state.run_progress = Some(crate::reducer::RunProgress {
+            prompt: state.transcript.entries()[1].id,
+            turn: 6,
+            completed_output_tokens: 9_000,
+            streaming_bytes: 1_800,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(100, 1)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_status_line(
+                    frame,
+                    frame.area(),
+                    &state,
+                    0,
+                    MotionMode::Still,
+                    StatusTimers {
+                        run: Some(std::time::Duration::from_secs(4)),
+                        phase: Some(std::time::Duration::from_secs(4)),
+                    },
+                    false,
+                    None,
+                    Palette::default(),
+                );
+            })
+            .unwrap();
+        let text = (0..100)
+            .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
+            .collect::<String>();
+        assert!(text.contains("⠋ Compacting context… 4.0s"), "{text}");
+        assert!(!text.contains('⇣'), "{text}");
+        assert!(text.ends_with("4.0s · ctx ~?  [stop]"), "{text}");
     }
 }

@@ -338,6 +338,18 @@ impl TranscriptEntry {
         self.thinking_ms
     }
 
+    /// Whether this live reply is currently streaming reasoning before answer text arrives.
+    pub(crate) fn is_thinking(&self) -> bool {
+        self.state == TranscriptEntryState::Streaming && self.thinking_started.is_some()
+    }
+
+    /// Whether this live reply has moved past reasoning and is streaming or revealing answer text.
+    pub(crate) fn is_responding(&self) -> bool {
+        self.state == TranscriptEntryState::Streaming
+            && self.thinking_started.is_none()
+            && (!self.content.is_empty() || !self.unrevealed.is_empty())
+    }
+
     /// How long this live call has run so far, or `None` for history and calls that
     /// never started.
     pub(crate) fn running_elapsed(&self) -> Option<std::time::Duration> {

@@ -48,11 +48,7 @@ pub(super) fn reading_context(
                     },
                     |percent| format!("{percent:.0}%"),
                 ),
-                if percent.is_some_and(|p| p >= ui::CONTEXT_WARNING_FILL * 100.0) {
-                    Style::default().fg(palette.warning)
-                } else {
-                    muted
-                },
+                Style::default().fg(ui::context_fill_color(percent.map(|p| p / 100.0), palette)),
             )],
             width,
         )],

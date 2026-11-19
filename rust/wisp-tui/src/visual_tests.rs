@@ -1665,8 +1665,8 @@ fn streamed_reply_stops_activity_without_changing_transcript_padding() {
         let status_text = (0..width)
             .map(|x| buffer[(x, status)].symbol())
             .collect::<String>();
-        assert!(status_text.contains("◐ Working"), "{status_text}");
-        assert!(!(0..width).any(|x| buffer[(x, height - 1)].symbol() == "◐"));
+        assert!(status_text.contains("⠋ Responding…"), "{status_text}");
+        assert!(!(0..width).any(|x| buffer[(x, height - 1)].symbol() == "⠋"));
         if height >= 16 {
             for x in 0..width {
                 assert_eq!(buffer[(x, 0)].symbol(), " ");
@@ -1677,12 +1677,12 @@ fn streamed_reply_stops_activity_without_changing_transcript_padding() {
         ui.activity_frame = 1;
         let next = draw(&mut ui, width, height);
         assert!(screen_text(&next).contains("wisp"));
-        assert!(screen_text(&next).contains("◓ Working"));
+        assert!(screen_text(&next).contains("⠙ Responding…"));
         assert_eq!(row_containing(&next, "wisp"), reply);
         ui.state.view_status = ViewStatus::Idle;
         ui.state.interaction_status = InteractionStatus::Idle;
         ui.state.current_command = None;
-        assert!(!screen_text(&draw(&mut ui, width, height)).contains("Working"));
+        assert!(!screen_text(&draw(&mut ui, width, height)).contains("Responding"));
     }
 }
 
@@ -1726,6 +1726,7 @@ async fn completed_reply_keeps_its_layout_until_command_finishes() {
                 turn: 2,
                 content,
                 cost: None,
+                output_tokens: None,
             }),
             &writer,
             8192,
@@ -1774,7 +1775,7 @@ fn new_turn_hides_previous_reply_until_scrolled_back() {
     assert!(text.contains("Now check the remaining edge cases."));
     assert!(!text.contains("Startup review"));
     assert!(!text.contains("Configuration loads"));
-    assert!(text.contains("◐ Working"));
+    assert!(text.contains("⠋ Working…"));
     // The transcript draws no scrollbar on its right edge.
     assert!((0..live.area.height).all(|y| !matches!(live[(79, y)].symbol(), "│" | "┃")));
     ui.transcript_viewport.reduce(
@@ -1795,8 +1796,8 @@ fn new_turn_hides_previous_reply_until_scrolled_back() {
     let streaming = screen_text(&draw(&mut ui, 80, 24));
     assert!(streaming.contains("The next review has started."));
     assert!(streaming.contains("wisp"));
-    // The status line stays while the reply streams.
-    assert!(streaming.contains("◐ Working"));
+    // The status line stays and transitions to `Responding…` while the reply streams.
+    assert!(streaming.contains("⠋ Responding…"));
     assert!(!streaming.contains("Startup review"));
     ui.state
         .transcript
@@ -1816,7 +1817,7 @@ fn minimum_terminal_keeps_the_submitted_prompt_before_the_first_token() {
         .filter(|c| !c.is_whitespace() && !matches!(c, '│' | '┃' | '▎'))
         .collect();
     assert!(compact.contains("Nowchecktheremainingedgecases."), "{text}");
-    assert!(text.contains("◐ Working"), "{text}");
+    assert!(text.contains("⠋ Working…"), "{text}");
     assert!(!text.contains("Startup review"));
 }
 

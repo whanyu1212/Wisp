@@ -101,7 +101,9 @@ use commands::session_command;
 use commands::{Command, Completion, Help, SessionCommand};
 use composer_images::{AttachError, AttachedImage, ComposerImages, ImageSupport};
 use connection_panel::{ConnectionPanel, ConnectionPanelAction};
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+};
 use detail_view::DetailView;
 use discovery_view::{DiscoveryAction, DiscoveryView};
 use external_editor::InputGate;
@@ -173,6 +175,7 @@ const INPUT_CHANNEL_CAPACITY: usize = 16;
 // immediately available directional run out of the input queue, but bound each
 // viewport action so high-resolution devices still reach scheduling checkpoints.
 const SCROLL_BATCH_MAX_ROWS: u32 = 12;
+const MOVE_BATCH_MAX_EVENTS: usize = 64;
 const STDERR_RETAINED_BYTES: usize = 64 * 1024;
 const TOP_LEVEL_ERROR_MAX_BYTES: usize = 8 * 1024;
 const TOP_LEVEL_ERROR_MAX_CHARS: usize = 4 * 1024;
@@ -605,6 +608,10 @@ struct LiveUi {
     input_gate: Option<Arc<InputGate>>,
     mouse_enabled: bool,
     mouse_frame: Option<mouse::Frame>,
+    /// Last pointer coordinates reported by the terminal, cleared on focus loss.
+    pointer: Option<(u16, u16)>,
+    /// Whether the last painted frame drew `[stop]` in its hovered state.
+    stop_hovered: bool,
     /// A drag selection over the transcript and the last frame painted while it was active,
     /// which a release copies from.
     transcript_selection: Option<(mouse::Selection, Option<ratatui::buffer::Buffer>)>,
@@ -637,6 +644,8 @@ struct LiveUi {
     welcome_tip: Option<usize>,
     /// The command whose run the working row times, and when it was first drawn.
     activity_clock: Option<(String, std::time::Instant)>,
+    /// The active non-tool phase (`Working…`, `Thinking…`, `Responding…`) and when it started.
+    phase_clock: Option<(String, u64, ui::ActivityPhase, std::time::Instant)>,
     /// The footer notice as first drawn, and when, which paces its ticker.
     notice_clock: Option<(String, std::time::Instant)>,
     /// Whether the last frame's notice was too long for the footer and scrolls.
@@ -690,6 +699,8 @@ impl Default for LiveUi {
             input_gate: None,
             mouse_enabled: false,
             mouse_frame: None,
+            pointer: None,
+            stop_hovered: false,
             transcript_selection: None,
             transcript_viewport: TranscriptViewport::default(),
             transcript_row_cache: TranscriptRowCache::default(),
@@ -712,6 +723,7 @@ impl Default for LiveUi {
             welcome_rows: Vec::new(),
             welcome_tip: None,
             activity_clock: None,
+            phase_clock: None,
             notice_clock: None,
             notice_scrolling: false,
             rendered_decision_context: None,
@@ -1926,7 +1938,11 @@ impl LiveUi {
         if let Some(view) = &mut self.prompt_history_view {
             view.invalidate_selection();
         }
-        let activity_elapsed = self.activity_elapsed();
+        let timers = self.status_timers();
+        let pointer = self
+            .pointer_hover_allowed()
+            .then_some(self.pointer)
+            .flatten();
         let notice_shown_for = self.notice_shown_for();
         let motion_mode = self.motion_mode();
         // A welcome screen that went away without input, as when history loads, ends the
@@ -1987,7 +2003,8 @@ impl LiveUi {
                     finished: &self.finished_cards,
                     logo: logo_entrance,
                 },
-                activity_elapsed,
+                timers,
+                pointer,
                 Some(&self.side_panel),
             );
             *painted_links.borrow_mut() =
@@ -2292,6 +2309,12 @@ impl LiveUi {
         }
         self.notice_scrolling = painted.conversation.notice_scrolls;
         self.welcome_rows = painted.conversation.welcome_rows.clone();
+        self.stop_hovered = pointer.is_some_and(|(column, row)| {
+            painted
+                .conversation
+                .stop_button
+                .is_some_and(|area| area.contains((column, row).into()))
+        });
         self.mouse_frame = self.mouse_enabled.then_some(painted);
         self.completion.invalidate();
         if let Some(name) = rendered_completion {
@@ -2505,6 +2528,74 @@ impl LiveUi {
         self.activity_clock
             .as_ref()
             .map(|(_, started)| started.elapsed())
+    }
+
+    /// Run-total and current-phase elapsed clocks for the live status row.
+    fn status_timers(&mut self) -> ui::StatusTimers {
+        let run = self.activity_elapsed();
+        if !ui::run_in_status_line(&self.state) {
+            self.phase_clock = None;
+            return ui::StatusTimers { run, phase: None };
+        }
+        let Some(current) = self.state.current_command.as_ref() else {
+            self.phase_clock = None;
+            return ui::StatusTimers { run, phase: None };
+        };
+        if ui::run_activity(&self.state).item.is_some() {
+            self.phase_clock = None;
+            return ui::StatusTimers { run, phase: None };
+        }
+        let turn = if current.command_type == reducer::ActiveCommandType::Compact {
+            0
+        } else {
+            self.state.run_progress.map_or(0, |progress| progress.turn)
+        };
+        let phase_kind = ui::activity_phase_kind(&self.state);
+        if self
+            .phase_clock
+            .as_ref()
+            .is_none_or(|(id, cached_turn, cached_kind, _)| {
+                id != &current.id || *cached_turn != turn || *cached_kind != phase_kind
+            })
+        {
+            self.phase_clock = Some((
+                current.id.clone(),
+                turn,
+                phase_kind,
+                std::time::Instant::now(),
+            ));
+        }
+        let phase = self
+            .phase_clock
+            .as_ref()
+            .map(|(_, _, _, started)| started.elapsed());
+        ui::StatusTimers { run, phase }
+    }
+
+    fn pointer_hover_allowed(&self) -> bool {
+        self.mouse_enabled
+            && !self.attention.focus_lost()
+            && self.mouse_layer() == mouse::Layer::Conversation
+            && self.key_help.is_none()
+            && !matches!(
+                self.state.view_status,
+                ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
+            )
+    }
+
+    fn update_pointer_hover(&mut self, column: u16, row: u16) {
+        self.pointer = Some((column, row));
+        let hovered = self.pointer_hover_allowed()
+            && self.mouse_frame.as_ref().is_some_and(|frame| {
+                frame.layer == mouse::Layer::Conversation
+                    && frame
+                        .conversation
+                        .stop_button
+                        .is_some_and(|area| area.contains((column, row).into()))
+            });
+        if hovered != self.stop_hovered {
+            self.render_pending = true;
+        }
     }
 
     /// How long the footer notice has been on screen. The clock restarts when the
@@ -4837,10 +4928,20 @@ impl LiveUi {
             self.attention.set_focus(focused);
             if !focused {
                 self.finish_logo_entrance();
+                self.pointer = None;
+                if self.stop_hovered {
+                    self.render_pending = true;
+                }
             }
             return Ok(LoopControl::Continue);
         }
         if let Input::Mouse(event) = &input {
+            if event.kind == MouseEventKind::Moved {
+                if self.mouse_enabled && mouse::supported(*event) {
+                    self.update_pointer_hover(event.column, event.row);
+                }
+                return Ok(LoopControl::Continue);
+            }
             if matches!(
                 event.kind,
                 crossterm::event::MouseEventKind::Drag(_) | crossterm::event::MouseEventKind::Up(_)
@@ -6812,6 +6913,32 @@ fn collect_scroll_run(
     Ok((scroll, deferred))
 }
 
+/// Drain consecutive queued pointer-motion events, keeping only the latest coordinates
+/// so rapid movement never floods the input channel or drops a trailing click or key.
+fn collect_move_run(
+    mut latest: MouseEvent,
+    mut next: impl FnMut() -> io::Result<Option<Event>>,
+) -> io::Result<(MouseEvent, Option<Event>)> {
+    let mut deferred = None;
+    for _ in 0..MOVE_BATCH_MAX_EVENTS {
+        let Some(event) = next()? else {
+            break;
+        };
+        match event {
+            Event::Mouse(event)
+                if event.kind == MouseEventKind::Moved && mouse::supported(event) =>
+            {
+                latest = event;
+            }
+            event => {
+                deferred = Some(event);
+                break;
+            }
+        }
+    }
+    Ok((latest, deferred))
+}
+
 fn input_task(
     sender: mpsc::Sender<Input>,
     mut stop: watch::Receiver<bool>,
@@ -6868,6 +6995,15 @@ fn input_task(
                     })?;
                     deferred = next;
                     Input::Scroll(scroll)
+                } else if event.kind == MouseEventKind::Moved {
+                    let (moved, next) = collect_move_run(event, || {
+                        source
+                            .poll(SCROLL_DRAIN_POLL)?
+                            .then(|| source.read())
+                            .transpose()
+                    })?;
+                    deferred = next;
+                    Input::Mouse(moved)
                 } else {
                     Input::Mouse(event)
                 };

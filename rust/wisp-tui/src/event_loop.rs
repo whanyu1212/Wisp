@@ -43,6 +43,7 @@ fn captured_event_prefix(sources: &Sources<'_>) -> usize {
 #[derive(PartialEq)]
 struct ActivationTarget {
     revision: u64,
+    command_id: Option<String>,
     decision: Option<RenderedDecisionContext>,
     overlay: Option<OverlayKind>,
     help_owner: Option<crate::key_help::Owner>,
@@ -70,6 +71,11 @@ impl ActivationTarget {
     fn capture(ui: &LiveUi, input: &Input) -> Self {
         Self {
             revision: ui.activation_revision,
+            command_id: ui
+                .state
+                .current_command
+                .as_ref()
+                .map(|command| command.id.clone()),
             decision: ui.current_decision_context(),
             overlay: ui.active_overlay(),
             help_owner: ui.key_help.as_ref().map(|help| help.owner.clone()),
@@ -127,6 +133,8 @@ pub(super) struct PendingInput {
     catalog_input: bool,
     wheel_input: bool,
     selection_input: bool,
+    hover_input: bool,
+    stop_click: bool,
     decision_highlight: bool,
 }
 
@@ -196,6 +204,36 @@ impl PendingInput {
             event.kind,
             crossterm::event::MouseEventKind::Drag(_) | crossterm::event::MouseEventKind::Up(_)
         ));
+        // Pointer motion updates hover state only, so backend output must not drop it or
+        // trigger an unrelated repaint.
+        let hover_input = matches!(
+            &input,
+            Input::Mouse(event) if event.kind == crossterm::event::MouseEventKind::Moved
+        );
+        // Clicking `[stop]` cancels the active command directly, so live tool output or
+        // completions must not swallow it unless a decision, overlay, resize, or command
+        // transition invalidated the target.
+        let stop_click = ui.mouse_enabled
+            && target.overlay.is_none()
+            && target.help_owner.is_none()
+            && target.decision.is_none()
+            && target.command_id.is_some()
+            && matches!(
+                &input,
+                Input::Mouse(event)
+                    if event.kind
+                        == crossterm::event::MouseEventKind::Down(
+                            crossterm::event::MouseButton::Left
+                        )
+                        && mouse::supported(*event)
+                        && target.mouse_frame.as_ref().is_some_and(|frame| {
+                            frame.layer == mouse::Layer::Conversation
+                                && frame
+                                    .conversation
+                                    .stop_button
+                                    .is_some_and(|area| area.contains((event.column, event.row).into()))
+                        })
+            );
         // Up/Down only move a decision's highlight; Enter is guarded separately by
         // the painted highlight, so tool output must not swallow the arrow keys.
         let decision_highlight = target.decision.is_some()
@@ -209,6 +247,8 @@ impl PendingInput {
             catalog_input,
             wheel_input,
             selection_input,
+            hover_input,
+            stop_click,
             decision_highlight,
         }
     }
@@ -242,6 +282,12 @@ impl PendingInput {
             && self.target.help_owner == current.help_owner
             && self.target.decision == current.decision
             && self.target.overlay == current.overlay;
+        let same_stop_click = self.stop_click
+            && self.target.overlay == current.overlay
+            && self.target.help_owner == current.help_owner
+            && self.target.decision == current.decision
+            && self.target.mouse_frame == current.mouse_frame
+            && self.target.command_id == current.command_id;
         if recovery
             || same_catalog
             // Focus belongs to no view, so no event between capture and apply makes it stale.
@@ -249,6 +295,8 @@ impl PendingInput {
             || same_editor
             || self.wheel_input
             || self.selection_input
+            || self.hover_input
+            || same_stop_click
             || (self.decision_highlight && self.target.decision == current.decision)
             || self.target == current
         {
