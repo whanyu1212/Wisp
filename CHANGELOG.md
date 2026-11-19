@@ -10,7 +10,10 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.14.1 — Unreleased
+<!-- Keeps links to the pre-release "0.14.1 — Unreleased" heading working. -->
+<a id="0141--unreleased"></a>
+
+## 0.14.1 — 2026-11-19
 
 0.14.1 is a patch release on 0.14.0 that adds Gemini 4 Neon to the model catalog and makes two
 terminal UI changes: background processes are shown in fewer places, and footer notices expire.
