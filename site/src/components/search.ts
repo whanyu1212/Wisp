@@ -158,6 +158,8 @@ dialog.addEventListener("keydown", (event) => {
   }
 });
 dialog.addEventListener("close", () => {
+  // A queued close from an earlier opening must not cancel a reopened search.
+  if (dialog.open) return;
   clearTimeout(timer);
   revision++;
   opener.focus();
