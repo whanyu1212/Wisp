@@ -7415,7 +7415,8 @@
               "enum": [
                 "workspace_edit_v1",
                 "command_review_v1",
-                "sandbox_development_v1"
+                "sandbox_development_v1",
+                "sandbox_process_v1"
               ],
               "type": "string"
             },

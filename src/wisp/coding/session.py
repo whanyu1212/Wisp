@@ -663,6 +663,9 @@ class CodingSession:
         # reconfiguration, which replaces the tool context, and compaction, after
         # which the model can still edit a file it read before.
         self._seen_files: dict[str, SeenFiles] = {}
+        # A process handle grants no authority across conversations, even when
+        # an embedding supplies the same base ToolContext to multiple sessions.
+        self._process_owners: dict[str, object] = {}
         self._apply_configuration(
             CodingSessionConfiguration(
                 provider=provider,
@@ -1556,6 +1559,10 @@ class CodingSession:
             self._require_image_input(images)
         session = session or self.sessions.create()
         assert session is not None
+        operation_context = replace(
+            operation_context,
+            process_owner=self._process_owners.setdefault(session.session_id, object()),
+        )
         user_message = await self._prepare_user_message(
             prompt,
             images=await _store_images(session, images),

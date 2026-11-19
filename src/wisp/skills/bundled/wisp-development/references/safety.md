@@ -25,14 +25,20 @@ safety. YOLO approves every safety class. Elevated modes are saved per project b
 `workspace_edit_v1` consent never authorizes automatic shell execution. Separately selecting
 `auto_commands` (`/permissions auto-commands`) requires fresh `sandbox_commands_v1` consent
 and macOS Seatbelt for automatic bash run/start execution. Supported pytest/unittest, Cargo
-test/check/build, and npm test/build forms run sandboxed without model review. Other eligible
+test/check/build, and npm test/build forms run sandboxed without model review. Use
+`uv run --no-sync pytest` for installed Python environments; use Bash's validated `cwd` argument
+for subprojects instead of shell composition. Poll/cancel of a sandboxed job is automatic only
+for its owning conversation, workspace, and still-active consent. Installed Python packages are
+read-only; credential-module source access does not exempt credential data or explicit protections.
+Other eligible
 commands use bounded independent no-tools review on the active provider/model; Allow is exact-call
 only, uncertainty/failure asks the user, and Deny does not execute. Reviews and usage/cost are
 persisted separately from the acting context. Sandboxed children inherit filesystem restrictions,
 network denial and a controlled environment. Sandbox failure never silently runs unrestricted;
 broader authority requires explicit human approval. Pre-existing hardlink aliases remain a known
 limitation: pathname restrictions are not complete credential isolation, and tests may modify
-allowed workspace files. Old command-review consent does not enable the fast path. Explicit sensitive
+allowed workspace files. UV's cache sentinel is a second one: a command can write its content and
+symlink the pinned cache folder into the workspace, exposing a `.git` file it wrote. Old command-review consent does not enable the fast path. Explicit sensitive
 operations, unsupported shell syntax, MCP mutations, replacement tools, and mandatory
 confirmations retain human approval. A tool that sets
 `confirm_every_call` (the MCP proposal tools) is never approved by Auto, YOLO, `--yes`, or a

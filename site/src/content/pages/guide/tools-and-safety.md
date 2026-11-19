@@ -366,12 +366,25 @@ changing consent invalidates an outstanding assessment, even if the same mode is
 
 Shell composition/expansion, redirects, unsupported commands/options, publishing, explicit
 credential/control paths, and outside-workspace paths require human approval without asking a
-model. `uv run` must use `--no-sync`. Poll/cancel, MCP mutations, custom/replacement tools, Plan,
-read-only subagents, and mandatory confirmations retain their boundaries.
+model. `uv run` must use `--no-sync`; dependencies must already be installed. For a subproject,
+pass Bash `cwd: "site"` with `command: "npm test"` instead of `cd site && npm test`.
+The directory must remain inside the workspace and outside protected/control paths; it applies
+only to this call, not to the session or subsequent file operations. Output is captured already,
+so shell redirects are unnecessary for reading command output.
+
+Poll/cancel of a sandboxed job started by the current conversation is automatic while the original
+consent remains active, including a foreground command moved into the background. This grants
+neither control of other sessions' jobs nor unrestricted jobs. Changing permission mode or project
+revokes the grant. MCP mutations, custom/replacement tools, Plan, read-only subagents, and mandatory
+confirmations retain their boundaries.
 
 Seatbelt restricts writes to the workspace/session scratch, excludes protected paths, limits
 runtime/toolchain reads, blocks network and local sockets, and starts commands with a controlled
-environment. Foreground/background children inherit containment. Unsupported protected-path
+environment. Installed Python package directories are read-only and cannot be moved into or out
+of the read exception for public Python source in `credentials` modules; credential data and explicit
+configured protections remain blocked. UV uses a private cache with a narrowly scoped regular-file
+sentinel exception, not permission to modify project Git metadata. Foreground/background children
+inherit containment. Unsupported protected-path
 patterns or unavailable sandboxing stop automatic execution and require explicit unrestricted
 approval. A failed command is never silently retried outside the sandbox. Existing human grants,
 Ask approvals, and YOLO are not sandboxed by this mode.
@@ -379,8 +392,13 @@ Ask approvals, and YOLO are not sandboxed by this mode.
 **Known limitation:** a pre-existing hardlink under an allowed name can expose or modify the
 same file even when its other name is protected or outside the workspace. Seatbelt is not a VM
 or complete file/credential isolation guarantee.
+A command can also write its own content into UV's cache sentinel and create a workspace symlink
+to that cache folder, so a `.git` file it wrote becomes reachable through a workspace path. The
+cache folder itself cannot be moved into the workspace. Avoid running Git inside an unexpected
+symlinked directory.
 Model review does not close this gap. Network-dependent tests, dependency downloads, and tools
-needing writes to shared caches may need explicit human approval. Use Ask if this residual risk
+needing writes to shared caches may need explicit human approval. Localhost servers are also
+blocked, and tests creating synthetic protected configuration paths are not automatically exempt. Use Ask if this residual risk
 is unacceptable. Each assessment and available usage/cost is persisted separately from the acting
 model's context; interrupted requests with unknown cost are not counted as free. Tool cards show
 the sandbox fast-path or model-review reason live and after reopening.

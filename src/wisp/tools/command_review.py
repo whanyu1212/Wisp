@@ -15,7 +15,9 @@ from jsonschema import Draft202012Validator
 
 from wisp.tools.context import ToolContext
 from wisp.tools.files.paths import is_protected_path
+from wisp.tools.result import ToolError
 from wisp.tools.shell.tool import BashTool
+from wisp.tools.shell.working_directory import command_context
 from wisp.trust.scope import is_broad_root
 
 if TYPE_CHECKING:
@@ -25,7 +27,16 @@ MAX_REVIEW_COMMAND_CHARS = 4_000
 MAX_REVIEW_REQUEST_CHARS = 12_000
 _BASH_ARGUMENTS = Draft202012Validator(BashTool.input_schema)
 _REVIEW_ARGUMENTS = frozenset(
-    {"operation", "command", "timeout", "lifetime_seconds", "yield_seconds", "notify_on_exit"}
+    {
+        "operation",
+        "command",
+        "cwd",
+        "timeout",
+        "lifetime_seconds",
+        "yield_seconds",
+        "notify_on_exit",
+        "until",
+    }
 )
 # Refuse composition even inside quotes. False negatives cost a prompt, not a grant.
 _SHELL_SYNTAX = frozenset("|;&<>`$\\\n\r#*?[]{}~")
@@ -106,7 +117,7 @@ def command_review_objection(arguments: Mapping[str, object], context: ToolConte
     if context.write_constraint is not None or context.atomic_writes_only:
         return "A restricted write context needs human approval for shell commands."
     if arguments.get("operation", "run") not in ("run", "start"):
-        return "Process polling and cancellation retain their existing approval flow."
+        return "Only this session's already-authorized sandboxed jobs allow automatic control."
     if (
         set(arguments) - _REVIEW_ARGUMENTS
         or not _BASH_ARGUMENTS.is_valid(dict(arguments))
@@ -133,11 +144,12 @@ def command_review_objection(arguments: Mapping[str, object], context: ToolConte
     ):
         return "Bidirectional control characters need human approval."
     try:
+        context = command_context(arguments, context)
         cwd = context.cwd.resolve(strict=False)
         boundary = context.boundary()
         if is_broad_root(boundary) or not cwd.is_relative_to(boundary):
             return "Commands in broad or outside-workspace directories need human approval."
-    except (OSError, ValueError, RuntimeError):
+    except (OSError, ValueError, RuntimeError, ToolError):
         return "The working directory could not be resolved; human approval required."
     try:
         tokens = shlex.split(command, posix=True)

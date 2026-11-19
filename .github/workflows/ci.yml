@@ -412,6 +412,9 @@ jobs:
           tests/cli/test_rpc_transport.py
           tests/tools/files/test_secure_fs.py
           tests/tools/test_seatbelt.py
+          tests/tools/test_shell_auto_workflows.py
+          tests/tools/shell/test_working_directory.py
+          tests/coding/test_sandbox_process_approvals.py
           tests/sessions
           --durations=20
           --junitxml=test-results/macos-smoke/junit.xml

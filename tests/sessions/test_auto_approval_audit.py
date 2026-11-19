@@ -49,6 +49,32 @@ def test_auto_audit_is_attached_to_the_matching_tool_result(tmp_path: Path) -> N
     assert exact.messages[0].auto_approved
 
 
+def test_owned_process_control_note_survives_reload(tmp_path: Path) -> None:
+    store = JsonlSessionStore(tmp_path)
+    session = store.create()
+    reason = "Auto-approved: control of this session's sandboxed job."
+
+    async def write() -> None:
+        await session.append_message(Message(role="user", content="stop the test job"))
+        await session.append_event(
+            ToolApprovalResolved(
+                call_id="cancel-job",
+                name="bash",
+                approved=True,
+                source="auto",
+                rule_id="sandbox_process_v1",
+                reason=reason,
+            )
+        )
+        await session.append_message(
+            Message(role="tool", content="cancelled", tool_call_id="cancel-job", tool_name="bash")
+        )
+
+    anyio.run(write)
+    result = store.load(session.path).read_message_page().messages[-1]
+    assert result.auto_approved and result.approval_note == reason
+
+
 def test_late_review_and_unused_grant_do_not_leak_to_a_reused_id_in_another_run(
     tmp_path: Path,
 ) -> None:
