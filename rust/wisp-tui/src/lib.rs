@@ -2526,8 +2526,24 @@ impl LiveUi {
             .map_or(std::time::Duration::ZERO, |(_, shown)| shown.elapsed())
     }
 
-    /// Repaint a scrolling footer notice so its ticker moves on.
-    fn advance_notice_ticker(&mut self) {
+    /// Dismiss a footer notice that has been on screen for its lifetime; otherwise
+    /// repaint a scrolling one so its ticker moves on.
+    ///
+    /// The clock starts when a notice is first drawn and restarts only when its text
+    /// changes, so a notice raised again with the same text keeps its first deadline.
+    /// The live-history wait notice describes a wait still going on, and leaves when
+    /// that wait ends instead.
+    fn advance_notice(&mut self, now: std::time::Instant) {
+        if let (Some(notice), Some((shown, since))) = (&self.notice, &self.notice_clock)
+            && shown == notice
+            && notice != LIVE_HISTORY_WAITS_NOTICE
+            && now.saturating_duration_since(*since)
+                >= ui::notice_lifetime(notice, self.notice_scrolling)
+        {
+            self.notice = None;
+            self.render_pending = true;
+            return;
+        }
         if self.notice_scrolling {
             self.render_pending = true;
         }
@@ -12775,6 +12791,64 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ui.notice.as_deref(), Some("x".repeat(1024).as_str()));
+    }
+
+    /// A UI whose notice was first drawn at the returned instant.
+    fn ui_showing_notice(notice: &str, scrolling: bool) -> (LiveUi, std::time::Instant) {
+        let shown = std::time::Instant::now();
+        let mut ui = LiveUi {
+            notice: Some(notice.into()),
+            notice_clock: Some((notice.into(), shown)),
+            notice_scrolling: scrolling,
+            ..LiveUi::default()
+        };
+        ui.render_pending = false;
+        (ui, shown)
+    }
+
+    #[test]
+    fn notice_expires_after_lifetime() {
+        let (mut ui, shown) = ui_showing_notice("Model selection applied.", false);
+
+        ui.advance_notice(shown + Duration::from_millis(7_999));
+        assert!(ui.notice.is_some());
+        assert!(!ui.render_pending);
+
+        ui.advance_notice(shown + Duration::from_secs(8));
+        assert_eq!(ui.notice, None);
+        assert!(ui.render_pending);
+    }
+
+    #[test]
+    fn history_wait_notice_outlasts_lifetime() {
+        let (mut ui, shown) = ui_showing_notice(LIVE_HISTORY_WAITS_NOTICE, false);
+
+        ui.advance_notice(shown + Duration::from_secs(60));
+
+        assert_eq!(ui.notice.as_deref(), Some(LIVE_HISTORY_WAITS_NOTICE));
+    }
+
+    #[test]
+    fn scrolling_notice_finishes_its_lap() {
+        // 100 columns, the 16-step hold and the 6-column gap, at 125 ms a step.
+        let (mut ui, shown) = ui_showing_notice(&"x".repeat(100), true);
+
+        ui.advance_notice(shown + Duration::from_millis(15_249));
+        assert!(ui.notice.is_some());
+
+        ui.advance_notice(shown + Duration::from_millis(15_250));
+        assert_eq!(ui.notice, None);
+    }
+
+    #[test]
+    fn replaced_notice_waits_for_own_clock() {
+        let (mut ui, shown) = ui_showing_notice("Model selection applied.", false);
+        // Raised after the last draw, so the clock still times the notice it replaced.
+        ui.notice = Some("Session selection cancelled.".into());
+
+        ui.advance_notice(shown + Duration::from_secs(60));
+
+        assert_eq!(ui.notice.as_deref(), Some("Session selection cancelled."));
     }
 
     #[tokio::test]

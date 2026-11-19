@@ -484,7 +484,7 @@ async fn run_with_interrupts<B: FrameBackend>(
         let now = Instant::now();
         if now >= next_activity {
             ui.advance_activity_animation();
-            ui.advance_notice_ticker();
+            ui.advance_notice(now.into_std());
             // Keep a fixed cadence so wake-up lag does not build up and make the
             // notice ticker skip a column; restart it after a long stall.
             next_activity += ACTIVITY_INTERVAL;

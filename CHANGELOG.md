@@ -59,6 +59,9 @@ use the same release.
   processes that are running or went wrong, and adjacent clean exits fold into one
   `Background N commands · passed` transcript row. A process row with no label takes the
   command from its exit event. (#1078)
+- TUI footer notices dismiss themselves after 8 seconds, or after one full scroll when too long
+  for their row, instead of staying until the next edit or prompt. The notice that earlier
+  history loads when a reply finishes stays until that wait ends. (#1080)
 
 ### Compatibility
 
