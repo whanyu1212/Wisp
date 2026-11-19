@@ -102,7 +102,7 @@ use commands::{Command, Completion, Help, SessionCommand};
 use composer_images::{AttachError, AttachedImage, ComposerImages, ImageSupport};
 use connection_panel::{ConnectionPanel, ConnectionPanelAction};
 use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use detail_view::DetailView;
 use discovery_view::{DiscoveryAction, DiscoveryView};
@@ -1579,6 +1579,7 @@ impl LiveUi {
             self.decision_choice = None;
             self.rendered_decision_choice = None;
             self.key_help = None;
+            self.mouse_frame = None;
         }
         for effect in &effects {
             if let UiEffect::ReanchorTranscript { from, to } = effect {
@@ -1676,6 +1677,7 @@ impl LiveUi {
                 .is_some_and(|help| help.owner != self.key_help_owner())
             {
                 self.key_help = None;
+                self.mouse_frame = None;
                 self.render_pending = true;
             }
         }
@@ -2040,7 +2042,9 @@ impl LiveUi {
             }
             if let Some(help) = &mut self.key_help {
                 if let Some(area) = ui::overlay_area(frame.area()) {
-                    help.render(frame, area, &self.bindings, palette, Some(connection));
+                    painted.popup = Some(area);
+                    painted.dialog_controls =
+                        help.render(frame, area, &self.bindings, palette, Some(connection));
                 }
                 return;
             }
@@ -2070,9 +2074,11 @@ impl LiveUi {
                     panel_docked,
                 ) {
                     painted.popup = Some(area);
-                    painted.rows =
+                    let dialog =
                         self.file_picker
                             .render(frame, area, &self.state.project_files, palette);
+                    painted.dialog_controls = dialog.controls;
+                    painted.rows = dialog.rows;
                 }
             }
             // `/permissions`, MCP server changes, and API-key entry dock above the
@@ -2161,55 +2167,75 @@ impl LiveUi {
             ui::clear_overlay(frame, area, palette);
             painted.popup = Some(area);
             painted.rows = match kind {
-                OverlayKind::Theme => self.theme_picker.as_mut().expect("active theme").render(
-                    frame,
-                    area,
-                    palette,
-                    self.no_color,
-                ),
-                OverlayKind::Logo => self.logo_picker.as_mut().expect("active logo").render(
-                    frame,
-                    area,
-                    palette,
-                    self.no_color,
-                ),
-                OverlayKind::PromptHistory => self
-                    .prompt_history_view
-                    .as_mut()
-                    .expect("active history")
-                    .render(frame, area, &self.prompt_history, palette),
-                OverlayKind::Discovery => self
-                    .discovery_view
-                    .as_mut()
-                    .expect("active discovery")
-                    .render(frame, area, &self.state, self.notice.as_deref(), palette),
-                OverlayKind::Queue => self.queue_view.as_mut().expect("active queue").render(
-                    frame,
-                    area,
-                    &self.state,
-                    palette,
-                ),
-                OverlayKind::GitDiff => {
-                    self.git_diff_view.as_mut().expect("active diff").render(
+                OverlayKind::Theme => {
+                    let dialog = self.theme_picker.as_mut().expect("active theme").render(
                         frame,
                         area,
-                        &self.state.git_diff,
-                        &self.state.transcript,
                         palette,
+                        self.no_color,
                     );
-                    mouse::Rows::default()
+                    painted.dialog_controls = dialog.controls;
+                    dialog.rows
                 }
-                OverlayKind::Context => {
-                    self.context_view.as_mut().expect("active context").render(
+                OverlayKind::Logo => {
+                    let dialog = self.logo_picker.as_mut().expect("active logo").render(
+                        frame,
+                        area,
+                        palette,
+                        self.no_color,
+                    );
+                    painted.dialog_controls = dialog.controls;
+                    dialog.rows
+                }
+                OverlayKind::PromptHistory => {
+                    let dialog = self
+                        .prompt_history_view
+                        .as_mut()
+                        .expect("active history")
+                        .render(frame, area, &self.prompt_history, palette);
+                    painted.dialog_controls = dialog.controls;
+                    dialog.rows
+                }
+                OverlayKind::Discovery => {
+                    let dialog = self
+                        .discovery_view
+                        .as_mut()
+                        .expect("active discovery")
+                        .render(frame, area, &self.state, self.notice.as_deref(), palette);
+                    painted.dialog_controls = dialog.controls;
+                    dialog.rows
+                }
+                OverlayKind::Queue => {
+                    let dialog = self.queue_view.as_mut().expect("active queue").render(
                         frame,
                         area,
                         &self.state,
                         palette,
                     );
+                    painted.dialog_controls = dialog.controls;
+                    dialog.rows
+                }
+                OverlayKind::GitDiff => {
+                    painted.dialog_controls =
+                        self.git_diff_view.as_mut().expect("active diff").render(
+                            frame,
+                            area,
+                            &self.state.git_diff,
+                            &self.state.transcript,
+                            palette,
+                        );
+                    mouse::Rows::default()
+                }
+                OverlayKind::Context => {
+                    painted.dialog_controls = self
+                        .context_view
+                        .as_mut()
+                        .expect("active context")
+                        .render(frame, area, &self.state, palette);
                     mouse::Rows::default()
                 }
                 OverlayKind::Help => {
-                    commands::render_help(
+                    painted.dialog_controls = commands::render_help(
                         frame,
                         area,
                         self.command_help.as_ref().expect("active help"),
@@ -2234,20 +2260,28 @@ impl LiveUi {
                     painted.dialog_controls = dialog.controls;
                     dialog.rows
                 }
-                OverlayKind::Connection => connection_panel::render(
-                    frame,
-                    area,
-                    self.connection_panel.as_mut().expect("active connection"),
-                    palette,
-                ),
-                OverlayKind::SessionTree => session_tree_picker::render(
-                    frame,
-                    area,
-                    self.session_tree_picker
-                        .as_ref()
-                        .expect("active session tree"),
-                    palette,
-                ),
+                OverlayKind::Connection => {
+                    let dialog = connection_panel::render(
+                        frame,
+                        area,
+                        self.connection_panel.as_mut().expect("active connection"),
+                        palette,
+                    );
+                    painted.dialog_controls = dialog.controls;
+                    dialog.rows
+                }
+                OverlayKind::SessionTree => {
+                    let dialog = session_tree_picker::render(
+                        frame,
+                        area,
+                        self.session_tree_picker
+                            .as_ref()
+                            .expect("active session tree"),
+                        palette,
+                    );
+                    painted.dialog_controls = dialog.controls;
+                    dialog.rows
+                }
                 OverlayKind::Session => {
                     let dialog = session_picker::render(
                         frame,
@@ -2259,7 +2293,7 @@ impl LiveUi {
                     dialog.rows
                 }
                 OverlayKind::Detail => {
-                    ui::render_detail_overlay(
+                    painted.dialog_controls = ui::render_detail_overlay(
                         frame,
                         area,
                         &self.state,
@@ -4986,10 +5020,12 @@ impl LiveUi {
             match &input {
                 Input::Key(key) if is_ctrl_c(*key) => {
                     self.key_help = None;
+                    self.mouse_frame = None;
                     return self.handle_focused_input(input, writer, limit).await;
                 }
                 Input::Key(key) if is_escape(*key) => {
                     self.key_help = None;
+                    self.mouse_frame = None;
                     self.render_pending = true;
                 }
                 Input::Key(key)
@@ -4997,12 +5033,79 @@ impl LiveUi {
                         && self.current_decision_context().is_some() =>
                 {
                     self.key_help = None;
+                    self.mouse_frame = None;
                     return self.handle_focused_input(input, writer, limit).await;
                 }
                 Input::Key(key) => {
                     let help = self.key_help.as_mut().expect("open key help");
                     help.scroll.scroll(key.code, help.rendered_rows);
                     self.render_pending = true;
+                }
+                Input::Scroll(scroll) if self.mouse_enabled => {
+                    if self
+                        .mouse_frame
+                        .as_ref()
+                        .and_then(|frame| frame.popup)
+                        .is_some_and(|area| {
+                            area.contains((scroll.event.column, scroll.event.row).into())
+                        })
+                    {
+                        let code = if scroll.lines < 0 {
+                            KeyCode::Up
+                        } else {
+                            KeyCode::Down
+                        };
+                        let help = self.key_help.as_mut().expect("open key help");
+                        for _ in 0..scroll.lines.unsigned_abs() {
+                            help.scroll.scroll(code, help.rendered_rows);
+                        }
+                        self.render_pending = true;
+                    }
+                }
+                Input::Mouse(event) if self.mouse_enabled && mouse::supported(*event) => {
+                    if let Some(scroll) = mouse::Scroll::from_event(*event) {
+                        if self
+                            .mouse_frame
+                            .as_ref()
+                            .and_then(|frame| frame.popup)
+                            .is_some_and(|area| {
+                                area.contains((scroll.event.column, scroll.event.row).into())
+                            })
+                        {
+                            let code = if scroll.lines < 0 {
+                                KeyCode::Up
+                            } else {
+                                KeyCode::Down
+                            };
+                            let help = self.key_help.as_mut().expect("open key help");
+                            help.scroll.scroll(code, help.rendered_rows);
+                            self.render_pending = true;
+                        }
+                    } else if event.kind == MouseEventKind::Down(MouseButton::Left)
+                        && event.modifiers.is_empty()
+                    {
+                        if let Some(frame) = self.mouse_frame.as_ref() {
+                            if frame.popup.is_some_and(|area| {
+                                !area.contains((event.column, event.row).into())
+                            }) {
+                                self.key_help = None;
+                                self.mouse_frame = None;
+                                self.render_pending = true;
+                            } else if let Some(key) =
+                                frame.dialog_controls.key_at(event.column, event.row)
+                            {
+                                if is_escape(key) {
+                                    self.key_help = None;
+                                    self.mouse_frame = None;
+                                    self.render_pending = true;
+                                } else {
+                                    let help = self.key_help.as_mut().expect("open key help");
+                                    help.scroll.scroll(key.code, help.rendered_rows);
+                                    self.render_pending = true;
+                                }
+                            }
+                        }
+                    }
                 }
                 Input::Redraw => {
                     self.render_pending = true;

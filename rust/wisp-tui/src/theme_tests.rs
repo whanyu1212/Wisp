@@ -269,8 +269,8 @@ fn theme_picker_uses_bands_without_moving_labels_or_mouse_targets() {
                 let mut target = None;
                 terminal
                     .draw(|frame| {
-                        let rows = picker.render(frame, frame.area(), palette, no_color);
-                        target = rows.hit(crossterm::event::MouseEvent {
+                        let rendered = picker.render(frame, frame.area(), palette, no_color);
+                        target = rendered.rows.hit(crossterm::event::MouseEvent {
                             kind: crossterm::event::MouseEventKind::Down(
                                 crossterm::event::MouseButton::Left,
                             ),
@@ -283,14 +283,13 @@ fn theme_picker_uses_bands_without_moving_labels_or_mouse_targets() {
                     .unwrap();
                 let buffer = terminal.backend().buffer();
                 assert_eq!(target, Some(0));
-                assert_eq!(
-                    buffer[(1, 2)].symbol(),
-                    if palette.shows_bands() { " " } else { "›" }
-                );
-                assert_eq!(buffer[(3, 2)].symbol(), "V");
+                assert_eq!(buffer[(1, 2)].symbol(), " ");
+                assert_eq!(buffer[(2, 2)].symbol(), "V");
                 for x in 1..59 {
                     let cell = &buffer[(x, 2)];
-                    assert!(cell.modifier.contains(Modifier::BOLD));
+                    if x < 7 {
+                        assert!(cell.modifier.contains(Modifier::BOLD));
+                    }
                     if palette.shows_bands() {
                         assert_eq!(cell.bg, depth.downconvert(palette.selected));
                         assert!(!cell.modifier.contains(Modifier::REVERSED));

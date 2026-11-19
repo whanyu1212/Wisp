@@ -282,7 +282,7 @@ for line in sys.stdin:
             if (
                 detail_resize_output_offset is not None
                 and resized_detail_at is None
-                and b"Esc close" in output[detail_resize_output_offset:]
+                and screen_shows(output[detail_resize_output_offset:], "Esc close")
             ):
                 resized_detail_at = time.monotonic()
             if (

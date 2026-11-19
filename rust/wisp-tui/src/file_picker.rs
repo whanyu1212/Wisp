@@ -1,5 +1,6 @@
 //! Composer-local reference editing and bounded views of backend-authorized paths.
 
+use crate::dialog::{self, Dialog, Hint, PickerRow};
 use crate::mouse::Rows;
 use crate::prompt_editor::PromptEditor;
 use crate::reducer::project_files::ProjectFiles;
@@ -8,8 +9,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
     layout::Rect,
-    text::Line,
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    style::Style,
+    widgets::{Paragraph, Wrap},
 };
 use std::{
     borrow::Cow,
@@ -406,22 +407,58 @@ impl FilePicker {
         area: Rect,
         files: &ProjectFiles,
         palette: Palette,
-    ) -> Rows {
+    ) -> dialog::Rendered {
         self.invalidate();
         crate::ui::clear_overlay(frame, area, palette);
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(palette.border())
-            .title(if self.tree {
-                " @ files: tree "
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let mut hints = vec![Hint {
+            label: "Enter",
+            description: "insert",
+            key: key(KeyCode::Enter),
+        }];
+        if area.width >= 38 {
+            hints.push(Hint {
+                label: "Tab",
+                description: "mode",
+                key: key(KeyCode::Tab),
+            });
+        }
+        hints.push(Hint {
+            label: "Esc",
+            description: "close",
+            key: key(KeyCode::Esc),
+        });
+        if area.width >= 48 {
+            hints.extend([
+                Hint {
+                    label: "↑",
+                    description: "prev",
+                    key: key(KeyCode::Up),
+                },
+                Hint {
+                    label: "↓",
+                    description: "next",
+                    key: key(KeyCode::Down),
+                },
+            ]);
+        }
+        let layout = Dialog {
+            title: if self.tree {
+                "@ files: tree"
             } else {
-                " @ files: fuzzy "
-            })
-            .title_bottom(" ↑↓ Enter Tab Esc ");
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
+                "@ files: fuzzy"
+            },
+            tabs: &[],
+            filter: None,
+            hints: &hints,
+        }
+        .render(frame, area, palette);
+        let inner = layout.body;
         if inner.height == 0 || inner.width == 0 {
-            return Rows::default();
+            return dialog::Rendered {
+                rows: Rows::default(),
+                controls: layout.controls,
+            };
         }
         let message = if self
             .context
@@ -450,69 +487,88 @@ impl FilePicker {
         };
         if let Some(message) = message {
             frame.render_widget(Paragraph::new(message).wrap(Wrap { trim: true }), inner);
-            return Rows::default();
+            return dialog::Rendered {
+                rows: Rows::default(),
+                controls: layout.controls,
+            };
         }
         let limited = files.snapshot.as_ref().is_some_and(|s| s.truncated);
-        frame.render_widget(
-            Paragraph::new(if limited {
-                "Limited snapshot • paths omitted"
-            } else if self.tree {
-                "←/→ folders • Tab fuzzy"
-            } else {
-                "Top 30 matches • Tab tree"
-            }),
-            Rect { height: 1, ..inner },
-        );
-        let list_area = Rect {
-            y: inner.y + 1,
-            height: inner.height - 1,
-            ..inner
+        let list_area = if inner.height >= 2 {
+            frame.render_widget(
+                Paragraph::new(if limited {
+                    "Limited snapshot • paths omitted"
+                } else if self.tree {
+                    "←/→ folders • Tab fuzzy"
+                } else {
+                    "Top 30 matches • Tab tree"
+                })
+                .style(Style::default().fg(palette.muted)),
+                Rect { height: 1, ..inner },
+            );
+            Rect {
+                y: inner.y + 1,
+                height: inner.height - 1,
+                ..inner
+            }
+        } else {
+            inner
         };
         if list_area.height == 0 {
-            return Rows::default();
+            return dialog::Rendered {
+                rows: Rows::default(),
+                controls: layout.controls,
+            };
         }
         let snapshot = self.snapshot.as_ref().expect("rows have snapshot");
         let offset = self
             .selected
             .saturating_sub(usize::from(list_area.height) - 1);
-        let rows = self
+        for (row_idx, &index) in self
             .rows
             .iter()
+            .enumerate()
             .skip(offset)
             .take(usize::from(list_area.height))
-            .map(|&index| {
-                let entry = &snapshot.entries[index];
-                let label = if self.tree {
-                    let depth = entry.path.matches('/').count().min(12);
-                    let marker = if entry.kind == ProjectFileKind::Directory {
-                        if self.expanded.contains(&index) {
-                            "▾ "
-                        } else {
-                            "▸ "
-                        }
+        {
+            let entry = &snapshot.entries[index];
+            let label = if self.tree {
+                let depth = entry.path.matches('/').count().min(12);
+                let marker = if entry.kind == ProjectFileKind::Directory {
+                    if self.expanded.contains(&index) {
+                        "▾ "
                     } else {
-                        "  "
-                    };
-                    format!(
-                        "{}{marker}{}",
-                        " ".repeat(depth * 2),
-                        entry.path.rsplit('/').next().unwrap_or(&entry.path)
-                    )
+                        "▸ "
+                    }
                 } else {
-                    entry_path(entry).into_owned()
+                    "  "
                 };
-                ListItem::new(Line::raw(crate::ui::sanitize_for_terminal(&label)))
-            })
-            .collect::<Vec<_>>();
-        let mut selection = ListState::default().with_selected(Some(self.selected - offset));
-        frame.render_stateful_widget(
-            List::new(rows)
-                .highlight_symbol(palette.selection_marker())
-                .highlight_style(palette.selection()),
-            list_area,
-            &mut selection,
-        );
+                format!(
+                    "{}{marker}{}",
+                    " ".repeat(depth * 2),
+                    entry.path.rsplit('/').next().unwrap_or(&entry.path)
+                )
+            } else {
+                entry_path(entry).into_owned()
+            };
+            let row_area = Rect::new(
+                list_area.x,
+                list_area.y + (row_idx - offset) as u16,
+                list_area.width,
+                1,
+            );
+            PickerRow {
+                label: &label,
+                description: None,
+                tag: None,
+                selected: row_idx == self.selected,
+                muted: false,
+            }
+            .render(frame, row_area, palette);
+        }
         self.rendered = self.rows.get(self.selected).copied();
-        Rows::new(list_area, offset + selection.offset(), self.rows.len(), 1)
+        dialog::Rendered {
+            rows: Rows::new(list_area, offset, self.rows.len(), 1),
+            controls: layout.controls,
+        }
     }
 }

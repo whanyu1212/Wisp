@@ -2,19 +2,19 @@
 
 use std::collections::{HashSet, VecDeque};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::Style;
-use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Paragraph};
-
+use crate::dialog::{self, Dialog, Hint};
 use crate::mouse::Rows;
 use crate::reducer::{
     SESSION_TREE_RETAINED_LIMIT, SessionTreeNode, SessionTreeNodeKind, SessionTreePage,
 };
 use crate::session_picker::terminal_row;
 use crate::theme::Palette;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::Frame;
+use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Paragraph};
 
 const PAGE_STEP: usize = 10;
 const RETAINED_PAGE_LIMIT: usize = 2;
@@ -170,81 +170,143 @@ pub fn render(
     area: Rect,
     picker: &SessionTreePicker,
     palette: Palette,
-) -> Rows {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(2), Constraint::Length(1)])
-        .split(area);
-    let height = usize::from(chunks[0].height.saturating_sub(2)).max(1);
-    let width = usize::from(chunks[0].width.saturating_sub(2)).max(1);
+) -> dialog::Rendered {
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    let mut hints = vec![
+        Hint {
+            label: "Enter",
+            description: "navigate",
+            key: key(KeyCode::Enter),
+        },
+        Hint {
+            label: "f",
+            description: "fork user",
+            key: key(KeyCode::Char('f')),
+        },
+        Hint {
+            label: "Esc",
+            description: "close",
+            key: key(KeyCode::Esc),
+        },
+    ];
+    if area.width >= 56 {
+        hints.extend([
+            Hint {
+                label: "↑",
+                description: "prev",
+                key: key(KeyCode::Up),
+            },
+            Hint {
+                label: "↓",
+                description: "next",
+                key: key(KeyCode::Down),
+            },
+            Hint {
+                label: "PgUp",
+                description: "page",
+                key: key(KeyCode::PageUp),
+            },
+            Hint {
+                label: "PgDn",
+                description: "page",
+                key: key(KeyCode::PageDown),
+            },
+        ]);
+    }
+    let layout = Dialog {
+        title: "session tree",
+        tabs: &[],
+        filter: None,
+        hints: &hints,
+    }
+    .render(frame, area, palette);
+    let inner = layout.body;
+    if inner.width == 0 || inner.height == 0 {
+        return dialog::Rendered {
+            rows: Rows::default(),
+            controls: layout.controls,
+        };
+    }
+    let height = usize::from(inner.height);
     let marker_rows = usize::from(picker.earlier_nodes_omitted);
     let visible_nodes = height.saturating_sub(marker_rows).max(1);
     let start = picker
         .selected
         .map(|selected| selected.saturating_sub(visible_nodes.saturating_sub(1)))
         .unwrap_or(0);
-    let mut lines = Vec::new();
+    let mut next_y = inner.y;
     if picker.earlier_nodes_omitted {
-        lines.push(Line::styled(
-            terminal_row("… earlier nodes omitted; reopen /tree to restart", width),
-            Style::default().fg(palette.muted),
-        ));
+        let marker_area = Rect::new(inner.x + 1, next_y, inner.width.saturating_sub(2), 1);
+        frame.render_widget(
+            Paragraph::new(terminal_row(
+                "… earlier nodes omitted; reopen /tree to restart",
+                usize::from(marker_area.width),
+            ))
+            .style(Style::default().fg(palette.muted)),
+            marker_area,
+        );
+        next_y += 1;
     }
     if picker.node_count() == 0 {
-        lines.push(Line::styled(
-            "No persisted tree nodes.",
-            Style::default().fg(palette.muted),
-        ));
-    } else {
+        let empty_area = Rect::new(inner.x + 1, next_y, inner.width.saturating_sub(2), 1);
+        frame.render_widget(
+            Paragraph::new(terminal_row(
+                "No persisted tree nodes.",
+                usize::from(empty_area.width),
+            ))
+            .style(Style::default().fg(palette.muted)),
+            empty_area,
+        );
+    } else if usize::from(next_y) < usize::from(inner.bottom()) {
         let active_leaf_id = picker
             .pages
             .back()
             .and_then(|page| page.active_leaf_id.as_deref());
-        lines.extend(
-            picker
-                .nodes()
-                .enumerate()
-                .skip(start)
-                .take(visible_nodes)
-                .map(|(index, node)| {
-                    tree_line(
+        let rows_available = usize::from(inner.bottom() - next_y);
+        for (visible_index, (index, node)) in picker
+            .nodes()
+            .enumerate()
+            .skip(start)
+            .take(rows_available)
+            .enumerate()
+        {
+            let selected = picker.selected == Some(index);
+            let active = active_leaf_id == Some(node.entry_id.as_str());
+            let row = Rect::new(inner.x, next_y + visible_index as u16, inner.width, 1);
+            let base = if selected {
+                palette.selection()
+            } else {
+                palette.base()
+            };
+            frame.render_widget(Block::default().style(base), row);
+            let content = Rect::new(row.x + 1, row.y, row.width.saturating_sub(2), 1);
+            if content.width > 0 {
+                frame.render_widget(
+                    Paragraph::new(tree_line(
                         node,
-                        picker.selected == Some(index),
-                        active_leaf_id == Some(node.entry_id.as_str()),
-                        width,
+                        selected,
+                        active,
+                        usize::from(content.width),
                         palette,
-                    )
-                }),
-        );
+                    )),
+                    content,
+                );
+            }
+        }
     }
-    frame.render_widget(
-        Paragraph::new(Text::from(lines)).block(
-            Block::default()
-                .title(" session tree ")
-                .border_style(palette.border())
-                .borders(Borders::ALL),
+    dialog::Rendered {
+        rows: Rows::new(
+            Rect {
+                y: inner.y.saturating_add(marker_rows as u16),
+                height: inner.height.saturating_sub(marker_rows as u16),
+                ..inner
+            },
+            start,
+            picker.node_count(),
+            1,
         ),
-        chunks[0],
-    );
-    frame.render_widget(
-        Paragraph::new(
-            "↑/↓ move · PgUp/PgDn · Home/End · Enter navigate · f fork user · Esc close",
-        )
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(palette.muted)),
-        chunks[1],
-    );
-    let inner = chunks[0].inner(ratatui::layout::Margin::new(1, 1));
-    Rows::new(
-        Rect {
-            y: inner.y.saturating_add(marker_rows as u16),
-            height: inner.height.saturating_sub(marker_rows as u16),
-            ..inner
-        },
-        start,
-        picker.node_count(),
-        1,
-    )
+        controls: layout.controls,
+    }
 }
 
 impl SessionTreePicker {
@@ -277,8 +339,7 @@ fn tree_line(
     };
     let content = terminal_row(
         &format!(
-            "{}{} {:<10} {} · id {} · parent {}",
-            if selected { ">" } else { " " },
+            "{} {:<10} {} · id {} · parent {}",
             if active { "*" } else { " " },
             role_or_kind,
             preview,
@@ -288,11 +349,17 @@ fn tree_line(
         width,
     );
     let style = if selected {
-        palette.selection()
+        palette
+            .selected_row(Style::default().fg(if active {
+                palette.success
+            } else {
+                palette.foreground
+            }))
+            .add_modifier(Modifier::BOLD)
     } else if active {
         Style::default().fg(palette.success)
     } else {
-        Style::default()
+        Style::default().fg(palette.foreground)
     };
     Line::from(Span::styled(content, style))
 }

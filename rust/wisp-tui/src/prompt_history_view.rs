@@ -1,14 +1,19 @@
 //! Search and selection over process-local prompt history; the draft stays in LiveUi.
 
 use crate::{
-    mouse::Rows, prompt_editor::PromptEditor, prompt_history::PromptHistory,
-    session_picker::terminal_row, theme::Palette,
+    dialog::{self, Dialog, Hint, PickerRow},
+    mouse::Rows,
+    prompt_editor::PromptEditor,
+    prompt_history::PromptHistory,
+    session_picker::terminal_row,
+    theme::Palette,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    style::Style,
+    widgets::Paragraph,
 };
 
 const QUERY_BYTES_LIMIT: usize = 1024;
@@ -150,75 +155,142 @@ impl PromptHistoryView {
         area: Rect,
         history: &PromptHistory,
         palette: Palette,
-    ) -> Rows {
+    ) -> dialog::Rendered {
         self.invalidate_selection();
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(palette.border())
-            .title(" Prompt history ")
-            .title_bottom(" Enter restore · Esc/Ctrl-R close ");
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        let [query_area, list_area, status_area] = Layout::vertical([
-            Constraint::Length(2),
-            Constraint::Min(1),
-            Constraint::Length(1),
-        ])
-        .areas(inner);
-        let width = usize::from(inner.width);
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let mut hints = vec![
+            Hint {
+                label: "Enter",
+                description: "restore",
+                key: key(KeyCode::Enter),
+            },
+            Hint {
+                label: "Esc",
+                description: "close",
+                key: key(KeyCode::Esc),
+            },
+        ];
+        if area.width >= 56 {
+            hints.extend([
+                Hint {
+                    label: "↑",
+                    description: "prev",
+                    key: key(KeyCode::Up),
+                },
+                Hint {
+                    label: "↓",
+                    description: "next",
+                    key: key(KeyCode::Down),
+                },
+            ]);
+        }
+        let width = usize::from(area.width.saturating_sub(2));
         let query_width = width.saturating_sub(2);
         let column = self.query.cursor_column();
         let start = column.saturating_sub(query_width.saturating_sub(1));
         let query = crate::ui::source_display_column_window(self.query.text(), start, query_width);
         let cursor_column = column.saturating_sub(query.effective_start);
-        frame.render_widget(Paragraph::new(format!("> {}", query.text)), query_area);
-        if query_area.width > 2 && query_area.height > 0 {
-            frame.set_cursor_position((query_area.x + 2 + cursor_column as u16, query_area.y));
+        let filter_line = format!("> {}", query.text);
+        let layout = Dialog {
+            title: "Prompt history",
+            tabs: &[],
+            filter: Some(&filter_line),
+            hints: &hints,
         }
+        .render(frame, area, palette);
+        let inner = layout.body;
+        if inner.width == 0 || inner.height == 0 {
+            return dialog::Rendered {
+                rows: Rows::default(),
+                controls: layout.controls,
+            };
+        }
+        if inner.y > area.y + 1 && inner.width > 2 {
+            frame.set_cursor_position((area.x + 1 + 2 + cursor_column as u16, area.y + 1));
+        }
+        let [list_area, status_area] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
         self.page_size = usize::from(list_area.height);
         let status = if self.query_limit_reached {
             "Search is limited to 1024 bytes; input kept.".to_owned()
         } else {
-            format!(
-                "{} matches · ↑↓ PgUp/PgDn · current TUI run",
-                self.matches.len()
-            )
+            format!("{} matches · current TUI run", self.matches.len())
         };
-        frame.render_widget(Paragraph::new(terminal_row(&status, width)), status_area);
+        let status_rect = Rect::new(
+            status_area.x + 1,
+            status_area.y,
+            status_area.width.saturating_sub(2),
+            1,
+        );
+        frame.render_widget(
+            Paragraph::new(terminal_row(&status, usize::from(status_rect.width)))
+                .style(Style::default().fg(palette.muted)),
+            status_rect,
+        );
         if self.matches.is_empty() {
+            let empty_area = Rect::new(
+                list_area.x + 1,
+                list_area.y,
+                list_area.width.saturating_sub(2),
+                list_area.height,
+            );
             frame.render_widget(
                 Paragraph::new(if history.is_empty() {
                     "No prompts submitted in this TUI run."
                 } else {
                     "No matching prompts."
-                }),
-                list_area,
+                })
+                .style(Style::default().fg(palette.muted)),
+                empty_area,
             );
-            return Rows::default();
+            return dialog::Rendered {
+                rows: Rows::default(),
+                controls: layout.controls,
+            };
         }
         if list_area.height == 0 || list_area.width < 3 {
-            return Rows::default();
+            return dialog::Rendered {
+                rows: Rows::default(),
+                controls: layout.controls,
+            };
         }
-        let rows = self
-            .matches
-            .iter()
-            .filter_map(|id| history.entry(*id))
-            .map(|entry| ListItem::new(terminal_row(&entry.preview, width.saturating_sub(2))))
-            .collect::<Vec<_>>();
         let selected = self
             .matches
             .iter()
             .position(|id| Some(*id) == self.selected);
-        let mut state = ListState::default().with_selected(selected);
-        frame.render_stateful_widget(
-            List::new(rows)
-                .highlight_symbol(palette.selection_marker())
-                .highlight_style(palette.selection()),
-            list_area,
-            &mut state,
-        );
+        let height = usize::from(list_area.height);
+        let offset = selected.map_or(0, |index| index.saturating_sub(height.saturating_sub(1)));
+        for (visible_index, (index, id)) in self
+            .matches
+            .iter()
+            .enumerate()
+            .skip(offset)
+            .take(height)
+            .enumerate()
+        {
+            let Some(entry) = history.entry(*id) else {
+                continue;
+            };
+            let row = Rect::new(
+                list_area.x,
+                list_area.y + visible_index as u16,
+                list_area.width,
+                1,
+            );
+            PickerRow {
+                label: &entry.preview,
+                description: None,
+                tag: None,
+                selected: selected == Some(index),
+                muted: false,
+            }
+            .render(frame, row, palette);
+        }
         self.rendered = self.selected;
-        Rows::new(list_area, state.offset(), self.matches.len(), 1)
+        dialog::Rendered {
+            rows: Rows::new(list_area, offset, self.matches.len(), 1),
+            controls: layout.controls,
+        }
     }
 }
 

@@ -1,22 +1,26 @@
 //! Local command routing and presentation over backend-owned discovery metadata.
 
+use crate::dialog::{self, Dialog, Hint};
 use crate::directory_completion::{self, DirectoryListing};
 use crate::model_picker::{self, ModelCommand};
 use crate::mouse::Rows;
 use crate::prompt_editor::PromptEditor;
 use crate::startup_logo::LogoChoice;
 use crate::theme::{self, Palette};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
     layout::Rect,
-    style::Style,
-    text::Line,
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    style::{Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Paragraph},
 };
 use std::borrow::Cow;
 use std::ops::{ControlFlow, Range};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 use wisp_protocol::{
     commands::AgentMode,
     events::{CommandDescriptor, SkillCatalogEntry, SkillCatalogSnapshot},
@@ -380,6 +384,7 @@ pub(crate) struct Completion {
 pub(crate) struct CompletionView<'a> {
     pub items: Vec<CompletionItem<'a>>,
     pub selected: usize,
+    pub query: &'a str,
 }
 
 fn diff_command() -> &'static CommandDescriptor {
@@ -534,7 +539,7 @@ impl Completion {
         }
         let (range, prefix) = match self.context.as_ref()? {
             CompletionContext::Command(range, prefix) => (range, prefix),
-            CompletionContext::Directory(..) => {
+            CompletionContext::Directory(_, partial) => {
                 let items: Vec<_> = self
                     .directories
                     .candidates
@@ -545,15 +550,22 @@ impl Completion {
                     return None;
                 }
                 let selected = self.selected.min(items.len() - 1);
-                return Some(CompletionView { items, selected });
+                return Some(CompletionView {
+                    items,
+                    selected,
+                    query: partial.as_str(),
+                });
             }
         };
-        let prefix = prefix.to_ascii_lowercase();
+        let lower_prefix = prefix.to_ascii_lowercase();
         let items: Vec<_> = command_descriptors(catalog)
             .into_iter()
             .filter(|item| {
                 usage(&item.name).is_some()
-                    && item.slash_command.to_ascii_lowercase().starts_with(&prefix)
+                    && item
+                        .slash_command
+                        .to_ascii_lowercase()
+                        .starts_with(&lower_prefix)
             })
             .map(CompletionItem::Command)
             .chain(
@@ -564,7 +576,7 @@ impl Completion {
                     .flat_map(|catalog| &catalog.entries)
                     .filter(|skill| {
                         skill.is_invocable()
-                            && format!("/skill:{}", skill.name).starts_with(&prefix)
+                            && format!("/skill:{}", skill.name).starts_with(&lower_prefix)
                     })
                     .map(CompletionItem::Skill),
             )
@@ -573,7 +585,11 @@ impl Completion {
             return None;
         }
         let selected = self.selected.min(items.len() - 1);
-        Some(CompletionView { items, selected })
+        Some(CompletionView {
+            items,
+            selected,
+            query: prefix.as_str(),
+        })
     }
 
     pub fn move_selection(&mut self, down: bool, count: usize) {
@@ -635,28 +651,177 @@ impl Completion {
     }
 }
 
+fn highlighted_match_spans(
+    label: &str,
+    query: &str,
+    normal: Style,
+    matched: Style,
+) -> Vec<Span<'static>> {
+    let graphemes: Vec<&str> = label.graphemes(true).collect();
+    if graphemes.is_empty() {
+        return Vec::new();
+    }
+    let query_lower: Vec<String> = query.graphemes(true).map(str::to_lowercase).collect();
+    if query_lower.is_empty() {
+        return vec![Span::styled(label.to_owned(), normal)];
+    }
+    let label_lower: Vec<String> = graphemes.iter().map(|g| g.to_lowercase()).collect();
+    let mut flags = vec![false; graphemes.len()];
+
+    if label_lower.len() >= query_lower.len() && label_lower[..query_lower.len()] == query_lower[..]
+    {
+        flags[..query_lower.len()].fill(true);
+    } else if label.ends_with('…') && label_lower.len() > 1 {
+        let prefix_len = (label_lower.len() - 1).min(query_lower.len());
+        if prefix_len > 0 && label_lower[..prefix_len] == query_lower[..prefix_len] {
+            flags[..prefix_len].fill(true);
+        }
+    }
+    if !flags.iter().any(|&m| m) && query_lower.len() <= label_lower.len() {
+        if let Some(start) = (0..=(label_lower.len() - query_lower.len()))
+            .find(|&idx| label_lower[idx..idx + query_lower.len()] == query_lower[..])
+        {
+            flags[start..start + query_lower.len()].fill(true);
+        } else {
+            let mut matched_indices = Vec::with_capacity(query_lower.len());
+            let mut q_idx = 0;
+            for (l_idx, grapheme) in label_lower.iter().enumerate() {
+                if grapheme == &query_lower[q_idx] {
+                    matched_indices.push(l_idx);
+                    q_idx += 1;
+                    if q_idx == query_lower.len() {
+                        break;
+                    }
+                }
+            }
+            if q_idx == query_lower.len() {
+                for idx in matched_indices {
+                    flags[idx] = true;
+                }
+            }
+        }
+    }
+
+    let mut spans = Vec::new();
+    let mut current = String::new();
+    let mut current_match = flags[0];
+    for (grapheme, is_match) in graphemes.into_iter().zip(flags) {
+        if is_match != current_match && !current.is_empty() {
+            spans.push(Span::styled(
+                std::mem::take(&mut current),
+                if current_match { matched } else { normal },
+            ));
+        }
+        current_match = is_match;
+        current.push_str(grapheme);
+    }
+    if !current.is_empty() {
+        spans.push(Span::styled(
+            current,
+            if current_match { matched } else { normal },
+        ));
+    }
+    spans
+}
+
 pub(crate) fn render_completion(
     frame: &mut Frame<'_>,
     area: Rect,
     view: &CompletionView<'_>,
     palette: Palette,
 ) -> Rows {
-    let items = view.items.iter().map(|item| {
-        ListItem::new(format!(
-            "{}  {}",
-            crate::ui::sanitize_for_terminal(&item.spelling()),
-            item.description()
-        ))
-    });
-    let mut state = ListState::default().with_selected(Some(view.selected));
-    frame.render_stateful_widget(
-        List::new(items)
-            .highlight_style(palette.selection())
-            .highlight_symbol(palette.selection_marker()),
-        area,
-        &mut state,
-    );
-    Rows::new(area, state.offset(), view.items.len(), 1)
+    const PREFIX_W: usize = 1;
+    const LABEL_DESC_GAP: usize = 2;
+
+    if area.width == 0 || area.height == 0 || view.items.is_empty() {
+        return Rows::default();
+    }
+    let height = usize::from(area.height);
+    let offset = view.selected.saturating_sub(height.saturating_sub(1));
+    let (content_x, content_w) = if usize::from(area.width) > PREFIX_W * 2 {
+        (
+            area.x + PREFIX_W as u16,
+            usize::from(area.width) - PREFIX_W * 2,
+        )
+    } else {
+        (area.x, usize::from(area.width))
+    };
+    let clean_line = |text: &str| crate::ui::sanitize_for_terminal(text).replace('\n', " ");
+    let has_desc = view
+        .items
+        .iter()
+        .any(|item| !clean_line(&item.description()).is_empty());
+    let widest_label = view
+        .items
+        .iter()
+        .map(|item| clean_line(&item.spelling()).width())
+        .max()
+        .unwrap_or(0);
+    let (label_col_w, desc_x, desc_w) = if has_desc && content_w >= 16 {
+        let max_label_w = (content_w / 2)
+            .max(12)
+            .min(content_w.saturating_sub(LABEL_DESC_GAP + 6));
+        let label_col_w = widest_label.max(1).min(max_label_w);
+        let desc_x = content_x + label_col_w as u16 + LABEL_DESC_GAP as u16;
+        let desc_w = content_w.saturating_sub(label_col_w + LABEL_DESC_GAP);
+        (label_col_w, desc_x, desc_w)
+    } else {
+        (content_w, content_x, 0)
+    };
+    let clean_query = clean_line(view.query);
+
+    for (row_idx, item) in view.items.iter().enumerate().skip(offset).take(height) {
+        let selected = row_idx == view.selected;
+        let row_area = Rect::new(area.x, area.y + (row_idx - offset) as u16, area.width, 1);
+        let base = if selected {
+            palette.selection()
+        } else {
+            palette.base()
+        };
+        frame.render_widget(Block::default().style(base), row_area);
+
+        let (normal, matched, desc_style) = if selected {
+            (
+                palette
+                    .selected_row(Style::default().fg(palette.foreground))
+                    .remove_modifier(Modifier::BOLD),
+                palette
+                    .selected_row(Style::default().fg(palette.primary))
+                    .add_modifier(Modifier::BOLD),
+                palette
+                    .selected_row(Style::default().fg(palette.muted))
+                    .remove_modifier(Modifier::BOLD),
+            )
+        } else {
+            (
+                Style::default().fg(palette.foreground),
+                Style::default()
+                    .fg(palette.primary)
+                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(palette.muted),
+            )
+        };
+
+        let raw_label = clean_line(&item.spelling());
+        let label_text = crate::session_picker::terminal_row(&raw_label, label_col_w);
+        let spans = highlighted_match_spans(&label_text, &clean_query, normal, matched);
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)),
+            Rect::new(content_x, row_area.y, label_col_w as u16, 1),
+        );
+
+        if desc_w > 0 {
+            let raw_desc = clean_line(&item.description());
+            if !raw_desc.is_empty() {
+                let desc_text = crate::session_picker::terminal_row(&raw_desc, desc_w);
+                frame.render_widget(
+                    Paragraph::new(Span::styled(desc_text, desc_style)),
+                    Rect::new(desc_x, row_area.y, desc_w as u16, 1),
+                );
+            }
+        }
+    }
+    Rows::new(area, offset, view.items.len(), 1)
 }
 
 #[derive(Default)]
@@ -731,14 +896,54 @@ pub(crate) fn render_help(
     error: Option<&str>,
     palette: Palette,
     bindings: &crate::keybindings::Bindings,
-) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(palette.border())
-        .title(" Commands ")
-        .title_bottom(" ↑↓ PgUp/PgDn • r refresh • Esc close ");
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+) -> dialog::Controls {
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    let mut hints = vec![
+        Hint {
+            label: "r",
+            description: "refresh",
+            key: key(KeyCode::Char('r')),
+        },
+        Hint {
+            label: "Esc",
+            description: "close",
+            key: key(KeyCode::Esc),
+        },
+        Hint {
+            label: "↑",
+            description: "up",
+            key: key(KeyCode::Up),
+        },
+        Hint {
+            label: "↓",
+            description: "down",
+            key: key(KeyCode::Down),
+        },
+    ];
+    if area.width >= 56 {
+        hints.extend([
+            Hint {
+                label: "PgUp",
+                description: "page",
+                key: key(KeyCode::PageUp),
+            },
+            Hint {
+                label: "PgDn",
+                description: "page",
+                key: key(KeyCode::PageDown),
+            },
+        ]);
+    }
+    let layout = Dialog {
+        title: "Commands",
+        tabs: &[],
+        filter: None,
+        hints: &hints,
+    }
+    .render(frame, area, palette);
+    if layout.body.width == 0 || layout.body.height == 0 {
+        return layout.controls;
+    }
     let mut rows = Vec::new();
     if loading {
         rows.push(Line::raw("Loading commands…"));
@@ -753,8 +958,9 @@ pub(crate) fn render_help(
     let offset = help.offset.min(rows.len().saturating_sub(1));
     frame.render_widget(
         Paragraph::new(rows.into_iter().skip(offset).collect::<Vec<_>>()),
-        inner,
+        layout.body,
     );
+    layout.controls
 }
 
 pub(crate) enum SessionCommand {
@@ -1324,5 +1530,110 @@ pub(crate) mod tests {
             classify("/mark", Some(&catalog)),
             Some(Command::Logo(None))
         ));
+    }
+
+    #[test]
+    fn completion_menu_highlights_matches_aligns_descriptions_and_fills_selection_band() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let catalog = catalog();
+        let mut skills = skills();
+        let mut extra = skills.entries[0].clone();
+        extra.name = "refactor-long-skill".into();
+        extra.description = "Refactor carefully".into();
+        let expected_tag = format!("[{}]", extra.source.as_str());
+        skills.entries.push(extra);
+        let items = vec![
+            CompletionItem::Command(catalog.iter().find(|cmd| cmd.name == "mcp").unwrap()),
+            CompletionItem::Command(catalog.iter().find(|cmd| cmd.name == "model").unwrap()),
+            CompletionItem::Skill(skills.entries.last().unwrap()),
+        ];
+        let view = CompletionView {
+            items,
+            selected: 1,
+            query: "/m",
+        };
+        let mut terminal = Terminal::new(TestBackend::new(72, 4)).unwrap();
+        let mut rows = Rows::default();
+        let palette = Palette::default();
+        terminal
+            .draw(|frame| {
+                rows = render_completion(frame, Rect::new(0, 0, 72, 4), &view, palette);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+
+        // Row 0 (/mcp): no leading cursor glyph, "/m" bold + primary, "cp" normal foreground.
+        assert_eq!(buffer[(0, 0)].symbol(), " ");
+        assert_eq!(buffer[(1, 0)].symbol(), "/");
+        assert_eq!(buffer[(2, 0)].symbol(), "m");
+        assert!(buffer[(1, 0)].modifier.contains(Modifier::BOLD));
+        assert!(buffer[(2, 0)].modifier.contains(Modifier::BOLD));
+        assert_eq!(buffer[(1, 0)].fg, palette.primary);
+        assert_eq!(buffer[(2, 0)].fg, palette.primary);
+        assert!(!buffer[(3, 0)].modifier.contains(Modifier::BOLD));
+        assert_eq!(buffer[(3, 0)].fg, palette.foreground);
+
+        // Row 1 (/model, selected): full-width band with no › marker, "/m" bold, "odel" unbolded.
+        assert_eq!(buffer[(0, 1)].symbol(), " ");
+        assert!(buffer[(1, 1)].modifier.contains(Modifier::BOLD));
+        assert!(buffer[(2, 1)].modifier.contains(Modifier::BOLD));
+        assert!(!buffer[(3, 1)].modifier.contains(Modifier::BOLD));
+        for x in 0..72 {
+            assert_eq!(buffer[(x, 1)].bg, palette.selected, "x={x}");
+        }
+
+        // Descriptions align at the exact same column (1 + widest_label(19) + 2 = 22).
+        let desc_col = |row_y: u16, prefix: &str| {
+            let line: String = (0..72).map(|x| buffer[(x, row_y)].symbol()).collect();
+            line.find(prefix)
+                .unwrap_or_else(|| panic!("missing {prefix:?} in {line:?}"))
+        };
+        let x0 = desc_col(0, "Describe mcp") as u16;
+        let x1 = desc_col(1, "Describe model") as u16;
+        let x2 = desc_col(2, &expected_tag) as u16;
+        assert_eq!(x0, x1);
+        assert_eq!(x1, x2);
+        assert_eq!(buffer[(x0, 0)].fg, palette.muted);
+        assert!(!buffer[(x1, 1)].modifier.contains(Modifier::BOLD));
+
+        // Substring query highlighting also marks matching graphemes across a skill label.
+        let spans = highlighted_match_spans(
+            "/skill:refactor-long-skill",
+            "re",
+            Style::default().fg(palette.foreground),
+            Style::default()
+                .fg(palette.primary)
+                .add_modifier(Modifier::BOLD),
+        );
+        assert_eq!(spans[0].content.as_ref(), "/skill:");
+        assert!(!spans[0].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(spans[1].content.as_ref(), "re");
+        assert!(spans[1].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(spans[1].style.fg, Some(palette.primary));
+
+        // Monochrome selected row reverses full width and keeps matched chars bold.
+        let mono = crate::theme::resolve("glass").unwrap().palette(true);
+        let mut mono_terminal = Terminal::new(TestBackend::new(72, 4)).unwrap();
+        mono_terminal
+            .draw(|frame| {
+                render_completion(frame, Rect::new(0, 0, 72, 4), &view, mono);
+            })
+            .unwrap();
+        let mono_buf = mono_terminal.backend().buffer();
+        for x in 0..72 {
+            assert!(mono_buf[(x, 1)].modifier.contains(Modifier::REVERSED));
+        }
+        assert!(mono_buf[(1, 1)].modifier.contains(Modifier::BOLD));
+        assert!(!mono_buf[(3, 1)].modifier.contains(Modifier::BOLD));
+
+        // Click hits resolve to the rendered row index.
+        let hit = rows.hit(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 5,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(hit, Some(2));
     }
 }

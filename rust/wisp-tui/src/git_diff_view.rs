@@ -4,6 +4,7 @@
 //! snapshot's age), a file tree beside the selected file's diff on a wide terminal,
 //! and a row of keys. Narrow terminals show the tree or the diff, switched by Tab.
 use crate::{
+    dialog::{self, Hint},
     diff_review::DiffReview,
     reducer::git_diff::{GitDiff, GitDiffEdit, GitDiffFile, GitDiffSnapshot},
     side_panel::spread,
@@ -12,7 +13,7 @@ use crate::{
     transcript::{Transcript, TranscriptEntryId, TranscriptRole},
     ui::sanitize_for_terminal,
 };
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
     layout::Rect,
@@ -409,12 +410,12 @@ impl GitDiffView {
         state: &GitDiff,
         transcript: &Transcript,
         palette: Palette,
-    ) {
+    ) -> dialog::Controls {
         self.sync(state);
         frame.render_widget(Clear, area);
         frame.render_widget(Paragraph::new("").style(palette.base()), area);
         if area.height < 6 || area.width < 20 {
-            return;
+            return dialog::Controls::default();
         }
         let rule = Style::default().fg(palette.rail());
         let width = usize::from(area.width);
@@ -471,10 +472,155 @@ impl GitDiffView {
             self.render_pane(frame, pane, transcript, palette);
         }
         // Last, so the keys name the layout the pane just drew.
-        frame.render_widget(
-            Paragraph::new(self.keys_line(width, palette)),
-            line_at(area.height - 1),
+        let footer = line_at(area.height - 1);
+        let focus = if self.tree_focus { "files" } else { "diff" };
+        let focus_text = format!("focus: {focus} ");
+        let focus_w = u16::try_from(focus_text.width()).unwrap_or(0);
+        let hints_area = Rect::new(
+            footer.x.saturating_add(1),
+            footer.y,
+            footer.width.saturating_sub(focus_w.saturating_add(2)),
+            1,
         );
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let split_desc = if self.review.split_shown() {
+            "unified"
+        } else {
+            "split"
+        };
+        let hints = if hints_area.width >= 110 {
+            vec![
+                Hint {
+                    label: "Tab",
+                    description: "files/diff",
+                    key: key(KeyCode::Tab),
+                },
+                Hint {
+                    label: "Enter",
+                    description: "open",
+                    key: key(KeyCode::Enter),
+                },
+                Hint {
+                    label: "[",
+                    description: "prev",
+                    key: key(KeyCode::Char('[')),
+                },
+                Hint {
+                    label: "]",
+                    description: "next",
+                    key: key(KeyCode::Char(']')),
+                },
+                Hint {
+                    label: "s",
+                    description: split_desc,
+                    key: key(KeyCode::Char('s')),
+                },
+                Hint {
+                    label: "c",
+                    description: "context",
+                    key: key(KeyCode::Char('c')),
+                },
+                Hint {
+                    label: "r",
+                    description: "refresh",
+                    key: key(KeyCode::Char('r')),
+                },
+                Hint {
+                    label: "Esc",
+                    description: "back to chat",
+                    key: key(KeyCode::Esc),
+                },
+            ]
+        } else if hints_area.width >= 80 {
+            vec![
+                Hint {
+                    label: "Tab",
+                    description: "pane",
+                    key: key(KeyCode::Tab),
+                },
+                Hint {
+                    label: "Enter",
+                    description: "open",
+                    key: key(KeyCode::Enter),
+                },
+                Hint {
+                    label: "[",
+                    description: "prev",
+                    key: key(KeyCode::Char('[')),
+                },
+                Hint {
+                    label: "]",
+                    description: "next",
+                    key: key(KeyCode::Char(']')),
+                },
+                Hint {
+                    label: "s",
+                    description: split_desc,
+                    key: key(KeyCode::Char('s')),
+                },
+                Hint {
+                    label: "c",
+                    description: "context",
+                    key: key(KeyCode::Char('c')),
+                },
+                Hint {
+                    label: "r",
+                    description: "refresh",
+                    key: key(KeyCode::Char('r')),
+                },
+                Hint {
+                    label: "Esc",
+                    description: "close",
+                    key: key(KeyCode::Esc),
+                },
+            ]
+        } else {
+            vec![
+                Hint {
+                    label: "Esc",
+                    description: "close",
+                    key: key(KeyCode::Esc),
+                },
+                Hint {
+                    label: "Tab",
+                    description: "pane",
+                    key: key(KeyCode::Tab),
+                },
+                Hint {
+                    label: "Enter",
+                    description: "open",
+                    key: key(KeyCode::Enter),
+                },
+                Hint {
+                    label: "s",
+                    description: split_desc,
+                    key: key(KeyCode::Char('s')),
+                },
+                Hint {
+                    label: "c",
+                    description: "context",
+                    key: key(KeyCode::Char('c')),
+                },
+                Hint {
+                    label: "r",
+                    description: "refresh",
+                    key: key(KeyCode::Char('r')),
+                },
+            ]
+        };
+        let mut controls = dialog::Controls::default();
+        dialog::render_hints(frame, hints_area, &hints, palette, &mut controls);
+        let focus_render_w = focus_w.min(footer.width);
+        frame.render_widget(
+            Paragraph::new(Span::styled(focus_text, Style::default().fg(palette.dim()))),
+            Rect::new(
+                footer.right().saturating_sub(focus_render_w),
+                footer.y,
+                focus_render_w,
+                1,
+            ),
+        );
+        controls
     }
 
     /// `/diff · working tree ↔ HEAD 4e32d60c3a · read only`, with the totals, the
@@ -843,46 +989,6 @@ impl GitDiffView {
         );
         frame.render_widget(Paragraph::new(lines), content);
     }
-
-    /// `Tab files/diff · Enter open · [ ] hunks · s unified · c context · r refresh ·
-    /// Esc back to chat`, with which side has focus at the right.
-    fn keys_line(&self, width: usize, palette: Palette) -> Line<'static> {
-        let muted = Style::default().fg(palette.muted);
-        let key = |label: &str| Span::styled(label.to_owned(), palette.keycap());
-        let text = |label: &str| Span::styled(label.to_owned(), muted);
-        let left = vec![
-            text(" "),
-            key("Tab"),
-            text(" files/diff · "),
-            key("Enter"),
-            text(" open · "),
-            key("["),
-            text(" "),
-            key("]"),
-            text(" hunks · "),
-            key("s"),
-            text(if self.review.split_shown() {
-                " unified · "
-            } else {
-                " split · "
-            }),
-            key("c"),
-            text(" context · "),
-            key("r"),
-            text(" refresh · "),
-            key("Esc"),
-            text(" back to chat"),
-        ];
-        let focus = if self.tree_focus { "files" } else { "diff" };
-        spread(
-            left,
-            vec![Span::styled(
-                format!("focus: {focus} "),
-                Style::default().fg(palette.dim()),
-            )],
-            width,
-        )
-    }
 }
 
 /// Whether a file's line counts are known: untracked content is never read, and
@@ -1039,7 +1145,9 @@ mod tests {
     ) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|frame| view.render(frame, frame.area(), state, transcript, Palette::default()))
+            .draw(|frame| {
+                let _ = view.render(frame, frame.area(), state, transcript, Palette::default());
+            })
             .unwrap();
         let buffer = terminal.backend().buffer();
         (0..buffer.area.height)
@@ -1167,7 +1275,7 @@ mod tests {
         let keys = text.lines().last().unwrap();
         assert!(
             keys.starts_with(
-                " Tab files/diff · Enter open · [ ] hunks · s unified · c context · r refresh · Esc back to chat"
+                " Tab files/diff │ Enter open │ [ prev │ ] next │ s unified │ c context │ r refresh │ Esc back to chat"
             ),
             "{keys}"
         );

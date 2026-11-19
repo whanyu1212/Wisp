@@ -213,7 +213,11 @@ for line in sys.stdin:
             # Enter only accepts a completion the user saw, so wait for the frame that
             # placed the cursor after "/he" and painted its menu. Menu text painted for
             # "/" or "/h" can arrive first while the TUI still has keys to process.
-            elif phase == "prefix" and b"/help" in output and frame_cursor(output) == (22, 9):
+            elif (
+                phase == "prefix"
+                and screen_shows(output, "/help")
+                and frame_cursor(output) == (22, 9)
+            ):
                 os.write(terminal_fd, b"\r")
                 phase = "completed"
                 output.clear()
@@ -239,7 +243,7 @@ for line in sys.stdin:
                 phase == "help scrolled"
                 and b"/codemode" in output
                 and b"/compact" in output
-                and b"Esc close" in output
+                and screen_shows(output, "Esc close")
             ):
                 assert b"/context" in output
                 assert b"/compact" in output

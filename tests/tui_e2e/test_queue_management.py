@@ -15,7 +15,11 @@ from pathlib import Path
 import pytest
 
 from tests.support.paths import REPO_ROOT
-from tests.tui_e2e.support import complete_frames, full_repaint_after
+from tests.tui_e2e.support import (
+    complete_frames,
+    full_repaint_after,
+    rendered_without_spacing,
+)
 from tests.tui_e2e.test_readiness import _rust_binary, _TuiProcess
 from wisp import __version__
 
@@ -116,7 +120,7 @@ main()
     tui = _TuiProcess(child, fd, termios.tcgetattr(fd))
     width = 102
 
-    idle_footer = "↑↓ select".encode()
+    idle_footer = b"Escclose"
 
     def wait_for_full_repaint(accept: Callable[[bytes], bool], *, failure: str) -> None:
         """Force full repaints until one shows the expected current state.
@@ -157,7 +161,8 @@ main()
         only after the TUI has applied the result.
         """
         wait_for_full_repaint(
-            lambda frame: idle_footer in frame, failure="queue manager did not settle"
+            lambda frame: idle_footer in rendered_without_spacing(frame),
+            failure="queue manager did not settle",
         )
 
     def selected_label_painted(output: bytes, label: bytes) -> bool:
@@ -278,7 +283,9 @@ main()
         # The draft is visible under the overlay too, so wait until the overlay is
         # gone, so the Enter that follows reaches the composer.
         wait_for_full_repaint(
-            lambda frame: b"draft-kept" in frame and idle_footer not in frame,
+            lambda frame: (
+                b"draft-kept" in frame and idle_footer not in rendered_without_spacing(frame)
+            ),
             failure="queue overlay lost the composer draft",
         )
         # Keep work across cancellation, then restore it on the first attempt

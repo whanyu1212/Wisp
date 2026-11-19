@@ -3,18 +3,19 @@
 use crate::context_split::{
     self, Split, abbreviated, approximate, budget_tokens, compact_tokens_upper,
 };
+use crate::dialog::{self, Dialog, Hint};
 use crate::reducer::UiState;
 use crate::side_panel::{clip_spans, spread};
 use crate::theme::Palette;
 use crate::ui::{clip_columns, sanitize_for_terminal};
 use crate::web_search::CostTotal;
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph},
+    widgets::Paragraph,
 };
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -378,20 +379,57 @@ impl ContextView {
         .min(self.row_count.saturating_sub(self.page_height));
     }
 
-    pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect, state: &UiState, palette: Palette) {
+    pub fn render(
+        &mut self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        state: &UiState,
+        palette: Palette,
+    ) -> dialog::Controls {
         let split = Split::of(state).filter(|split| split.breakdown.is_some());
-        let hint = if split.is_some() {
-            " ↑↓ move · Enter expand · PgUp/PgDn · r refresh · Esc close "
-        } else {
-            " ↑↓ PgUp/PgDn · r refresh · Esc close "
-        };
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(palette.border())
-            .title(" Context ")
-            .title_bottom(hint);
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let mut hints = Vec::new();
+        if split.is_some() {
+            hints.push(Hint {
+                label: "Enter",
+                description: "expand",
+                key: key(KeyCode::Enter),
+            });
+        }
+        hints.extend([
+            Hint {
+                label: "r",
+                description: "refresh",
+                key: key(KeyCode::Char('r')),
+            },
+            Hint {
+                label: "Esc",
+                description: "close",
+                key: key(KeyCode::Esc),
+            },
+        ]);
+        if area.width >= 56 {
+            hints.extend([
+                Hint {
+                    label: "↑",
+                    description: "prev",
+                    key: key(KeyCode::Up),
+                },
+                Hint {
+                    label: "↓",
+                    description: "next",
+                    key: key(KeyCode::Down),
+                },
+            ]);
+        }
+        let layout = Dialog {
+            title: "Context",
+            tabs: &[],
+            filter: None,
+            hints: &hints,
+        }
+        .render(frame, area, palette);
+        let inner = layout.body;
         let width = usize::from(inner.width);
         // Refresh progress and errors come first, so a failed refresh is never
         // hidden below a split that is now stale.
@@ -431,6 +469,7 @@ impl ContextView {
             .take(self.page_height)
             .collect();
         frame.render_widget(Paragraph::new(visible), inner);
+        layout.controls
     }
 
     /// The split's header and bar, the source table, the largest items and growth
@@ -906,12 +945,16 @@ mod tests {
         let mut view = ContextView::default();
         let mut terminal = Terminal::new(TestBackend::new(30, 8)).unwrap();
         terminal
-            .draw(|frame| view.render(frame, frame.area(), &state, Palette::default()))
+            .draw(|frame| {
+                let _ = view.render(frame, frame.area(), &state, Palette::default());
+            })
             .unwrap();
         assert!(view.row_count > rows(&state).len());
         view.key(KeyCode::End);
         terminal
-            .draw(|frame| view.render(frame, frame.area(), &state, Palette::default()))
+            .draw(|frame| {
+                let _ = view.render(frame, frame.area(), &state, Palette::default());
+            })
             .unwrap();
         let text: String = terminal
             .backend()
@@ -927,7 +970,9 @@ mod tests {
         assert!(joined.contains("whenidle)"), "{text:?}");
         let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
         terminal
-            .draw(|frame| view.render(frame, frame.area(), &state, Palette::default()))
+            .draw(|frame| {
+                let _ = view.render(frame, frame.area(), &state, Palette::default());
+            })
             .unwrap();
         assert_eq!(view.offset, 0);
     }
@@ -935,7 +980,9 @@ mod tests {
     fn screen(view: &mut ContextView, state: &UiState, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|frame| view.render(frame, frame.area(), state, Palette::default()))
+            .draw(|frame| {
+                let _ = view.render(frame, frame.area(), state, Palette::default());
+            })
             .unwrap();
         let buffer = terminal.backend().buffer();
         (0..height)

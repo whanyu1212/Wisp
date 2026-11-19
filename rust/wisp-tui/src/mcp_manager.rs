@@ -15,6 +15,7 @@
 //! cancels a sign-in in progress instead of closing the view.
 
 use crate::{
+    dialog::{self, Dialog, Hint},
     discovery_view::{DiscoveryAction, ReportView},
     reducer::{McpChange, SecretText, UiAction, UiState},
     session_picker::terminal_row,
@@ -25,9 +26,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
-    style::{Modifier, Style},
+    style::Style,
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, Padding, Paragraph},
+    widgets::Paragraph,
 };
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -712,7 +713,7 @@ impl McpView {
     pub fn panel_height(&self, width: u16) -> u16 {
         match &self.flow {
             None => 0,
-            Some(Flow::Paste | Flow::Previewing | Flow::Env(_)) => 6,
+            Some(Flow::Paste | Flow::Previewing | Flow::Env(_)) => 7,
             Some(Flow::Confirm(confirm)) => {
                 let rows = confirm_details(&confirm.kind, panel_width(width)).len();
                 let footnote = if confirm.kind.footnote().is_some() {
@@ -720,13 +721,19 @@ impl McpView {
                 } else {
                     0
                 };
-                // Borders, details and a gap, two choices, then the footnote.
-                u16::try_from(2 + rows + usize::from(rows > 0) + 2 + footnote).unwrap_or(u16::MAX)
+                // Borders, footer, details and a gap, two choices, then the footnote.
+                u16::try_from(3 + rows + usize::from(rows > 0) + 2 + footnote).unwrap_or(u16::MAX)
             }
         }
     }
 
-    pub fn render(&mut self, frame: &mut Frame<'_>, area: Rect, state: &UiState, palette: Palette) {
+    pub fn render(
+        &mut self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        state: &UiState,
+        palette: Palette,
+    ) -> dialog::Controls {
         let notice = self.notice.as_deref();
         match &mut self.flow {
             None => self.render_browse(frame, area, state, palette),
@@ -743,30 +750,84 @@ impl McpView {
         area: Rect,
         state: &UiState,
         palette: Palette,
-    ) {
-        let hint = match &state.mcp_sign_in {
-            Some(sign_in) if !sign_in.cancel_requested => " Esc cancel sign-in ",
-            Some(_) => " Esc close ",
-            None => [
-                " ↑↓ select · a add · e enable/disable · d remove · l sign in · o sign out · c reconnect · r refresh · Esc close ",
-                " a add · e on/off · d remove · l/o sign in/out · c reconnect · Esc close ",
-                " a e d l o c r · Esc ",
-            ]
-            .into_iter()
-            // Borders and title corners take the rest of the row.
-            .find(|hint| hint.width() + 4 <= usize::from(area.width))
-            .unwrap_or(" Esc "),
+    ) -> dialog::Controls {
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let hints = match &state.mcp_sign_in {
+            Some(sign_in) if !sign_in.cancel_requested => vec![Hint {
+                label: "Esc",
+                description: "cancel sign-in",
+                key: key(KeyCode::Esc),
+            }],
+            Some(_) => vec![Hint {
+                label: "Esc",
+                description: "close",
+                key: key(KeyCode::Esc),
+            }],
+            None => {
+                let mut hints = vec![
+                    Hint {
+                        label: "a",
+                        description: "add",
+                        key: key(KeyCode::Char('a')),
+                    },
+                    Hint {
+                        label: "e",
+                        description: "on/off",
+                        key: key(KeyCode::Char('e')),
+                    },
+                ];
+                if area.width >= 54 {
+                    hints.extend([
+                        Hint {
+                            label: "d",
+                            description: "remove",
+                            key: key(KeyCode::Char('d')),
+                        },
+                        Hint {
+                            label: "r",
+                            description: "refresh",
+                            key: key(KeyCode::Char('r')),
+                        },
+                    ]);
+                }
+                hints.push(Hint {
+                    label: "Esc",
+                    description: "close",
+                    key: key(KeyCode::Esc),
+                });
+                if area.width >= 68 {
+                    hints.extend([
+                        Hint {
+                            label: "l",
+                            description: "sign in",
+                            key: key(KeyCode::Char('l')),
+                        },
+                        Hint {
+                            label: "o",
+                            description: "sign out",
+                            key: key(KeyCode::Char('o')),
+                        },
+                        Hint {
+                            label: "c",
+                            description: "reconnect",
+                            key: key(KeyCode::Char('c')),
+                        },
+                    ]);
+                }
+                hints
+            }
         };
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(palette.border())
-            .title(" MCP servers ")
-            .title_bottom(Line::from(hint).style(Style::default().fg(palette.muted)));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
+        let layout = Dialog {
+            title: "MCP servers",
+            tabs: &[],
+            filter: None,
+            hints: &hints,
+        }
+        .render(frame, area, palette);
+        let inner = layout.body;
         self.rendered = None;
         if inner.width == 0 || inner.height == 0 {
-            return;
+            return layout.controls;
         }
         let width = usize::from(inner.width);
         let mut status: Vec<Line<'static>> = Vec::new();
@@ -794,7 +855,7 @@ impl McpView {
         let Some(snapshot) = state.mcp.snapshot.as_deref() else {
             status.push(Line::raw(terminal_row("MCP status unavailable.", width)));
             frame.render_widget(Paragraph::new(status), inner);
-            return;
+            return layout.controls;
         };
         let servers = &snapshot.servers;
         if servers.is_empty() {
@@ -803,7 +864,7 @@ impl McpView {
                 width,
             )));
             frame.render_widget(Paragraph::new(status), inner);
-            return;
+            return layout.controls;
         }
         let selected = self
             .selected
@@ -846,6 +907,7 @@ impl McpView {
             };
             self.detail.render(frame, body, &rows);
         }
+        layout.controls
     }
 }
 
@@ -1153,35 +1215,13 @@ fn title_fits(title: &str, area: Rect) -> bool {
     sanitize_for_terminal(title).width() <= usize::from(area.width.saturating_sub(6))
 }
 
-fn docked_block(
-    title: &str,
-    area: Rect,
-    hint: &str,
-    warning: bool,
-    palette: Palette,
-) -> Block<'static> {
-    let muted = Style::default().fg(palette.muted);
-    let mut block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .padding(Padding::horizontal(1))
-        .style(palette.composer())
-        .border_style(if warning {
-            Style::default().fg(palette.warning)
-        } else {
-            palette.border()
-        })
-        .title(
-            Line::from(format!(
-                " {} ",
-                terminal_row(title, usize::from(area.width.saturating_sub(6)))
-            ))
-            .style(Style::default().add_modifier(Modifier::BOLD)),
-        );
-    if hint.width() + 2 <= usize::from(area.width) {
-        block = block.title_bottom(Line::from(hint.to_owned()).style(muted).right_aligned());
-    }
-    block
+fn inset_body(body: Rect) -> Rect {
+    Rect::new(
+        body.x.saturating_add(1),
+        body.y,
+        body.width.saturating_sub(2),
+        body.height,
+    )
 }
 
 fn render_paste(
@@ -1190,10 +1230,21 @@ fn render_paste(
     reading: bool,
     notice: Option<&str>,
     palette: Palette,
-) {
-    let block = docked_block("Add MCP server", area, " Esc cancel ", false, palette);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+) -> dialog::Controls {
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    let hints = [Hint {
+        label: "Esc",
+        description: "cancel",
+        key: key(KeyCode::Esc),
+    }];
+    let layout = Dialog {
+        title: "Add MCP server",
+        tabs: &[],
+        filter: None,
+        hints: &hints,
+    }
+    .render(frame, area, palette);
+    let inner = inset_body(layout.body);
     let width = usize::from(inner.width);
     let muted = Style::default().fg(palette.muted);
     let mut lines = vec![
@@ -1221,9 +1272,15 @@ fn render_paste(
         ));
     }
     frame.render_widget(Paragraph::new(lines), inner);
+    layout.controls
 }
 
-fn render_env(frame: &mut Frame<'_>, area: Rect, step: &mut EnvStep, palette: Palette) {
+fn render_env(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    step: &mut EnvStep,
+    palette: Palette,
+) -> dialog::Controls {
     let (position, total) = step.position();
     let (name, header) = match step.current() {
         Ask::Env(name) => (name.to_owned(), false),
@@ -1235,16 +1292,70 @@ fn render_env(frame: &mut Frame<'_>, area: Rect, step: &mut EnvStep, palette: Pa
         name.clone()
     };
     let title = format!("{} needs {asked} ({position} of {total})", step.server.name);
-    let hint = if header {
-        " Enter save · Esc cancel "
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    let hints = if header {
+        vec![
+            Hint {
+                label: "Enter",
+                description: "save",
+                key: key(KeyCode::Enter),
+            },
+            Hint {
+                label: "Esc",
+                description: "cancel",
+                key: key(KeyCode::Esc),
+            },
+        ]
     } else if step.input.is_some() {
-        " Enter save · Esc back "
+        vec![
+            Hint {
+                label: "Enter",
+                description: "save",
+                key: key(KeyCode::Enter),
+            },
+            Hint {
+                label: "Esc",
+                description: "back",
+                key: key(KeyCode::Esc),
+            },
+        ]
     } else {
-        " ↑↓ select · Enter choose · Esc cancel "
+        let mut hints = vec![
+            Hint {
+                label: "Enter",
+                description: "choose",
+                key: key(KeyCode::Enter),
+            },
+            Hint {
+                label: "Esc",
+                description: "cancel",
+                key: key(KeyCode::Esc),
+            },
+        ];
+        if area.width >= 50 {
+            hints.extend([
+                Hint {
+                    label: "↑",
+                    description: "prev",
+                    key: key(KeyCode::Up),
+                },
+                Hint {
+                    label: "↓",
+                    description: "next",
+                    key: key(KeyCode::Down),
+                },
+            ]);
+        }
+        hints
     };
-    let block = docked_block(&title, area, hint, false, palette);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let layout = Dialog {
+        title: &title,
+        tabs: &[],
+        filter: None,
+        hints: &hints,
+    }
+    .render(frame, area, palette);
+    let inner = inset_body(layout.body);
     let width = usize::from(inner.width);
     let muted = Style::default().fg(palette.muted);
     // The input or the choices come first, so they stay usable in a small
@@ -1279,7 +1390,7 @@ fn render_env(frame: &mut Frame<'_>, area: Rect, step: &mut EnvStep, palette: Pa
         if inner.height >= 1 && inner.width > 0 {
             frame.set_cursor_position((cursor_x.min(inner.right().saturating_sub(1)), inner.y));
         }
-        return;
+        return layout.controls;
     }
     let choices = [
         format!("Forward ${name} from Wisp's environment"),
@@ -1308,25 +1419,77 @@ fn render_env(frame: &mut Frame<'_>, area: Rect, step: &mut EnvStep, palette: Pa
     // provided; the final confirmation shows the whole result.
     step.pick
         .mark_painted(inner.height >= 2 && inner.width >= 12);
+    layout.controls
 }
 
-fn render_confirm(frame: &mut Frame<'_>, area: Rect, confirm: &mut Confirm, palette: Palette) {
-    let hint = if panel_width(area.width) >= 40 {
-        " ↑↓ select · Enter confirm · Esc cancel "
-    } else {
-        " ↑↓ Enter · Esc "
-    };
+fn render_confirm(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    confirm: &mut Confirm,
+    palette: Palette,
+) -> dialog::Controls {
     let title = confirm.kind.title();
-    let block = docked_block(&title, area, hint, true, palette);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let measure_width = usize::from(area.width.saturating_sub(4));
+    let details = confirm_details(&confirm.kind, measure_width);
+    let choices = confirm.kind.choices();
+    let detail_rows = details.len() + usize::from(!details.is_empty());
+    let confirm_footer_rows = if area.width >= 28 { 1 } else { 2 };
+    let will_be_complete = detail_rows + choices.len()
+        <= usize::from(area.height.saturating_sub(2 + confirm_footer_rows))
+        && title_fits(&title, area);
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    let hints = if will_be_complete {
+        let mut hints = vec![
+            Hint {
+                label: "Enter",
+                description: "confirm",
+                key: key(KeyCode::Enter),
+            },
+            Hint {
+                label: "Esc",
+                description: "cancel",
+                key: key(KeyCode::Esc),
+            },
+        ];
+        if area.width >= 50 {
+            hints.extend([
+                Hint {
+                    label: "↑",
+                    description: "prev",
+                    key: key(KeyCode::Up),
+                },
+                Hint {
+                    label: "↓",
+                    description: "next",
+                    key: key(KeyCode::Down),
+                },
+            ]);
+        }
+        hints
+    } else if area.height >= 6 {
+        vec![Hint {
+            label: "Esc",
+            description: "cancel",
+            key: key(KeyCode::Esc),
+        }]
+    } else {
+        Vec::new()
+    };
+    let layout = Dialog {
+        title: &title,
+        tabs: &[],
+        filter: None,
+        hints: &hints,
+    }
+    .render_with_border(frame, area, palette, Style::default().fg(palette.warning));
+    let inner = inset_body(layout.body);
     let width = usize::from(inner.width);
     let height = usize::from(inner.height);
-    let details = confirm_details(&confirm.kind, width);
-    let choices = confirm.kind.choices();
-    // The choices always stay visible. The details need their own rows plus a
-    // gap; when they cannot all be shown, the panel says so instead of showing
-    // part of them, and the choices stay unarmed.
+    let details = if width == measure_width {
+        details
+    } else {
+        confirm_details(&confirm.kind, width)
+    };
     let detail_rows = details.len() + usize::from(!details.is_empty());
     let complete = detail_rows + choices.len() <= height && title_fits(&title, area);
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -1366,12 +1529,13 @@ fn render_confirm(frame: &mut Frame<'_>, area: Rect, confirm: &mut Confirm, pale
     }
     frame.render_widget(Paragraph::new(lines), inner);
     confirm.pick.mark_painted(complete && inner.width >= 12);
+    layout.controls
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
+    use ratatui::{Terminal, backend::TestBackend, buffer::Buffer, style::Modifier};
     use std::sync::Arc;
     use wisp_protocol::events::McpStatusSnapshot;
 
@@ -1444,7 +1608,9 @@ mod tests {
     ) -> Buffer {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
-            .draw(|frame| view.render(frame, frame.area(), state, palette))
+            .draw(|frame| {
+                let _ = view.render(frame, frame.area(), state, palette);
+            })
             .unwrap();
         terminal.backend().buffer().clone()
     }
@@ -1501,11 +1667,17 @@ mod tests {
             );
             assert!(wide.contains("forwards: HOME_DIR"), "{name}");
             assert!(wide.contains("mcp__github__search"), "{name}");
-            assert!(wide.contains("l/o sign in/out · c reconnect"), "{name}");
+            assert!(
+                wide.contains("l sign in │ o sign out │ c reconnect"),
+                "{name}: {wide}"
+            );
 
             let small = text(&draw_buffer(&mut view, &state, 30, 8, palette));
             assert!(small.contains("› github"), "{name}: {small}");
-            assert!(small.contains("a e d l o c r"), "{name}: {small}");
+            assert!(
+                small.contains("a add │ e on/off │ Esc close"),
+                "{name}: {small}"
+            );
         }
     }
 
