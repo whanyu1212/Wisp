@@ -45,6 +45,9 @@ def test_fast_path_forms(command: str) -> None:
         "git status",
         "ruff check .",
         "uv run pytest",
+        "uv run --no-sync",
+        "uv run --no-sync cargo test",
+        "uv run --no-sync npm test",
         "npm run deploy",
         "pnpm test",
         "cargo fmt",
@@ -69,12 +72,14 @@ def macos() -> None:
         pytest.skip("Real Seatbelt enforcement requires macOS")
 
 
-def execute(command: str, context: ToolContext) -> tuple[int, str, str]:
+def execute(command: str, context: ToolContext, *, timeout: float = 10) -> tuple[int, str, str]:
     launch = prepare_seatbelt({"command": command}, context)
 
     async def run() -> tuple[int, str, str]:
         with activate_seatbelt(launch):
-            result = await _run_shell(command, cwd=context.cwd, timeout=10, max_output_bytes=4000)
+            result = await _run_shell(
+                command, cwd=context.cwd, timeout=timeout, max_output_bytes=4000
+            )
         return result.exit_code, result.stdout, result.stderr
 
     return asyncio.run(run())
@@ -427,7 +432,7 @@ def test_offline_development_workflows(
             "require('node:test')('ok',()=>require('node:assert').strictEqual(2+2,4));"
         )
         command = "npm test --offline"
-    code, stdout, stderr = execute(command, context)
+    code, stdout, stderr = execute(command, context, timeout=30)
     if code != 0:
         print(f"stdout:\n{stdout}\nstderr:\n{stderr}")
     assert code == 0, (stdout, stderr)
@@ -464,3 +469,172 @@ def test_background_retains_policy(macos: None, context: ToolContext) -> None:
             await tool.aclose()
 
     asyncio.run(run())
+
+
+@pytest.mark.process
+def test_non_ascii_paths_enforce_protections_and_allow_workspace(
+    macos: None, tmp_path: Path
+) -> None:
+    from dataclasses import replace
+
+    workspace = tmp_path / "café-workspace"
+    scratch = tmp_path / "café-scratch"
+    workspace.mkdir()
+    scratch.mkdir()
+    target = workspace / "café-secret"
+    target.mkdir()
+    (target / "secret.txt").write_text("non-ascii-canary")
+    (workspace / "link").symlink_to(target, target_is_directory=True)
+    context = replace(
+        ToolContext(cwd=workspace, scratch_root=scratch.resolve()),
+        protected_paths=("link/secret.txt",),
+    )
+
+    code, stdout, stderr = execute("printf ok > allowed.txt && cat allowed.txt", context)
+    assert code == 0 and stdout == "ok", stderr
+
+    for attack in (
+        "cat café-secret/secret.txt",
+        "mv café-secret moved && cat moved/secret.txt",
+        "cat link/secret.txt",
+    ):
+        code, stdout, stderr = execute(attack, context)
+        assert code != 0, (attack, stdout, stderr)
+        assert "non-ascii-canary" not in stdout
+    assert (target / "secret.txt").read_text() == "non-ascii-canary"
+
+
+@pytest.mark.process
+@pytest.mark.parametrize("name", [".env", ".env.local", "credentials.json"])
+def test_bare_protected_symlinks_bind_their_targets(
+    macos: None, context: ToolContext, name: str
+) -> None:
+    from dataclasses import replace
+
+    real_file = context.cwd / "real_secret_data"
+    real_file.write_text("bare-symlink-canary")
+    (context.cwd / name).symlink_to(real_file)
+    # Bare built-in protections (.env*, _PRIVATE_NAMES) must still bind symlink targets
+    # even when custom protected_paths is empty.
+    scoped = replace(context, protected_paths=())
+    for attack in (f"cat {name}", "cat real_secret_data", f"printf changed > {name}"):
+        code, stdout, stderr = execute(attack, scoped)
+        assert code != 0, (attack, stdout, stderr)
+        assert "bare-symlink-canary" not in stdout
+    assert real_file.read_text() == "bare-symlink-canary"
+
+
+def test_quotes_and_control_characters_in_roots_and_patterns_fail_closed(
+    macos: None, tmp_path: Path, context: ToolContext
+) -> None:
+    from dataclasses import replace
+
+    for pattern in ('bad"name', "bad\x01name", "bad\x7fname"):
+        with pytest.raises(ToolError, match="protected-path pattern"):
+            prepare_seatbelt({"command": "pytest"}, replace(context, protected_paths=(pattern,)))
+
+    quoted_ws = tmp_path / 'ws"quoted'
+    quoted_ws.mkdir()
+    with pytest.raises(ToolError, match="unsupported characters"):
+        prepare_seatbelt(
+            {"command": "pytest"},
+            ToolContext(cwd=quoted_ws, scratch_root=context.scratch_root),
+        )
+
+
+def test_symlinked_cwd_and_outside_workspace_root_fail_closed(macos: None, tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    scratch = tmp_path / "scratch"
+    for directory in (workspace, outside, scratch):
+        directory.mkdir()
+    escape = workspace / "escape"
+    escape.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ToolError, match="symbolic links"):
+        prepare_seatbelt(
+            {"command": "pytest"},
+            ToolContext(cwd=escape, workspace_root=workspace, scratch_root=scratch.resolve()),
+        )
+    with pytest.raises(ToolError, match="stay inside the workspace root"):
+        prepare_seatbelt(
+            {"command": "pytest"},
+            ToolContext(cwd=outside, workspace_root=workspace, scratch_root=scratch.resolve()),
+        )
+
+
+@pytest.mark.process
+def test_cargo_net_offline_is_set_in_sandbox_environment(macos: None, context: ToolContext) -> None:
+    launch = prepare_seatbelt({"command": "cargo test"}, context)
+    assert dict(launch.environment)["CARGO_NET_OFFLINE"] == "true"
+    code, stdout, stderr = execute('printf "%s" "$CARGO_NET_OFFLINE"', context)
+    assert code == 0 and stdout == "true", stderr
+
+
+@pytest.mark.process
+def test_nested_protected_and_control_symlinks_bind_targets(
+    macos: None, context: ToolContext
+) -> None:
+    from dataclasses import replace
+
+    sub = context.cwd / "sub"
+    sub.mkdir()
+    secret = context.cwd / "real_secret"
+    secret.write_text("nested-secret-canary")
+    (sub / ".env").symlink_to(secret)
+    real_ssh = context.cwd / "real_ssh"
+    real_ssh.mkdir()
+    (real_ssh / "id_ed25519").write_text("nested-ssh-canary")
+    (sub / ".ssh").symlink_to(real_ssh, target_is_directory=True)
+    real_instructions = context.cwd / "real_instructions.md"
+    real_instructions.write_text("keep-me")
+    (sub / "AGENTS.md").symlink_to(real_instructions)
+
+    scoped = replace(context, protected_paths=())
+    for attack in (
+        "cat sub/.env",
+        "cat real_secret",
+        "cat sub/.ssh/id_ed25519",
+        "cat real_ssh/id_ed25519",
+    ):
+        code, stdout, stderr = execute(attack, scoped)
+        assert code != 0, (attack, stdout, stderr)
+        assert "canary" not in stdout
+
+    # Control-file symlink remains readable, but writes through either name are denied.
+    code, stdout, stderr = execute("cat sub/AGENTS.md", scoped)
+    assert code == 0 and stdout == "keep-me", stderr
+    for attack in ("printf pwned > sub/AGENTS.md", "printf pwned > real_instructions.md"):
+        code, _, stderr = execute(attack, scoped)
+        assert code != 0, (attack, stderr)
+    assert real_instructions.read_text() == "keep-me"
+
+
+@pytest.mark.process
+@pytest.mark.parametrize("link_name", ["CAFÉ-1", "cafe\u0301-1"])
+def test_non_ascii_case_and_nfd_wildcard_symlinks_bind_targets(
+    macos: None, context: ToolContext, link_name: str
+) -> None:
+    from dataclasses import replace
+
+    target = context.cwd / "target_secret"
+    target.write_text("wildcard-unicode-canary")
+    (context.cwd / link_name).symlink_to(target)
+    scoped = replace(context, protected_paths=("café-*",))
+    for attack in (f"cat {shlex.quote(link_name)}", "cat target_secret"):
+        code, stdout, stderr = execute(attack, scoped)
+        assert code != 0, (attack, stdout, stderr)
+        assert "wildcard-unicode-canary" not in stdout
+
+
+def test_symlink_loops_fail_closed_with_tool_error(macos: None, context: ToolContext) -> None:
+    (context.cwd / ".env").symlink_to(context.cwd / "loop_b")
+    (context.cwd / "loop_b").symlink_to(context.cwd / ".env")
+    with pytest.raises(ToolError, match="resolved safely"):
+        prepare_seatbelt({"command": "pytest"}, context)
+
+
+def test_venv_symlink_loop_fails_closed_with_tool_error(macos: None, context: ToolContext) -> None:
+    (context.cwd / ".venv").symlink_to(context.cwd / "venv_loop")
+    (context.cwd / "venv_loop").symlink_to(context.cwd / ".venv")
+    with pytest.raises(ToolError, match="resolved safely"):
+        prepare_seatbelt({"command": "pytest"}, context)

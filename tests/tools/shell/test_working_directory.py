@@ -143,3 +143,61 @@ def test_prepared_directory_cannot_be_rebound(tmp_path: Path) -> None:
             await tool.aclose()
 
     asyncio.run(run())
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt")
+def test_cwd_does_not_erase_lexical_workspace_symlink_for_seatbelt(tmp_path: Path) -> None:
+    from wisp.tools.result import ToolError
+    from wisp.tools.shell.seatbelt import prepare_seatbelt
+
+    real_ws = tmp_path / "real_ws"
+    scratch = tmp_path / "scratch"
+    real_ws.mkdir()
+    scratch.mkdir()
+    link_ws = tmp_path / "link_ws"
+    link_ws.symlink_to(real_ws, target_is_directory=True)
+    context = ToolContext(cwd=link_ws, scratch_root=scratch.resolve())
+    scoped = command_context({"cwd": ".", "command": "pytest"}, context)
+    assert scoped.workspace_root == link_ws
+    with pytest.raises(ToolError, match="symbolic links"):
+        prepare_seatbelt({"cwd": ".", "command": "pytest"}, scoped)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Seatbelt")
+def test_broad_root_with_cwd_subdirectory_cannot_auto_approve(tmp_path: Path) -> None:
+    home = Path.home()
+    (home / "project").mkdir()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    context = ToolContext(cwd=home, scratch_root=scratch.resolve())
+
+    async def run() -> None:
+        tool = BashTool()
+        registry = ToolRegistry()
+        registry.register(tool)
+        runner = ConfiguredToolExecutor(
+            registry=registry,
+            context=context,
+            policy=ToolPolicy.allow_all_tools(),
+            approval_policy=ToolApprovalPolicy.auto_commands(),
+        )
+        try:
+            events = [
+                event
+                async for event in runner.execute(
+                    ToolCall(
+                        call_id="broad-cwd",
+                        name="bash",
+                        arguments={"cwd": "project", "command": "pytest"},
+                    )
+                )
+            ]
+            assert any(
+                isinstance(event, ToolApprovalReviewed) and event.verdict == "ask"
+                for event in events
+            )
+            assert any(isinstance(event, ToolApprovalRequested) for event in events)
+        finally:
+            await tool.aclose()
+
+    asyncio.run(run())

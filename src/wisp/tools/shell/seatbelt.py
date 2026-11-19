@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from wisp.tools.files.paths import matches_protected_pattern
 from wisp.tools.result import ToolError
 from wisp.trust.scope import is_broad_root
 
@@ -58,6 +59,19 @@ _BASE = """(version 1)
 # F_MAKECOMPRESSED/F_TRANSFEREXTENTS can mutate read-only descriptors. This
 # explicit denial follows the finding documented by OpenAI Codex's Seatbelt tests.
 _CONTROL_NAMES = (".git", ".codex", ".claude", ".agents", "AGENTS.md", "CLAUDE.md", "CODEX.md")
+_SKIP_SYMLINK_SCAN_DIRS = frozenset(
+    {
+        ".git",
+        ".venv",
+        "node_modules",
+        "target",
+        "__pycache__",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".pytest_cache",
+    }
+)
+_MAX_SYMLINK_SCAN_ENTRIES = 100_000
 _PRIVATE_NAMES = (
     ".ssh",
     ".aws",
@@ -128,7 +142,7 @@ class SeatbeltLaunch:
 
     def argv(self, wrapped_command: str, jobs_file: Path) -> list[str]:
         """Add only the host-owned job recorder to the prepared policy."""
-        recorder = f"(allow file-write-data (literal {json.dumps(str(jobs_file.resolve()))}))"
+        recorder = f"(allow file-write-data (literal {_sbpl_string(str(jobs_file.resolve()))}))"
         return [_EXECUTABLE, "-p", self.profile + recorder, "/bin/sh", "-c", wrapped_command]
 
 
@@ -147,6 +161,14 @@ def active_seatbelt() -> SeatbeltLaunch | None:
     return _ACTIVE.get()
 
 
+def _sandbox_python_test(tokens: list[str]) -> bool:
+    if not tokens:
+        return False
+    if tokens[0] in {"python", "python3"}:
+        return tokens[1:3] in (["-m", "pytest"], ["-m", "unittest"])
+    return tokens[0] == "pytest"
+
+
 def sandbox_development_command(arguments: Mapping[str, object]) -> bool:
     """Recognize the fast path after the shared command eligibility checks pass."""
     command = arguments.get("command")
@@ -156,12 +178,8 @@ def sandbox_development_command(arguments: Mapping[str, object]) -> bool:
     if tokens[:2] == ["uv", "run"]:
         if tokens[2:3] != ["--no-sync"]:
             return False
-        tokens = tokens[3:]
-    if not tokens:
-        return False
-    if tokens[0] in {"python", "python3"}:
-        return tokens[1:3] in (["-m", "pytest"], ["-m", "unittest"])
-    if tokens[0] == "pytest":
+        return _sandbox_python_test(tokens[3:])
+    if _sandbox_python_test(tokens):
         return True
     if tokens[0] == "cargo":
         return tokens[1:2] in (["test"], ["check"], ["build"])
@@ -173,7 +191,28 @@ def sandbox_development_command(arguments: Mapping[str, object]) -> bool:
     return False
 
 
+def _has_control_chars(text: str) -> bool:
+    return any(ord(char) < 0x20 or ord(char) == 0x7F for char in text)
+
+
+def _sbpl_string(text: str) -> str:
+    """Serialize a literal SBPL string while preserving UTF-8 path bytes."""
+    if _has_control_chars(text):
+        raise ToolError("Sandbox path contains unsupported control characters.")
+    return json.dumps(text, ensure_ascii=False)
+
+
+def _sbpl_regex(pattern: str) -> str:
+    """Serialize an SBPL raw regex literal, failing closed on quotes or control chars."""
+    if '"' in pattern or _has_control_chars(pattern):
+        raise ToolError("Sandbox cannot safely compile this path or protected pattern.")
+    return f'#"{pattern}"'
+
+
 def _validate_root(root: Path) -> None:
+    text = str(root)
+    if '"' in text or _has_control_chars(text):
+        raise ToolError("Sandbox root path contains unsupported characters.")
     if not root.is_absolute() or is_broad_root(root) or not root.is_dir():
         raise ToolError("Sandbox requires an existing, non-broad workspace and scratch directory.")
     # Normalize system aliases (/tmp, /var), but do not follow user-owned ones.
@@ -201,7 +240,8 @@ def _protected_pattern(pattern: str) -> str:
     # Unsupported glob syntax is an admission failure, not an ignored protection.
     if (
         not expanded.strip("/")
-        or any(char in expanded for char in "[]{}\\\n\r\0")
+        or any(char in expanded for char in '"[]{}\\')
+        or _has_control_chars(expanded)
         or ("/" in expanded and any(char in expanded for char in "*?"))
     ):
         raise ToolError("Sandbox cannot enforce this protected-path pattern.")
@@ -241,13 +281,23 @@ def prepare_seatbelt(arguments: Mapping[str, object], context: ToolContext) -> S
     if not isinstance(command, str):
         raise ToolError("Sandbox requires an exact command.")
     # Validate lexical roots before resolving so user-controlled symlinks are not erased.
-    _validate_root(context.workspace_root or context.cwd)
+    _validate_root(context.cwd)
+    if context.workspace_root is not None:
+        _validate_root(context.workspace_root)
     if context.scratch_root is None:
         raise ToolError("Automatic commands require a private session scratch directory.")
     _validate_root(context.scratch_root)
-    cwd = context.cwd.resolve()
+    cwd = _resolve_safely(context.cwd, "Sandbox working directory could not be resolved safely.")
+    if context.workspace_root is not None:
+        resolved_workspace = _resolve_safely(
+            context.workspace_root, "Sandbox workspace root could not be resolved safely."
+        )
+        if not cwd.is_relative_to(resolved_workspace):
+            raise ToolError("Sandbox working directory must stay inside the workspace root.")
     workspace = context.boundary()
-    scratch = context.scratch_root.resolve()
+    scratch = _resolve_safely(
+        context.scratch_root, "Sandbox scratch directory could not be resolved safely."
+    )
     roots = (workspace, scratch)
     for root in roots:
         _validate_root(root)
@@ -375,59 +425,153 @@ def _runtime_access(roots: tuple[Path, Path]) -> tuple[set[Path], dict[str, str]
         "UV_CACHE_DIR": str(scratch / "uv-cache"),
         "npm_config_cache": str(scratch / "npm-cache"),
         "CARGO_HOME": str(home / ".cargo"),
+        "CARGO_NET_OFFLINE": "true",
         "RUSTUP_HOME": str(home / ".rustup"),
     }
     return reads, environment
 
 
-def _package_roots(reads: set[Path], workspace: Path) -> tuple[Path, ...]:
+def _resolve_safely(path: Path, message: str) -> Path:
+    try:
+        return path.resolve()
+    except (OSError, RuntimeError) as exc:
+        raise ToolError(message) from exc
+
+
+def _package_roots(reads: set[Path], roots: tuple[Path, Path]) -> tuple[Path, ...]:
     """Locate installed Python packages, not arbitrary project source directories."""
+    workspace, scratch = roots
+    venv = workspace / ".venv"
+    venv_is_symlink = venv.is_symlink()
+    venv_resolved = (
+        _resolve_safely(venv, "Workspace virtual environment could not be resolved safely.")
+        if venv.exists() or venv_is_symlink
+        else None
+    )
     candidates = {path for path in reads if path.name in {"site-packages", "dist-packages"}}
-    for prefix in {*reads, workspace / ".venv"}:
+    # Never treat writable workspace or scratch roots themselves as virtualenv prefixes.
+    for prefix in (*(reads - set(roots)), venv):
         if (prefix / "pyvenv.cfg").is_file():
             candidates.update((prefix / "lib").glob("python*/site-packages"))
     packages: set[Path] = set()
     for candidate in candidates:
-        resolved = candidate.resolve()
+        resolved = _resolve_safely(
+            candidate, "Python package directory could not be resolved safely."
+        )
         if resolved.name not in {"site-packages", "dist-packages"} or is_broad_root(resolved):
             raise ToolError("Python package directory resolves outside an installed package root.")
+        if resolved.is_relative_to(scratch):
+            raise ToolError("Python package directory cannot resolve inside session scratch.")
+        if resolved.is_relative_to(workspace) and (
+            venv_is_symlink or venv_resolved is None or not resolved.is_relative_to(venv_resolved)
+        ):
+            raise ToolError("Python package directory cannot resolve into the writable workspace.")
         if resolved.is_dir():
             packages.add(resolved)
     return tuple(sorted(packages))
 
 
-def _package_protections(packages: tuple[Path, ...]) -> list[str]:
+def _package_protections(packages: tuple[Path, ...], workspace: Path) -> list[str]:
     """Allow public credential-module source only in pinned, read-only packages.
 
     Explicit configured protections are applied separately and still win. All
-    package writes and ancestor moves are denied so a workspace secret cannot be
-    relocated into this read exception. Pre-existing hardlink aliases remain the
-    documented shared-workspace limitation.
+    workspace .venv writes, package writes, and ancestor moves are denied so a
+    workspace secret cannot be relocated into this read exception across calls.
+    Pre-existing hardlink aliases remain the documented shared-workspace limitation.
     """
     rules: list[str] = []
+    # Keep workspace/.venv non-writable even when absent, blocking cross-call planting
+    # of a fake pyvenv.cfg or sibling python*/site-packages directory.
+    venv_regex = "^" + _case_literal(str(workspace / ".venv")) + "(/.*)?$"
+    rules.append(f"(deny file-write* (regex {_sbpl_regex(venv_regex)}))")
     for package in packages:
-        rules.append(f"(deny file-write* (subpath {json.dumps(str(package))}))")
+        rules.append(f"(deny file-write* (subpath {_sbpl_string(str(package))}))")
         for ancestor in (package, *package.parents):
             rules.append(
                 "(deny file-write-unlink (require-all (vnode-type DIRECTORY) "
-                f"(literal {json.dumps(str(ancestor))})))"
+                f"(literal {_sbpl_string(str(ancestor))})))"
             )
-    credentials = _protected_regex("credentials").replace('"', '\\"')
-    rules.append(f'(deny file-write* (regex #"{credentials}"))')
+    credentials = _sbpl_regex(_protected_regex("credentials"))
+    rules.append(f"(deny file-write* (regex {credentials}))")
     if packages:
-        locations = " ".join(f"(subpath {json.dumps(str(path))})" for path in packages)
+        locations = " ".join(f"(subpath {_sbpl_string(str(path))})" for path in packages)
         public_source = (
             f"(require-all (require-any {locations}) "
             "(require-any (vnode-type DIRECTORY) "
             '(require-all (vnode-type REGULAR-FILE) (regex #"[.]py$"))))'
         )
         rules.append(
-            f'(deny file-read* (require-all (regex #"{credentials}") '
-            f"(require-not {public_source})))"
+            f"(deny file-read* (require-all (regex {credentials}) (require-not {public_source})))"
         )
     else:
-        rules.append(f'(deny file-read* (regex #"{credentials}"))')
+        rules.append(f"(deny file-read* (regex {credentials}))")
     return rules
+
+
+def _bind_symlink_target(
+    rules: list[str],
+    path: Path,
+    *,
+    seen: set[Path],
+    operations: str,
+) -> None:
+    """Deny a symlinked protected/control path's target and pin both names' ancestors."""
+    resolved = _resolve_safely(path, "Protected symlink target could not be resolved safely.")
+    if resolved != path and resolved not in seen:
+        seen.add(resolved)
+        rules.append(f"(deny {operations} (subpath {_sbpl_string(str(resolved))}))")
+    for protected in (path, resolved):
+        for ancestor in protected.parents:
+            rules.append(
+                "(deny file-write-unlink (require-all (vnode-type DIRECTORY) "
+                f"(literal {_sbpl_string(str(ancestor))})))"
+            )
+
+
+def _bind_workspace_symlinks(
+    rules: list[str],
+    workspace: Path,
+    *,
+    protected_patterns: tuple[str, ...],
+    seen_protected: set[Path],
+    seen_control: set[Path],
+) -> None:
+    """Bind nested protected and control symlinks without following directory links."""
+    scanned = 0
+    stack = [str(workspace)]
+    try:
+        while stack:
+            current = stack.pop()
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    scanned += 1
+                    if scanned > _MAX_SYMLINK_SCAN_ENTRIES:
+                        raise ToolError(
+                            "Workspace exceeds sandbox symlink inspection limit; approve manually."
+                        )
+                    if entry.is_symlink():
+                        symlink = Path(entry.path)
+                        if matches_protected_pattern(symlink, protected_patterns):
+                            _bind_symlink_target(
+                                rules,
+                                symlink,
+                                seen=seen_protected,
+                                operations="file-read* file-write*",
+                            )
+                        elif matches_protected_pattern(symlink, _CONTROL_NAMES):
+                            _bind_symlink_target(
+                                rules,
+                                symlink,
+                                seen=seen_control,
+                                operations="file-write*",
+                            )
+                    elif (
+                        entry.is_dir(follow_symlinks=False)
+                        and entry.name not in _SKIP_SYMLINK_SCAN_DIRS
+                    ):
+                        stack.append(entry.path)
+    except OSError as exc:
+        raise ToolError("Sandbox could not inspect workspace entries.") from exc
 
 
 def _filesystem_profile(
@@ -435,82 +579,89 @@ def _filesystem_profile(
 ) -> str:
     """Compile read/write grants with final path and ancestor protections."""
     workspace, scratch = roots
-    packages = _package_roots(reads, workspace)
+    packages = _package_roots(reads, roots)
     rules = [_BASE]
     for root in sorted(reads):
         resolved_root = root.resolve()
         if is_broad_root(resolved_root):
             raise ToolError("A sandbox read root resolves to a broad directory.")
-        rules.append(f"(allow file-read* (subpath {json.dumps(str(resolved_root))}))")
+        rules.append(f"(allow file-read* (subpath {_sbpl_string(str(resolved_root))}))")
     for root in roots:
-        quoted = json.dumps(str(root))
+        quoted = _sbpl_string(str(root))
         rules.append(f"(allow file-write* (subpath {quoted}))")
         for ancestor in (root, *root.parents):
             rules.append(
                 "(deny file-write-unlink (require-all (vnode-type DIRECTORY) "
-                f"(literal {json.dumps(str(ancestor))})))"
+                f"(literal {_sbpl_string(str(ancestor))})))"
             )
     for name in _CONTROL_NAMES:
-        regex = _protected_regex(name).replace('"', '\\"')
+        regex = _sbpl_regex(_protected_regex(name))
         if name == ".git":
             # UV initializes this regular-file cache sentinel even with --no-sync.
             # UV numbers the bucket and renumbers it between releases. Only that
             # private-cache file is exempt, never a Git directory.
-            marker = "^" + re.escape(str(scratch / "uv-cache")) + r"/sdists-v[0-9]+/\.git$"
-            marker = marker.replace('"', '\\"')
-            exception = f'(require-all (regex #"{marker}") (vnode-type REGULAR-FILE))'
+            marker = _sbpl_regex(
+                "^" + re.escape(str(scratch / "uv-cache")) + r"/sdists-v[0-9]+/\.git$"
+            )
+            exception = f"(require-all (regex {marker}) (vnode-type REGULAR-FILE))"
             rules.append(
-                f'(deny file-write* (require-all (regex #"{regex}") (require-not {exception})))'
+                f"(deny file-write* (require-all (regex {regex}) (require-not {exception})))"
             )
             # A rename checks only the moved directory's own path, so a movable
             # cache or bucket would carry the exempt marker into the workspace.
-            pinned = (
+            pinned = _sbpl_regex(
                 "^"
                 + _case_literal(str(scratch / "uv-cache"))
                 + "(/"
                 + _case_literal("sdists-v")
                 + "[0-9]+)?$"
-            ).replace('"', '\\"')
+            )
             rules.append(
-                f'(deny file-write-unlink (require-all (vnode-type DIRECTORY) (regex #"{pinned}")))'
+                f"(deny file-write-unlink (require-all (vnode-type DIRECTORY) (regex {pinned})))"
             )
         else:
-            rules.append(f'(deny file-write* (regex #"{regex}"))')
+            rules.append(f"(deny file-write* (regex {regex}))")
     # Seatbelt evaluates ordered rules: restrictions must follow workspace grants.
-    rules.extend(_package_protections(packages))
+    rules.extend(_package_protections(packages, workspace))
     # Scratch lives under ~/.wisp, but .wisp descendants of either writable root
     # are configuration, not scratch. Protect every nested project directory too.
     for root in roots:
-        regex = "^" + _case_literal(str(root)) + "(/.*)?/" + _case_literal(".wisp") + "(/.*)?$"
-        regex = regex.replace('"', '\\"')
-        rules.append(f'(deny file-read* file-write* (regex #"{regex}"))')
+        regex = _sbpl_regex(
+            "^" + _case_literal(str(root)) + "(/.*)?/" + _case_literal(".wisp") + "(/.*)?$"
+        )
+        rules.append(f"(deny file-read* file-write* (regex {regex}))")
     patterns = (*protected_paths, ".env*", *_PRIVATE_NAMES, str(workspace / ".wisp"))
+    expanded_patterns: list[str] = []
+    bound_targets: set[Path] = set()
     for pattern in patterns:
-        # SBPL's #"..." is a raw regex literal, unlike its ordinary path strings.
-        regex = _protected_regex(pattern).replace('"', '\\"')
-        rules.append(f'(deny file-read* file-write* (regex #"{regex}"))')
+        raw_regex = _protected_regex(pattern)
+        rules.append(f"(deny file-read* file-write* (regex {_sbpl_regex(raw_regex)}))")
         expanded = _protected_pattern(pattern)
-        if "/" in expanded and "*" not in expanded and "?" not in expanded:
-            # Also protect ancestors of suffix matches in nested directories and
-            # scratch. Otherwise moving `sub/private` would expose its secret.
-            for ancestor in Path(expanded).parents:
-                if ancestor in (Path("."), Path("/")):
-                    continue
-                ancestor_regex = _protected_regex(str(ancestor), subtree=False).replace('"', '\\"')
-                rules.append(
-                    "(deny file-write-unlink (require-all (vnode-type DIRECTORY) "
-                    f'(regex #"{ancestor_regex}")))'
-                )
-            path = Path(expanded).expanduser()
-            path = path if path.is_absolute() else workspace / path
-            # Bind both names when an explicit protected path currently follows a symlink.
-            resolved = path.resolve()
-            if resolved != path:
-                rules.append(f"(deny file-read* file-write* (subpath {json.dumps(str(resolved))}))")
-            for protected in (path, resolved):
-                for ancestor in protected.parents:
+        expanded_patterns.append(expanded)
+        if "*" not in expanded and "?" not in expanded:
+            if "/" in expanded:
+                # Also protect ancestors of suffix matches in nested directories and
+                # scratch. Otherwise moving `sub/private` would expose its secret.
+                for ancestor in Path(expanded).parents:
+                    if ancestor in (Path("."), Path("/")):
+                        continue
+                    ancestor_regex = _sbpl_regex(_protected_regex(str(ancestor), subtree=False))
                     rules.append(
                         "(deny file-write-unlink (require-all (vnode-type DIRECTORY) "
-                        f"(literal {json.dumps(str(ancestor))})))"
+                        f"(regex {ancestor_regex})))"
                     )
+            path = Path(expanded).expanduser()
+            path = path if path.is_absolute() else workspace / path
+            if "/" in expanded or path.is_symlink():
+                # Bind both names when an explicit protected path follows a symlink.
+                _bind_symlink_target(
+                    rules, path, seen=bound_targets, operations="file-read* file-write*"
+                )
+    _bind_workspace_symlinks(
+        rules,
+        workspace,
+        protected_patterns=tuple(dict.fromkeys((*patterns, *expanded_patterns, "credentials"))),
+        seen_protected=bound_targets,
+        seen_control=set(),
+    )
     return "\n".join(rules) + "\n"
