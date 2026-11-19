@@ -118,3 +118,72 @@ def test_fuzz_warms_main_cache() -> None:
         step.get("uses") == "Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0"
         for step in steps
     )
+
+
+def test_python_matrices_cover_every_shard() -> None:
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/ci.yml").read_text())
+    for job_name, expected_serial_shards in (("python-tests", 3), ("python-tests-oldest", 2)):
+        job = workflow["jobs"][job_name]
+        entries = {entry["suite"]: entry["args"] for entry in job["strategy"]["matrix"]["include"]}
+
+        for idx in (1, 2):
+            args = entries[f"parallel-{idx}"]
+            assert "-m 'not (slow or process or benchmark)'" in args
+            assert "-n auto" in args
+            assert f"--shard {idx}/2" in args
+
+        for idx in range(1, expected_serial_shards + 1):
+            args = entries[f"serial-{idx}"]
+            assert "-m 'slow or process or benchmark'" in args
+            assert "-k 'not test_every_module_imports_fresh'" in args
+            assert f"--shard {idx}/{expected_serial_shards}" in args
+
+        fresh = entries["fresh-imports"]
+        assert "tests/repository/test_architecture.py" in fresh
+        assert "test_every_module_imports_fresh" in fresh
+
+        test_step = next(step for step in job["steps"] if step.get("name") == "Test")
+        assert "uv run pytest ${{ matrix.args }}" in test_step["run"]
+
+
+def test_handoff_runs_tui_benchmarks() -> None:
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/ci.yml").read_text())
+    steps = workflow["jobs"]["tui-handoff"]["steps"]
+    e2e_step = next(step for step in steps if step.get("name") == "Test Python/Rust TUI handoff")
+    bench_step = next(step for step in steps if step.get("name") == "Test TUI benchmark harnesses")
+    assert "tests/tui_e2e" in e2e_step["run"]
+    assert "tests/benchmarks/test_tui_*.py" in bench_step["run"]
+
+
+def test_macos_smoke_covers_platform_paths() -> None:
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/ci.yml").read_text())
+    steps = workflow["jobs"]["macos-smoke"]["steps"]
+    parallel = next(
+        step for step in steps if step.get("name") == "Test platform-sensitive paths (parallel)"
+    )
+    serial = next(
+        step for step in steps if step.get("name") == "Test timing-sensitive macOS paths (serial)"
+    )
+
+    for path in (
+        "tests/auth/test_storage.py",
+        "tests/cli/test_rpc_transport.py",
+        "tests/tools/files/test_secure_fs.py",
+        "tests/tools/test_seatbelt.py",
+        "tests/tools/test_shell_auto_workflows.py",
+        "tests/tools/shell/test_working_directory.py",
+        "tests/coding/test_sandbox_process_approvals.py",
+        "tests/sessions",
+    ):
+        assert path in parallel["run"]
+    assert "-m 'not benchmark'" in parallel["run"]
+    assert "-n 2" in parallel["run"]
+
+    serial_commands = serial["run"].replace("\\\n", " ").splitlines()
+    supervisor_cmd = next(
+        cmd for cmd in serial_commands if "tests/tools/shell/test_supervisor*.py" in cmd
+    )
+    benchmark_cmd = next(cmd for cmd in serial_commands if "tests/sessions" in cmd)
+    assert "tests/mcp/test_runtime_process.py" in supervisor_cmd
+    assert "-m benchmark" not in supervisor_cmd
+    assert "tests/sessions -m benchmark" in benchmark_cmd

@@ -11,21 +11,25 @@ from pathlib import Path
 from typing import Any
 
 GROUP_JOBS = {
-    "python": ("quality", "python-tests", "python-tests-oldest", "macos-smoke"),
+    "quality": ("quality",),
+    "python": ("python-tests", "macos-smoke"),
+    "python_oldest": ("python-tests-oldest",),
     "rust": ("rust-workspace",),
     "handoff": ("tui-handoff",),
     "package": ("package",),
     "contracts": ("contracts",),
 }
-FULL = frozenset({"python", "rust", "handoff", "package"})
-PYTHON = frozenset({"python", "package"})
+PYTHON_PR = frozenset({"quality", "python", "package"})
+FULL_PR = frozenset({"quality", "python", "rust", "handoff", "package"})
+FULL = FULL_PR | {"python_oldest"}
 
 
-def select_groups(paths: list[str]) -> set[str]:
+def select_groups(paths: list[str], *, event_name: str = "push") -> set[str]:
     """Select checks for changed paths; unknown or empty input keeps full coverage.
 
     Args:
         paths (list[str]): Both old and new paths for renames, including deletions.
+        event_name (str): GitHub event name; routine PRs defer ``python_oldest`` to ``main``.
 
     Returns:
         set[str]: Groups to run. Full Python tests already include the contracts.
@@ -37,15 +41,17 @@ def select_groups(paths: list[str]) -> set[str]:
         if path.startswith(
             ("schemas/", "tests/fixtures/", "tests/support/", "src/wisp/events/", "src/wisp/rpc/")
         ):
-            selected.update(FULL)
+            selected.update(FULL_PR)
         elif path.startswith("rust/wisp-tui/src/") and path.endswith(".rs"):
             selected.update({"rust", "handoff", "contracts"})
+        elif path.startswith("tests/tui_e2e/") or (
+            path.startswith("tests/benchmarks/test_tui_") and path.endswith(".py")
+        ):
+            selected.update({"quality", "handoff", "contracts"})
         elif path.startswith("src/wisp/"):
-            selected.update(PYTHON | {"handoff"})
-        elif path.startswith(("tests/tui_e2e/", "tests/benchmarks/")):
-            selected.update(PYTHON | {"handoff"})
+            selected.update(PYTHON_PR | {"handoff"})
         elif path.startswith(("tests/", "examples/")) and path != "tests/conftest.py":
-            selected.update(PYTHON)
+            selected.update(PYTHON_PR)
         elif path == "README.md":
             # The README is also distribution metadata.
             selected.update({"contracts", "package"})
@@ -62,6 +68,8 @@ def select_groups(paths: list[str]) -> set[str]:
             selected.update(FULL)
     if not paths:
         selected.update(FULL)
+    if event_name != "pull_request" and "python" in selected:
+        selected.add("python_oldest")
     if "python" in selected:
         selected.discard("contracts")
     return selected
@@ -139,8 +147,9 @@ def main() -> int:
         return int(bool(errors))
     if sys.argv[1:] != ["select"]:
         raise SystemExit("usage: ci_jobs.py select|verify")
+    event_name = os.environ["GITHUB_EVENT_NAME"]
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
-    selected = select_groups(changed_paths(os.environ["GITHUB_EVENT_NAME"], event))
+    selected = select_groups(changed_paths(event_name, event), event_name=event_name)
     output = "".join(f"{group}={str(group in selected).lower()}\n" for group in GROUP_JOBS)
     print(output, end="")
     with Path(os.environ["GITHUB_OUTPUT"]).open("a") as destination:

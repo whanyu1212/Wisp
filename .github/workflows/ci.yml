@@ -29,7 +29,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
+      quality: ${{ steps.select.outputs.quality }}
       python: ${{ steps.select.outputs.python }}
+      python_oldest: ${{ steps.select.outputs.python_oldest }}
       rust: ${{ steps.select.outputs.rust }}
       handoff: ${{ steps.select.outputs.handoff }}
       package: ${{ steps.select.outputs.package }}
@@ -46,7 +48,7 @@ jobs:
 
   quality:
     needs: changes
-    if: needs.changes.outputs.python == 'true'
+    if: needs.changes.outputs.quality == 'true'
     name: Format, lint, and type-check
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -216,13 +218,13 @@ jobs:
           --junitxml=test-results/rust-smoke/e2e.xml
 
       - name: Test TUI benchmark harnesses
-        # The benchmark harnesses' PTY runs (skipped without the binary) keep
-        # working against the current CLI. They measure timing, so they run on
-        # one worker.
+        # The TUI benchmark harnesses' PTY runs (skipped without the binary) keep
+        # working against the current CLI. Non-TUI benchmarks do not use the binary
+        # and already run in python-tests.
         env:
           RUST_TUI_BINARY_UNDER_TEST: ${{ github.workspace }}/target/debug/wisp-tui
         run: >-
-          uv run pytest tests/benchmarks --durations=20
+          uv run pytest tests/benchmarks/test_tui_*.py --durations=20
           --timeout=90 --timeout-method=signal
           --junitxml=test-results/rust-smoke/benchmarks.xml
 
@@ -289,12 +291,21 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - suite: parallel
-            args: -m 'not (slow or process or benchmark)' -n auto
+          - suite: parallel-1
+            args: tests -m 'not (slow or process or benchmark)' -n auto --shard 1/2
+          - suite: parallel-2
+            args: tests -m 'not (slow or process or benchmark)' -n auto --shard 2/2
           # Process, slow, and benchmark tests assert timing and resource
           # bounds that flake when they compete with parallel workers.
-          - suite: serial
-            args: -m 'slow or process or benchmark'
+          - suite: serial-1
+            args: tests -m 'slow or process or benchmark' -k 'not test_every_module_imports_fresh' --shard 1/3
+          - suite: serial-2
+            args: tests -m 'slow or process or benchmark' -k 'not test_every_module_imports_fresh' --shard 2/3
+          - suite: serial-3
+            args: tests -m 'slow or process or benchmark' -k 'not test_every_module_imports_fresh' --shard 3/3
+          # Spawns a fresh Python process per module (~38s on its own).
+          - suite: fresh-imports
+            args: tests/repository/test_architecture.py -k 'test_every_module_imports_fresh'
 
     steps:
       - name: Check out repository
@@ -315,7 +326,7 @@ jobs:
 
       - name: Test
         run: >-
-          uv run pytest tests ${{ matrix.args }}
+          uv run pytest ${{ matrix.args }}
           --durations=20
           --junitxml=test-results/${{ matrix.suite }}/junit.xml
 
@@ -328,11 +339,12 @@ jobs:
           path: test-results/${{ matrix.suite }}/
           if-no-files-found: error
 
-  # The development Python is pinned in .python-version; this job runs both suites on the
-  # oldest supported Python (requires-python in pyproject.toml), on Linux.
+  # The development Python is pinned in .python-version; this job runs on the oldest
+  # supported Python (requires-python in pyproject.toml) on main, manual runs, and
+  # pull requests touching dependency, Python, or CI configuration.
   python-tests-oldest:
     needs: changes
-    if: needs.changes.outputs.python == 'true'
+    if: needs.changes.outputs.python_oldest == 'true'
     name: Python tests on 3.11 (${{ matrix.suite }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -340,10 +352,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - suite: parallel
-            args: -m 'not (slow or process or benchmark)' -n auto
-          - suite: serial
-            args: -m 'slow or process or benchmark'
+          - suite: parallel-1
+            args: tests -m 'not (slow or process or benchmark)' -n auto --shard 1/2
+          - suite: parallel-2
+            args: tests -m 'not (slow or process or benchmark)' -n auto --shard 2/2
+          - suite: serial-1
+            args: tests -m 'slow or process or benchmark' -k 'not test_every_module_imports_fresh' --shard 1/2
+          - suite: serial-2
+            args: tests -m 'slow or process or benchmark' -k 'not test_every_module_imports_fresh' --shard 2/2
+          - suite: fresh-imports
+            args: tests/repository/test_architecture.py -k 'test_every_module_imports_fresh'
     env:
       UV_PYTHON: "3.11"
 
@@ -366,7 +384,7 @@ jobs:
 
       - name: Test
         run: >-
-          uv run pytest tests ${{ matrix.args }}
+          uv run pytest ${{ matrix.args }}
           --durations=20
           --junitxml=test-results/oldest-${{ matrix.suite }}/junit.xml
 
@@ -403,12 +421,10 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked
 
-      - name: Test platform-sensitive paths
+      - name: Test platform-sensitive paths (parallel)
         run: >-
           uv run pytest
           tests/auth/test_storage.py
-          tests/mcp/test_runtime_process.py
-          tests/tools/shell/test_supervisor*.py
           tests/cli/test_rpc_transport.py
           tests/tools/files/test_secure_fs.py
           tests/tools/test_seatbelt.py
@@ -416,8 +432,22 @@ jobs:
           tests/tools/shell/test_working_directory.py
           tests/coding/test_sandbox_process_approvals.py
           tests/sessions
+          -m 'not benchmark'
+          -n 2
           --durations=20
-          --junitxml=test-results/macos-smoke/junit.xml
+          --junitxml=test-results/macos-smoke/parallel.xml
+
+      - name: Test timing-sensitive macOS paths (serial)
+        run: |
+          uv run pytest \
+            tests/mcp/test_runtime_process.py \
+            tests/tools/shell/test_supervisor*.py \
+            --durations=20 \
+            --junitxml=test-results/macos-smoke/serial.xml
+          uv run pytest \
+            tests/sessions -m benchmark \
+            --durations=20 \
+            --junitxml=test-results/macos-smoke/benchmarks.xml
 
       - name: Upload platform test results
         if: always()

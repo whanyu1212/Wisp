@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.ci_jobs import FULL, GROUP_JOBS, changed_paths, select_groups, verify_results
+from scripts.ci_jobs import FULL, FULL_PR, GROUP_JOBS, changed_paths, select_groups, verify_results
 
 
 class CheckSelectionTests(unittest.TestCase):
@@ -19,21 +19,42 @@ class CheckSelectionTests(unittest.TestCase):
             "assets/banner.png",
         ):
             with self.subTest(path=path):
-                self.assertEqual(select_groups([path]), {"contracts"})
-        self.assertEqual(select_groups(["README.md"]), {"contracts", "package"})
+                self.assertEqual(select_groups([path], event_name="pull_request"), {"contracts"})
+                self.assertEqual(select_groups([path], event_name="push"), {"contracts"})
+        self.assertEqual(
+            select_groups(["README.md"], event_name="pull_request"), {"contracts", "package"}
+        )
 
     def test_tui_source_keeps_rust_handoff_and_repository_contracts(self) -> None:
         self.assertEqual(
-            select_groups(["rust/wisp-tui/src/ui.rs", "site/src/content/pages/guide/tui.md"]),
+            select_groups(
+                ["rust/wisp-tui/src/ui.rs", "site/src/content/pages/guide/tui.md"],
+                event_name="pull_request",
+            ),
             {"rust", "handoff", "contracts"},
         )
 
     def test_python_runtime_keeps_both_platforms_and_handoff(self) -> None:
         self.assertEqual(
-            select_groups(["src/wisp/agent/loop/runner.py"]), {"python", "package", "handoff"}
+            select_groups(["src/wisp/agent/loop/runner.py"], event_name="pull_request"),
+            {"quality", "python", "package", "handoff"},
+        )
+        self.assertEqual(
+            select_groups(["src/wisp/agent/loop/runner.py"], event_name="push"),
+            {"quality", "python", "python_oldest", "package", "handoff"},
         )
 
     def test_shared_and_unknown_inputs_keep_all_checks(self) -> None:
+        for path in (
+            "tests/support/tui.py",
+            "tests/fixtures/rust_tui_context.json",
+            "schemas/live-rpc/events.schema.json",
+            "src/wisp/events/run.py",
+            "src/wisp/rpc/commands.py",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(select_groups([path], event_name="pull_request"), FULL_PR)
+                self.assertEqual(select_groups([path], event_name="push"), FULL)
         for path in (
             "pyproject.toml",
             "uv.lock",
@@ -43,28 +64,50 @@ class CheckSelectionTests(unittest.TestCase):
             "rust-toolchain.toml",
             ".cargo/config.toml",
             "tests/conftest.py",
-            "tests/support/tui.py",
-            "tests/fixtures/rust_tui_context.json",
-            "schemas/live-rpc/events.schema.json",
-            "src/wisp/events/run.py",
-            "src/wisp/rpc/commands.py",
             "rust/wisp-python/src/lib.rs",
             "scripts/ci_jobs.py",
             ".github/workflows/ci.yml",
             "new-area/file.txt",
         ):
             with self.subTest(path=path):
-                self.assertEqual(select_groups([path]), FULL)
-        self.assertEqual(select_groups([]), FULL)
+                self.assertEqual(select_groups([path], event_name="pull_request"), FULL)
+                self.assertEqual(select_groups([path], event_name="push"), FULL)
+        self.assertEqual(select_groups([], event_name="pull_request"), FULL)
+        self.assertEqual(select_groups([], event_name="push"), FULL)
 
     def test_mixed_change_unions_checks_without_duplicate_contracts(self) -> None:
         self.assertEqual(
-            select_groups(["rust/wisp-tui/src/ui.rs", "src/wisp/config/runtime.py"]), FULL
+            select_groups(
+                ["rust/wisp-tui/src/ui.rs", "src/wisp/config/runtime.py"],
+                event_name="pull_request",
+            ),
+            FULL_PR,
+        )
+        self.assertEqual(
+            select_groups(
+                ["rust/wisp-tui/src/ui.rs", "src/wisp/config/runtime.py"],
+                event_name="push",
+            ),
+            FULL,
         )
 
     def test_handoff_and_benchmark_test_changes_run_with_binary(self) -> None:
         for path in ("tests/tui_e2e/test_input.py", "tests/benchmarks/test_tui_hydration.py"):
-            self.assertIn("handoff", select_groups([path]))
+            with self.subTest(path=path):
+                expected = {"quality", "handoff", "contracts"}
+                self.assertEqual(select_groups([path], event_name="pull_request"), expected)
+                self.assertEqual(select_groups([path], event_name="push"), expected)
+        self.assertEqual(
+            select_groups(["tests/benchmarks/test_session_loading.py"], event_name="pull_request"),
+            {"quality", "python", "package"},
+        )
+        self.assertEqual(
+            select_groups(
+                ["rust/wisp-tui/src/ui.rs", "tests/tui_e2e/test_input.py"],
+                event_name="pull_request",
+            ),
+            {"quality", "rust", "handoff", "contracts"},
+        )
 
     def test_git_diff_keeps_deleted_and_renamed_paths_and_uses_merge_base(self) -> None:
         # No GitHub API pagination/300-file limit; filenames are NUL-separated.
