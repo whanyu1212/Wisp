@@ -10,7 +10,34 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.14.0 — Unreleased
+## 0.14.1 — Unreleased
+
+0.14.1 is a patch release on 0.14.0 that adds Gemini 4 Neon to the model catalog and makes two
+terminal UI changes: background processes are shown in fewer places, and footer notices expire.
+It changes no command, event, handshake, session, settings, credential, or trust format, so 0.14.0
+and 0.14.1 read each other's sessions. The backend and frontend must come from the same release.
+
+### Models
+
+- Gemini 4 Neon (`gemini-4-neon`) is in the model catalog, with its thinking levels, default
+  thinking level, context window and prices, so `/model` offers it and its cost is counted. The
+  entry comes from Google's documentation; it was not checked with a live request. (#1079)
+
+### Terminal UI
+
+- The TUI shows each background process in fewer places: the status line no longer names one,
+  the strip under the composer hides beside a docked side panel, the docked panel lists only
+  processes that are running or went wrong, and adjacent clean exits fold into one
+  `Background N commands · passed` transcript row. A process row with no label takes the
+  command from its exit event. (#1078)
+- TUI footer notices dismiss themselves after 8 seconds, or after one full scroll when too long
+  for their row, instead of staying until the next edit or prompt. The notice that earlier
+  history loads when a reply finishes stays until that wait ends. (#1080)
+
+<!-- Keeps links to the pre-release "0.14.0 — Unreleased" heading working. -->
+<a id="0140--unreleased"></a>
+
+## 0.14.0 — 2026-11-19
 
 0.14.0 graduates opt-in automatic approval modes (`Auto edits` on macOS/Linux and macOS Seatbelt
 `Auto commands`), adds GPT-6.2 Astra and Sol models, explains tool failures and grouped outcomes,
@@ -46,22 +73,11 @@ use the same release.
 
 - Added GPT-6.2 Astra and Sol for OpenAI API and Codex, including API input ceiling enforcement
   while preserving full context windows. (#1067)
-- Gemini 4 Neon (`gemini-4-neon`) is in the model catalog, with its thinking levels, default
-  thinking level, context window and prices, so `/model` offers it and its cost is counted. The
-  entry comes from Google's documentation; it was not checked with a live request. (#1079)
 - Tool cards and print mode explain failed attempts from typed failure metadata and report
   grouped outcomes accurately, including mixed exploration/MCP results and script child status.
   (#1066)
 - Finished TUI selection bands and readable ANSI diffs, shared model and session picker dialog
   frames, and fixed a docs-search close/reopen race. (#1064, #1065, #1072)
-- The TUI shows each background process in fewer places: the status line no longer names one,
-  the strip under the composer hides beside a docked side panel, the docked panel lists only
-  processes that are running or went wrong, and adjacent clean exits fold into one
-  `Background N commands · passed` transcript row. A process row with no label takes the
-  command from its exit event. (#1078)
-- TUI footer notices dismiss themselves after 8 seconds, or after one full scroll when too long
-  for their row, instead of staying until the next edit or prompt. The notice that earlier
-  history loads when a reply finishes stays until that wait ends. (#1080)
 
 ### Compatibility
 
