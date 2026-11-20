@@ -28,7 +28,7 @@ _PAGE = b"""<!doctype html>
   }
   @keyframes pulse { 50% { background: #002fee } }
 </style>
-<input aria-label="Type here">
+<form><input aria-label="Type here"></form>
 <script>
   const field = document.querySelector('input');
   field.addEventListener('click', ev => {
@@ -42,6 +42,10 @@ _PAGE = b"""<!doctype html>
       field.style.background = '#11ee22';
       fetch('/typed');
     }
+  });
+  field.form.addEventListener('submit', ev => {
+    ev.preventDefault();
+    if (ev.isTrusted) fetch('/submitted');
   });
 </script>
 """
@@ -58,6 +62,7 @@ def test_live_browser_renders_and_types(tmp_path: Path, monkeypatch: pytest.Monk
     monkeypatch.delenv("NO_COLOR", raising=False)
     clicked = threading.Event()
     typed = threading.Event()
+    submitted = threading.Event()
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
@@ -73,6 +78,8 @@ def test_live_browser_renders_and_types(tmp_path: Path, monkeypatch: pytest.Monk
                 clicked.set()
             elif self.path == "/typed":
                 typed.set()
+            elif self.path == "/submitted":
+                submitted.set()
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
             self.send_header("Content-Length", str(len(body)))
@@ -138,6 +145,12 @@ def test_live_browser_renders_and_types(tmp_path: Path, monkeypatch: pytest.Monk
                     failure="Typed state did not repaint in Kitty output",
                 )
                 print(f"Typed input and repaint observed after {time.monotonic() - typed_at:.2f}s")
+                tui.send(b"\r")
+                tui.wait_until(
+                    lambda _: submitted.is_set(),
+                    timeout=5,
+                    failure="Enter did not submit Chromium's form",
+                )
                 assert not list((tmp_path / "sessions" / "images").glob("*"))
                 assert list(tmp_path.glob("wisp-browser-*"))
                 tui.send(b"\x03/browser\r")

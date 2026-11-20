@@ -20,8 +20,7 @@ from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import WebSocketException
 
 from wisp.coding.browser_control import BrowserControlError, BrowserInteraction
-from wisp.events import BrowserViewportUpdated
-from wisp.events.rpc import MAX_BROWSER_URL_CHARS, MAX_LIVE_BROWSER_FRAME_CHARS
+from wisp.events import MAX_BROWSER_URL_CHARS, MAX_LIVE_BROWSER_FRAME_CHARS, BrowserViewportUpdated
 
 _WIDTH = 900
 _HEIGHT = 600
@@ -360,17 +359,20 @@ class LiveBrowser:
                 await self._command("Input.insertText", {"text": request.text})
             case "press_key":
                 key = request.key or ""
+                modifiers = request.modifiers or ()
                 code = _KEY_CODES.get(
                     key, ord(key.upper()) if len(key) == 1 and key.isascii() else 0
                 )
                 params = {
                     "key": key,
                     "windowsVirtualKeyCode": code,
-                    "modifiers": sum(
-                        _MODIFIER_MASK[modifier] for modifier in request.modifiers or ()
-                    ),
+                    "modifiers": sum(_MODIFIER_MASK[modifier] for modifier in modifiers),
                 }
-                await self._command("Input.dispatchKeyEvent", {"type": "rawKeyDown", **params})
+                keydown = {"type": "rawKeyDown"}
+                if key == "Enter" and modifiers in ((), ("Shift",)):
+                    # Chromium needs the text-producing event for newline and form submission.
+                    keydown = {"type": "keyDown", "text": "\r", "unmodifiedText": "\r"}
+                await self._command("Input.dispatchKeyEvent", {**keydown, **params})
                 await self._command("Input.dispatchKeyEvent", {"type": "keyUp", **params})
             case "reload":
                 await self._command("Page.reload", {})
