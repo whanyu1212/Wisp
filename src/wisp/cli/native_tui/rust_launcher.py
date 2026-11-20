@@ -359,19 +359,21 @@ def _wait_for_process_group(
     pgid: int,
     timeout: float,
     *,
-    clock: Callable[[], float] = time.monotonic,
-    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] | None = None,
+    sleep: Callable[[float], None] | None = None,
 ) -> bool:
-    deadline = clock() + timeout
+    active_clock = time.monotonic if clock is None else clock
+    active_sleep = time.sleep if sleep is None else sleep
+    deadline = active_clock() + timeout
     while True:
         if process is not None:
             process.poll()
         if not _process_group_exists(pgid):
             return True
-        remaining = deadline - clock()
+        remaining = deadline - active_clock()
         if remaining <= 0:
             return False
-        sleep(min(_POLL_SECONDS, remaining))
+        active_sleep(min(_POLL_SECONDS, remaining))
 
 
 def _process_group_exists(pgid: int) -> bool:
@@ -387,5 +389,8 @@ def _process_group_exists(pgid: int) -> bool:
 def _signal_process_group(pgid: int, signum: int) -> None:
     try:
         os.killpg(pgid, signum)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
+        # On macOS (XNU killpg1), signaling a process group whose members exited
+        # and are awaiting waitpid returns EPERM (PermissionError) rather than
+        # ESRCH. Live groups that keep rejecting signals still fail wait/escalation.
         pass
