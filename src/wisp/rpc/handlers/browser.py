@@ -17,7 +17,9 @@ from wisp.coding.browser_control import (
     BrowserInteraction,
     McpBrowserController,
 )
+from wisp.coding.browser_live import LiveBrowser
 from wisp.coding.session import CodingSession
+from wisp.events import BrowserViewportUpdated
 from wisp.rpc.commands import BrowserInteractCommand
 from wisp.rpc.coordinator import (
     _RpcCommandCompleted,
@@ -54,6 +56,7 @@ def start_rpc_browser_interact_command(
     running_command_factory: RunningCommandFactory = _RpcRunningCommand,
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
     controller: BrowserController | None = None,
+    live_browser: LiveBrowser | None = None,
 ) -> _RpcRunningCommand:
     """Start one user-initiated browser takeover interaction sequentially on ``task_group``."""
 
@@ -76,6 +79,7 @@ def start_rpc_browser_interact_command(
         send.clone(),
         command_completed_factory,
         controller or McpBrowserController(),
+        live_browser,
     )
     return running_command_factory(
         command_id=command_id,
@@ -98,8 +102,12 @@ def _session_image_store(
 
 
 def _to_browser_interaction(command: BrowserInteractCommand) -> BrowserInteraction:
+    action = command.action
+    match action:
+        case "live_open" | "live_frame" | "live_close":
+            raise AssertionError("Live browser lifecycle action is not an interaction")
     return BrowserInteraction(
-        action=command.action,
+        action=action,
         interaction_id=command.id,
         x=command.x,
         y=command.y,
@@ -125,30 +133,34 @@ async def _run_browser_interact(
     send: MemoryObjectSendStream[_RpcControlEvent],
     command_completed_factory: CommandCompletedFactory,
     controller: BrowserController,
+    live_browser: LiveBrowser | None,
 ) -> None:
     error: str | None = None
     entry_count = session_state.entry_count
     try:
         with cancel_scope:
-            if mcp_servers is not None:
-                await mcp_servers.wait_for_startup()
-            tools = agent.tool_registry.all() if agent.tool_registry is not None else ()
-            result = await controller.execute(
-                _to_browser_interaction(command),
-                tools=tools,
-                context=agent.tool_context,
-                policy=agent.tool_policy,
-                image_store=_session_image_store(session_state, sessions),
-                tracker=agent.browser_handoff,
-                connected=runtime.mcp_server_connected,
-            )
-            if result.viewport_event is not None:
-                lifecycle.write_event(result.viewport_event)
-            agent.browser_handoff.record_user_action(
-                command.action,
-                server_name=result.server_name,
-                metadata=result.metadata,
-            )
+            if command.live or command.action in {"live_open", "live_frame", "live_close"}:
+                await _run_live_browser_command(command, agent, lifecycle, live_browser)
+            else:
+                if mcp_servers is not None:
+                    await mcp_servers.wait_for_startup()
+                tools = agent.tool_registry.all() if agent.tool_registry is not None else ()
+                result = await controller.execute(
+                    _to_browser_interaction(command),
+                    tools=tools,
+                    context=agent.tool_context,
+                    policy=agent.tool_policy,
+                    image_store=_session_image_store(session_state, sessions),
+                    tracker=agent.browser_handoff,
+                    connected=runtime.mcp_server_connected,
+                )
+                if result.viewport_event is not None:
+                    lifecycle.write_event(result.viewport_event)
+                agent.browser_handoff.record_user_action(
+                    command.action,
+                    server_name=result.server_name,
+                    metadata=result.metadata,
+                )
         if cancel_scope.cancelled_caught and error is None:
             error = f"RPC command cancelled: {lifecycle.command_id}"
     except BrowserControlError as exc:
@@ -173,3 +185,29 @@ async def _run_browser_interact(
                         entry_count=entry_count,
                     )
                 )
+
+
+async def _run_live_browser_command(
+    command: BrowserInteractCommand,
+    agent: CodingSession,
+    lifecycle: RpcCommandLifecycle,
+    browser: LiveBrowser | None,
+) -> None:
+    if browser is None:
+        raise BrowserControlError("This RPC host does not support the live browser")
+    if command.action == "live_close":
+        await browser.close()
+        return
+    if not agent.trusted:
+        raise BrowserControlError("The live browser requires a trusted project")
+    frame: BrowserViewportUpdated | None
+    if command.action == "live_open":
+        assert command.url is not None
+        frame = await browser.open(command.url)
+    elif command.action in {"live_frame", "refresh"}:
+        frame = browser.take_frame()
+    else:
+        await browser.interact(_to_browser_interaction(command))
+        return
+    if frame is not None:
+        lifecycle.write_event(frame)

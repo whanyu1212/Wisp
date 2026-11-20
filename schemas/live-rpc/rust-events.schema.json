@@ -291,6 +291,20 @@
           "default": null,
           "title": "BrowserViewportUpdatedImage"
         },
+        "live_png": {
+          "anyOf": [
+            {
+              "maxLength": 3000000,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "BrowserViewportUpdatedLivePng"
+        },
         "source_tool": {
           "anyOf": [
             {
@@ -376,6 +390,7 @@
       "required": [
         "type",
         "timestamp",
+        "live_png",
         "image",
         "url",
         "title",

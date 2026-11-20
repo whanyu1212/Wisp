@@ -58,6 +58,7 @@ pub(crate) enum Command {
     Browser {
         interact: bool,
     },
+    BrowserLive(String),
     /// `/kill`: the process to stop, by `/ps` number or id.
     KillProcess(String),
     Quit,
@@ -103,7 +104,7 @@ fn usage(name: &str) -> Option<&'static str> {
         "unrevert" => "/unrevert",
         "cd" => "/cd <path>",
         "ps" => "/ps",
-        "browser" => "/browser [interact]",
+        "browser" => "/browser [interact | live <url>]",
         "kill" => "/kill <number|process-id>",
         _ => return None,
     })
@@ -225,6 +226,16 @@ fn parse_browser(tail: &str, syntax: &str) -> Command {
         Command::Browser { interact: false }
     } else if trimmed.eq_ignore_ascii_case("interact") {
         Command::Browser { interact: true }
+    } else if let Some(url) = trimmed
+        .strip_prefix("live ")
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+    {
+        if url.chars().count() > 2_048 {
+            Command::Invalid("Browser addresses must be 2,048 characters or fewer.".into())
+        } else {
+            Command::BrowserLive(url.to_owned())
+        }
     } else {
         Command::Invalid(format!("Usage: {syntax}"))
     }
@@ -1672,7 +1683,21 @@ pub(crate) mod tests {
         ));
         assert!(matches!(
             classify("/browser extra", None),
-            Some(Command::Invalid(msg)) if msg == "Usage: /browser [interact]"
+            Some(Command::Invalid(msg)) if msg == "Usage: /browser [interact | live <url>]"
+        ));
+    }
+
+    #[test]
+    fn live_browser_address_length() {
+        let url = format!("https://example.test/{}", "a".repeat(2_027));
+        assert_eq!(url.len(), 2_048);
+        assert!(matches!(
+            classify(&format!("/browser live {url}"), None),
+            Some(Command::BrowserLive(address)) if address == url
+        ));
+        assert!(matches!(
+            classify(&format!("/browser live {url}a"), None),
+            Some(Command::Invalid(message)) if message.contains("2,048")
         ));
     }
 }

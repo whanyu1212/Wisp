@@ -246,7 +246,10 @@
         "press_key",
         "back",
         "reload",
-        "refresh"
+        "refresh",
+        "live_open",
+        "live_frame",
+        "live_close"
       ],
       "type": "string"
     },
@@ -314,6 +317,15 @@
           ],
           "title": "BrowserInteractCommandKey"
         },
+        "live": {
+          "anyOf": [
+            {
+              "const": true,
+              "type": "boolean"
+            }
+          ],
+          "title": "BrowserInteractCommandLive"
+        },
         "modifiers": {
           "anyOf": [
             {
@@ -342,6 +354,16 @@
           "default": "browser_interact",
           "title": "BrowserInteractCommandType",
           "type": "string"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "maxLength": 2048,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "BrowserInteractCommandUrl"
         },
         "x": {
           "anyOf": [

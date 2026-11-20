@@ -154,6 +154,14 @@
    "event": "browser.viewport.updated",
    "operation": "remove",
    "path": [
+    "live_png"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "browser.viewport.updated",
+   "operation": "remove",
+   "path": [
     "source_tool"
    ],
    "accepted": true

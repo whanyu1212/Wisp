@@ -349,7 +349,7 @@ impl SidePanel {
         self.close_peek();
     }
 
-    fn visible(&self) -> bool {
+    pub(crate) fn visible(&self) -> bool {
         self.docked() || self.overlay_open()
     }
 

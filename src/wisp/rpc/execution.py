@@ -11,6 +11,7 @@ from anyio.streams.memory import MemoryObjectSendStream
 from typing_extensions import TypeAliasType
 
 from wisp.coding import CodingSession
+from wisp.coding.browser_live import LiveBrowser
 from wisp.coding.session import DirectoryChangeError
 from wisp.config.settings import SettingsDocumentError
 from wisp.events import RpcPermissionsReported, WispEvent
@@ -200,7 +201,9 @@ class RpcCommandExecutor:
         outbound_frame_limit: int | None = None,
         change_directory: DirectoryChanger | None = None,
         settings_reloader: RpcSettingsReloader | None = None,
+        live_browser: LiveBrowser | None = None,
     ) -> None:
+        self.live_browser = live_browser
         self.settings_reloader = settings_reloader
         self.change_directory = change_directory
         self.project_files = project_files
@@ -978,6 +981,7 @@ class RpcCommandExecutor:
         return _RpcDispatchResult(
             running_command=start_rpc_browser_interact_command(
                 command,
+                live_browser=self.live_browser,
                 agent=self.agent,
                 runtime=self.runtime,
                 sessions=self.sessions,

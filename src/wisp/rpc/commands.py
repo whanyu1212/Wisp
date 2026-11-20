@@ -60,7 +60,18 @@ MAX_RPC_BROWSER_TEXT_CHARS = 1_024
 MAX_RPC_BROWSER_KEY_CHARS = 64
 BrowserInteractAction = TypeAliasType(
     "BrowserInteractAction",
-    Literal["click", "scroll", "type", "press_key", "back", "reload", "refresh"],
+    Literal[
+        "click",
+        "scroll",
+        "type",
+        "press_key",
+        "back",
+        "reload",
+        "refresh",
+        "live_open",
+        "live_frame",
+        "live_close",
+    ],
 )
 BrowserMouseButton = TypeAliasType(
     "BrowserMouseButton",
@@ -873,6 +884,8 @@ class BrowserInteractCommand(RpcCommandModel):
 
     type: Literal["browser_interact"] = "browser_interact"
     action: BrowserInteractAction
+    live: Literal[True] | None = None
+    url: str | None = Field(default=None, min_length=1, max_length=2048, repr=False)
     x: int | None = Field(default=None, ge=0, le=MAX_RPC_BROWSER_COORD)
     y: int | None = Field(default=None, ge=0, le=MAX_RPC_BROWSER_COORD)
     button: BrowserMouseButton | None = None
@@ -907,6 +920,11 @@ class BrowserInteractCommand(RpcCommandModel):
 
     @model_validator(mode="after")
     def _validate_action_fields(self) -> Self:
+        if self.action == "live_open":
+            if self.url is None:
+                raise ValueError("browser_interact live_open requires a URL")
+        else:
+            self._reject_disallowed_fields("url")
         if self.action == "click":
             if self.x is None or self.y is None:
                 raise ValueError("browser_interact click requires x and y coordinates")

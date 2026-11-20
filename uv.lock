@@ -1940,6 +1940,7 @@ dependencies = [
     { name = "rich" },
     { name = "typer" },
     { name = "typing-extensions" },
+    { name = "websockets" },
 ]
 
 [package.optional-dependencies]
@@ -1983,6 +1984,7 @@ requires-dist = [
     { name = "rich", specifier = ">=15.0.0" },
     { name = "typer", specifier = ">=0.26.8" },
     { name = "typing-extensions", specifier = ">=4.12" },
+    { name = "websockets", specifier = ">=15" },
 ]
 provides-extras = ["codemode"]
 
