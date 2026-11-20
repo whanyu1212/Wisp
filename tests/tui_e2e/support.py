@@ -301,6 +301,32 @@ def welcome_ready(output: bytes | bytearray) -> bool:
     )
 
 
+_CONTEXT_STATS_READY = re.compile(r"\bctx (?:[▰▱]+ )?~?\d")
+_CONTEXT_PLACEHOLDER = re.compile(r"\bctx ~[…?]")
+_DOCKED_CONTEXT_STATS_READY = re.compile(
+    r"(?:^|[\s│])~?\d+(?:\.\d+)?[KMG]?(?: · \d+%)? context\b.*/context(?=[\s│]|$)"
+)
+
+
+def context_stats_ready(output: bytes | bytearray) -> bool:
+    """Return whether the last complete frame shows resolved startup context stats.
+
+    Before initial ``get_session_stats`` finishes, the footer renders ``ctx ~…`` or
+    ``ctx ~?`` and prompt submits are rejected with a refresh notice. Once resolved,
+    layouts under 148 columns show a numeric reading on the footer row (percent such as
+    ``ctx ▰▰▰▱▱▱▱▱▱▱ ~30%`` or ``ctx ~30%``, or a token count such as ``ctx ~0`` without a
+    known window), while wider docked side-panel layouts render ``~3K · 30% context ...
+    /context`` inside the side panel. Assumes the layout is wide enough to render it.
+    """
+    rows = screen_rows(complete_frames(output))
+    footer = next((row for row in reversed(rows) if row.strip()), "")
+    if _CONTEXT_STATS_READY.search(footer) is not None:
+        return True
+    if _CONTEXT_PLACEHOLDER.search(footer) is not None:
+        return False
+    return any(_DOCKED_CONTEXT_STATS_READY.search(row) is not None for row in rows)
+
+
 def complete_logged_commands(path: Path) -> list[dict[str, object]]:
     """Ignore a final record until the backend finishes writing its newline."""
     if not path.exists():

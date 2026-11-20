@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.tui_e2e.support import screen_shows, welcome_ready
+from tests.tui_e2e.support import context_stats_ready, screen_shows, welcome_ready
 
 
 @pytest.mark.process
@@ -80,7 +80,7 @@ def test_native_mouse_moves_the_composer_cursor_when_capture_is_enabled(
                 except OSError as exc:
                     if exc.errno != errno.EIO:
                         raise
-            if not context_redrawn and b"ctx" in output and b"~" in output:
+            if not context_redrawn and context_stats_ready(output):
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 81, 0, 0))
                 context_redrawn = True
                 output.clear()

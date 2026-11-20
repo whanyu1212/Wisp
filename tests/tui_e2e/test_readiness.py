@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from tests.tui_e2e.support import (
+    context_stats_ready,
     full_repaint_after,
     rendered_without_spacing,
     run_settled,
@@ -146,7 +147,9 @@ class _TuiProcess:
     def wait_ready(self) -> None:
         # Wait past initial `ctx ~?` / `ctx ~…` placeholders until startup
         # session stats render, so prompt submits are not rejected as refreshing.
-        self.wait_for(b"ctx", b"%", failure="Rust TUI startup context stats did not render")
+        self.wait_until(
+            context_stats_ready, failure="Rust TUI startup context stats did not render"
+        )
         self.resize(width=101)
         offset = len(self.output)
         # The composer border styles the model and mode apart, so read it from the

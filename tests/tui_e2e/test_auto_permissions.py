@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from tests.tui_e2e.support import (
+    context_stats_ready,
     reap,
     run_settled,
     screen_rows,
@@ -203,7 +204,7 @@ def test_rust_tui_auto_permissions_workflow_on_standalone_project(tmp_path: Path
                 except OSError as exc:
                     if exc.errno != errno.EIO:
                         raise
-            if not context_redrawn and b"ctx" in output:
+            if not context_redrawn and context_stats_ready(output):
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 28, 121, 0, 0))
                 context_redrawn = True
                 output.clear()

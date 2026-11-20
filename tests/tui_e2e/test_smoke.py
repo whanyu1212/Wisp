@@ -16,6 +16,7 @@ import pytest
 
 from tests.tui_e2e.support import (
     complete_logged_commands,
+    context_stats_ready,
     frame_cursor,
     reap,
     run_settled,
@@ -75,6 +76,62 @@ def test_run_settled_respects_offset() -> None:
 
     assert not run_settled(output, len(output), b"response")
     assert run_settled(output, 0, b"response")
+
+
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        (_frame(b"idle \xc2\xb7 ctx ~\xe2\x80\xa6"), False),
+        (_frame(b"idle \xc2\xb7 ctx ~?"), False),
+        (b"\x1b[?2026hidle \xc2\xb7 ctx ~30%", False),
+        (
+            _frame(
+                b"idle \xc2\xb7 ctx \xe2\x96\xb0\xe2\x96\xb0\xe2\x96\xb0"
+                b"\xe2\x96\xb1\xe2\x96\xb1\xe2\x96\xb1\xe2\x96\xb1\xe2\x96\xb1"
+                b"\xe2\x96\xb1\xe2\x96\xb1 ~30%"
+            ),
+            True,
+        ),
+        (_frame(b"idle \xc2\xb7 ctx ~30%"), True),
+        (_frame(b"idle \xc2\xb7 ctx 0%"), True),
+        (_frame(b"idle \xc2\xb7 ctx ~0"), True),
+        (_frame(b"idle \xc2\xb7 ctx ~11.0k"), True),
+        (_frame(b"\x1b[2;1Hctx ~\xe2\x80\xa6") + _frame(b"\x1b[2;6H0"), True),
+        (_frame(b"\x1b[1;1Hctx ~30%\x1b[2;1Hidle \xc2\xb7 ctx ~\xe2\x80\xa6"), False),
+        (_frame(b"\x1b[2;1Hidle \xe2\x94\x82 Ctrl+G help \xe2\x94\x82 Ctrl+P panel"), False),
+        (
+            _frame(
+                b"\x1b[1;1H\xe2\x94\x82 ~3.0K \xc2\xb7 30% context   "
+                b"$0.01 \xc2\xb7 /context \xe2\x94\x82\x1b[2;1Hidle \xe2\x94\x82 Ctrl+G help"
+            ),
+            True,
+        ),
+        (
+            _frame(
+                b"\x1b[1;1H\xe2\x94\x82 ~0 context   /context \xe2\x94\x82"
+                b"\x1b[2;1Hidle \xe2\x94\x82 Ctrl+G help"
+            ),
+            True,
+        ),
+    ],
+    ids=[
+        "loading-ellipsis",
+        "unloaded-question",
+        "partial-frame",
+        "wide-meter",
+        "narrow-percent",
+        "exact-percent",
+        "token-count-zero",
+        "token-count-k",
+        "differential-update",
+        "resumed-transcript-false-positive",
+        "docked-panel-unloaded",
+        "docked-panel-percent",
+        "docked-panel-no-window",
+    ],
+)
+def test_context_stats_ready_ignores_placeholders(output: bytes, expected: bool) -> None:
+    assert context_stats_ready(output) is expected
 
 
 def test_frame_cursor_reads_only_a_shown_cursor() -> None:
@@ -178,7 +235,7 @@ def test_rust_tui_cross_language_smoke(
                 except OSError as exc:
                     if exc.errno != errno.EIO:
                         raise
-            if not context_redrawn and b"ctx" in output and b"~" in output:
+            if not context_redrawn and context_stats_ready(output):
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 81, 0, 0))
                 context_redrawn = True
                 output.clear()

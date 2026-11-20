@@ -13,7 +13,7 @@ from pathlib import Path
 import anyio
 import pytest
 
-from tests.tui_e2e.support import screen_shows
+from tests.tui_e2e.support import context_stats_ready, screen_shows
 from tests.tui_e2e.test_readiness import _rust_binary, _TuiProcess
 from wisp import __version__
 from wisp.messages import Message
@@ -118,8 +118,7 @@ def test_picker_shares_into_current_chat(tmp_path: Path) -> None:
             lambda output: (
                 screen_shows(output, "Current conversation.")
                 and screen_shows(output, "scripted-history")
-                and screen_shows(output, "ctx")
-                and not screen_shows(output, "Refreshing context")
+                and context_stats_ready(output)
             ),
             failure="current session did not hydrate",
         )

@@ -17,13 +17,17 @@ from pathlib import Path
 import pytest
 
 from tests.tui_e2e.support import (
+    CONTEXT_STATS_BACKEND,
+    context_stats_ready,
     run_settled,
     screen_shows,
     welcome_ready,
 )
 from wisp import __version__
 
-_PRESSURE_BACKEND = r"""
+_PRESSURE_BACKEND = (
+    CONTEXT_STATS_BACKEND
+    + r"""
 import json
 import os
 import sys
@@ -90,26 +94,34 @@ for line in sys.stdin:
         ))
         if mode in {"long-session", "terminal-safety"} and burst_done_path.exists():
             release_path.touch()
-    elif command_type == "get_connection_catalog" and mode == "terminal-safety":
-        hostile = (
-            "p\x1b]0;T\x07\x1b]52;c;QQ==\x07\x1b[H\x1b[5n\x1b[c"
-            "\x1bP$qm\x1b\\\u202eCONNECTION-SAFE-TAIL"
-        )
-        emit_fragmented(RpcConnectionCatalogReported(
-            command_id=command_id,
-            catalog=RpcConnectionCatalogSnapshot(providers=(
-                RpcConnectionProviderSnapshot(
-                    id="hostile",
-                    label="Hostile",
-                    methods=(RpcConnectionMethodSnapshot(
-                        provider=hostile,
-                        label="API key",
-                        kind="api_key",
-                        source="missing",
-                    ),),
-                ),
-            )),
-        ))
+    elif command_type == "get_session_stats":
+        report_stats(command)
+    elif command_type == "get_connection_catalog":
+        if mode == "terminal-safety":
+            hostile = (
+                "p\x1b]0;T\x07\x1b]52;c;QQ==\x07\x1b[H\x1b[5n\x1b[c"
+                "\x1bP$qm\x1b\\\u202eCONNECTION-SAFE-TAIL"
+            )
+            emit_fragmented(RpcConnectionCatalogReported(
+                command_id=command_id,
+                catalog=RpcConnectionCatalogSnapshot(providers=(
+                    RpcConnectionProviderSnapshot(
+                        id="hostile",
+                        label="Hostile",
+                        methods=(RpcConnectionMethodSnapshot(
+                            provider=hostile,
+                            label="API key",
+                            kind="api_key",
+                            source="missing",
+                        ),),
+                    ),
+                )),
+            ))
+        else:
+            emit(RpcConnectionCatalogReported(
+                command_id=command_id,
+                catalog=RpcConnectionCatalogSnapshot(),
+            ))
         emit(RpcCommandFinished(
             command_id=command_id,
             command_type=command_type,
@@ -229,6 +241,7 @@ for line in sys.stdin:
             ok=True,
         ))
 """
+)
 
 
 def _rust_binary() -> Path:
@@ -283,7 +296,7 @@ class _TuiProcess:
 
     def wait_ready(self) -> None:
         self.wait_until(
-            lambda output: welcome_ready(output),
+            lambda output: context_stats_ready(output) and welcome_ready(output),
             failure="Rust TUI did not finish startup",
         )
 

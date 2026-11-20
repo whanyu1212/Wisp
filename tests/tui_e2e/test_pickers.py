@@ -17,6 +17,7 @@ import pytest
 
 from tests.tui_e2e.support import (
     complete_logged_commands,
+    context_stats_ready,
     display_width,
     frame_cursor,
     reap,
@@ -88,7 +89,7 @@ SKILL_EXPANSION_MARKER
                 except OSError as exc:
                     if exc.errno != errno.EIO:
                         raise
-            if not context_redrawn and b"ctx" in output and b"~" in output:
+            if not context_redrawn and context_stats_ready(output):
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 28, 121, 0, 0))
                 context_redrawn = True
                 output.clear()
@@ -240,7 +241,7 @@ def test_rust_file_picker_uses_python_discovery_and_submits_only_the_reference(
             # text, not an assumed contiguous ANSI write.
             emitted = re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", output)
             compact = b"".join(emitted.split())
-            if not context_redrawn and b"ctx" in output and b"~" in output:
+            if not context_redrawn and context_stats_ready(output):
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 28, 121, 0, 0))
                 context_redrawn = True
                 output.clear()

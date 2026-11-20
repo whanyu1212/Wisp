@@ -16,6 +16,7 @@ import pytest
 from tests.tui_e2e.support import (
     CONTEXT_STATS_BACKEND,
     complete_logged_commands,
+    context_stats_ready,
     reap,
     screen_shows,
     welcome_ready,
@@ -141,7 +142,7 @@ for line in sys.stdin:
                 except OSError as exc:
                     if exc.errno != errno.EIO:
                         raise
-            if phase == "startup" and b"ctx" in output and b"~" in output:
+            if phase == "startup" and context_stats_ready(output):
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 101, 0, 0))
                 output.clear()
                 phase = "ready"
