@@ -20,6 +20,7 @@ from tests.tui_e2e.support import (
     reap,
     run_settled,
     screen_rows,
+    screen_shows,
     welcome_ready,
 )
 
@@ -161,6 +162,7 @@ def test_rust_tui_cross_language_smoke(
     context_redrawn = False
     deadline = time.monotonic() + 20
     prompt_sent = False
+    resubmit_at = 0.0
     response_seen = False
     quit_sent = False
     terminal_output = bytearray()
@@ -188,7 +190,19 @@ def test_rust_tui_cross_language_smoke(
                     quit_sent = True
                 else:
                     os.write(terminal_fd, b"hello rust\r")
+                    resubmit_at = time.monotonic() + 0.5
                 prompt_sent = True
+            # A prompt submitted while the startup context refresh is still
+            # running is refused and stays in the composer; send Enter again.
+            if (
+                exercise_prompt
+                and prompt_sent
+                and not response_seen
+                and time.monotonic() >= resubmit_at
+                and screen_shows(terminal_output, "› hello rust")
+            ):
+                os.write(terminal_fd, b"\r")
+                resubmit_at = time.monotonic() + 0.5
             # Streaming can draw "fake" and "response" in separate frames with
             # cursor movements between them; the raw PTY bytes need not be adjacent.
             if exercise_prompt and not response_seen and b"response" in output:
