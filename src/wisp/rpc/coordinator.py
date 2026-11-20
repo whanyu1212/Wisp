@@ -51,6 +51,7 @@ _SequentialRpcCommandType = TypeAliasType(
         "reconnect_mcp",
         "login_mcp_server",
         "logout_mcp_server",
+        "browser_interact",
     ],
 )
 
@@ -567,6 +568,17 @@ class RpcCoordinator:
             or self.pending_prompt_queue_commands
         ):
             await reject(command, "Settings reload is idle-only; wait for active work to finish")
+            return False
+        if selected_type == "browser_interact" and (
+            (running is not None and running.command_type != "browser_interact")
+            or self._ordered_auxiliary_pending()
+            or any(queued.command_type != "browser_interact" for queued in self.queued_commands)
+            or self.pending_prompt_queue_commands
+        ):
+            await reject(
+                command,
+                "Finish or cancel the active operation before interacting with the browser",
+            )
             return False
         if selected_type == "shutdown":
             self._cancel_discovery()

@@ -14,7 +14,8 @@ use crate::tool_cards::{
 pub use crate::tool_detail::ToolDetailSource;
 use crate::transcript::SharedTranscript;
 use wisp_protocol::commands::{
-    ApprovalScope, ModelConfiguration, QueueKind, WispTypedClientRpcCommands,
+    ApprovalScope, BrowserKeyModifier, BrowserMouseButton, BrowserNavAction, ModelConfiguration,
+    QueueKind, WispTypedClientRpcCommands,
 };
 
 pub use wisp_protocol::commands::AgentMode;
@@ -850,6 +851,72 @@ pub struct BrowserViewportInput {
     pub timestamp: String,
 }
 
+#[derive(Clone, Eq, PartialEq)]
+pub enum BrowserInteractRequest {
+    Click {
+        x: u32,
+        y: u32,
+        button: Option<BrowserMouseButton>,
+        double_click: bool,
+    },
+    Scroll {
+        x: u32,
+        y: u32,
+        delta_x: i64,
+        delta_y: i64,
+    },
+    Type {
+        text: String,
+    },
+    PressKey {
+        key: String,
+        modifiers: Vec<BrowserKeyModifier>,
+    },
+    Nav(BrowserNavAction),
+}
+
+impl std::fmt::Debug for BrowserInteractRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Click {
+                x,
+                y,
+                button,
+                double_click,
+            } => f
+                .debug_struct("Click")
+                .field("x", x)
+                .field("y", y)
+                .field("button", button)
+                .field("double_click", double_click)
+                .finish(),
+            Self::Scroll {
+                x,
+                y,
+                delta_x,
+                delta_y,
+            } => f
+                .debug_struct("Scroll")
+                .field("x", x)
+                .field("y", y)
+                .field("delta_x", delta_x)
+                .field("delta_y", delta_y)
+                .finish(),
+            Self::Type { text } => f
+                .debug_struct("Type")
+                .field("text_len", &text.len())
+                .field("text", &"[REDACTED]")
+                .finish(),
+            Self::PressKey { key, modifiers } => f
+                .debug_struct("PressKey")
+                .field("key", key)
+                .field("modifiers", modifiers)
+                .finish(),
+            Self::Nav(action) => f.debug_tuple("Nav").field(action).finish(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct UiState {
     pub view_status: ViewStatus,
@@ -937,6 +1004,7 @@ pub struct UiState {
     pub(crate) codemode_picker_open: bool,
     pub(crate) project_files: project_files::ProjectFiles,
     pub browser_viewport: Option<BrowserViewport>,
+    pub(crate) browser_interact_pending: std::collections::BTreeSet<String>,
     pending_queue_submissions: std::collections::BTreeMap<String, PendingQueueSubmission>,
     pending_queue_restore: Option<PendingQueueRestore>,
     next_queue_order: u64,
@@ -1033,6 +1101,7 @@ impl UiState {
             side_panel_visible: false,
             codemode_picker_open: false,
             browser_viewport: None,
+            browser_interact_pending: std::collections::BTreeSet::new(),
             pending_queue_submissions: std::collections::BTreeMap::new(),
             pending_queue_restore: None,
             next_queue_order: 0,
@@ -1041,6 +1110,10 @@ impl UiState {
 
     pub(crate) fn queue_management_pending(&self) -> bool {
         self.pending_queue_restore.is_some() || self.queue.management.pending.is_some()
+    }
+
+    pub fn browser_interact_in_flight(&self) -> bool {
+        !self.browser_interact_pending.is_empty()
     }
 
     pub(crate) fn queue_management_available(&self, token: &str) -> bool {
@@ -1216,6 +1289,7 @@ pub enum CommandKind {
     BackgroundToolCall,
     GetProcesses,
     GetProcessOutput,
+    BrowserInteract,
     StoreApiKey,
     DisconnectProvider,
     BeginDeviceCode,
@@ -1267,6 +1341,7 @@ impl CommandKind {
             Self::BackgroundToolCall => "background_tool_call",
             Self::GetProcesses => "get_processes",
             Self::GetProcessOutput => "get_process_output",
+            Self::BrowserInteract => "browser_interact",
             Self::StoreApiKey => "store_api_key",
             Self::DisconnectProvider => "disconnect_provider",
             Self::BeginDeviceCode => "begin_device_code",
@@ -1715,6 +1790,7 @@ pub enum UiAction {
         transient: Option<bool>,
     },
     Cancel,
+    BrowserInteract(BrowserInteractRequest),
     BackendEvent(BackendEvent),
     TransportClosed {
         error: Option<String>,
@@ -1999,6 +2075,7 @@ pub fn reduce(
             transient,
         } => answer_trust(state, request_id, trusted, reason, transient, ids),
         UiAction::Cancel => cancel(state, ids),
+        UiAction::BrowserInteract(request) => handle_browser_interact(state, request, ids),
         UiAction::BackendEvent(event) => Ok(handle_backend_event(state, event, ids)?),
         UiAction::TransportClosed { .. } => Ok(close_transport(state)),
     }?;
@@ -2028,6 +2105,7 @@ fn close_transport(state: &mut UiState) -> Vec<UiEffect> {
     state.search_change = None;
     state.directory_change = None;
     state.command_catalog_read = None;
+    state.browser_interact_pending.clear();
     state.queue.clear_local_presentations();
     for pending in state.pending_queue_submissions.values_mut() {
         pending.local_display = None;
@@ -3343,7 +3421,7 @@ fn commit_session_and_hydrate(
     state.transcript = SharedTranscript::default();
     state.run_progress = None;
     state.finished_run_cost = None;
-    state.browser_viewport = None;
+    clear_browser_viewport(state);
     state.history = HistoryWindow::default();
     clear_queue_cache(state);
     state.history_request = None;
@@ -3757,7 +3835,7 @@ fn finish_startup_hydration(
                 .as_ref()
                 .map(|session| session.session_id.clone());
             clear_queue_cache(state);
-            state.browser_viewport = None;
+            clear_browser_viewport(state);
             state.last_command_error = None;
             state.last_command_failed = false;
             install_history_snapshot(state, report);
@@ -4485,7 +4563,7 @@ fn finish_new_session(
             state.finished_run_cost = None;
             state.selected_session = None;
             state.saved_session_attachment = None;
-            state.browser_viewport = None;
+            clear_browser_viewport(state);
             state.last_session = None;
             state.history = HistoryWindow::default();
             clear_queue_cache(state);
@@ -5626,7 +5704,7 @@ fn handle_backend_event(
                 .is_some_and(|previous| previous != &cwd)
             {
                 state.saved_session_attachment = None;
-                state.browser_viewport = None;
+                clear_browser_viewport(state);
             }
             if let Some(dir) = session_images_dir {
                 state.default_session_images_dir = Some(dir);
@@ -6272,7 +6350,53 @@ fn apply_project_config(
     Ok(effects)
 }
 
-/// Finishes a queue command, or the current prompt, init or compaction run.
+fn clear_browser_viewport(state: &mut UiState) {
+    state.browser_viewport = None;
+    state.browser_interact_pending.clear();
+}
+
+fn handle_browser_interact(
+    state: &mut UiState,
+    request: BrowserInteractRequest,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ReduceError> {
+    if state.view_status != ViewStatus::Idle || state.current_command.is_some() {
+        return Ok(vec![
+            UiEffect::Notice(
+                "Wait for the active run to finish before controlling the browser.".into(),
+            ),
+            UiEffect::RequestRender,
+        ]);
+    }
+    let id = ids.next_id(CommandKind::BrowserInteract);
+    let command = match request {
+        BrowserInteractRequest::Click {
+            x,
+            y,
+            button,
+            double_click,
+        } => WispTypedClientRpcCommands::browser_interact_click(&id, x, y, button, double_click)?,
+        BrowserInteractRequest::Scroll {
+            x,
+            y,
+            delta_x,
+            delta_y,
+        } => WispTypedClientRpcCommands::browser_interact_scroll(&id, x, y, delta_x, delta_y)?,
+        BrowserInteractRequest::Type { text } => {
+            WispTypedClientRpcCommands::browser_interact_type(&id, &text)?
+        }
+        BrowserInteractRequest::PressKey { key, modifiers } => {
+            WispTypedClientRpcCommands::browser_interact_press_key(&id, &key, &modifiers)?
+        }
+        BrowserInteractRequest::Nav(action) => {
+            WispTypedClientRpcCommands::browser_interact_nav(&id, action)?
+        }
+    };
+    state.browser_interact_pending.insert(id);
+    Ok(vec![UiEffect::SendCommand(command)])
+}
+
+/// Finishes a queue command, a browser interaction, or the current prompt, init or compaction run.
 /// A finish for any other command changes nothing.
 fn finish_command(
     state: &mut UiState,
@@ -6282,6 +6406,22 @@ fn finish_command(
     error: Option<String>,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    if command_type == CommandKind::BrowserInteract.prefix() {
+        if !state.browser_interact_pending.remove(&command_id) {
+            return Ok(Vec::new());
+        }
+        if !ok {
+            let detail = error.unwrap_or_else(|| "browser interaction failed".into());
+            return Ok(vec![
+                UiEffect::Notice(bounded_session_text(
+                    &format!("Browser interaction failed: {detail}"),
+                    SESSION_NOTICE_MAX_BYTES,
+                )),
+                UiEffect::RequestRender,
+            ]);
+        }
+        return Ok(Vec::new());
+    }
     if let Some(mut effects) =
         handle_queue_command_finished(state, command_id.clone(), command_type.clone(), ok)
     {

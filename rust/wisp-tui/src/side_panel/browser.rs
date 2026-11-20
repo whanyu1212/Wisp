@@ -12,6 +12,7 @@ use ratatui::widgets::Paragraph;
 pub(super) fn push_mode_tabs(
     rows: &mut PanelRows,
     active: PanelMode,
+    interacting: bool,
     width: usize,
     palette: Palette,
 ) {
@@ -54,14 +55,54 @@ pub(super) fn push_mode_tabs(
         col += span_width;
     }
 
+    if interacting && active == PanelMode::Browser && col + sep.width() < width {
+        spans.push(Span::styled(sep, muted));
+        col += sep.width();
+        let clipped = ui::clip_columns("INTERACT", width.saturating_sub(col));
+        if !clipped.is_empty() {
+            spans.push(Span::styled(clipped, active_style));
+        }
+    }
+
     rows.section(Section::ModeTabs, vec![Line::from(spans)]);
     for (start, end, mode) in hits {
         rows.action_range(0, start, end, PanelAction::SwitchMode(mode));
     }
 }
 
+/// Map a terminal cell inside `image_rect` to centered browser viewport coordinates.
+pub(super) fn map_cell_to_viewport(
+    image_rect: Rect,
+    column: u16,
+    row: u16,
+    viewport_width: u32,
+    viewport_height: u32,
+) -> Option<(u32, u32)> {
+    if image_rect.width == 0
+        || image_rect.height == 0
+        || viewport_width == 0
+        || viewport_height == 0
+        || column < image_rect.x
+        || column >= image_rect.right()
+        || row < image_rect.y
+        || row >= image_rect.bottom()
+    {
+        return None;
+    }
+    let col_rel = u64::from(column - image_rect.x);
+    let row_rel = u64::from(row - image_rect.y);
+    let rect_w = u64::from(image_rect.width);
+    let rect_h = u64::from(image_rect.height);
+    let x_num = (2 * col_rel + 1).saturating_mul(u64::from(viewport_width));
+    let y_num = (2 * row_rel + 1).saturating_mul(u64::from(viewport_height));
+    let x = u32::try_from(x_num / (2 * rect_w)).unwrap_or(viewport_width - 1);
+    let y = u32::try_from(y_num / (2 * rect_h)).unwrap_or(viewport_height - 1);
+    Some((x.min(viewport_width - 1), y.min(viewport_height - 1)))
+}
+
 /// Render header metadata (sanitized title, URL, dimensions, updated clock) and the
-/// centered browser screenshot inside `body`.
+/// centered browser screenshot inside `body`. Returns the painted image rectangle when
+/// a screenshot frame is laid out.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_browser_body(
     frame: &mut Frame<'_>,
@@ -73,10 +114,10 @@ pub(super) fn render_browser_body(
     cell_size: CellSize,
     painted_images: Option<&mut Vec<PaintedImage>>,
     ignore_overlay_rect: bool,
-) {
+) -> Option<Rect> {
     let width = usize::from(body.width);
     if width == 0 || body.height == 0 {
-        return;
+        return None;
     }
     let muted = Style::default().fg(palette.muted);
     let viewport = state.browser_viewport.as_ref();
@@ -152,7 +193,7 @@ pub(super) fn render_browser_body(
     let after_meta_y = meta_rect.bottom();
     let remaining_height = body.bottom().saturating_sub(after_meta_y);
     if remaining_height == 0 {
-        return;
+        return None;
     }
     // Leave one blank spacer row between metadata and the image frame when space permits.
     let spacer = u16::from(remaining_height > 2);
@@ -163,12 +204,12 @@ pub(super) fn render_browser_body(
         height: remaining_height - spacer,
     };
     if image_area.is_empty() {
-        return;
+        return None;
     }
 
     let Some(vp) = viewport else {
         render_placeholder(frame, image_area, "No browser frame yet.", muted);
-        return;
+        return None;
     };
     let Some(_image_ref) = &vp.image else {
         render_placeholder(
@@ -177,14 +218,11 @@ pub(super) fn render_browser_body(
             "Metadata updated (no screenshot returned).",
             muted,
         );
-        return;
+        return None;
     };
     let Some(preview) = preview else {
         render_placeholder(frame, image_area, "Preview unavailable.", muted);
-        return;
-    };
-    let Some(painted_images) = painted_images else {
-        return;
+        return None;
     };
 
     let (cols, rows) = thumbnail_cells(
@@ -196,35 +234,39 @@ pub(super) fn render_browser_body(
     );
     if cols == 0 || rows == 0 {
         render_placeholder(frame, image_area, "Viewport too small for frame.", muted);
-        return;
+        return None;
     }
 
     let x = image_area.x + (image_area.width.saturating_sub(cols)) / 2;
     let y = image_area.y + (image_area.height.saturating_sub(rows)) / 2;
     let img_rect = Rect::new(x, y, cols, rows);
 
-    let buffer = frame.buffer_mut();
-    let mut snapshot = Vec::with_capacity(usize::from(cols) * usize::from(rows));
-    let bg = surface.bg.unwrap_or(ratatui::style::Color::Reset);
-    for dy in 0..rows {
-        for dx in 0..cols {
-            let cell = &mut buffer[Position::new(x + dx, y + dy)];
-            cell.set_symbol(" ");
-            cell.set_style(surface);
-            snapshot.push(cell.clone());
+    if let Some(painted_images) = painted_images {
+        let buffer = frame.buffer_mut();
+        let mut snapshot = Vec::with_capacity(usize::from(cols) * usize::from(rows));
+        let bg = surface.bg.unwrap_or(ratatui::style::Color::Reset);
+        for dy in 0..rows {
+            for dx in 0..cols {
+                let cell = &mut buffer[Position::new(x + dx, y + dy)];
+                cell.set_symbol(" ");
+                cell.set_style(surface);
+                snapshot.push(cell.clone());
+            }
         }
+
+        painted_images.push(PaintedImage {
+            placement: PlacementKey::BrowserViewport,
+            key: preview.key.clone(),
+            rect: img_rect,
+            total_rows: rows,
+            first_image_row: 0,
+            bg,
+            snapshot,
+            ignore_overlay_rect,
+        });
     }
 
-    painted_images.push(PaintedImage {
-        placement: PlacementKey::BrowserViewport,
-        key: preview.key.clone(),
-        rect: img_rect,
-        total_rows: rows,
-        first_image_row: 0,
-        bg,
-        snapshot,
-        ignore_overlay_rect,
-    });
+    Some(img_rect)
 }
 
 fn render_placeholder(frame: &mut Frame<'_>, area: Rect, message: &str, style: Style) {

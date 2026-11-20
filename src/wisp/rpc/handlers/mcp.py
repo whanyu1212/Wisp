@@ -515,6 +515,7 @@ class RpcMcpServers:
                 while self._agent.busy:
                     await anyio.sleep(0.01)
             self._agent.replace_tool_registry(self._tool_selection.select(self._runtime))
+            self._agent.clear_browser_state()
         return error
 
 

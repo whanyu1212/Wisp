@@ -19,6 +19,7 @@ from wisp.rpc.commands import (
     ApprovalCommand,
     BackgroundToolCallCommand,
     BeginDeviceCodeCommand,
+    BrowserInteractCommand,
     CancelCommand,
     CancelProcessCommand,
     ChangeDirectoryCommand,
@@ -75,6 +76,7 @@ from wisp.rpc.commands import (
     TrustCommand,
     UnrevertSessionTreeCommand,
 )
+from wisp.rpc.handlers.browser import start_rpc_browser_interact_command
 from wisp.rpc.handlers.inspection import rpc_workspace_report
 from wisp.rpc.handlers.mcp import (
     McpServerCommand,
@@ -354,6 +356,9 @@ class RpcCommandExecutor:
             self.coordinator.running_command = running_command
             handle_background_tool_call(known, agent=self.agent, write_event=self.write_event)
             return _RpcDispatchResult(running_command=running_command)
+        if isinstance(known, BrowserInteractCommand):
+            self.coordinator.running_command = running_command
+            return self._dispatch_browser_interact(known, running_command)
         if isinstance(known, CancelProcessCommand):
             self.coordinator.running_command = running_command
             start_cancel_process_command(
@@ -959,6 +964,32 @@ class RpcCommandExecutor:
             write_event=self.write_event,
         )
         return _RpcDispatchResult(running_command=running_command)
+
+    def _dispatch_browser_interact(
+        self,
+        command: BrowserInteractCommand,
+        running_command: _RpcRunningCommand | None,
+    ) -> _RpcDispatchResult:
+        if running_command is not None:
+            RpcCommandLifecycle.for_command(command, write_event=self.write_event).fail(
+                "Finish or cancel the active operation before interacting with the browser"
+            )
+            return _RpcDispatchResult(running_command=running_command)
+        return _RpcDispatchResult(
+            running_command=start_rpc_browser_interact_command(
+                command,
+                agent=self.agent,
+                runtime=self.runtime,
+                sessions=self.sessions,
+                session_state=self.session_state,
+                mcp_servers=self.mcp_servers,
+                task_group=self.task_group,
+                send=self.send,
+                write_event=self.write_event,
+                running_command_factory=self.running_command_factory,
+                command_completed_factory=self.command_completed_factory,
+            )
+        )
 
     def _dispatch_control(
         self,

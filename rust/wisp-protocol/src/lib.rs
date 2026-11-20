@@ -371,6 +371,11 @@ macro_rules! validated_wire_wrapper {
                     Some("preview_mcp_snippet") => {
                         value["snippet"] = serde_json::Value::String("<redacted>".into());
                     }
+                    Some("browser_interact") => {
+                        if value.get("text").is_some_and(|v| !v.is_null()) {
+                            value["text"] = serde_json::Value::String("<redacted>".into());
+                        }
+                    }
                     _ => {}
                 }
                 formatter
@@ -547,6 +552,33 @@ pub mod commands {
         ToolSession,
         AllSession,
         AllProject,
+    }
+
+    /// Mouse button forwarded during live browser takeover.
+    #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, Eq, PartialEq)]
+    #[serde(rename_all = "lowercase")]
+    pub enum BrowserMouseButton {
+        Left,
+        Right,
+        Middle,
+    }
+
+    /// Key modifier forwarded during live browser takeover.
+    #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, Eq, PartialEq)]
+    pub enum BrowserKeyModifier {
+        Alt,
+        Control,
+        Meta,
+        Shift,
+    }
+
+    /// Navigation or screenshot refresh action in the live browser viewport.
+    #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, Eq, PartialEq)]
+    #[serde(rename_all = "snake_case")]
+    pub enum BrowserNavAction {
+        Back,
+        Reload,
+        Refresh,
     }
 
     /// Backend execution mode, shared by command builders and frontend state.
@@ -1453,6 +1485,94 @@ pub mod commands {
         /// Construct the typed command used to request graceful backend shutdown.
         pub fn shutdown(id: &str) -> Result<Self, super::ProtocolDecodeError> {
             deserialize(serde_json::json!({"type": "shutdown", "id": id}))
+        }
+
+        /// Click inside the live browser viewport at viewport-pixel coordinates `(x, y)`.
+        pub fn browser_interact_click(
+            id: &str,
+            x: u32,
+            y: u32,
+            button: Option<BrowserMouseButton>,
+            double_click: bool,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            let mut value = serde_json::json!({
+                "type": "browser_interact",
+                "id": id,
+                "action": "click",
+                "x": x,
+                "y": y,
+            });
+            if let Some(button) = button {
+                value["button"] =
+                    serde_json::to_value(button).expect("mouse button enum serializes cleanly");
+            }
+            if double_click {
+                value["double_click"] = serde_json::Value::Bool(true);
+            }
+            deserialize(value)
+        }
+
+        /// Scroll the live browser viewport anchored at `(x, y)` pixels.
+        pub fn browser_interact_scroll(
+            id: &str,
+            x: u32,
+            y: u32,
+            delta_x: i64,
+            delta_y: i64,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({
+                "type": "browser_interact",
+                "id": id,
+                "action": "scroll",
+                "x": x,
+                "y": y,
+                "delta_x": delta_x,
+                "delta_y": delta_y,
+            }))
+        }
+
+        /// Type or paste bounded text into the focused element in the live browser.
+        pub fn browser_interact_type(
+            id: &str,
+            text: &str,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({
+                "type": "browser_interact",
+                "id": id,
+                "action": "type",
+                "text": text,
+            }))
+        }
+
+        /// Press a key or shortcut in the live browser viewport.
+        pub fn browser_interact_press_key(
+            id: &str,
+            key: &str,
+            modifiers: &[BrowserKeyModifier],
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            let mut value = serde_json::json!({
+                "type": "browser_interact",
+                "id": id,
+                "action": "press_key",
+                "key": key,
+            });
+            if !modifiers.is_empty() {
+                value["modifiers"] =
+                    serde_json::to_value(modifiers).expect("key modifiers serialize cleanly");
+            }
+            deserialize(value)
+        }
+
+        /// Trigger browser history back, page reload, or screenshot refresh.
+        pub fn browser_interact_nav(
+            id: &str,
+            action: BrowserNavAction,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({
+                "type": "browser_interact",
+                "id": id,
+                "action": action,
+            }))
         }
     }
 

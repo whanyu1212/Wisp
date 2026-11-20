@@ -76,6 +76,13 @@ def builtin_command_descriptors() -> tuple[CommandDescriptor, ...]:
             title="Browser viewport",
             description="Show or toggle the live browser viewport in the side panel",
             category=CommandCategory.general,
+            arguments=(
+                CommandArgument(
+                    name="mode",
+                    description="Optional 'interact' to take over the live browser",
+                ),
+            ),
+            accepts_arguments=True,
             order=24,
         ),
         CommandDescriptor(

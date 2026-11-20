@@ -258,6 +258,538 @@
       "title": "BeginDeviceCodeCommand",
       "type": "object"
     },
+    "BrowserInteractAction": {
+      "enum": [
+        "click",
+        "scroll",
+        "type",
+        "press_key",
+        "back",
+        "reload",
+        "refresh"
+      ],
+      "type": "string"
+    },
+    "BrowserInteractCommand": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "click"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "allOf": [
+              {
+                "required": [
+                  "x",
+                  "y"
+                ]
+              },
+              {
+                "not": {
+                  "anyOf": [
+                    {
+                      "required": [
+                        "delta_x"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "delta_y"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "text"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "key"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "modifiers"
+                      ]
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "scroll"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "allOf": [
+              {
+                "required": [
+                  "x",
+                  "y"
+                ]
+              },
+              {
+                "anyOf": [
+                  {
+                    "properties": {
+                      "delta_x": {
+                        "not": {
+                          "const": 0
+                        }
+                      }
+                    },
+                    "required": [
+                      "delta_x"
+                    ]
+                  },
+                  {
+                    "properties": {
+                      "delta_y": {
+                        "not": {
+                          "const": 0
+                        }
+                      }
+                    },
+                    "required": [
+                      "delta_y"
+                    ]
+                  }
+                ]
+              },
+              {
+                "not": {
+                  "anyOf": [
+                    {
+                      "required": [
+                        "button"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "double_click"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "text"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "key"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "modifiers"
+                      ]
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "type"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "allOf": [
+              {
+                "required": [
+                  "text"
+                ]
+              },
+              {
+                "properties": {
+                  "text": {
+                    "pattern": "^[^\u0000-\b\u000b\f\u000e-\u001f-]+$"
+                  }
+                }
+              },
+              {
+                "not": {
+                  "anyOf": [
+                    {
+                      "required": [
+                        "x"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "y"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "button"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "double_click"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "delta_x"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "delta_y"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "key"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "modifiers"
+                      ]
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "press_key"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "allOf": [
+              {
+                "required": [
+                  "key"
+                ]
+              },
+              {
+                "properties": {
+                  "key": {
+                    "anyOf": [
+                      {
+                        "enum": [
+                          "ArrowDown",
+                          "ArrowLeft",
+                          "ArrowRight",
+                          "ArrowUp",
+                          "Backspace",
+                          "Delete",
+                          "End",
+                          "Enter",
+                          "Escape",
+                          "F1",
+                          "F10",
+                          "F11",
+                          "F12",
+                          "F2",
+                          "F3",
+                          "F4",
+                          "F5",
+                          "F6",
+                          "F7",
+                          "F8",
+                          "F9",
+                          "Home",
+                          "Insert",
+                          "PageDown",
+                          "PageUp",
+                          "Space",
+                          "Tab"
+                        ]
+                      },
+                      {
+                        "maxLength": 1,
+                        "minLength": 1,
+                        "pattern": "^[^\u0000-\u001f-]$"
+                      }
+                    ]
+                  }
+                }
+              },
+              {
+                "not": {
+                  "anyOf": [
+                    {
+                      "required": [
+                        "x"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "y"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "button"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "double_click"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "delta_x"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "delta_y"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "text"
+                      ]
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "enum": [
+                  "back",
+                  "reload",
+                  "refresh"
+                ]
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "x"
+                  ]
+                },
+                {
+                  "required": [
+                    "y"
+                  ]
+                },
+                {
+                  "required": [
+                    "button"
+                  ]
+                },
+                {
+                  "required": [
+                    "double_click"
+                  ]
+                },
+                {
+                  "required": [
+                    "delta_x"
+                  ]
+                },
+                {
+                  "required": [
+                    "delta_y"
+                  ]
+                },
+                {
+                  "required": [
+                    "text"
+                  ]
+                },
+                {
+                  "required": [
+                    "key"
+                  ]
+                },
+                {
+                  "required": [
+                    "modifiers"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "description": "Apply one bounded user interaction inside the live browser viewport.",
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/BrowserInteractAction"
+        },
+        "button": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BrowserMouseButton"
+            }
+          ]
+        },
+        "delta_x": {
+          "anyOf": [
+            {
+              "maximum": 10000,
+              "minimum": -10000,
+              "type": "integer"
+            }
+          ],
+          "title": "Delta X"
+        },
+        "delta_y": {
+          "anyOf": [
+            {
+              "maximum": 10000,
+              "minimum": -10000,
+              "type": "integer"
+            }
+          ],
+          "title": "Delta Y"
+        },
+        "double_click": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            }
+          ],
+          "title": "Double Click"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "key": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Key"
+        },
+        "modifiers": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/BrowserKeyModifier"
+              },
+              "maxItems": 4,
+              "minItems": 1,
+              "type": "array"
+            }
+          ],
+          "title": "Modifiers",
+          "uniqueItems": true
+        },
+        "text": {
+          "anyOf": [
+            {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Text"
+        },
+        "type": {
+          "const": "browser_interact",
+          "default": "browser_interact",
+          "title": "Type",
+          "type": "string"
+        },
+        "x": {
+          "anyOf": [
+            {
+              "maximum": 16384,
+              "minimum": 0,
+              "type": "integer"
+            }
+          ],
+          "title": "X"
+        },
+        "y": {
+          "anyOf": [
+            {
+              "maximum": 16384,
+              "minimum": 0,
+              "type": "integer"
+            }
+          ],
+          "title": "Y"
+        }
+      },
+      "required": [
+        "type",
+        "action"
+      ],
+      "title": "BrowserInteractCommand",
+      "type": "object"
+    },
+    "BrowserKeyModifier": {
+      "enum": [
+        "Alt",
+        "Control",
+        "Meta",
+        "Shift"
+      ],
+      "type": "string"
+    },
+    "BrowserMouseButton": {
+      "enum": [
+        "left",
+        "right",
+        "middle"
+      ],
+      "type": "string"
+    },
     "CancelCommand": {
       "additionalProperties": false,
       "description": "Cancel a running prompt or compact command.",
@@ -2597,6 +3129,7 @@
       "approval": "#/$defs/ApprovalCommand",
       "background_tool_call": "#/$defs/BackgroundToolCallCommand",
       "begin_device_code": "#/$defs/BeginDeviceCodeCommand",
+      "browser_interact": "#/$defs/BrowserInteractCommand",
       "cancel": "#/$defs/CancelCommand",
       "cancel_process": "#/$defs/CancelProcessCommand",
       "change_directory": "#/$defs/ChangeDirectoryCommand",
@@ -2808,6 +3341,9 @@
       "$ref": "#/$defs/BackgroundToolCallCommand"
     },
     {
+      "$ref": "#/$defs/BrowserInteractCommand"
+    },
+    {
       "$ref": "#/$defs/ApprovalCommand"
     },
     {
@@ -2857,6 +3393,10 @@
     "begin_device_code": {
       "provider": "openai-codex",
       "type": "begin_device_code"
+    },
+    "browser_interact": {
+      "action": "refresh",
+      "type": "browser_interact"
     },
     "cancel": {
       "target_id": "command-1",

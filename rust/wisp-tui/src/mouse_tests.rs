@@ -104,6 +104,8 @@ fn capture_defaults_on_with_an_explicit_opt_out_and_filters_reports() {
     }
     for kind in [
         MouseEventKind::Down(MouseButton::Left),
+        MouseEventKind::Down(MouseButton::Right),
+        MouseEventKind::Down(MouseButton::Middle),
         MouseEventKind::Drag(MouseButton::Left),
         MouseEventKind::Up(MouseButton::Left),
         MouseEventKind::Moved,
@@ -115,7 +117,6 @@ fn capture_defaults_on_with_an_explicit_opt_out_and_filters_reports() {
     for kind in [
         MouseEventKind::Drag(MouseButton::Right),
         MouseEventKind::Up(MouseButton::Right),
-        MouseEventKind::Down(MouseButton::Right),
         MouseEventKind::ScrollLeft,
         MouseEventKind::ScrollRight,
     ] {

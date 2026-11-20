@@ -614,6 +614,7 @@ async def run_rpc_prompt_command(
                 # The prompt left the branch, so its process notices never reached
                 # the model for good; the next prompt carries them instead.
                 agent.restore_process_notices(command_id)
+                agent.restore_browser_handoff(command_id)
             if not rolled_back and session.path.is_file():
                 entries = await _run_abandonable_session_read(session.read_entries)
                 if any(entry.operation_id == command_id for entry in entries[run_entry_start:]):

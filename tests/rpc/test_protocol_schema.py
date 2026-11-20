@@ -198,7 +198,7 @@ def test_command_schema_contains_every_discriminator_once() -> None:
     variants = cast(list[dict[str, str]], schema["oneOf"])
     references = {variant["$ref"] for variant in variants}
 
-    assert len(mapping) == 57
+    assert len(mapping) == 58
     assert len(set(mapping.values())) == len(mapping)
     assert references == set(mapping.values())
 
@@ -303,6 +303,26 @@ def test_typed_command_output_validates_but_none_is_never_a_wire_value() -> None
             "approved": False,
             "scope": "tool_session",
         },
+        {"type": "browser_interact", "action": "click", "x": 1},
+        {"type": "browser_interact", "action": "scroll", "x": 1, "y": 2},
+        {
+            "type": "browser_interact",
+            "action": "scroll",
+            "x": 1,
+            "y": 2,
+            "delta_x": 0,
+            "delta_y": 0,
+        },
+        {"type": "browser_interact", "action": "type", "text": "x", "x": 1},
+        {"type": "browser_interact", "action": "type", "text": "a\x00b"},
+        {"type": "browser_interact", "action": "press_key", "key": "NotAKey"},
+        {
+            "type": "browser_interact",
+            "action": "press_key",
+            "key": "Enter",
+            "modifiers": ["Shift", "Shift"],
+        },
+        {"type": "browser_interact", "action": "refresh", "x": 1},
     ],
 )
 def test_command_schema_rejects_semantically_invalid_typed_output(
@@ -331,6 +351,26 @@ def test_command_schema_rejects_semantically_invalid_typed_output(
             "approved": False,
             "scope": "tool_session",
         },
+        {"type": "browser_interact", "action": "click", "x": 1},
+        {"type": "browser_interact", "action": "scroll", "x": 1, "y": 2},
+        {
+            "type": "browser_interact",
+            "action": "scroll",
+            "x": 1,
+            "y": 2,
+            "delta_x": 0,
+            "delta_y": 0,
+        },
+        {"type": "browser_interact", "action": "type", "text": "x", "x": 1},
+        {"type": "browser_interact", "action": "type", "text": "a\x00b"},
+        {"type": "browser_interact", "action": "press_key", "key": "NotAKey"},
+        {
+            "type": "browser_interact",
+            "action": "press_key",
+            "key": "Enter",
+            "modifiers": ["Shift", "Shift"],
+        },
+        {"type": "browser_interact", "action": "refresh", "x": 1},
     ],
 )
 def test_typed_command_models_reject_invalid_output_states(payload: dict[str, object]) -> None:
