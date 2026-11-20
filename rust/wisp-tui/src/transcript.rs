@@ -232,6 +232,8 @@ pub struct TranscriptEntry {
     pub content: String,
     /// Ephemeral text used only to render a locally submitted user message.
     local_display: Option<String>,
+    /// Images attached to a user message, retained for inline thumbnail rendering.
+    images: Vec<crate::composer_images::TranscriptImage>,
     /// Display-only reasoning streamed for this assistant turn.
     thinking: String,
     /// When this reply's first reasoning arrived, until its first answer text.
@@ -289,6 +291,15 @@ impl TranscriptEntry {
     /// source verbatim.
     pub(crate) fn display_content(&self) -> &str {
         self.local_display.as_deref().unwrap_or(&self.content)
+    }
+
+    /// Image payloads associated with this entry (user attachments or tool outputs).
+    pub(crate) fn preview_images(&self) -> &[crate::composer_images::TranscriptImage] {
+        match &self.kind {
+            TranscriptEntryKind::Message => &self.images,
+            TranscriptEntryKind::Tool(card) => &card.image_parts,
+            TranscriptEntryKind::Process(_) => &[],
+        }
     }
 
     /// The web searches this reply ran, which the transcript view draws as tool rows
@@ -515,12 +526,23 @@ impl Transcript {
         prompt: String,
         display: Option<String>,
     ) -> TranscriptEntryId {
+        self.append_prompt_with_images(prompt, display, Vec::new())
+    }
+
+    /// Append a user prompt with optional display-only text and thumbnail images.
+    pub fn append_prompt_with_images(
+        &mut self,
+        prompt: String,
+        display: Option<String>,
+        images: Vec<crate::composer_images::TranscriptImage>,
+    ) -> TranscriptEntryId {
         self.finish_active_response();
         let display = display.filter(|candidate| !candidate.is_empty() && candidate != &prompt);
-        self.push_message_with_display(
+        self.push_message_with_images(
             TranscriptRole::User,
             prompt,
             display,
+            images,
             TranscriptEntryState::Complete,
         )
     }
@@ -1274,6 +1296,7 @@ impl Transcript {
                             process_ended_at_ms: None,
                             edit_locations: Vec::new(),
                             images: Vec::new(),
+                            image_parts: Vec::new(),
                             is_error: true,
                             ..input.clone()
                         },
@@ -1343,6 +1366,7 @@ impl Transcript {
                             process_ended_at_ms: None,
                             edit_locations: Vec::new(),
                             images: Vec::new(),
+                            image_parts: Vec::new(),
                             is_error: true,
                             ..input.clone()
                         },
@@ -2128,6 +2152,7 @@ impl Transcript {
                 role: TranscriptRole::Assistant,
                 content: LIVE_RETENTION_OMISSION_MARKER.into(),
                 local_display: None,
+                images: Vec::new(),
                 thinking: String::new(),
                 searches: Vec::new(),
                 cost: None,
@@ -2820,12 +2845,24 @@ impl Transcript {
         local_display: Option<String>,
         state: TranscriptEntryState,
     ) -> TranscriptEntryId {
+        self.push_message_with_images(role, content, local_display, Vec::new(), state)
+    }
+
+    fn push_message_with_images(
+        &mut self,
+        role: TranscriptRole,
+        content: String,
+        local_display: Option<String>,
+        images: Vec<crate::composer_images::TranscriptImage>,
+        state: TranscriptEntryState,
+    ) -> TranscriptEntryId {
         let has_local_display = local_display.is_some();
         let entry_id = self.push_entry(TranscriptEntry {
             id: TranscriptEntryId(0),
             role,
             content,
             local_display,
+            images,
             thinking: String::new(),
             searches: Vec::new(),
             cost: None,
@@ -2924,6 +2961,7 @@ impl Transcript {
             role: TranscriptRole::Tool,
             content: String::new(),
             local_display: None,
+            images: Vec::new(),
             thinking: String::new(),
             searches: Vec::new(),
             cost: None,
@@ -3150,6 +3188,7 @@ mod tests {
             process_ended_at_ms: None,
             edit_locations: Vec::new(),
             images: Vec::new(),
+            image_parts: Vec::new(),
         }
     }
 

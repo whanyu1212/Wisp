@@ -82,6 +82,7 @@ fn fixture(scenario: &str) -> LiveUi {
         process_ended_at_ms: None,
         edit_locations: Vec::new(),
         images: Vec::new(),
+        image_parts: Vec::new(),
     };
     ui.state.transcript.observe_tool_result(result.clone());
     ui.state.transcript.complete_message(1, fixture.reply);
@@ -686,6 +687,7 @@ fn showcase_state(worked: bool) -> UiState {
             process_ended_at_ms: None,
             edit_locations: Vec::new(),
             images: Vec::new(),
+            image_parts: Vec::new(),
         });
     }
     state.transcript.complete_message(
@@ -3040,4 +3042,91 @@ async fn script_details_stay_sanitized() {
         .unwrap();
     assert_eq!(script.calls.len(), crate::script_card::MAX_SCRIPT_CALLS);
     assert!(script.code.len() <= crate::script_card::SCRIPT_MAX_BYTES);
+}
+
+#[test]
+fn tool_card_with_stored_image_renders_thumbnail_with_connector() {
+    use image::ImageEncoder as _;
+    use sha2::{Digest, Sha256};
+
+    let dir = std::env::temp_dir().join(format!("wisp-visual-img-card-{}", std::process::id()));
+    let images_dir = dir.join("images");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&images_dir).unwrap();
+
+    let mut rgba = Vec::with_capacity(32 * 32 * 4);
+    for y in 0..32 {
+        let px = if y < 16 {
+            [180, 40, 40, 255]
+        } else {
+            [40, 160, 200, 255]
+        };
+        for _ in 0..32 {
+            rgba.extend_from_slice(&px);
+        }
+    }
+    let mut png = Vec::new();
+    let encoder = image::codecs::png::PngEncoder::new(&mut png);
+    encoder
+        .write_image(&rgba, 32, 32, image::ExtendedColorType::Rgba8)
+        .unwrap();
+    let digest = Sha256::digest(&png);
+    let mut sha = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(sha, "{byte:02x}");
+    }
+    std::fs::write(images_dir.join(&sha), &png).unwrap();
+
+    let mut ui = LiveUi::default();
+    ui.state.selected_session = Some(reducer::SessionIdentity {
+        session_id: "s-img".into(),
+        session_path: dir.join("session.jsonl").display().to_string(),
+        session_name: None,
+    });
+    for event in [
+        json!({
+            "type": "tool.call",
+            "call_id": "read-img-1",
+            "name": "read",
+            "arguments": {"path": "screenshots/preview.png"}
+        }),
+        json!({
+            "type": "tool.result",
+            "message_entry_id": null,
+            "call_id": "read-img-1",
+            "name": "read",
+            "output": "Image file preview.png",
+            "is_error": false,
+            "images": [{
+                "media_type": "image/png",
+                "sha256": sha,
+                "byte_size": png.len(),
+                "width": 32,
+                "height": 32,
+            }]
+        }),
+    ] {
+        match BackendEvent::from_projection_value(&event).unwrap() {
+            BackendEvent::ToolCall(call) => {
+                ui.state.transcript.observe_tool_call(call);
+            }
+            BackendEvent::ToolResult(result) => {
+                ui.state.transcript.observe_tool_result(*result);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    let buffer = draw(&mut ui, 80, 20);
+    let read_y = row_containing(&buffer, "Read");
+    let read_line = buffer_row(&buffer, read_y);
+    assert!(read_line.contains("[image 32×32 png]"), "{read_line:?}");
+
+    let row0 = buffer_row(&buffer, read_y + 1);
+    let row1 = buffer_row(&buffer, read_y + 2);
+    assert!(row0.contains("└ ▀"), "{row0:?}");
+    assert!(!row1.contains('└') && row1.contains('▀'), "{row1:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

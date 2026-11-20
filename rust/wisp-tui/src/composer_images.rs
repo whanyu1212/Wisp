@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use base64::Engine;
 use image::ImageEncoder;
+use sha2::{Digest, Sha256};
 
 /// Largest image file the backend accepts (`wisp.images.MAX_IMAGE_BYTES`).
 pub const MAX_IMAGE_BYTES: usize = 7_500_000;
@@ -21,6 +22,52 @@ pub const MAX_IMAGE_BYTES: usize = 7_500_000;
 pub const MAX_IMAGES: usize = 6;
 /// Enough leading bytes to recognise every supported format.
 const SNIFF_BYTES: usize = 16;
+
+/// Image payload metadata retained on a transcript entry for thumbnail rendering.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TranscriptImage {
+    pub source: TranscriptImageSource,
+    pub media_type: &'static str,
+    pub dimensions: Option<(u32, u32)>,
+}
+
+impl TranscriptImage {
+    /// Stable cache key combining the content digest and exact byte length.
+    pub fn cache_key(&self) -> Arc<str> {
+        match &self.source {
+            TranscriptImageSource::Inline { sha256, bytes } => {
+                Arc::from(format!("{sha256}:{}", bytes.len()))
+            }
+            TranscriptImageSource::Stored { sha256, byte_size } => {
+                Arc::from(format!("{sha256}:{byte_size}"))
+            }
+        }
+    }
+}
+
+/// Where a transcript entry's image payload lives.
+#[derive(Clone, PartialEq, Eq)]
+pub enum TranscriptImageSource {
+    /// Bytes already in memory (from an inline clipboard paste or drag-and-drop).
+    Inline { sha256: Arc<str>, bytes: Arc<[u8]> },
+    /// Content-addressed image file (`<session_dir>/images/<sha256>`).
+    Stored { sha256: String, byte_size: usize },
+}
+
+impl fmt::Debug for TranscriptImageSource {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Inline { sha256, bytes } => {
+                write!(formatter, "Inline({} bytes, {sha256:.8})", bytes.len())
+            }
+            Self::Stored { sha256, byte_size } => formatter
+                .debug_struct("Stored")
+                .field("sha256", sha256)
+                .field("byte_size", byte_size)
+                .finish(),
+        }
+    }
+}
 
 /// One image waiting in the composer.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -227,6 +274,33 @@ impl AttachedImage {
             (None, None) => format!("[image {format}]"),
         }
     }
+
+    /// Thumbnail payload for the transcript entry created from this attachment.
+    pub fn to_transcript_image(&self) -> TranscriptImage {
+        let source = match &self.source {
+            ImageSource::Inline(bytes) => {
+                let digest = Sha256::digest(bytes);
+                let mut hex = String::with_capacity(64);
+                for byte in digest {
+                    use std::fmt::Write as _;
+                    let _ = write!(hex, "{byte:02x}");
+                }
+                TranscriptImageSource::Inline {
+                    sha256: Arc::from(hex),
+                    bytes: Arc::clone(bytes),
+                }
+            }
+            ImageSource::Stored { sha256, byte_size } => TranscriptImageSource::Stored {
+                sha256: sha256.clone(),
+                byte_size: *byte_size,
+            },
+        };
+        TranscriptImage {
+            source,
+            media_type: self.media_type,
+            dimensions: self.dimensions,
+        }
+    }
 }
 
 /// The transcript line for an image the backend reports by reference.
@@ -248,6 +322,20 @@ pub fn reported_image_lines(images: Option<&serde_json::Value>) -> Vec<String> {
                 image.get("height")?.as_u64()?,
             ))
         })
+        .collect()
+}
+
+/// Thumbnail payloads for the `images` array of a reported user message, queue event,
+/// or tool result. Invalid or oversized items are ignored so text labels still render.
+pub fn reported_transcript_images(images: Option<&serde_json::Value>) -> Vec<TranscriptImage> {
+    let Some(images) = images.and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    images
+        .iter()
+        .filter_map(AttachedImage::stored)
+        .filter(|image| image.byte_size() <= MAX_IMAGE_BYTES)
+        .map(|image| image.to_transcript_image())
         .collect()
 }
 
@@ -361,6 +449,14 @@ impl ComposerImages {
         self.images
             .iter()
             .map(AttachedImage::transcript_line)
+            .collect()
+    }
+
+    /// Thumbnail payloads for these images, one per image, in order.
+    pub fn transcript_images(&self) -> Vec<TranscriptImage> {
+        self.images
+            .iter()
+            .map(AttachedImage::to_transcript_image)
             .collect()
     }
 
