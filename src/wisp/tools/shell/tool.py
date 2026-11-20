@@ -75,6 +75,8 @@ class BashTool:
         "Run a command in bash (or /bin/sh where bash is not installed) and capture stdout, "
         "stderr, and an explicit completion exit code. "
         "Set cwd to a workspace subdirectory instead of using cd and shell composition. "
+        "For an Auto commands external read grant, use /bin/ls or /bin/cat with "
+        "one absolute path and no flags; keep cwd in the workspace. "
         "For automatic offline Python tests use uv run --no-sync pytest or python -m pytest; "
         "avoid environment assignments and shell redirects (output is captured already). "
         "Use operation=start to launch a resumable command, operation=poll to read incremental "

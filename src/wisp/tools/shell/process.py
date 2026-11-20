@@ -377,6 +377,7 @@ async def _create_shell_process(
         if sys.platform != "darwin" or os.name != "posix":
             raise ToolError("Seatbelt is unavailable; automatic execution stopped.")
         sandbox.validate(command, cwd)
+        command = sandbox.external_read_command or command
         env = dict(sandbox.environment)
     if os.name == "posix":
         command_token = secrets.token_hex(16)
@@ -392,7 +393,8 @@ async def _create_shell_process(
                 posix_jobs_file, posix_inherited_fds, posix_exit_pipe_read_fd
             )
             raise ToolError(f"Failed to start command: {exc}") from exc
-        command = _wrap_posix_shell_command(command, posix_jobs_file)
+        shell = "/bin/sh" if sandbox is not None and sandbox.external_read is not None else None
+        command = _wrap_posix_shell_command(command, posix_jobs_file, shell=shell)
     # Commands never read Wisp's stdin: in RPC mode it carries the JSONL command stream.
     try:
         if os.name == "nt":
@@ -544,7 +546,7 @@ def _command_shell() -> str:
     return shutil.which("bash") or "/bin/sh"
 
 
-def _wrap_posix_shell_command(command: str, jobs_file: Path) -> str:
+def _wrap_posix_shell_command(command: str, jobs_file: Path, *, shell: str | None = None) -> str:
     recorder_prelude = _posix_job_recorder_prelude(jobs_file)
     signal_traps = _posix_signal_traps()
     child_command = f"{recorder_prelude}{signal_traps}eval {shlex.quote(command)}"
@@ -575,7 +577,7 @@ def _wrap_posix_shell_command(command: str, jobs_file: Path) -> str:
             record_loop,
             "__wisp_record_loop & __wisp_recorder_pid=$!; ",
             signal_traps,
-            f"{shlex.quote(_command_shell())} -c {quoted_child_command}; ",
+            f"{shlex.quote(shell or _command_shell())} -c {quoted_child_command}; ",
             "__wisp_status=$?; ",
             "kill $__wisp_recorder_pid 2>/dev/null || true; ",
             "wait $__wisp_recorder_pid 2>/dev/null || true; ",

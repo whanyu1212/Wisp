@@ -377,6 +377,16 @@ The directory must remain inside the workspace and outside protected/control pat
 only to this call, not to the session or subsequent file operations. Output is captured already,
 so shell redirects are unnecessary for reading command output.
 
+To read inputs from another folder in Auto commands, launch with
+`wisp tui --auto-command-read-dir /absolute/path/to/inputs`. The flag grants one directory
+to the initial session in the launch project. Select Auto commands in `/permissions` if needed.
+Give the agent the absolute path to list or read. It can automatically run the system `/bin/ls`
+on one directory or `/bin/cat` on one regular file, with no flags and a workspace working
+directory. Each call grants Seatbelt read access to just that operand. Other commands
+retain the ordinary Auto commands approval rules. Links, hard-linked file operands, and protected
+paths such as `~/.wisp` are excluded. The grant expires when you switch sessions or projects
+or leave Auto commands.
+
 Poll/cancel of a sandboxed job started by the current conversation is automatic while the original
 consent remains active, including a foreground command moved into the background. This grants
 neither control of other sessions' jobs nor unrestricted jobs. Changing permission mode or project

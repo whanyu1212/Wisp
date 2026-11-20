@@ -24,11 +24,12 @@ from typing import TYPE_CHECKING
 
 from wisp.tools.files.paths import matches_protected_pattern
 from wisp.tools.result import ToolError
-from wisp.trust.scope import is_broad_root
+from wisp.trust.scope import is_broad_root, is_within_directory
 
 if TYPE_CHECKING:
     from wisp.tools.approval import ToolApprovalPolicy
     from wisp.tools.context import ToolContext
+    from wisp.tools.shell.external_reads import ExternalCommandRead
 
 _EXECUTABLE = "/usr/bin/sandbox-exec"
 _ACTIVE: ContextVar[SeatbeltLaunch | None] = ContextVar("seatbelt_launch", default=None)
@@ -155,6 +156,8 @@ class SeatbeltLaunch:
     cleanup_dir: Path | None = None
     read_only_workspace: bool = False
     _lease: _EphemeralDirLease | None = None
+    external_read: ExternalCommandRead | None = None
+    external_read_command: str | None = None
 
     def claim_cleanup_dir(self) -> Path | None:
         """Transfer ephemeral directory cleanup responsibility to a spawned process."""
@@ -180,6 +183,8 @@ class SeatbeltLaunch:
             raise ToolError("Sandbox launch no longer matches the approved command.")
         for root in self.roots:
             _validate_root(root)
+        if self.external_read is not None:
+            self.external_read.validate()
 
     def argv(self, wrapped_command: str, jobs_file: Path) -> list[str]:
         """Add only the host-owned job recorder to the prepared policy."""
@@ -391,12 +396,18 @@ def _protected_regex(pattern: str, *, subtree: bool = True) -> str:
     return "^(.*/)?" + expression + ("(/.*)?$" if subtree else "$")
 
 
-def prepare_seatbelt(arguments: Mapping[str, object], context: ToolContext) -> SeatbeltLaunch:
+def prepare_seatbelt(
+    arguments: Mapping[str, object],
+    context: ToolContext,
+    *,
+    external_read: ExternalCommandRead | None = None,
+) -> SeatbeltLaunch:
     """Prepare and probe containment, failing closed before automatic approval.
 
     Args:
         arguments (Mapping[str, object]): Schema-checked exact Bash arguments.
         context (ToolContext): Workspace, scratch and protected paths.
+        external_read (ExternalCommandRead | None): Validated single-input read for this call.
 
     Returns:
         SeatbeltLaunch: The exact launch authority; never an unrestricted fallback.
@@ -413,6 +424,10 @@ def prepare_seatbelt(arguments: Mapping[str, object], context: ToolContext) -> S
     command = arguments.get("command")
     if not isinstance(command, str):
         raise ToolError("Sandbox requires an exact command.")
+    if external_read is not None:
+        if external_read.command != command:
+            raise ToolError("Sandbox launch no longer matches the approved external read.")
+        external_read.validate()
     # Validate lexical roots before resolving so user-controlled symlinks are not erased.
     _validate_root(context.cwd)
     if context.workspace_root is not None:
@@ -435,6 +450,19 @@ def prepare_seatbelt(arguments: Mapping[str, object], context: ToolContext) -> S
     for root in roots:
         _validate_root(root)
     read_only_workspace, needs_cargo_target = _sandbox_test_profile(command, cwd, workspace)
+    external_read_command = None
+    if external_read is not None:
+        interpreter = _resolve_safely(
+            Path(sys.executable), "Could not resolve the interpreter for automatic external reads."
+        )
+        if any(
+            is_within_directory(interpreter, root) for root in (*roots, external_read.directory)
+        ):
+            raise ToolError(
+                "Automatic external reads require Python outside the project and inputs."
+            )
+        external_read_command = external_read.launch_command(interpreter)
+        read_only_workspace = True
     runs_root = scratch / ".seatbelt-runs"
     cargo_target_root = scratch / ".seatbelt-cargo-target"
     try:
@@ -468,6 +496,10 @@ def prepare_seatbelt(arguments: Mapping[str, object], context: ToolContext) -> S
             cargo_target=cargo_target,
             read_only_workspace=read_only_workspace,
         )
+        if external_read_command is not None:
+            # Only trusted system programs may run while the input is readable,
+            # including the shell wrapper's job recorder before it starts Python.
+            environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
         for key in context.withheld_environment:
             environment.pop(key, None)
         profile = _filesystem_profile(
@@ -481,6 +513,7 @@ def prepare_seatbelt(arguments: Mapping[str, object], context: ToolContext) -> S
             cargo_target_root=cargo_target_root,
             cargo_target=cargo_target,
             read_only_workspace=read_only_workspace,
+            external_input=external_read.target if external_read is not None else None,
         )
         try:
             probe = subprocess.run(
@@ -514,6 +547,8 @@ def prepare_seatbelt(arguments: Mapping[str, object], context: ToolContext) -> S
         cleanup_dir=run_dir,
         read_only_workspace=read_only_workspace,
         _lease=_EphemeralDirLease(run_dir),
+        external_read=external_read,
+        external_read_command=external_read_command,
     )
 
 
@@ -823,6 +858,7 @@ def _filesystem_profile(
     cargo_target_root: Path,
     cargo_target: Path | None,
     read_only_workspace: bool,
+    external_input: Path | None = None,
 ) -> str:
     """Compile read/write grants with final path and ancestor protections."""
     workspace, scratch = roots
@@ -836,6 +872,10 @@ def _filesystem_profile(
         if is_broad_root(resolved_root):
             raise ToolError("A sandbox read root resolves to a broad directory.")
         rules.append(f"(allow file-read* (subpath {_sbpl_string(str(resolved_root))}))")
+    if external_input is not None:
+        quoted = _sbpl_string(str(external_input))
+        rules.append(f"(allow file-read* (literal {quoted}))")
+        rules.append(f"(deny file-write* (literal {quoted}))")
     writable_roots: tuple[Path, ...] = (
         (run_dir, cargo_target)
         if read_only_workspace and cargo_target is not None

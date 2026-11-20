@@ -89,6 +89,7 @@ async def _run_rpc(
     project_context_root: Path | None = None,
     *,
     handshake_complete: bool = False,
+    auto_command_read_dir: Path | None = None,
 ) -> None:
     if not handshake_complete and not await _negotiate_rpc_connection():
         return
@@ -113,6 +114,7 @@ async def _run_rpc(
                 config_overrides=config_overrides,
                 project_context_root=project_context_root,
                 shutdown_signals=shutdown_signals,
+                auto_command_read_dir=auto_command_read_dir,
             )
         finally:
             await runtime.aclose()
@@ -161,6 +163,7 @@ async def _run_rpc_with_runtime(
     config_overrides: _ConfigOverrides | None = None,
     project_context_root: Path | None = None,
     shutdown_signals: AsyncIterator[int] | None = None,
+    auto_command_read_dir: Path | None = None,
 ) -> None:
     """Run the CLI's stdin/stdout adapter over the shared RPC host.
 
@@ -192,6 +195,7 @@ async def _run_rpc_with_runtime(
                     startup_trusted=startup_trusted,
                     project_context_root=project_context_root,
                     cwd=Path.cwd(),
+                    auto_command_read_dir=auto_command_read_dir,
                 ),
                 write_event=event_writer,
                 render_events=render_events,

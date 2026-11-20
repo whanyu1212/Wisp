@@ -861,3 +861,10 @@ def test_print_mode_reports_unknown_provider(tmp_path: Path) -> None:
 
     assert result.exit_code == 1
     assert "Unknown provider: missing" in result.output
+
+
+def test_print_rejects_auto_command_read_dir() -> None:
+    result = CliRunner().invoke(app, ["--prompt", "hello", "--auto-command-read-dir", "fixtures"])
+
+    assert result.exit_code == 1, result.output
+    assert "--auto-command-read-dir applies only to TUI and RPC" in result.output

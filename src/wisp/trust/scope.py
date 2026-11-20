@@ -58,6 +58,28 @@ def is_broad_root(path: Path, *, home: Path | None = None) -> bool:
     return identity is not None and any(identity == _identity(folder) for folder in broad)
 
 
+def is_within_directory(path: Path, directory: Path) -> bool:
+    """Check whether a real path names a directory or one of its descendants.
+
+    Compare existing ancestors by identity to recognize differently spelled
+    paths to the same directory on case-insensitive or firmlinked filesystems.
+
+    Args:
+        path (Path): Resolved path to check.
+        directory (Path): Resolved directory to compare against.
+
+    Returns:
+        bool: Whether the path is the directory or falls under it.
+    """
+
+    if path.is_relative_to(directory):
+        return True
+    identity = _identity(directory)
+    return identity is not None and any(
+        _identity(ancestor) == identity for ancestor in (path, *path.parents)
+    )
+
+
 def _home(home: Path | None) -> Path | None:
     try:
         return _resolved(home if home is not None else Path.home())
@@ -89,4 +111,4 @@ def _resolved(path: Path) -> Path:
     return path.expanduser().resolve(strict=False)
 
 
-__all__ = ["BROAD_FOLDER_DESCRIPTION", "is_broad_root"]
+__all__ = ["BROAD_FOLDER_DESCRIPTION", "is_broad_root", "is_within_directory"]

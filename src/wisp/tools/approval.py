@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import anyio
@@ -53,6 +54,7 @@ class ToolApprovalPolicy:
     session_only_yolo: bool = field(default=False, kw_only=True)
     # Auto remains edit-only; auto_commands requires separate explicit consent.
     mode: PermissionMode = field(default="ask", kw_only=True)
+    auto_command_read_dir: Path | None = field(default=None, kw_only=True)
     # Revokes an in-flight command assessment when consent or project changes.
     generation: int = field(default=0, init=False, repr=False)
 

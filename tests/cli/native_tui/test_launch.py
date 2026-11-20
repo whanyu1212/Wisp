@@ -379,3 +379,45 @@ def test_explicit_no_all_tools_overrides_native_tui_default(
 
     assert result.exit_code == 0, result.output
     assert captured[0]["all_tools"] is False
+
+
+@pytest.mark.parametrize("arguments", [["--mode", "tui"], ["tui"]])
+def test_cli_forwards_auto_command_read_dir(
+    arguments: list[str], tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    from wisp.cli.native_tui import rust_launcher
+
+    directory = tmp_path / "external fixtures"
+    captured: list[TuiOptions] = []
+    monkeypatch.setattr(
+        rust_launcher, "run_rust_tui", lambda options: captured.append(options) or 0
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [*arguments, "--auto-command-read-dir", str(directory)],
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": "", "WISP_TRUST": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(captured) == 1
+    command = _rpc_command(captured[0])
+    flag = command.index("--auto-command-read-dir")
+    assert command[flag + 1] == str(directory)
+
+
+@pytest.mark.parametrize("arguments", [["--mode", "tui"], ["tui"]])
+def test_cli_rejects_multiple_read_dirs(arguments: list[str]) -> None:
+    result = CliRunner().invoke(
+        app, [*arguments, "--auto-command-read-dir", "first", "--auto-command-read-dir", "second"]
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "--auto-command-read-dir can only be used once" in result.output
+
+
+def test_cli_rejects_misplaced_read_dir() -> None:
+    result = CliRunner().invoke(app, ["--auto-command-read-dir", "fixtures", "tui"])
+
+    assert result.exit_code == 2, result.output
+    assert "pass this option after 'wisp tui'" in result.output

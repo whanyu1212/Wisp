@@ -55,11 +55,16 @@ from wisp.tool_types import ToolFailureCode
 from wisp.tools.approval import ToolApprovalPolicy, confirms_every_call
 from wisp.tools.base import ArgumentCheckedTool, Tool
 from wisp.tools.codemode.calls import CODEMODE, NestedCallResult, ResultLimits
-from wisp.tools.command_review import CommandReviewer, command_review_objection
+from wisp.tools.command_review import (
+    MAX_REVIEW_COMMAND_CHARS,
+    CommandReviewer,
+    command_review_objection,
+)
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
 from wisp.tools.progress import OutputProgress, ToolProgress
 from wisp.tools.result import ToolError, ToolResult
+from wisp.tools.shell.external_reads import ExternalCommandRead, external_command_read
 from wisp.tools.shell.seatbelt import (
     ProcessAuthority,
     SeatbeltLaunch,
@@ -801,16 +806,37 @@ class ConfiguredToolExecutor:
         def still_authorized() -> bool:
             return self._command_consent_active(generation)
 
+        read_directory = self._approval_policy.auto_command_read_dir
+
+        def preflight() -> tuple[str | None, ExternalCommandRead | None]:
+            command = arguments.get("command")
+            external_read = (
+                external_command_read(command, read_directory, self._context)
+                if read_directory is not None
+                and isinstance(command, str)
+                and len(command) <= MAX_REVIEW_COMMAND_CHARS
+                else None
+            )
+            return (
+                command_review_objection(arguments, self._context, external_read=external_read),
+                external_read,
+            )
+
+        external_read = None
         try:
-            objection = await anyio.to_thread.run_sync(
-                lambda: command_review_objection(arguments, self._context), abandon_on_cancel=True
+            objection, external_read = await anyio.to_thread.run_sync(
+                preflight, abandon_on_cancel=True
             )
         except Exception:  # noqa: BLE001 - uncertain preflight is not a grant
             objection = "Command preflight unavailable; human approval required."
         if objection is None:
             try:
                 sandbox = await anyio.to_thread.run_sync(
-                    lambda: prepare_seatbelt(arguments, command_context(arguments, self._context)),
+                    lambda: prepare_seatbelt(
+                        arguments,
+                        command_context(arguments, self._context),
+                        external_read=external_read,
+                    ),
                     abandon_on_cancel=True,
                 )
                 if not isinstance(sandbox, SeatbeltLaunch):
@@ -823,7 +849,12 @@ class ConfiguredToolExecutor:
         try:
             if not still_authorized():
                 objection = "Permissions changed during review; human approval required."
-            if objection is None and sandbox_development_command(arguments):
+            if objection is None and (
+                external_read is not None or sandbox_development_command(arguments)
+            ):
+                reason = "Auto-approved: Seatbelt test/build; network blocked; no model review."
+                if external_read is not None:
+                    reason = "Auto-approved: Seatbelt read from a user-granted directory."
                 return _ApprovalEvaluation(
                     generation=generation,
                     sandbox=sandbox,
@@ -834,9 +865,7 @@ class ConfiguredToolExecutor:
                         approved=True,
                         source="auto",
                         rule_id="sandbox_development_v1",
-                        reason=(
-                            "Auto-approved: Seatbelt test/build; network blocked; no model review."
-                        ),
+                        reason=reason,
                     ),
                 )
             if objection is None and self._command_reviewer is None:
