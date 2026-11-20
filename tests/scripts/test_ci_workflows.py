@@ -187,3 +187,70 @@ def test_macos_smoke_covers_platform_paths() -> None:
     assert "tests/mcp/test_runtime_process.py" in supervisor_cmd
     assert "-m benchmark" not in supervisor_cmd
     assert "tests/sessions -m benchmark" in benchmark_cmd
+
+
+def test_rust_lint_splits_from_workspace() -> None:
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/ci.yml").read_text())
+    jobs = workflow["jobs"]
+    expected_cache = "Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0"
+    expected_keys = {
+        "rust-lint": "rust-lint-ubuntu-latest",
+        "rust-workspace": "rust-test-${{ matrix.os }}",
+        "tui-handoff": "tui-handoff-v2-${{ matrix.os }}",
+    }
+    for job_name, cache_key in expected_keys.items():
+        cache_step = next(
+            step
+            for step in jobs[job_name]["steps"]
+            if step.get("name") == "Cache Rust dependencies"
+        )
+        assert cache_step["uses"] == expected_cache
+        assert cache_step["with"]["key"] == cache_key
+        assert cache_step["with"]["cache-bin"] is False
+
+    lint = jobs["rust-lint"]
+    assert lint["runs-on"] == "ubuntu-latest"
+    assert lint["env"]["PYO3_NO_PYTHON"] == "1"
+    lint_steps = lint["steps"]
+    assert not any(
+        str(step.get("uses", "")).startswith(("astral-sh/setup-uv@", "actions/setup-python@"))
+        or "uv sync" in step.get("run", "")
+        for step in lint_steps
+    )
+    lint_toolchain = next(
+        step
+        for step in lint_steps
+        if str(step.get("uses", "")).startswith("dtolnay/rust-toolchain@")
+    )
+    assert lint_toolchain["with"]["components"] == "clippy,rustfmt"
+    lint_commands = [step.get("run", "") for step in lint_steps]
+    assert "cargo fmt --all --check" in lint_commands
+    assert "cargo clippy --workspace --all-targets --all-features -- -D warnings" in lint_commands
+
+    workspace = jobs["rust-workspace"]
+    assert workspace["strategy"]["matrix"]["os"] == ["ubuntu-latest", "macos-latest"]
+    assert workspace["env"]["PYO3_NO_PYTHON"] == "1"
+    ws_steps = workspace["steps"]
+    assert not any(
+        str(step.get("uses", "")).startswith(("astral-sh/setup-uv@", "actions/setup-python@"))
+        or "uv sync" in step.get("run", "")
+        for step in ws_steps
+    )
+    remove_idx = next(
+        i for i, step in enumerate(ws_steps) if step.get("name") == "Remove Homebrew rustup"
+    )
+    install_idx = next(
+        i
+        for i, step in enumerate(ws_steps)
+        if str(step.get("uses", "")).startswith("dtolnay/rust-toolchain@")
+    )
+    cache_idx = next(i for i, step in enumerate(ws_steps) if step.get("uses") == expected_cache)
+    assert remove_idx < install_idx < cache_idx
+    assert not any("cargo fmt" in step.get("run", "") for step in ws_steps)
+    clippy_step = next(step for step in ws_steps if "cargo clippy" in step.get("run", ""))
+    assert clippy_step["if"] == "runner.os == 'macOS'"
+    assert (
+        clippy_step["run"]
+        == "cargo clippy -p wisp-search --all-targets --all-features -- -D warnings"
+    )
+    assert any(step.get("run") == "cargo test --workspace --all-features" for step in ws_steps)

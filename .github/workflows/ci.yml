@@ -84,6 +84,40 @@ jobs:
       - name: Type-check
         run: uv run mypy
 
+  rust-lint:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    name: Rust lint (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # wisp-python targets abi3-py311 and does not run Python during Rust lint/test.
+      # Skipping interpreter discovery removes pyo3-build-config's
+      # rerun-if-env-changed=PATH trigger, keeping pyo3 warm in rust-cache.
+      PYO3_NO_PYTHON: "1"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: clippy,rustfmt
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: rust-lint-ubuntu-latest
+          # CI installs nothing with `cargo install`; ~/.cargo/bin holds only rustup.
+          cache-bin: false
+
+      - name: Check Rust formatting
+        run: cargo fmt --all --check
+
+      - name: Lint Rust workspace
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
   rust-workspace:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
@@ -94,23 +128,15 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
+    env:
+      # wisp-python targets abi3-py311 and does not run Python during Rust lint/test.
+      # Skipping interpreter discovery removes pyo3-build-config's
+      # rerun-if-env-changed=PATH trigger, keeping pyo3 warm in rust-cache.
+      PYO3_NO_PYTHON: "1"
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version-file: .python-version
-
-      - name: Install Python dependencies
-        run: uv sync --locked
 
       # The macOS image ships Homebrew's rustup. Its cargo shim can't run rustc
       # in rust-cache's post step, so `cargo metadata` fails and rust-cache saves
@@ -127,21 +153,20 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.88.0
         with:
-          components: clippy,rustfmt
+          components: ${{ runner.os == 'macOS' && 'clippy' || '' }}
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          key: ${{ matrix.os }}
+          key: rust-test-${{ matrix.os }}
           # CI installs nothing with `cargo install`; ~/.cargo/bin holds only rustup.
           cache-bin: false
 
-      - name: Check Rust formatting
-        if: runner.os == 'Linux'
-        run: cargo fmt --all --check
-
-      - name: Lint Rust workspace
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      # Full workspace clippy runs in parallel in rust-lint on Linux; only
+      # wisp-search contains macOS-conditional code.
+      - name: Lint macOS-specific Rust code
+        if: runner.os == 'macOS'
+        run: cargo clippy -p wisp-search --all-targets --all-features -- -D warnings
 
       - name: Test Rust workspace
         run: cargo test --workspace --all-features
@@ -193,9 +218,9 @@ jobs:
         uses: dtolnay/rust-toolchain@1.88.0
 
       - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@bc2d2e71bd35c5549942babaa51a89c586b981d1 # v2.8.1
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          key: tui-handoff-${{ matrix.os }}
+          key: tui-handoff-v2-${{ matrix.os }}
           # CI installs nothing with `cargo install`; ~/.cargo/bin holds only rustup.
           cache-bin: false
 
@@ -485,7 +510,7 @@ jobs:
   ci-passed:
     name: CI passed
     if: ${{ always() }}
-    needs: [changes, quality, rust-workspace, tui-handoff, package, python-tests, python-tests-oldest, macos-smoke, contracts]
+    needs: [changes, quality, rust-lint, rust-workspace, tui-handoff, package, python-tests, python-tests-oldest, macos-smoke, contracts]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

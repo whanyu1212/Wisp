@@ -52,3 +52,10 @@ tokio = { version = "=1.44.2", features = [
 ] }
 unicode-segmentation = "=1.13.3"
 unicode-width = "=0.2.0"
+
+# Optimize third-party dependencies in dev and test builds while keeping
+# workspace crates and proc-macros/build scripts unoptimized. Dependencies are
+# compiled once per Cargo.lock change and cached, cutting test runtime across
+# jsonschema, syntect, ratatui, and debug wisp-tui runs.
+[profile.dev.package."*"]
+opt-level = 2
