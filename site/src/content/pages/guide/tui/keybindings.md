@@ -148,7 +148,7 @@ characters per chord.
 | `Ctrl+T` | Open the session tree to switch branches (`/tree`) |
 | `Ctrl+P` | Hide or show the side panel on a wide terminal; open or close it as an overlay otherwise |
 | `Ctrl+B` | While the agent runs a shell command in the foreground, move it to the background (in tmux, press it twice) |
-| `F8` | Focus the side panel for keyboard navigation |
+| `F8` | Focus the side panel for keyboard navigation (`f` expands/restores; `b` switches Work/Browser; `i` enters browser takeover; `r` refreshes) |
 | `F6` | Browse transcript cards; Right expands, Left collapses, and Enter opens retained detail |
 | `Ctrl+G` | Toggle contextual help for the focused Rust surface |
 | `Ctrl+R` | Search prompt history for this TUI run |
