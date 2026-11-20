@@ -60,9 +60,11 @@ on:
 permissions:
   contents: read
 
+# Scope by caller workflow so standalone main/tag wheel runs cannot cancel
+# release.yml dry runs or tag releases (and keep release calls non-cancelling).
 concurrency:
-  group: rust-tui-wheels-${{ github.ref }}
-  cancel-in-progress: true
+  group: rust-tui-wheels-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.workflow != 'Release' }}
 
 jobs:
   linux-x86-64:

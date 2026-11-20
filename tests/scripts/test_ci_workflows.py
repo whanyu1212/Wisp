@@ -254,3 +254,99 @@ def test_rust_lint_splits_from_workspace() -> None:
         == "cargo clippy -p wisp-search --all-targets --all-features -- -D warnings"
     )
     assert any(step.get("run") == "cargo test --workspace --all-features" for step in ws_steps)
+
+
+def test_release_runs_checks_in_parallel() -> None:
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/release.yml").read_text())
+    assert workflow["env"]["CARGO_PROFILE_DEV_DEBUG"] == "line-tables-only"
+    assert workflow["concurrency"]["cancel-in-progress"] is False
+
+    jobs = workflow["jobs"]
+    wheels = jobs["native-wheels"]
+    assert "needs" not in wheels
+    assert wheels["uses"] == "./.github/workflows/rust-tui-wheels.yml"
+    assert wheels["permissions"] == {"contents": "read"}
+    wheels_workflow = yaml.safe_load(
+        (REPO_ROOT / ".github/workflows/rust-tui-wheels.yml").read_text()
+    )
+    assert workflow["name"] == "Release"
+    assert "${{ github.workflow }}" in wheels_workflow["concurrency"]["group"]
+    assert "${{ github.ref }}" in wheels_workflow["concurrency"]["group"]
+    assert (
+        wheels_workflow["concurrency"]["cancel-in-progress"]
+        == "${{ github.workflow != 'Release' }}"
+    )
+
+    assert set(jobs["build"]["needs"]) == {
+        "verify-quality",
+        "rust-lint",
+        "rust-workspace",
+        "verify-python",
+        "verify-macos",
+        "native-wheels",
+    }
+    assert jobs["attest"]["needs"] == "build"
+    assert set(jobs["publish"]["needs"]) == {"build", "attest"}
+    assert set(jobs["github-release"]["needs"]) == {"build", "attest", "publish"}
+    for gated in ("attest", "publish", "github-release"):
+        assert jobs[gated]["if"] == "startsWith(github.ref, 'refs/tags/')"
+
+    quality_commands = [step.get("run", "") for step in jobs["verify-quality"]["steps"]]
+    assert "uv run ruff format --check ." in quality_commands
+    assert "uv run ruff check ." in quality_commands
+    assert "uv run python -m wisp.rpc.protocol_schema --check" in quality_commands
+    assert "uv run mypy" in quality_commands
+
+    expected_cache = "Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0"
+    for job_name, cache_key, expected_cmd in (
+        (
+            "rust-lint",
+            "rust-lint-ubuntu-latest",
+            "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+        ),
+        ("rust-workspace", "rust-test-ubuntu-latest", "cargo test --workspace --all-features"),
+    ):
+        job = jobs[job_name]
+        assert job["runs-on"] == "ubuntu-latest"
+        assert job["env"]["PYO3_NO_PYTHON"] == "1"
+        steps = job["steps"]
+        assert not any(
+            str(step.get("uses", "")).startswith(("astral-sh/setup-uv@", "actions/setup-python@"))
+            or "uv sync" in step.get("run", "")
+            for step in steps
+        )
+        cache_step = next(step for step in steps if step.get("name") == "Cache Rust dependencies")
+        assert cache_step["uses"] == expected_cache
+        assert cache_step["with"]["key"] == cache_key
+        assert cache_step["with"]["cache-bin"] is False
+        assert any(step.get("run") == expected_cmd for step in steps)
+    assert any(step.get("run") == "cargo fmt --all --check" for step in jobs["rust-lint"]["steps"])
+
+    py_entries = {
+        entry["suite"]: entry["args"]
+        for entry in jobs["verify-python"]["strategy"]["matrix"]["include"]
+    }
+    assert py_entries["parallel"] == "tests -m 'not (slow or process or benchmark)' -n auto"
+    for idx in (1, 2):
+        args = py_entries[f"serial-{idx}"]
+        assert "-m 'slow or process or benchmark'" in args
+        assert "-k 'not test_every_module_imports_fresh'" in args
+        assert f"--shard {idx}/2" in args
+    assert "tests/repository/test_architecture.py" in py_entries["fresh-imports"]
+    assert "test_every_module_imports_fresh" in py_entries["fresh-imports"]
+    py_test_step = next(
+        step for step in jobs["verify-python"]["steps"] if step.get("name") == "Test"
+    )
+    assert "uv run pytest ${{ matrix.args }}" in py_test_step["run"]
+
+    macos = jobs["verify-macos"]
+    assert macos["runs-on"] == "macos-latest"
+    macos_cmds = " ".join(step.get("run", "") for step in macos["steps"])
+    for expected_path in (
+        "tests/mcp/test_runtime_process.py",
+        "tests/tools/shell/test_supervisor*.py",
+        "tests/cli/test_rpc_transport.py",
+        "tests/tools/files/test_secure_fs.py",
+        'uv run wisp -p "hello" --provider fake',
+    ):
+        assert expected_path in macos_cmds
