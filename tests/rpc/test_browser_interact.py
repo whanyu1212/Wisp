@@ -18,7 +18,13 @@ from wisp.coding.browser_control import BrowserInteractionResult
 from wisp.coding.browser_viewport import BrowserMetadata
 from wisp.coding.session import CodingSession
 from wisp.config.mcp_servers import McpServerConfig
-from wisp.events import BrowserViewportUpdated, ErrorEvent, RpcCommandFinished, WispEvent
+from wisp.events import (
+    BrowserViewportUpdated,
+    ErrorEvent,
+    LiveBrowserViewport,
+    RpcCommandFinished,
+    WispEvent,
+)
 from wisp.mcp.tool import adapt_mcp_tool
 from wisp.rpc.commands import BrowserInteractCommand, ParsedRpcCommand, RpcCommandAdapter
 from wisp.rpc.coordinator import RpcCoordinator, _RpcInputCommand, _RpcSessionState
@@ -314,6 +320,55 @@ def test_browser_interact_cancellation_reports_failed_completion(tmp_path: Path)
             assert "RPC command cancelled: bi-cancel" in error_event.message
             assert finished.ok is False
             assert finished.error == "RPC command cancelled: bi-cancel"
+        finally:
+            await runtime.aclose()
+
+    anyio.run(scenario)
+
+
+@pytest.mark.parametrize("trusted", [True, False])
+def test_resize_respects_trust(tmp_path: Path, trusted: bool) -> None:
+    viewport = LiveBrowserViewport(width=640, height=480, device_scale_factor=2)
+    frame = BrowserViewportUpdated(
+        live_png=PNG_B64, viewport_width=640, viewport_height=480, live_device_scale=2
+    )
+    resized: list[LiveBrowserViewport] = []
+
+    class _Browser:
+        async def resize(self, requested: LiveBrowserViewport) -> BrowserViewportUpdated:
+            resized.append(requested)
+            return frame
+
+    async def scenario() -> None:
+        runtime = await build_runtime()
+        try:
+            sessions = JsonlSessionStore(tmp_path / "sessions")
+            agent = CodingSession(provider=CapturingProvider(), sessions=sessions, trusted=trusted)
+            session_state = _RpcSessionState(session=None, history=(), entry_count=0)
+            events: list[WispEvent] = []
+            send, receive = anyio.create_memory_object_stream(4)
+            async with send, receive, anyio.create_task_group() as tasks:
+                start_rpc_browser_interact_command(
+                    BrowserInteractCommand(action="live_resize", viewport=viewport),
+                    agent=agent,
+                    runtime=runtime,
+                    sessions=sessions,
+                    session_state=session_state,
+                    mcp_servers=None,
+                    task_group=tasks,
+                    send=send,
+                    write_event=events.append,
+                    live_browser=_Browser(),  # type: ignore[arg-type]
+                )
+                assert (await receive.receive()).ok == trusted
+            assert isinstance(events[-1], RpcCommandFinished)
+            assert events[-1].ok == trusted
+            if trusted:
+                assert events[-2] == frame
+                assert resized == [viewport]
+            else:
+                assert "trusted project" in (events[-1].error or "")
+                assert not resized
         finally:
             await runtime.aclose()
 

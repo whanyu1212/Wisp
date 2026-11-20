@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import base64
 import os
 import re
+import struct
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
-from tests.tui_e2e.support import context_stats_ready
+from tests.tui_e2e.support import complete_frames, context_stats_ready, screen_rows
 from tests.tui_e2e.test_browser_takeover import _start_wide_tui, _wait_screen
+from tests.tui_e2e.test_readiness import _TuiProcess
 
 _PAGE = b"""<!doctype html>
 <style>
@@ -29,10 +33,17 @@ _PAGE = b"""<!doctype html>
   @keyframes pulse { 50% { background: #002fee } }
 </style>
 <form><input aria-label="Type here"></form>
+<div style="height: 100vh; background: #444"></div>
 <script>
   const field = document.querySelector('input');
+  const reportSize = () => fetch('/size?' + innerWidth + ',' + innerHeight);
+  window.addEventListener('resize', reportSize);
+  reportSize();
+  window.addEventListener('scroll', () => {
+    if (scrollY > 0) fetch('/scrolled');
+  });
   field.addEventListener('click', ev => {
-    if (ev.isTrusted) {
+    if (ev.isTrusted && ev.clientX > innerWidth * .15 && ev.clientX < innerWidth * .85) {
       field.style.animation = 'none';
       fetch('/clicked');
     }
@@ -52,34 +63,60 @@ _PAGE = b"""<!doctype html>
 _KITTY_FRAME = re.compile(rb"\x1b_Ga=T,f=100,[^;]*U=1,[^;]+;([^\x1b]+)\x1b\\")
 
 
+def _has_frame_size(output: bytes, offset: int, size: tuple[int, int]) -> bool:
+    for frame in _KITTY_FRAME.finditer(output, offset):
+        header = base64.b64decode(frame[1][:32])
+        if len(header) == 24 and struct.unpack(">II", header[16:24]) == size:
+            return True
+    return False
+
+
+def _click_control(tui: _TuiProcess, label: str) -> None:
+    for row, text in enumerate(screen_rows(complete_frames(tui.output)), 1):
+        if (column := text.find(label)) >= 0:
+            tui.send(f"\x1b[<0;{column + 2};{row}M\x1b[<0;{column + 2};{row}m".encode())
+            return
+    pytest.fail(f"No {label} button in the painted browser pane")
+
+
 @pytest.mark.process
 @pytest.mark.skipif(
     os.environ.get("WISP_TEST_LIVE_BROWSER") != "1",
     reason="set WISP_TEST_LIVE_BROWSER=1 on a host with Chrome or Chromium",
 )
-def test_live_browser_renders_and_types(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A page animates without input and accepts a trusted click and typed text."""
+def test_live_browser_controls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A live page animates, accepts input, navigates, reflows, and closes."""
     monkeypatch.delenv("NO_COLOR", raising=False)
     clicked = threading.Event()
     typed = threading.Event()
     submitted = threading.Event()
+    scrolled = threading.Event()
+    sizes: list[tuple[int, int]] = []
+    opened_pages: list[str] = []
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
+            url = urlsplit(self.path)
             body = b""
-            if self.path == "/":
+            if url.path == "/":
                 self.send_response(302)
                 self.send_header("Location", "/page")
                 self.end_headers()
                 return
-            if self.path == "/page":
+            if url.path in {"/page", "/other"}:
+                opened_pages.append(url.path)
                 body = _PAGE
-            elif self.path == "/clicked":
+            elif url.path == "/size":
+                width, height = url.query.split(",")
+                sizes.append((int(width), int(height)))
+            elif url.path == "/clicked":
                 clicked.set()
-            elif self.path == "/typed":
+            elif url.path == "/typed":
                 typed.set()
-            elif self.path == "/submitted":
+            elif url.path == "/submitted":
                 submitted.set()
+            elif url.path == "/scrolled":
+                scrolled.set()
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
             self.send_header("Content-Length", str(len(body)))
@@ -110,7 +147,6 @@ def test_live_browser_renders_and_types(tmp_path: Path, monkeypatch: pytest.Monk
                 tui.wait_until(context_stats_ready, timeout=15, failure="TUI did not start")
                 opened_at = time.monotonic()
                 tui.send(f"/browser live http://127.0.0.1:{server.server_port}/\r".encode())
-                _wait_screen(tui, "Live Chromium", "Browser did not show its first frame")
                 _wait_screen(
                     tui,
                     f"127.0.0.1:{server.server_port}/page",
@@ -122,6 +158,12 @@ def test_live_browser_renders_and_types(tmp_path: Path, monkeypatch: pytest.Monk
                     failure="Browser did not transmit its first Kitty PNG",
                 )
                 print(f"First Kitty frame observed after {time.monotonic() - opened_at:.2f}s")
+                tui.wait_until(
+                    lambda _: bool(sizes and sizes[-1][0] < 900),
+                    timeout=5,
+                    failure="Chromium did not reflow to the docked pane",
+                )
+                docked_size = sizes[-1]
                 start = len(tui.output)
                 tui.wait_until(
                     lambda output: len(set(_KITTY_FRAME.findall(output, start))) >= 2,
@@ -133,6 +175,17 @@ def test_live_browser_renders_and_types(tmp_path: Path, monkeypatch: pytest.Monk
                     lambda _: clicked.is_set(), timeout=5, failure="Chromium did not receive click"
                 )
                 _wait_screen(tui, "INTERACT", "Browser did not take keyboard focus")
+                scroll_offset = len(tui.output)
+                wheel_at = time.monotonic()
+                tui.send(b"\x1b[<65;136;16M")
+                tui.wait_until(
+                    lambda output: (
+                        scrolled.is_set() and bool(_KITTY_FRAME.search(output, scroll_offset))
+                    ),
+                    timeout=5,
+                    failure="Chromium scroll did not repaint",
+                )
+                print(f"Scroll and repaint observed after {time.monotonic() - wheel_at:.2f}s")
                 first_byte = len(tui.output)
                 typed_at = time.monotonic()
                 tui.send(b"wisp")
@@ -153,6 +206,44 @@ def test_live_browser_renders_and_types(tmp_path: Path, monkeypatch: pytest.Monk
                 )
                 assert not list((tmp_path / "sessions" / "images").glob("*"))
                 assert list(tmp_path.glob("wisp-browser-*"))
+
+                tui.send(b"\x0c")
+                _wait_screen(tui, "Enter go", "Ctrl+L did not focus the address bar")
+                tui.send(
+                    f"\x1b[200~http://127.0.0.1:{server.server_port}/other\x1b[201~\r".encode()
+                )
+                _wait_screen(tui, "/other", "The address bar did not navigate the live tab")
+                _click_control(tui, "[‹]")
+                _wait_screen(tui, "/page", "Back did not select the previous address")
+                _click_control(tui, "[›]")
+                _wait_screen(tui, "/other", "Forward did not select the next address")
+                before_reload = opened_pages.count("/other")
+                _click_control(tui, "[↻]")
+                tui.wait_until(
+                    lambda _: opened_pages.count("/other") > before_reload,
+                    timeout=5,
+                    failure="Reload did not request the current page",
+                )
+                resize_offset = len(sizes)
+                frame_offset = len(tui.output)
+                tui.resize(width=190)
+                tui.wait_until(
+                    lambda _: any(size != docked_size for size in sizes[resize_offset:]),
+                    timeout=5,
+                    failure="Terminal resize did not update Chromium's CSS viewport",
+                )
+                resized = next(size for size in sizes[resize_offset:] if size != docked_size)
+                tui.wait_until(
+                    lambda output: _has_frame_size(output, frame_offset, resized),
+                    timeout=5,
+                    failure="The resized browser frame did not reach the terminal",
+                )
+                clicked.clear()
+                # The same form still receives a center click at its shifted docked position.
+                tui.send(b"\x1b[<0;166;12M\x1b[<0;166;12m")
+                tui.wait_until(
+                    lambda _: clicked.is_set(), timeout=5, failure="Resized click missed the page"
+                )
                 tui.send(b"\x03/browser\r")
                 tui.wait_until(
                     lambda _: not list(tmp_path.glob("wisp-browser-*")),

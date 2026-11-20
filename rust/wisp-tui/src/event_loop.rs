@@ -65,6 +65,8 @@ struct ActivationTarget {
     session_query: Option<(String, String)>,
     composer_copy: bool,
     browser_interacting: bool,
+    browser_address: bool,
+    browser_pointer_target: Option<(wisp_protocol::commands::LiveBrowserViewport, u64)>,
     mouse_frame: Option<mouse::Frame>,
 }
 
@@ -118,9 +120,14 @@ impl ActivationTarget {
                 .and_then(|picker| picker.editing_identity()),
             composer_copy: matches!(input, Input::Key(key) if is_ctrl_c(*key)
                 && !ui.browser_takeover_active()
+                && !ui.browser_address_active()
                 && ui.composer_clipboard_action(*key)
                     == Some(crate::clipboard::ClipboardAction::Copy)),
             browser_interacting: ui.browser_takeover_active(),
+            browser_address: ui.browser_address_active(),
+            browser_pointer_target: matches!(input, Input::Mouse(_) | Input::Scroll(_))
+                .then(|| ui.side_panel.painted_browser_target())
+                .flatten(),
             mouse_frame: matches!(input, Input::Mouse(_) | Input::Scroll(_))
                 .then(|| ui.mouse_frame.clone())
                 .flatten(),
@@ -152,6 +159,7 @@ impl PendingInput {
         // Ordinary draft editing must survive tool output and status changes.
         // Submission and rendered selections retain the stronger activation guard.
         let editor_input = !target.browser_interacting
+            && !target.browser_address
             && target.help_owner.is_none()
             && target.overlay.is_none()
             && target.decision.is_none()
@@ -269,7 +277,8 @@ impl PendingInput {
         limit: usize,
     ) -> Result<LoopControl, Error> {
         let current = ActivationTarget::capture(ui, &self.input);
-        let stale_takeover_exit = self.target.browser_interacting && !current.browser_interacting;
+        let stale_takeover_exit = (self.target.browser_interacting && !current.browser_interacting)
+            || (self.target.browser_address && !current.browser_address);
         // A negative decision may deny a replacement decision, but must never
         // become literal text after the waiting workflow has finished. And a
         // Ctrl+C/Esc captured to leave takeover must not cancel or deny what exited it.
@@ -280,6 +289,7 @@ impl PendingInput {
                     && printable_char(*key).is_some_and(|c| c.eq_ignore_ascii_case(&'n'))));
         let same_editor = self.editor_input
             && !current.browser_interacting
+            && !current.browser_address
             && self.target.help_owner == current.help_owner
             && self.target.overlay == current.overlay
             && self.target.decision == current.decision
@@ -306,7 +316,8 @@ impl PendingInput {
             // Focus belongs to no view, so no event between capture and apply makes it stale.
             || matches!(self.input, Input::Redraw | Input::Focus(_) | Input::Error(_))
             || same_editor
-            || self.wheel_input
+            || (self.wheel_input
+                && self.target.browser_pointer_target == current.browser_pointer_target)
             || self.selection_input
             || self.hover_input
             || same_stop_click
@@ -553,10 +564,12 @@ async fn run_with_interrupts<B: FrameBackend>(
             {
                 return Ok(Exit::User);
             }
-            if ui
-                .poll_browser_viewport(now.into_std(), writer, limit)
-                .await?
-                == LoopControl::Exit
+            if pending_input.is_none()
+                && sources.inputs.is_empty()
+                && ui
+                    .poll_browser_viewport(now.into_std(), writer, limit)
+                    .await?
+                    == LoopControl::Exit
             {
                 return Ok(Exit::User);
             }

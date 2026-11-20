@@ -208,6 +208,18 @@ pub(crate) fn thumbnail_cells(
     max_cols: u16,
     max_rows: u16,
 ) -> (u16, u16) {
+    fit_image_cells(px_w, px_h, cell, max_cols, max_rows, false)
+}
+
+/// Fit an image in terminal cells, optionally enlarging a size-capped live frame.
+pub(crate) fn fit_image_cells(
+    px_w: u32,
+    px_h: u32,
+    cell: CellSize,
+    max_cols: u16,
+    max_rows: u16,
+    allow_upscale: bool,
+) -> (u16, u16) {
     if px_w == 0 || px_h == 0 || max_cols == 0 || max_rows == 0 {
         return (0, 0);
     }
@@ -215,9 +227,8 @@ pub(crate) fn thumbnail_cells(
     let cell_h = f64::from(cell.height_px.max(1));
     let box_w = f64::from(max_cols) * cell_w;
     let box_h = f64::from(max_rows) * cell_h;
-    let scale = (box_w / f64::from(px_w))
-        .min(box_h / f64::from(px_h))
-        .min(1.0);
+    let fit = (box_w / f64::from(px_w)).min(box_h / f64::from(px_h));
+    let scale = if allow_upscale { fit } else { fit.min(1.0) };
     let target_w = f64::from(px_w) * scale;
     let target_h = f64::from(px_h) * scale;
     let cols = (target_w / cell_w).round().clamp(1.0, f64::from(max_cols)) as u16;
@@ -1748,6 +1759,16 @@ mod tests {
         assert_eq!(thumbnail_cells(16, 16, cell, 36, 10), (2, 1));
         assert_eq!(thumbnail_cells(0, 100, cell, 36, 10), (0, 0));
         assert_eq!(thumbnail_cells(100, 100, cell, 0, 10), (0, 0));
+    }
+
+    #[test]
+    fn capped_live_frame_fills_pane() {
+        let cell = CellSize {
+            width_px: 16,
+            height_px: 32,
+        };
+        assert_eq!(thumbnail_cells(1600, 1000, cell, 160, 50), (100, 31));
+        assert_eq!(fit_image_cells(1600, 1000, cell, 160, 50, true), (160, 50));
     }
 
     #[test]

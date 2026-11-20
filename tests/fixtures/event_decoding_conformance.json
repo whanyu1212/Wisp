@@ -154,6 +154,14 @@
    "event": "browser.viewport.updated",
    "operation": "remove",
    "path": [
+    "live_device_scale"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "browser.viewport.updated",
+   "operation": "remove",
+   "path": [
     "live_png"
    ],
    "accepted": true

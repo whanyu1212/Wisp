@@ -249,6 +249,9 @@
         "refresh",
         "live_open",
         "live_frame",
+        "live_navigate",
+        "live_forward",
+        "live_resize",
         "live_close"
       ],
       "type": "string"
@@ -364,6 +367,14 @@
             }
           ],
           "title": "BrowserInteractCommandUrl"
+        },
+        "viewport": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LiveBrowserViewport"
+            }
+          ],
+          "title": "BrowserInteractCommandViewport"
         },
         "x": {
           "anyOf": [
@@ -1539,6 +1550,37 @@
         "type"
       ],
       "title": "InitCommand",
+      "type": "object"
+    },
+    "LiveBrowserViewport": {
+      "additionalProperties": false,
+      "description": "CSS layout size and device pixel ratio requested for an isolated Chromium tab.",
+      "properties": {
+        "device_scale_factor": {
+          "maximum": 2,
+          "minimum": 1,
+          "title": "LiveBrowserViewportDeviceScaleFactor",
+          "type": "integer"
+        },
+        "height": {
+          "maximum": 1200,
+          "minimum": 1,
+          "title": "LiveBrowserViewportHeight",
+          "type": "integer"
+        },
+        "width": {
+          "maximum": 1600,
+          "minimum": 1,
+          "title": "LiveBrowserViewportWidth",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "width",
+        "height",
+        "device_scale_factor"
+      ],
+      "title": "LiveBrowserViewport",
       "type": "object"
     },
     "LoginMcpServerCommand": {

@@ -2,11 +2,152 @@
 
 use super::*;
 use crate::terminal_images::{
-    CellSize, ImagePreviewMeta, PaintedImage, PlacementKey, thumbnail_cells,
+    CellSize, ImagePreviewMeta, PaintedImage, PlacementKey, fit_image_cells,
 };
 use chrono::Timelike;
 use ratatui::layout::Position;
 use ratatui::widgets::Paragraph;
+use unicode_segmentation::UnicodeSegmentation;
+use wisp_protocol::commands::LiveBrowserViewport;
+
+use crate::prompt_editor::PromptEditor;
+
+pub(super) struct AddressBar(pub(super) PromptEditor);
+
+impl std::fmt::Debug for AddressBar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AddressBar([REDACTED])")
+    }
+}
+
+/// Lay out the page in CSS pixels while keeping the capture at terminal pixel density.
+pub(super) fn viewport_for_cells(area: Rect, cell: CellSize) -> LiveBrowserViewport {
+    // TIOCGWINSZ gives physical cell dimensions, but no monitor scale. Treat
+    // cells approximately twice the default height as high-density.
+    let scale = if cell.height_px >= 28 { 2 } else { 1 };
+    let width = (u32::from(area.width) * u32::from(cell.width_px) / scale).max(1);
+    let height = (u32::from(area.height) * u32::from(cell.height_px) / scale).max(1);
+    let fit = (1600.0 / f64::from(width))
+        .min(1200.0 / f64::from(height))
+        .min(1.0);
+    LiveBrowserViewport {
+        width: (f64::from(width) * fit).round().clamp(1.0, 1600.0) as u32,
+        height: (f64::from(height) * fit).round().clamp(1.0, 1200.0) as u32,
+        device_scale_factor: scale,
+    }
+}
+
+/// Draw browser controls and return the address editor's cursor in pane cells.
+pub(super) fn push_live_toolbar(
+    rows: &mut PanelRows,
+    viewport: &BrowserViewport,
+    editor: Option<&PromptEditor>,
+    width: u16,
+    palette: Palette,
+) -> Option<(u16, u16)> {
+    let mut nav = Vec::new();
+    let mut actions = Vec::new();
+    let muted = Style::default().fg(palette.muted);
+    let mut col = 0;
+    for (text, control) in [
+        ("[‹]", BrowserControl::Back),
+        ("[›]", BrowserControl::Forward),
+        ("[↻]", BrowserControl::Reload),
+    ] {
+        if col + 3 > width {
+            break;
+        }
+        nav.push(Span::styled(text, Style::default().fg(palette.primary)));
+        actions.push((col, col + 3, control));
+        col += 3;
+        if col < width {
+            nav.push(Span::raw(" "));
+            col += 1;
+        }
+    }
+    let narrow = width < 40;
+    let address_col = if narrow { 0 } else { col };
+    let address_row = usize::from(narrow);
+    let start = rows.lines.len() + 1;
+    let available = width.saturating_sub(address_col).saturating_sub(2);
+    let (address, cursor) = address_text(viewport, editor, available, palette);
+    let mut location = vec![Span::styled("[", muted)];
+    location.extend(address);
+    location.push(Span::styled("]", muted));
+    let lines = if narrow {
+        let title = sanitize_for_terminal(viewport.title.as_deref().unwrap_or("Browser"));
+        nav.push(Span::styled(
+            ui::clip_columns(&title, usize::from(width - col)),
+            muted,
+        ));
+        vec![Line::from(nav), Line::from(location)]
+    } else {
+        nav.extend(location);
+        vec![Line::from(nav)]
+    };
+    rows.section(Section::BrowserControls, lines);
+    for (from, to, control) in actions {
+        rows.action_range(0, from, to, PanelAction::BrowserControl(control));
+    }
+    rows.action_range(
+        address_row,
+        address_col,
+        width,
+        PanelAction::BrowserControl(BrowserControl::Address),
+    );
+    cursor.map(|cursor| (address_col + 1 + cursor, (start + address_row) as u16))
+}
+
+fn address_text(
+    viewport: &BrowserViewport,
+    editor: Option<&PromptEditor>,
+    width: u16,
+    palette: Palette,
+) -> (Vec<Span<'static>>, Option<u16>) {
+    let style = Style::default().fg(palette.secondary);
+    let Some(editor) = editor.filter(|_| width > 0) else {
+        let url = sanitize_for_terminal(viewport.url.as_deref().unwrap_or("Address"));
+        return (
+            vec![Span::styled(
+                ui::clip_columns(&url, usize::from(width)),
+                style,
+            )],
+            None,
+        );
+    };
+    let address = editor.text();
+    let mut start = editor.cursor_offset();
+    let mut cursor = 0;
+    for (offset, grapheme) in address[..start].grapheme_indices(true).rev() {
+        let columns = grapheme.width();
+        if cursor + columns >= usize::from(width) {
+            break;
+        }
+        start = offset;
+        cursor += columns;
+    }
+    let selection = editor.selection_range();
+    let mut spans = Vec::new();
+    let mut columns = 0;
+    for (offset, grapheme) in address[start..].grapheme_indices(true) {
+        let span_width = grapheme.width();
+        if columns + span_width > usize::from(width) {
+            break;
+        }
+        let style = if selection
+            .as_ref()
+            .is_some_and(|r| r.contains(&(start + offset)))
+        {
+            palette.text_selection()
+        } else {
+            style
+        };
+        spans.push(Span::styled(grapheme.to_owned(), style));
+        columns += span_width;
+    }
+    spans.push(Span::raw(" ".repeat(usize::from(width) - columns)));
+    (spans, Some(cursor as u16))
+}
 
 /// Draw the `Work | Browser` tab switcher and right-aligned `Expand` / `Restore` toggle at row 0.
 pub(super) fn push_mode_tabs(
@@ -136,7 +277,7 @@ pub(super) fn render_browser_body(
     let viewport = state.browser_viewport.as_ref();
 
     let mut meta: Vec<Line<'static>> = Vec::new();
-    if let Some(vp) = viewport {
+    if let Some(vp) = viewport.filter(|vp| !vp.live) {
         let title = vp
             .title
             .as_deref()
@@ -186,7 +327,7 @@ pub(super) fn render_browser_body(
                 muted,
             ));
         }
-    } else {
+    } else if viewport.is_none() {
         meta.push(Line::styled(
             ui::clip_columns("Browser", width),
             Style::default().add_modifier(Modifier::BOLD),
@@ -209,7 +350,7 @@ pub(super) fn render_browser_body(
         return None;
     }
     // Leave one blank spacer row between metadata and the image frame when space permits.
-    let spacer = u16::from(remaining_height > 2);
+    let spacer = u16::from(!meta_rect.is_empty() && remaining_height > 2);
     let image_area = Rect {
         x: body.x,
         y: after_meta_y + spacer,
@@ -238,12 +379,13 @@ pub(super) fn render_browser_body(
         return None;
     };
 
-    let (cols, rows) = thumbnail_cells(
+    let (cols, rows) = fit_image_cells(
         preview.pixel_width,
         preview.pixel_height,
         cell_size,
         image_area.width,
         image_area.height,
+        vp.live,
     );
     if cols == 0 || rows == 0 {
         render_placeholder(frame, image_area, "Viewport too small for frame.", muted);

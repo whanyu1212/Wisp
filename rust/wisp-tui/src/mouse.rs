@@ -508,13 +508,19 @@ impl LiveUi {
                 ) {
                     return Ok(LoopControl::Continue);
                 }
-                if let crate::side_panel::OverlayKey::Open(target) =
-                    self.side_panel.click(event.column, event.row)
-                {
-                    self.side_panel.close_overlay();
-                    self.clear_browser_takeover_buffers();
-                    self.render_pending = true;
-                    return self.open_from_panel(target, writer, limit).await;
+                match self.side_panel.click(event.column, event.row) {
+                    crate::side_panel::OverlayKey::Open(target) => {
+                        self.side_panel.close_overlay();
+                        self.clear_browser_takeover_buffers();
+                        self.render_pending = true;
+                        return self.open_from_panel(target, writer, limit).await;
+                    }
+                    crate::side_panel::OverlayKey::BrowserControl(control) => {
+                        return self
+                            .handle_live_browser_control(control, writer, limit)
+                            .await;
+                    }
+                    _ => self.clear_browser_address(),
                 }
                 if !self.side_panel.browser_interacting() {
                     self.clear_browser_takeover_buffers();
@@ -523,11 +529,11 @@ impl LiveUi {
             self.render_pending = true;
             return Ok(LoopControl::Continue);
         }
-        if scroll_lines.is_none()
-            && matches!(event.kind, MouseEventKind::Down(_))
-            && self.side_panel.browser_interacting()
-        {
-            self.exit_browser_takeover();
+        if scroll_lines.is_none() && matches!(event.kind, MouseEventKind::Down(_)) {
+            if self.side_panel.browser_interacting() {
+                self.exit_browser_takeover();
+            }
+            self.clear_browser_address();
         }
         if matches!(
             event.kind,

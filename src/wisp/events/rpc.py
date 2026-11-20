@@ -52,7 +52,10 @@ MAX_RPC_MODEL_DISPLAY_CHARS = 256
 MAX_RPC_MODEL_EFFORT_CHARS = 64
 # The most recent calls kept per file; the TUI jumps to the latest one.
 MAX_GIT_DIFF_FILE_EDITS = 16
-MAX_LIVE_BROWSER_FRAME_CHARS = 3_000_000
+MAX_LIVE_BROWSER_WIDTH = 1_600
+MAX_LIVE_BROWSER_HEIGHT = 1_200
+# Includes base64 overhead for a full-size, incompressible RGBA PNG.
+MAX_LIVE_BROWSER_FRAME_CHARS = 11_000_000
 MAX_BROWSER_URL_CHARS = 2_048
 MAX_BROWSER_TITLE_CHARS = 512
 MAX_BROWSER_SOURCE_TOOL_CHARS = 128
@@ -810,6 +813,16 @@ class SkillCatalogUpdated(WispEvent):
     catalog: RpcSkillCatalogSnapshot
 
 
+class LiveBrowserViewport(BaseModel):
+    """CSS layout size and device pixel ratio requested for an isolated Chromium tab."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    width: int = Field(ge=1, le=MAX_LIVE_BROWSER_WIDTH)
+    height: int = Field(ge=1, le=MAX_LIVE_BROWSER_HEIGHT)
+    device_scale_factor: int = Field(ge=1, le=2)
+
+
 class BrowserViewportUpdated(WispEvent):
     """Transient live snapshot of an agent browser session's current page and frame."""
 
@@ -826,6 +839,7 @@ class BrowserViewportUpdated(WispEvent):
     viewport_height: int | None = Field(
         default=None, ge=1, le=MAX_BROWSER_VIEWPORT_SIDE, strict=True
     )
+    live_device_scale: int | None = Field(default=None, ge=1, le=2, strict=True)
     source_tool: str | None = Field(
         default=None, min_length=1, max_length=MAX_BROWSER_SOURCE_TOOL_CHARS
     )

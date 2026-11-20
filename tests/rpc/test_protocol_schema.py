@@ -378,6 +378,78 @@ def test_typed_command_models_reject_invalid_output_states(payload: dict[str, ob
         RpcCommandAdapter.validate_python(payload)
 
 
+@pytest.mark.parametrize(
+    ("fields", "valid"),
+    [
+        (
+            {
+                "action": "live_resize",
+                "viewport": {"width": 1, "height": 1, "device_scale_factor": 1},
+            },
+            True,
+        ),
+        (
+            {
+                "action": "live_resize",
+                "viewport": {"width": 1600, "height": 1200, "device_scale_factor": 2},
+            },
+            True,
+        ),
+        (
+            {
+                "action": "live_resize",
+                "viewport": {"width": 1601, "height": 1200, "device_scale_factor": 1},
+            },
+            False,
+        ),
+        (
+            {
+                "action": "live_resize",
+                "viewport": {"width": 1, "height": 1201, "device_scale_factor": 1},
+            },
+            False,
+        ),
+        (
+            {
+                "action": "live_resize",
+                "viewport": {"width": 1, "height": 1, "device_scale_factor": 3},
+            },
+            False,
+        ),
+        (
+            {
+                "action": "live_resize",
+                "viewport": {"width": 1, "height": 1, "device_scale_factor": True},
+            },
+            False,
+        ),
+        ({"action": "live_resize"}, False),
+        ({"action": "live_navigate", "url": "https://example.org"}, True),
+        ({"action": "live_navigate"}, False),
+        ({"action": "live_forward"}, True),
+        ({"action": "live_forward", "url": "https://example.org"}, False),
+        (
+            {
+                "action": "live_forward",
+                "viewport": {"width": 1, "height": 1, "device_scale_factor": 1},
+            },
+            False,
+        ),
+        ({"action": "live_forward", "x": 0}, False),
+    ],
+)
+def test_live_command_contract(fields: dict[str, object], valid: bool) -> None:
+    payload = {"type": "browser_interact", **fields}
+    schema = json.loads((_REPOSITORY_SCHEMA_DIRECTORY / "commands.schema.json").read_text())
+    assert Draft202012Validator(schema).is_valid(payload) == valid
+    if valid:
+        command = RpcCommandAdapter.validate_python(payload)
+        assert json.loads(command.to_json_line()) == payload
+    else:
+        with pytest.raises(ValidationError):
+            RpcCommandAdapter.validate_python(payload)
+
+
 def test_event_schema_contains_every_current_discriminator_once() -> None:
     schema = _artifact("events.schema.json")
     mapping = _mapping(schema)

@@ -587,8 +587,17 @@ pub mod commands {
         Back,
         Reload,
         Refresh,
+        LiveForward,
         LiveFrame,
         LiveClose,
+    }
+
+    /// CSS dimensions and device pixel scale for the manual browser tab.
+    #[derive(Clone, Copy, Debug, serde::Serialize, Eq, PartialEq)]
+    pub struct LiveBrowserViewport {
+        pub width: u32,
+        pub height: u32,
+        pub device_scale_factor: u32,
     }
 
     /// Backend execution mode, shared by command builders and frontend state.
@@ -1583,6 +1592,24 @@ pub mod commands {
             }))
         }
 
+        pub fn browser_live_navigate(
+            id: &str,
+            url: &str,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({
+                "type": "browser_interact", "id": id, "action": "live_navigate", "url": url,
+            }))
+        }
+
+        pub fn browser_live_resize(
+            id: &str,
+            viewport: LiveBrowserViewport,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({
+                "type": "browser_interact", "id": id, "action": "live_resize", "viewport": viewport,
+            }))
+        }
+
         /// Route the interaction to the isolated Chromium tab.
         pub fn for_live_browser(self) -> Result<Self, super::ProtocolDecodeError> {
             let mut value = self
@@ -1864,6 +1891,7 @@ pub mod events {
     #[derive(Clone, serde::Deserialize, Eq, PartialEq)]
     pub struct BrowserViewportUpdate {
         pub live_png: Option<String>,
+        pub live_device_scale: Option<u32>,
         pub image: Option<BrowserViewportImage>,
         pub url: Option<String>,
         pub title: Option<String>,

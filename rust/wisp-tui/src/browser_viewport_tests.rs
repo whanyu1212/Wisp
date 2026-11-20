@@ -1669,3 +1669,194 @@ async fn kitty_unicode_viewport_paints_placeholders_and_expands_panel() {
     assert!(!ui.side_panel.expanded());
     assert!(!ui.side_panel.overlay_open());
 }
+
+async fn push_live_browser_frame(
+    ui: &mut LiveUi,
+    dir: &TempSessionDir,
+    geometry: wisp_protocol::commands::LiveBrowserViewport,
+) {
+    use base64::Engine;
+    let (sha, _) = write_split_tone_png(
+        &dir.images_dir(),
+        geometry.width * geometry.device_scale_factor,
+        geometry.height * geometry.device_scale_factor,
+    );
+    let png = std::fs::read(dir.images_dir().join(sha)).unwrap();
+    push_backend_event(
+        ui,
+        serde_json::json!({
+            "type": "browser.viewport.updated",
+            "timestamp": "2026-11-20T12:34:56Z",
+            "live_png": base64::engine::general_purpose::STANDARD.encode(png),
+            "live_device_scale": geometry.device_scale_factor,
+            "viewport_width": geometry.width,
+            "viewport_height": geometry.height,
+            "url": "https://example.test/",
+            "title": "Live Chromium",
+        }),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn resize_targets_painted_geometry() {
+    let dir = TempSessionDir::new("live-resize");
+    let mut ui = ui_with_session(&dir);
+    use wisp_protocol::commands::LiveBrowserViewport;
+    push_live_browser_frame(
+        &mut ui,
+        &dir,
+        LiveBrowserViewport {
+            width: 900,
+            height: 600,
+            device_scale_factor: 1,
+        },
+    )
+    .await;
+    ui.cell_size = terminal_images::CellSize {
+        width_px: 16,
+        height_px: 32,
+    };
+    draw_text(&mut ui, 160, 36);
+    let old_rect = ui.side_panel.viewport_image_rect().unwrap();
+    let desired = ui
+        .side_panel
+        .desired_browser_geometry(ui.cell_size)
+        .unwrap();
+    assert_eq!(desired.device_scale_factor, 2);
+    assert!(desired.width < 900);
+    assert!(
+        ui.side_panel
+            .map_viewport_point(&ui.state, old_rect.x, old_rect.y)
+            .is_some()
+    );
+
+    let (writer, mut commands) = mpsc::channel(8);
+    let now = std::time::Instant::now();
+    ui.poll_browser_viewport(now, &writer, MAX_APPLICATION_FRAME_BYTES)
+        .await
+        .unwrap();
+    let requests = drain_sent_commands(&mut commands);
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request["action"], "live_resize");
+    assert_eq!(request["viewport"], serde_json::to_value(desired).unwrap());
+    assert!(
+        ui.side_panel
+            .map_viewport_point(&ui.state, old_rect.x, old_rect.y)
+            .is_none()
+    );
+    ui.enter_browser_takeover();
+    send_input(
+        &mut ui,
+        Input::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+    )
+    .await;
+    assert_eq!(ui.browser_typing_buffer.text, "x");
+    ui.clear_browser_takeover_buffers();
+
+    push_backend_event(
+        &mut ui,
+        serde_json::json!({
+            "type": "rpc.command.finished", "timestamp": "2026-11-20T12:34:57Z",
+            "command_type": "browser_interact", "command_id": request["id"], "ok": false,
+            "error": "Finish or cancel the active operation before interacting with the browser",
+        }),
+    )
+    .await;
+    ui.poll_browser_viewport(
+        now + LIVE_BROWSER_RESIZE_INTERVAL,
+        &writer,
+        MAX_APPLICATION_FRAME_BYTES,
+    )
+    .await
+    .unwrap();
+    let retry = drain_sent_commands(&mut commands);
+    assert_eq!(retry.len(), 1);
+    assert_eq!(retry[0]["action"], "live_resize");
+    assert_eq!(retry[0]["viewport"], request["viewport"]);
+
+    push_live_browser_frame(&mut ui, &dir, desired).await;
+    push_backend_event(
+        &mut ui,
+        serde_json::json!({
+            "type": "rpc.command.finished", "timestamp": "2026-11-20T12:34:57Z",
+            "command_type": "browser_interact", "command_id": retry[0]["id"], "ok": true,
+        }),
+    )
+    .await;
+    assert!(
+        ui.side_panel
+            .map_viewport_point(&ui.state, old_rect.x, old_rect.y)
+            .is_none()
+    );
+    draw_text(&mut ui, 160, 36);
+    let rect = ui.side_panel.viewport_image_rect().unwrap();
+    assert_eq!(
+        ui.side_panel.map_viewport_point(&ui.state, rect.x, rect.y),
+        Some((4, 8))
+    );
+}
+
+#[tokio::test]
+async fn address_focus_keeps_chat_draft() {
+    let dir = TempSessionDir::new("live-address");
+    let mut ui = ui_with_session(&dir);
+    push_live_browser_frame(
+        &mut ui,
+        &dir,
+        wisp_protocol::commands::LiveBrowserViewport {
+            width: 320,
+            height: 240,
+            device_scale_factor: 1,
+        },
+    )
+    .await;
+    ui.editor.replace_range(0..0, "draft for the agent");
+    draw_text(&mut ui, 160, 36);
+    ui.enter_browser_takeover();
+
+    for width in [100, 160] {
+        draw_text(&mut ui, width, 36);
+        assert!(ui.side_panel.visible());
+        assert_eq!(ui.side_panel.overlay_open(), width == 100);
+        assert!(ui.browser_takeover_active());
+        send_input(
+            &mut ui,
+            Input::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL)),
+        )
+        .await;
+        assert!(ui.browser_address_active());
+
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(width, 36)).unwrap();
+        ui.draw(&mut terminal, &conn()).unwrap();
+        let (address_row, _) = buffer_text(terminal.backend().buffer())
+            .lines()
+            .enumerate()
+            .find(|(_, line)| line.contains("https://example.test/"))
+            .expect("painted address");
+        let caret = ratatui::backend::Backend::get_cursor_position(terminal.backend_mut()).unwrap();
+        assert_eq!(usize::from(caret.y), address_row);
+
+        send_input(&mut ui, Input::Paste("example.net/next".into())).await;
+        let commands = send_input_collecting(
+            &mut ui,
+            Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        )
+        .await;
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0]["action"], "live_navigate");
+        assert_eq!(commands[0]["url"], "https://example.net/next");
+        assert_eq!(ui.editor.text(), "draft for the agent");
+        assert!(!ui.browser_address_active());
+        push_backend_event(
+            &mut ui,
+            serde_json::json!({
+                "type": "rpc.command.finished", "timestamp": "2026-11-20T12:34:57Z",
+                "command_type": "browser_interact", "command_id": commands[0]["id"], "ok": true,
+            }),
+        )
+        .await;
+        ui.enter_browser_takeover();
+    }
+}
