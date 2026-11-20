@@ -642,6 +642,7 @@ def test_build_runtime_activates_builtin_providers_tools_and_commands() -> None:
             "new",
             "resume",
             "name",
+            "past-sessions",
             "clone",
             "tree",
             "unrevert",
