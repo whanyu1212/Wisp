@@ -37,6 +37,10 @@ pub(crate) const MAX_PREVIEW_IMAGES_PER_ENTRY: usize = 4;
 const MAX_THUMBNAIL_PX_WIDTH: u32 = 576;
 const MAX_THUMBNAIL_PX_HEIGHT: u32 = 320;
 
+/// Maximum pixel dimensions retained for the docked/overlay browser viewport frame.
+const MAX_VIEWPORT_PX_WIDTH: u32 = 1600;
+const MAX_VIEWPORT_PX_HEIGHT: u32 = 1200;
+
 /// Strict decoder safety bounds matching the backend's image ingestion limits.
 const MAX_DECODE_SIDE: u32 = 8000;
 const MAX_DECODE_ALLOC_BYTES: u64 = 64 * 1024 * 1024;
@@ -260,8 +264,8 @@ fn digest_hex(digest: &[u8]) -> String {
     hex
 }
 
-/// Safely decode PNG, JPEG, GIF, or WebP bytes into a bounded RGBA thumbnail.
-pub(crate) fn decode_thumbnail(bytes: &[u8]) -> Option<DecodedThumbnail> {
+/// Safely decode PNG, JPEG, GIF, or WebP bytes into a bounded RGBA image.
+fn decode_bounded(bytes: &[u8], max_width: u32, max_height: u32) -> Option<DecodedThumbnail> {
     let mut reader = image::ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .ok()?;
@@ -289,12 +293,8 @@ pub(crate) fn decode_thumbnail(bytes: &[u8]) -> Option<DecodedThumbnail> {
         return None;
     }
 
-    let scaled = if pixel_width > MAX_THUMBNAIL_PX_WIDTH || pixel_height > MAX_THUMBNAIL_PX_HEIGHT {
-        decoded.resize(
-            MAX_THUMBNAIL_PX_WIDTH,
-            MAX_THUMBNAIL_PX_HEIGHT,
-            FilterType::Triangle,
-        )
+    let scaled = if pixel_width > max_width || pixel_height > max_height {
+        decoded.resize(max_width, max_height, FilterType::Triangle)
     } else {
         decoded
     };
@@ -314,20 +314,55 @@ pub(crate) fn decode_thumbnail(bytes: &[u8]) -> Option<DecodedThumbnail> {
     })
 }
 
-/// Bounded LRU cache of decoded image thumbnails and sticky failed keys for the session.
+/// Safely decode PNG, JPEG, GIF, or WebP bytes into a bounded RGBA thumbnail.
+#[cfg(test)]
+pub(crate) fn decode_thumbnail(bytes: &[u8]) -> Option<DecodedThumbnail> {
+    decode_bounded(bytes, MAX_THUMBNAIL_PX_WIDTH, MAX_THUMBNAIL_PX_HEIGHT)
+}
+
+fn load_and_decode(
+    image: &TranscriptImage,
+    session_images_dir: Option<&Path>,
+    max_width: u32,
+    max_height: u32,
+) -> Option<DecodedThumbnail> {
+    match &image.source {
+        TranscriptImageSource::Inline { bytes, .. } => decode_bounded(bytes, max_width, max_height),
+        TranscriptImageSource::Stored { sha256, byte_size } => {
+            let images_dir = session_images_dir?;
+            load_stored_bytes(images_dir, sha256, *byte_size)
+                .and_then(|bytes| decode_bounded(&bytes, max_width, max_height))
+        }
+    }
+}
+
+/// Bounded LRU cache of decoded image thumbnails, active viewport frame, and sticky failed keys.
 #[derive(Debug, Default)]
 pub(crate) struct ImageCache {
     entries: HashMap<ImageCacheKey, Arc<DecodedThumbnail>>,
     order: VecDeque<ImageCacheKey>,
+    viewport_entry: Option<(ImageCacheKey, Arc<DecodedThumbnail>)>,
     failed: HashSet<ImageCacheKey>,
     failed_order: VecDeque<ImageCacheKey>,
     last_images_dir: Option<PathBuf>,
 }
 
 impl ImageCache {
-    /// Look up a cached decoded thumbnail without mutating LRU order.
+    /// Look up a cached decoded image without mutating LRU order.
     pub(crate) fn get(&self, key: &ImageCacheKey) -> Option<&Arc<DecodedThumbnail>> {
-        self.entries.get(key)
+        self.viewport_entry
+            .as_ref()
+            .and_then(|(viewport_key, thumb)| (viewport_key == key).then_some(thumb))
+            .or_else(|| self.entries.get(key))
+    }
+
+    fn sync_images_dir(&mut self, session_images_dir: Option<&Path>) {
+        if self.last_images_dir.as_deref() != session_images_dir {
+            self.last_images_dir = session_images_dir.map(Path::to_path_buf);
+            self.viewport_entry = None;
+            self.failed.clear();
+            self.failed_order.clear();
+        }
     }
 
     /// Decode visible and nearby transcript images into memory and sync layout metadata
@@ -340,11 +375,7 @@ impl ImageCache {
         cell_size: CellSize,
         row_cache: &mut TranscriptRowCache,
     ) {
-        if self.last_images_dir.as_deref() != session_images_dir {
-            self.last_images_dir = session_images_dir.map(Path::to_path_buf);
-            self.failed.clear();
-            self.failed_order.clear();
-        }
+        self.sync_images_dir(session_images_dir);
 
         let entries = transcript.entries();
         if entries.is_empty() {
@@ -395,6 +426,51 @@ impl ImageCache {
         row_cache.set_image_previews(previews, cell_size);
     }
 
+    /// Decode or retrieve the active browser viewport frame without evicting transcript thumbnails.
+    pub(crate) fn prepare_browser_viewport(
+        &mut self,
+        image: Option<&TranscriptImage>,
+        session_images_dir: Option<&Path>,
+    ) -> Option<ImagePreviewMeta> {
+        self.sync_images_dir(session_images_dir);
+        let Some(image) = image else {
+            self.viewport_entry = None;
+            return None;
+        };
+        let key = ImageCacheKey(Arc::from(format!("viewport:{}", image.cache_key())));
+        if let Some((existing_key, thumb)) = &self.viewport_entry {
+            if existing_key == &key {
+                return Some(ImagePreviewMeta {
+                    key,
+                    pixel_width: thumb.pixel_width,
+                    pixel_height: thumb.pixel_height,
+                });
+            }
+        }
+        if self.failed.contains(&key) {
+            self.viewport_entry = None;
+            return None;
+        }
+        if let Some(thumb) = load_and_decode(
+            image,
+            session_images_dir,
+            MAX_VIEWPORT_PX_WIDTH,
+            MAX_VIEWPORT_PX_HEIGHT,
+        ) {
+            let meta = ImagePreviewMeta {
+                key: key.clone(),
+                pixel_width: thumb.pixel_width,
+                pixel_height: thumb.pixel_height,
+            };
+            self.viewport_entry = Some((key, Arc::new(thumb)));
+            Some(meta)
+        } else {
+            self.viewport_entry = None;
+            self.record_failed(key);
+            None
+        }
+    }
+
     fn ensure_loaded(
         &mut self,
         image: &TranscriptImage,
@@ -409,14 +485,12 @@ impl ImageCache {
             return None;
         }
 
-        let decoded = match &image.source {
-            TranscriptImageSource::Inline { bytes, .. } => decode_thumbnail(bytes),
-            TranscriptImageSource::Stored { sha256, byte_size } => {
-                let images_dir = session_images_dir?;
-                load_stored_bytes(images_dir, sha256, *byte_size)
-                    .and_then(|bytes| decode_thumbnail(&bytes))
-            }
-        };
+        let decoded = load_and_decode(
+            image,
+            session_images_dir,
+            MAX_THUMBNAIL_PX_WIDTH,
+            MAX_THUMBNAIL_PX_HEIGHT,
+        );
 
         if let Some(thumb) = decoded {
             let thumb = Arc::new(thumb);
@@ -476,18 +550,20 @@ fn outward_indices(len: usize, center: usize) -> impl Iterator<Item = usize> {
     indices.into_iter()
 }
 
-/// On-screen span recorded while rendering transcript image rows, checked for overlay
+/// On-screen span recorded while rendering image slots, checked for overlay
 /// occlusion in `finish` before painting half-blocks or syncing native placements.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PaintedImage {
-    pub entry_id: TranscriptEntryId,
-    pub image_index: u8,
+    pub placement: PlacementKey,
     pub key: ImageCacheKey,
     pub rect: Rect,
     pub total_rows: u16,
     pub first_image_row: u16,
     pub bg: Color,
     pub snapshot: Vec<Cell>,
+    /// True when rendered inside a panel overlay that shares `popup_rect`, so the
+    /// overlay does not mark its own embedded image as self-occluded.
+    pub ignore_overlay_rect: bool,
 }
 
 /// Slice the vertical pixel band `[first_row .. first_row + visible_rows)` out of `total_rows`.
@@ -832,11 +908,14 @@ fn encode_sixel_rle(out: &mut Vec<u8>, masks: &[u8]) {
     }
 }
 
-/// Stable identifier of one placement slot inside a transcript entry.
+/// Stable identifier of one placement slot inside a transcript entry or the browser viewport.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct PlacementKey {
-    pub entry_id: TranscriptEntryId,
-    pub image_index: u8,
+pub(crate) enum PlacementKey {
+    Transcript {
+        entry_id: TranscriptEntryId,
+        image_index: u8,
+    },
+    BrowserViewport,
 }
 
 /// Desired native protocol placement for the current frame.
@@ -875,6 +954,21 @@ impl ImagePlacementState {
     /// (for example after a terminal resize or frame invalidation).
     pub(crate) fn request_reemit(&mut self) {
         self.force_reemit = true;
+    }
+
+    /// Whether `spec` matches an unchanged native placement that needs no cell rewrite.
+    pub(crate) fn is_steady_state(
+        &self,
+        protocol: ImageProtocol,
+        spec: &NativePlacement,
+        cell_size: CellSize,
+    ) -> bool {
+        !self.force_reemit
+            && protocol != ImageProtocol::HalfBlock
+            && self
+                .active
+                .get(&spec.placement)
+                .is_some_and(|existing| existing.spec == *spec && existing.cell_size == cell_size)
     }
 
     /// Forget all active placements without deleting them (after `$EDITOR` suspend/resume).
@@ -1224,14 +1318,17 @@ mod tests {
         let mut buffer = Buffer::empty(Rect::new(0, 0, 2, 1));
         buffer[(1, 0)].set_symbol("X");
         let painted = PaintedImage {
-            entry_id: TranscriptEntryId::from_raw(1),
-            image_index: 0,
+            placement: PlacementKey::Transcript {
+                entry_id: TranscriptEntryId::from_raw(1),
+                image_index: 0,
+            },
             key: ImageCacheKey(Arc::from("k")),
             rect: Rect::new(0, 0, 2, 1),
             total_rows: 1,
             first_image_row: 0,
             bg: Color::Rgb(10, 20, 30),
             snapshot: Vec::new(),
+            ignore_overlay_rect: false,
         };
         // Leave second column covered (false).
         paint_half_blocks(&mut buffer, &thumb, &painted, false, Some(&[true, false]));
@@ -1296,7 +1393,7 @@ mod tests {
 
         let mut placements = ImagePlacementState::default();
         let desired = vec![NativePlacement {
-            placement: PlacementKey {
+            placement: PlacementKey::Transcript {
                 entry_id: TranscriptEntryId::from_raw(1),
                 image_index: 0,
             },
@@ -1306,6 +1403,12 @@ mod tests {
             first_image_row: 0,
             bg: Color::Black,
         }];
+
+        assert!(!placements.is_steady_state(
+            ImageProtocol::Kitty,
+            &desired[0],
+            CellSize::default()
+        ));
 
         let mut frame1 = Vec::new();
         placements.sync(
@@ -1318,6 +1421,7 @@ mod tests {
         let f1 = String::from_utf8(frame1).unwrap();
         assert!(f1.contains("a=T,") && f1.contains(",q=2,"));
         assert!(placements.has_active_kitty());
+        assert!(placements.is_steady_state(ImageProtocol::Kitty, &desired[0], CellSize::default()));
 
         // Identical second frame emits zero bytes.
         let mut frame2 = Vec::new();
@@ -1372,5 +1476,37 @@ mod tests {
         assert!(String::from_utf8(frame5).unwrap().contains(",i=3,"));
         placements.invalidate();
         assert!(!placements.has_active_kitty());
+    }
+
+    #[test]
+    fn browser_viewport_uses_dedicated_slot_without_evicting_thumbnails() {
+        let mut cache = ImageCache::default();
+        let thumb_key = ImageCacheKey(Arc::from("thumb-1"));
+        cache.insert(
+            thumb_key.clone(),
+            Arc::new(decode_thumbnail(&sample_png_bytes(16, 16)).unwrap()),
+        );
+
+        let vp_png = sample_png_bytes(800, 600);
+        let digest = digest_hex(&Sha256::digest(&vp_png));
+        let vp_image = TranscriptImage {
+            media_type: "image/png",
+            dimensions: Some((800, 600)),
+            source: TranscriptImageSource::Inline {
+                sha256: Arc::from(digest),
+                bytes: Arc::from(vp_png),
+            },
+        };
+        let meta = cache
+            .prepare_browser_viewport(Some(&vp_image), None)
+            .expect("viewport frame should decode");
+        assert_eq!((meta.pixel_width, meta.pixel_height), (800, 600));
+        assert!(cache.get(&meta.key).is_some());
+        assert!(cache.get(&thumb_key).is_some());
+
+        // Clearing viewport drops only the viewport slot while preserving transcript LRU entries.
+        assert!(cache.prepare_browser_viewport(None, None).is_none());
+        assert!(cache.get(&meta.key).is_none());
+        assert!(cache.get(&thumb_key).is_some());
     }
 }

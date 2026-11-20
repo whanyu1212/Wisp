@@ -199,8 +199,23 @@ impl AttachedImage {
     /// An image the backend reports by reference (an `ImagePart`), or `None` when
     /// the value does not describe one.
     pub fn stored(part: &serde_json::Value) -> Option<Self> {
-        let media_type = known_media_type(part.get("media_type")?.as_str()?)?;
+        let media_type = part.get("media_type")?.as_str()?;
         let sha256 = part.get("sha256")?.as_str()?;
+        let byte_size = part.get("byte_size")?.as_u64()?;
+        let width = u32::try_from(part.get("width")?.as_u64()?).ok()?;
+        let height = u32::try_from(part.get("height")?.as_u64()?).ok()?;
+        Self::from_stored_parts(media_type, sha256, byte_size, width, height)
+    }
+
+    /// Construct a stored attachment from validated wire fields.
+    fn from_stored_parts(
+        media_type: &str,
+        sha256: &str,
+        byte_size: u64,
+        width: u32,
+        height: u32,
+    ) -> Option<Self> {
+        let media_type = known_media_type(media_type)?;
         if sha256.len() != 64
             || !sha256
                 .bytes()
@@ -208,21 +223,17 @@ impl AttachedImage {
         {
             return None;
         }
-        let dimension = |field| {
-            part.get(field)?
-                .as_u64()
-                .and_then(|value| u32::try_from(value).ok())
-                .filter(|value| *value > 0)
-        };
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let byte_size = usize::try_from(byte_size).ok().filter(|size| *size > 0)?;
         Some(Self {
             source: ImageSource::Stored {
                 sha256: sha256.to_owned(),
-                byte_size: usize::try_from(part.get("byte_size")?.as_u64()?)
-                    .ok()
-                    .filter(|size| *size > 0)?,
+                byte_size,
             },
             media_type,
-            dimensions: Some((dimension("width")?, dimension("height")?)),
+            dimensions: Some((width, height)),
             file_name: None,
         })
     }
@@ -323,6 +334,19 @@ pub fn reported_image_lines(images: Option<&serde_json::Value>) -> Vec<String> {
             ))
         })
         .collect()
+}
+
+/// Convert stored `ImagePart` fields into a [`TranscriptImage`] if within [`MAX_IMAGE_BYTES`].
+pub fn transcript_image_from_stored(
+    media_type: &str,
+    sha256: &str,
+    byte_size: u64,
+    width: u32,
+    height: u32,
+) -> Option<TranscriptImage> {
+    AttachedImage::from_stored_parts(media_type, sha256, byte_size, width, height)
+        .filter(|image| image.byte_size() <= MAX_IMAGE_BYTES)
+        .map(|image| image.to_transcript_image())
 }
 
 /// Thumbnail payloads for the `images` array of a reported user message, queue event,

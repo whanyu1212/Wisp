@@ -67,6 +67,7 @@ from wisp.rpc.working_directory import (
 )
 from wisp.runtime.api import WispRuntime
 from wisp.runtime.extensions import build_runtime
+from wisp.sessions.images import IMAGE_DIRECTORY_NAME
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 from wisp.skills.lifecycle import discover_skill_catalog
 from wisp.tools.approval import ToolApprovalDecision, ToolApprovalPolicy, confirms_every_call
@@ -929,7 +930,10 @@ class RpcHost:
             # knows the folder and project by the time the selection finishes.
             events: tuple[WispEvent, ...] = (
                 *move_events,
-                await rpc_workspace_report(agent.tool_context.cwd),
+                await rpc_workspace_report(
+                    agent.tool_context.cwd,
+                    session_images_dir=sessions.root / IMAGE_DIRECTORY_NAME,
+                ),
             )
             await host._render_event_batch(events)
 
@@ -1000,7 +1004,12 @@ class RpcHost:
             write_event(ErrorEvent(message=notice))
         for event in startup_move_events:
             write_event(event)
-        write_event(await rpc_workspace_report(agent.tool_context.cwd))
+        write_event(
+            await rpc_workspace_report(
+                agent.tool_context.cwd,
+                session_images_dir=sessions.root / IMAGE_DIRECTORY_NAME,
+            )
+        )
         return host
 
     async def run_with_streams(

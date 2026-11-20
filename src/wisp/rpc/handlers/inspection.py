@@ -237,7 +237,11 @@ def rpc_connection_catalog_snapshot(runtime: WispRuntime) -> RpcConnectionCatalo
 _WORKSPACE_BRANCH_TIMEOUT_SECONDS = 3.0
 
 
-async def rpc_workspace_report(cwd: Path) -> RpcWorkspaceReported:
+async def rpc_workspace_report(
+    cwd: Path,
+    *,
+    session_images_dir: Path | None = None,
+) -> RpcWorkspaceReported:
     """Report the folder commands run in and the Git branch checked out there.
 
     Git runs in a worker thread under the shared Git deadline, and the wait is
@@ -247,9 +251,11 @@ async def rpc_workspace_report(cwd: Path) -> RpcWorkspaceReported:
 
     Args:
         cwd (Path): Working directory the session's commands run in.
+        session_images_dir (Path | None, optional): Shared ``images`` directory
+            under the host's session store. Defaults to None.
 
     Returns:
-        RpcWorkspaceReported: The folder and its current branch, if any.
+        RpcWorkspaceReported: The folder, branch (if any), and image store dir.
     """
     branch: str | None = None
     with anyio.move_on_after(_WORKSPACE_BRANCH_TIMEOUT_SECONDS):
@@ -259,7 +265,11 @@ async def rpc_workspace_report(cwd: Path) -> RpcWorkspaceReported:
             )
         except Exception:  # noqa: BLE001 - a missing branch must not fail the caller
             branch = None
-    return RpcWorkspaceReported(cwd=cwd, git_branch=branch)
+    return RpcWorkspaceReported(
+        cwd=cwd,
+        git_branch=branch,
+        session_images_dir=session_images_dir,
+    )
 
 
 def rpc_skill_catalog_snapshot(agent: CodingSession) -> RpcSkillCatalogSnapshot:

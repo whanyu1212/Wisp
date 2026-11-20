@@ -72,6 +72,13 @@ def builtin_command_descriptors() -> tuple[CommandDescriptor, ...]:
             order=22,
         ),
         CommandDescriptor(
+            name="browser",
+            title="Browser viewport",
+            description="Show or toggle the live browser viewport in the side panel",
+            category=CommandCategory.general,
+            order=24,
+        ),
+        CommandDescriptor(
             name="history",
             title="Prompt history",
             description="Search prompts submitted in this TUI run",

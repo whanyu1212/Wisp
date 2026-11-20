@@ -135,6 +135,129 @@
    "accepted": false
   },
   {
+   "event": "browser.viewport.updated",
+   "operation": "remove",
+   "path": [
+    "call_id"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "browser.viewport.updated",
+   "operation": "remove",
+   "path": [
+    "image"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "browser.viewport.updated",
+   "operation": "remove",
+   "path": [
+    "source_tool"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "browser.viewport.updated",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "browser.viewport.updated",
+   "operation": "remove",
+   "path": [
+    "title"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "browser.viewport.updated",
+   "operation": "remove",
+   "path": [
+    "url"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "browser.viewport.updated",
+   "operation": "remove",
+   "path": [
+    "viewport_height"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "browser.viewport.updated",
+   "operation": "remove",
+   "path": [
+    "viewport_width"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "browser.viewport.updated",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "browser.viewport.updated",
+   "operation": "remove",
+   "path": [
+    "image",
+    "byte_size"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "browser.viewport.updated",
+   "operation": "remove",
+   "path": [
+    "image",
+    "height"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "browser.viewport.updated",
+   "operation": "remove",
+   "path": [
+    "image",
+    "media_type"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "browser.viewport.updated",
+   "operation": "remove",
+   "path": [
+    "image",
+    "sha256"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "browser.viewport.updated",
+   "operation": "remove",
+   "path": [
+    "image",
+    "width"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "browser.viewport.updated",
+   "operation": "add_unknown",
+   "path": [
+    "image"
+   ],
+   "accepted": false
+  },
+  {
    "event": "compaction.completed",
    "operation": "remove",
    "path": [
@@ -4404,6 +4527,14 @@
    "operation": "remove",
    "path": [
     "git_branch"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.workspace",
+   "operation": "remove",
+   "path": [
+    "session_images_dir"
    ],
    "accepted": true
   },

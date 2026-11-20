@@ -54,6 +54,8 @@ pub(crate) enum Command {
     ChangeDirectory(String),
     /// `/ps`: focus the running background processes in the side panel.
     Processes,
+    /// `/browser`: show or toggle the live browser viewport in the side panel.
+    Browser,
     /// `/kill`: the process to stop, by `/ps` number or id.
     KillProcess(String),
     Quit,
@@ -99,6 +101,7 @@ fn usage(name: &str) -> Option<&'static str> {
         "unrevert" => "/unrevert",
         "cd" => "/cd <path>",
         "ps" => "/ps",
+        "browser" => "/browser",
         "kill" => "/kill <number|process-id>",
         _ => return None,
     })
@@ -173,7 +176,7 @@ fn canonical_name<'a>(
 fn parse_command(canonical: &str, tail: &str, syntax: &str) -> Command {
     match canonical {
         "diff" | "help" | "init" | "history" | "plan" | "build" | "quit" | "skills" | "mcp"
-        | "queue" | "ps" | "reload"
+        | "queue" | "ps" | "browser" | "reload"
             if !tail.trim().is_empty() =>
         {
             Command::Invalid(format!("Usage: {syntax}"))
@@ -201,6 +204,7 @@ fn parse_command(canonical: &str, tail: &str, syntax: &str) -> Command {
         "cd" if tail.trim().is_empty() => Command::Invalid(format!("Usage: {syntax}")),
         "cd" => Command::ChangeDirectory(tail.trim().to_owned()),
         "ps" => Command::Processes,
+        "browser" => Command::Browser,
         "kill" if tail.split_whitespace().count() != 1 => {
             Command::Invalid(format!("Usage: {syntax}"))
         }
@@ -1641,5 +1645,14 @@ pub(crate) mod tests {
             modifiers: KeyModifiers::NONE,
         });
         assert_eq!(hit, Some(2));
+    }
+
+    #[test]
+    fn browser_command_accepts_no_arguments() {
+        assert!(matches!(classify("/browser", None), Some(Command::Browser)));
+        assert!(matches!(
+            classify("/browser extra", None),
+            Some(Command::Invalid(msg)) if msg == "Usage: /browser"
+        ));
     }
 }

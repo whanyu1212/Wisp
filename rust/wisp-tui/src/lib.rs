@@ -5,6 +5,8 @@
 mod attention;
 #[cfg(test)]
 mod background_strip_tests;
+#[cfg(test)]
+mod browser_viewport_tests;
 mod cli;
 mod clipboard;
 mod color_depth;
@@ -1924,7 +1926,8 @@ impl LiveUi {
             .selected_session
             .as_ref()
             .and_then(|session| std::path::Path::new(&session.session_path).parent())
-            .map(|dir| dir.join("images"));
+            .map(|dir| dir.join("images"))
+            .or_else(|| self.state.default_session_images_dir.clone());
         let focus_entry = self
             .transcript_viewport
             .scrolled_top()
@@ -1936,6 +1939,14 @@ impl LiveUi {
             self.cell_size,
             &mut self.transcript_row_cache,
         );
+        self.transcript_row_cache.browser_image_preview =
+            self.image_cache.prepare_browser_viewport(
+                self.state
+                    .browser_viewport
+                    .as_ref()
+                    .and_then(|viewport| viewport.image.as_ref()),
+                session_images_dir.as_deref(),
+            );
     }
 
     fn draw<B: FrameBackend>(
@@ -1946,6 +1957,8 @@ impl LiveUi {
         if let Ok(size) = terminal.size() {
             self.side_panel.observe_width(size.width);
         }
+        self.side_panel
+            .observe_browser_viewport(self.state.browser_viewport.as_ref());
         self.side_panel.sync_files(&self.state.git_diff);
         // A tiny terminal or a covering decision may omit the panel this frame.
         // Its previous hit regions must not outlive the pixels they described.
@@ -2009,12 +2022,13 @@ impl LiveUi {
         let cell_size = self.cell_size;
         let color_depth = self.color_depth;
         let image_cache = std::mem::take(&mut self.image_cache);
-        let mut image_placements = std::mem::take(&mut self.image_placements);
+        let image_placements = std::cell::RefCell::new(std::mem::take(&mut self.image_placements));
         let finish = |buffer: &mut ratatui::buffer::Buffer| {
             if hyperlinks {
                 hyperlink::apply(buffer, &painted_links.borrow());
             }
             let popup = popup_rect.get();
+            let placements_guard = image_placements.borrow();
             let mut desired = Vec::new();
             for painted in painted_images.borrow().iter() {
                 let Some(thumb) = image_cache.get(&painted.key) else {
@@ -2034,9 +2048,10 @@ impl LiveUi {
                         let idx =
                             usize::from(dy) * usize::from(painted.rect.width) + usize::from(dx);
                         let cell = &buffer[(x, y)];
-                        let occluded_by_popup = popup.is_some_and(|area| {
-                            area.contains(ratatui::layout::Position::new(x, y))
-                        });
+                        let occluded_by_popup = !painted.ignore_overlay_rect
+                            && popup.is_some_and(|area| {
+                                area.contains(ratatui::layout::Position::new(x, y))
+                            });
                         let same = !occluded_by_popup && cell == &painted.snapshot[idx];
                         uncovered.push(same);
                         all_uncovered &= same;
@@ -2051,30 +2066,37 @@ impl LiveUi {
                         Some(&uncovered),
                     );
                 } else if all_uncovered {
-                    if matches!(
-                        image_protocol,
-                        terminal_images::ImageProtocol::ITerm2
-                            | terminal_images::ImageProtocol::Sixel
-                    ) {
-                        for dy in 0..painted.rect.height {
-                            for dx in 0..painted.rect.width {
-                                let cell = &mut buffer[(painted.rect.x + dx, painted.rect.y + dy)];
-                                cell.set_symbol(" ");
-                                cell.modifier.insert(ratatui::style::Modifier::HIDDEN);
-                            }
-                        }
-                    }
-                    desired.push(terminal_images::NativePlacement {
-                        placement: terminal_images::PlacementKey {
-                            entry_id: painted.entry_id,
-                            image_index: painted.image_index,
-                        },
+                    let placement = terminal_images::NativePlacement {
+                        placement: painted.placement.clone(),
                         image_key: painted.key.clone(),
                         rect: painted.rect,
                         total_rows: painted.total_rows,
                         first_image_row: painted.first_image_row,
                         bg: painted.bg,
-                    });
+                    };
+                    let diff_option = if placements_guard.is_steady_state(
+                        image_protocol,
+                        &placement,
+                        cell_size,
+                    ) {
+                        ratatui::buffer::CellDiffOption::Skip
+                    } else {
+                        ratatui::buffer::CellDiffOption::AlwaysUpdate
+                    };
+                    // First or changed frames force-clear underlying cells before `post_draw`
+                    // paints native graphics; steady frames skip cell writes so Sixel/iTerm2/
+                    // Kitty placements do not flicker. Closing or occluding reverts cells to
+                    // `CellDiffOption::None`, forcing Ratatui to repaint clean background/UI.
+                    for dy in 0..painted.rect.height {
+                        for dx in 0..painted.rect.width {
+                            let cell = &mut buffer[(painted.rect.x + dx, painted.rect.y + dy)];
+                            cell.set_symbol(" ");
+                            cell.set_bg(painted.bg);
+                            cell.modifier = ratatui::style::Modifier::empty();
+                            cell.set_diff_option(diff_option);
+                        }
+                    }
+                    desired.push(placement);
                 } else {
                     terminal_images::paint_half_blocks(
                         buffer,
@@ -2090,14 +2112,15 @@ impl LiveUi {
         let post_draw = |backend: &mut B| -> std::io::Result<()> {
             let desired = native_placements.borrow();
             let mut bytes = Vec::new();
-            image_placements.sync(
+            let mut placements = image_placements.borrow_mut();
+            placements.sync(
                 image_protocol,
                 &desired,
                 &image_cache,
                 cell_size,
                 &mut bytes,
             );
-            terminal::set_kitty_images_active(image_placements.has_active_kitty());
+            terminal::set_kitty_images_active(placements.has_active_kitty());
             if bytes.is_empty() {
                 return Ok(());
             }
@@ -2449,13 +2472,21 @@ impl LiveUi {
                     mouse::Rows::default()
                 }
                 OverlayKind::SidePanel => {
-                    side_panel::render(
+                    let mut images = painted_images.borrow_mut();
+                    images.retain(|img| {
+                        img.placement != terminal_images::PlacementKey::BrowserViewport
+                    });
+                    side_panel::render_with_preview(
                         frame,
                         area,
                         &self.state,
                         &self.side_panel,
                         &self.bindings,
                         palette,
+                        self.transcript_row_cache.browser_image_preview.as_ref(),
+                        cell_size,
+                        Some(&mut *images),
+                        true,
                     );
                     mouse::Rows::default()
                 }
@@ -2464,7 +2495,7 @@ impl LiveUi {
         };
         let draw_result = terminal::draw_frame(terminal, color_depth, render, finish, post_draw);
         self.image_cache = image_cache;
-        self.image_placements = image_placements;
+        self.image_placements = image_placements.into_inner();
         draw_result?;
         // After the frame's synchronized update, so the title and any notification are
         // not held back with it.
@@ -3913,6 +3944,12 @@ impl LiveUi {
             Command::Processes => {
                 self.editor.clear();
                 self.show_background_processes();
+                Ok(LoopControl::Continue)
+            }
+            Command::Browser => {
+                self.editor.clear();
+                self.side_panel.toggle_browser();
+                self.render_pending = true;
                 Ok(LoopControl::Continue)
             }
             Command::KillProcess(target) => {

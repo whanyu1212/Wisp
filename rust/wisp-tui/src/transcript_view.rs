@@ -1144,6 +1144,8 @@ pub struct TranscriptRowCache {
     fold: FoldState,
     /// Decoded preview image metadata keyed by entry ID, pushed before layout.
     image_previews: HashMap<TranscriptEntryId, Vec<crate::terminal_images::ImagePreviewMeta>>,
+    /// Decoded metadata for the active browser viewport frame, pushed before layout.
+    pub(crate) browser_image_preview: Option<crate::terminal_images::ImagePreviewMeta>,
     /// Cell pixel size used when converting preview dimensions into rows/columns.
     cell_size: crate::terminal_images::CellSize,
     /// The links the latest transcript paint drew, for the frame to apply once complete.
@@ -1159,6 +1161,10 @@ impl TranscriptRowCache {
 
     pub fn fold_mut(&mut self) -> &mut FoldState {
         &mut self.fold
+    }
+
+    pub(crate) fn cell_size(&self) -> crate::terminal_images::CellSize {
+        self.cell_size
     }
 
     /// Update the decoded image preview metadata and terminal cell aspect ratio,

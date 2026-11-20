@@ -22,6 +22,14 @@ from wisp.agent.tool_contracts import (
     ToolExecutionEvent,
     ToolPreparationEvent,
 )
+from wisp.coding.browser_viewport import (
+    auto_screenshot_enabled,
+    build_browser_viewport_event,
+    extract_browser_metadata,
+    find_auto_screenshot_tool,
+    is_browser_mcp_tool,
+    is_mutating_browser_tool_name,
+)
 from wisp.coding.tool_progress import LiveEventSink, run_with_progress
 from wisp.events import (
     MAX_EDIT_LOCATIONS,
@@ -29,6 +37,7 @@ from wisp.events import (
     MAX_TOOL_RESULT_IMAGES,
     NESTED_CALL_ARGUMENTS_MAX_CHARS,
     NESTED_CALL_TEXT_MAX_CHARS,
+    BrowserViewportUpdated,
     EditLocation,
     ImagePart,
     JsonObject,
@@ -47,7 +56,13 @@ from wisp.events import (
     utc_now,
 )
 from wisp.images import ImageRejectedError
-from wisp.mcp.discovery import MCP_CALL, McpCatalog, check_proxied_arguments, resolve_target
+from wisp.mcp.discovery import (
+    MCP_CALL,
+    McpCatalog,
+    McpCatalogTool,
+    check_proxied_arguments,
+    resolve_target,
+)
 from wisp.providers.events import ToolCall
 from wisp.runtime.registry import ToolRegistry, UnknownToolError
 from wisp.sessions.errors import SessionError
@@ -107,6 +122,7 @@ _SUBAGENT_ENDED_FIRST = "The subagent ended before this call finished"
 # Appended to a result whose image the reader does not get, so it is never taken for
 # one that was seen.
 _IMAGE_NOT_ATTACHED = "[The image could not be attached to this result.]"
+_AUTO_SCREENSHOT_TIMEOUT_SECONDS = 5.0
 _MAX_RESULT_COUNT = (1 << 63) - 1
 _MIN_EXIT_CODE = -(1 << 31)
 _MAX_EXIT_CODE = (1 << 31) - 1
@@ -206,6 +222,9 @@ class _ToolRunOutcome:
     process_started_at: datetime | None = None
     process_ended_at: datetime | None = None
     images: tuple[ImagePart, ...] = ()
+    # Internal raw image from a nested call; kept off model-facing results so
+    # browser frames can still stream to live UI without altering script output.
+    viewport_image_bytes: bytes | None = None
     nested_calls: tuple[NestedToolCall, ...] = ()
     nested_calls_omitted: int = 0
     model_usage: tuple[ModelResponseUsage, ...] = ()
@@ -1255,6 +1274,19 @@ class ConfiguredToolExecutor:
                         nested=True,
                         context=context,
                     )
+                if (
+                    origin == "codemode"
+                    and not outcome.is_error
+                    and (log is None or not log.closed)
+                ):
+                    await self._maybe_publish_browser_viewport(
+                        tool=tool,
+                        arguments=arguments,
+                        outcome=outcome,
+                        call_id=tool_call.call_id,
+                        tool_name=name,
+                        nested_image_bytes=outcome.viewport_image_bytes,
+                    )
                 return replace(
                     outcome,
                     auto_approved=automatic.resolution is not None
@@ -1455,6 +1487,14 @@ class ConfiguredToolExecutor:
                             process_authority=process_authority,
                         ),
                     )
+                    if not outcome.is_error:
+                        await self._maybe_publish_browser_viewport(
+                            tool=tool,
+                            arguments=arguments,
+                            outcome=outcome,
+                            call_id=tool_call.call_id,
+                            tool_name=target or tool_call.name,
+                        )
                     return _execution_ended(tool_call, outcome, target=target)
                 log = _ScriptCallLog(
                     tool_call.call_id,
@@ -1629,7 +1669,11 @@ class ConfiguredToolExecutor:
         if nested:
             if not snapshot.images:
                 return outcome
-            return replace(outcome, output=f"{outcome.output}\n{_IMAGE_NOT_ATTACHED}")
+            return replace(
+                outcome,
+                output=f"{outcome.output}\n{_IMAGE_NOT_ATTACHED}",
+                viewport_image_bytes=snapshot.images[-1],
+            )
         return await self._with_stored_images(outcome, snapshot.images)
 
     async def _with_stored_images(
@@ -1668,6 +1712,101 @@ class ConfiguredToolExecutor:
                 "Could not store the image the tool returned", failure_code="internal_error"
             )
         return replace(outcome, images=stored)
+
+    async def _maybe_publish_browser_viewport(
+        self,
+        *,
+        tool: Tool,
+        arguments: Mapping[str, object],
+        outcome: _ToolRunOutcome,
+        call_id: str,
+        tool_name: str,
+        nested_image_bytes: bytes | None = None,
+    ) -> None:
+        """Emit a transient ``BrowserViewportUpdated`` when a browser MCP tool completes.
+
+        When a mutating browser MCP tool returns only text metadata and the same
+        MCP server exposes an allowed, already-approved zero-required-arg
+        screenshot tool, captures and stores one viewport frame without altering
+        the primary tool's model-facing ``ToolResult``.
+        """
+
+        sink = self._progress_sink
+        if sink is None or not isinstance(tool, McpCatalogTool):
+            return
+        candidates = self._browser_candidate_tools()
+        if not is_browser_mcp_tool(tool, candidates):
+            return
+
+        image = outcome.images[-1] if outcome.images else None
+        if image is None and nested_image_bytes is not None and self._image_store is not None:
+            try:
+                image = await self._image_store(nested_image_bytes)
+            except (ImageRejectedError, SessionError):
+                _logger.debug("Nested browser viewport image skipped after validation/store error")
+        if (
+            image is None
+            and self._image_store is not None
+            and is_mutating_browser_tool_name(tool.remote_name)
+            and auto_screenshot_enabled()
+        ):
+            image = await self._capture_auto_screenshot(tool, candidates)
+
+        active_log = _SCRIPT_CALLS.get()
+        if active_log is not None and active_log.closed:
+            return
+
+        metadata = extract_browser_metadata(
+            arguments=arguments,
+            output=outcome.output,
+            structured=outcome.structured,
+            image=image,
+        )
+        event: BrowserViewportUpdated | None = build_browser_viewport_event(
+            tool_name=tool_name,
+            call_id=call_id,
+            image=image,
+            metadata=metadata,
+        )
+        if event is None:
+            return
+        try:
+            await sink(event)
+        except Exception:  # noqa: BLE001 - best-effort live UI notification
+            _logger.debug("Could not publish browser viewport event for %s", tool_name)
+
+    def _browser_candidate_tools(self) -> tuple[Tool, ...]:
+        if self._mcp_catalog is not None:
+            return tuple(entry.tool for entry in self._mcp_catalog.entries if entry.connected)
+        if self._registry is not None:
+            return self._registry.all()
+        return ()
+
+    async def _capture_auto_screenshot(
+        self,
+        tool: McpCatalogTool,
+        candidates: tuple[Tool, ...],
+    ) -> ImagePart | None:
+        screenshot_tool = find_auto_screenshot_tool(tool, candidates)
+        if screenshot_tool is None or self._image_store is None:
+            return None
+        if not self._policy.allows(screenshot_tool):
+            return None
+        if self._approval_policy.requires_approval(
+            screenshot_tool
+        ) and not self._approval_policy.approves(screenshot_tool):
+            return None
+        try:
+            with anyio.move_on_after(_AUTO_SCREENSHOT_TIMEOUT_SECONDS):
+                result = await screenshot_tool.run({}, self._context)
+                if not result.images:
+                    return None
+                return await self._image_store(result.images[-1])
+        except (ToolError, ImageRejectedError, SessionError):
+            _logger.debug("Auto-screenshot capture skipped after tool/image error")
+        except Exception:  # noqa: BLE001 - never fail or disrupt the primary tool call
+            _logger.debug("Auto-screenshot capture failed", exc_info=True)
+        return None
 
     async def _run_reporting_progress(
         self,

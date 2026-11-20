@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import re
@@ -11,9 +13,10 @@ from typing import Any, Protocol
 
 from jsonschema.exceptions import SchemaError
 from jsonschema.validators import validator_for
-from mcp.types import CallToolResult, TextContent
+from mcp.types import CallToolResult, ImageContent, TextContent
 from mcp.types import Tool as McpToolDefinition
 
+from wisp.images import MAX_IMAGE_BYTES, ImageRejectedError, inspect_image
 from wisp.mcp.config import McpServerConfig
 from wisp.tool_types import ToolSafety
 from wisp.tools.base import ToolArguments, ToolInputSchema
@@ -25,9 +28,18 @@ _MAX_PROVIDER_TOOL_NAME_CHARS = 64
 _MAX_SCHEMA_BYTES = 65_536
 _MAX_DESCRIPTION_BYTES = 4_096
 _MAX_DESCRIPTION_LINES = 40
+# Match ``MAX_TOOL_RESULT_IMAGES`` in ``wisp.events.tools`` without importing ``wisp.events``.
+_MAX_MCP_RESULT_IMAGES = 6
+_MAX_IMAGE_BASE64_CHARS = ((MAX_IMAGE_BYTES + 2) // 3) * 4
+# Cap raw whitespace-padded base64 before normalization so adversarial
+# payloads cannot allocate unbounded strings.
+_MAX_RAW_IMAGE_BASE64_CHARS = MAX_IMAGE_BYTES * 2
+_ASCII_WHITESPACE = str.maketrans("", "", " \t\r\n")
 _PROVIDER_TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 _UNSUPPORTED_TOOL_CONTENT = "MCP tool returned unsupported non-text content"
 _INVALID_TEXT_CONTENT = "MCP tool returned invalid text content"
+_INVALID_IMAGE_CONTENT = "MCP tool returned invalid image content"
+_TOO_MANY_IMAGES = f"MCP tool returned more than {_MAX_MCP_RESULT_IMAGES} images"
 _NORMALIZED_NAME_MARKER = "_"
 
 
@@ -67,12 +79,29 @@ class McpTool:
             raise ToolError("MCP tool call failed") from None
 
         text_parts: list[str] = []
-        for block in result.content:
-            if not isinstance(block, TextContent):
-                raise ToolError(_UNSUPPORTED_TOOL_CONTENT)
-            text_parts.append(block.text)
+        images: list[bytes] = []
+        image_descriptions: list[str] = []
+        if result.is_error:
+            text_parts.extend(
+                block.text for block in result.content if isinstance(block, TextContent)
+            )
+        else:
+            for block in result.content:
+                if isinstance(block, TextContent):
+                    text_parts.append(block.text)
+                elif isinstance(block, ImageContent):
+                    if len(images) >= _MAX_MCP_RESULT_IMAGES:
+                        raise ToolError(_TOO_MANY_IMAGES, failure_code="invalid_result")
+                    decoded, description = _decode_image_content(block)
+                    images.append(decoded)
+                    image_descriptions.append(description)
+                else:
+                    raise ToolError(_UNSUPPORTED_TOOL_CONTENT)
+
         text = "\n".join(text_parts)
-        if result.structured_content is not None and not text.strip():
+        if not text.strip() and image_descriptions:
+            text = "\n".join(image_descriptions)
+        if result.structured_content is not None and not text.strip() and not images:
             raise ToolError(_UNSUPPORTED_TOOL_CONTENT)
 
         try:
@@ -88,6 +117,7 @@ class McpTool:
         return ToolResult(
             text=bounded.text,
             truncated=bounded.truncated,
+            images=tuple(images),
             structured=result.structured_content,
         )
 
@@ -210,6 +240,26 @@ def _copied_object_schema(schema: Mapping[str, object]) -> dict[str, object] | N
     except (SchemaError, TypeError):
         return None
     return copied
+
+
+def _decode_image_content(block: ImageContent) -> tuple[bytes, str]:
+    """Decode and validate one MCP image block within Wisp's size and format bounds."""
+
+    raw = block.data
+    if not isinstance(raw, str) or len(raw) > _MAX_RAW_IMAGE_BASE64_CHARS:
+        raise ToolError(_INVALID_IMAGE_CONTENT, failure_code="invalid_result")
+    compact = raw.translate(_ASCII_WHITESPACE)
+    if not compact or len(compact) > _MAX_IMAGE_BASE64_CHARS:
+        raise ToolError(_INVALID_IMAGE_CONTENT, failure_code="invalid_result")
+    try:
+        data = base64.b64decode(compact, validate=True)
+    except (binascii.Error, ValueError):
+        raise ToolError(_INVALID_IMAGE_CONTENT, failure_code="invalid_result") from None
+    try:
+        part = inspect_image(data)
+    except ImageRejectedError as exc:
+        raise ToolError(f"{_INVALID_IMAGE_CONTENT}: {exc}", failure_code="invalid_result") from None
+    return data, f"Image: {part.media_type}, {part.width}x{part.height} px, {part.byte_size} bytes."
 
 
 def _definition_error(server_name: str, remote_name: str) -> McpToolDefinitionError:

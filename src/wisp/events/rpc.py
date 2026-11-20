@@ -8,7 +8,7 @@ from typing import Annotated, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing_extensions import TypeAliasType
 
-from wisp.events._base import ManagedProcessState, QueueMode, WispEvent
+from wisp.events._base import ImagePart, ManagedProcessState, QueueMode, WispEvent
 from wisp.events.tools import PROCESS_COMMAND_SUMMARY_MAX_CHARS
 from wisp.project_files import (
     MAX_PROJECT_FILES,
@@ -52,6 +52,10 @@ MAX_RPC_MODEL_DISPLAY_CHARS = 256
 MAX_RPC_MODEL_EFFORT_CHARS = 64
 # The most recent calls kept per file; the TUI jumps to the latest one.
 MAX_GIT_DIFF_FILE_EDITS = 16
+MAX_BROWSER_URL_CHARS = 2_048
+MAX_BROWSER_TITLE_CHARS = 512
+MAX_BROWSER_SOURCE_TOOL_CHARS = 128
+MAX_BROWSER_VIEWPORT_SIDE = 16_384
 
 
 class CodingSessionState(BaseModel):
@@ -581,6 +585,9 @@ class RpcWorkspaceReported(WispEvent):
     # The current branch, or the short commit for a detached HEAD; None outside a
     # Git work tree or when Git does not answer in time.
     git_branch: str | None = None
+    # Shared session image store directory so frontends can resolve images stored
+    # during a fresh or /new run before the session file is committed.
+    session_images_dir: Path | None = None
 
 
 class RpcStateReported(WispEvent):
@@ -800,3 +807,22 @@ class SkillCatalogUpdated(WispEvent):
 
     type: Literal["skill.catalog.updated"] = "skill.catalog.updated"
     catalog: RpcSkillCatalogSnapshot
+
+
+class BrowserViewportUpdated(WispEvent):
+    """Transient live snapshot of an agent browser session's current page and frame."""
+
+    type: Literal["browser.viewport.updated"] = "browser.viewport.updated"
+    image: ImagePart | None = None
+    url: str | None = Field(default=None, min_length=1, max_length=MAX_BROWSER_URL_CHARS)
+    title: str | None = Field(default=None, min_length=1, max_length=MAX_BROWSER_TITLE_CHARS)
+    viewport_width: int | None = Field(
+        default=None, ge=1, le=MAX_BROWSER_VIEWPORT_SIDE, strict=True
+    )
+    viewport_height: int | None = Field(
+        default=None, ge=1, le=MAX_BROWSER_VIEWPORT_SIDE, strict=True
+    )
+    source_tool: str | None = Field(
+        default=None, min_length=1, max_length=MAX_BROWSER_SOURCE_TOOL_CHARS
+    )
+    call_id: str | None = Field(default=None, min_length=1, max_length=256)
