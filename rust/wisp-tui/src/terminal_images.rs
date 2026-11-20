@@ -229,7 +229,8 @@ pub(crate) fn load_stored_bytes(
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(nix::libc::O_NOFOLLOW);
+        // Open non-blocking so a writerless FIFO cannot freeze LiveUi::draw before is_file rejects it.
+        options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK);
     }
     let file = options.open(images_dir.join(sha256)).ok()?;
     let metadata = file.metadata().ok()?;
@@ -1146,6 +1147,27 @@ mod tests {
             std::os::unix::fs::symlink(&target, dir.path().join(&link_hex)).unwrap();
             assert_eq!(load_stored_bytes(dir.path(), &link_hex, bytes.len()), None);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_stored_bytes_rejects_fifo_without_blocking() {
+        let dir = TempDir::new("stored-bytes-fifo");
+        let fifo_hex = "b".repeat(64);
+        let fifo_path = dir.path().join(&fifo_hex);
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo_path)
+            .status()
+            .expect("mkfifo command should run on unix");
+        assert!(status.success(), "mkfifo failed: {status}");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let dir_path = dir.path().to_path_buf();
+        std::thread::spawn(move || {
+            let _ = tx.send(load_stored_bytes(&dir_path, &fifo_hex, 128));
+        });
+
+        assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(2)), Ok(None));
     }
 
     #[test]
