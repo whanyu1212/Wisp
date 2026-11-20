@@ -336,17 +336,33 @@ impl BackendEvent {
                         field: "browser.viewport.updated",
                     }
                 })?;
-                let image = update.image.as_ref().and_then(|img| {
-                    composer_images::transcript_image_from_stored(
-                        &img.media_type,
-                        &img.sha256,
-                        img.byte_size,
-                        img.width,
-                        img.height,
+                let live = update.live_png.is_some();
+                let live_image = update.live_png.as_deref().and_then(|png| {
+                    composer_images::transcript_image_from_live_png(
+                        png,
+                        update.viewport_width.zip(update.viewport_height),
                     )
+                });
+                if live && live_image.is_none() {
+                    return Err(EventProjectionError::InvalidField {
+                        event_type,
+                        field: "live_png",
+                    });
+                }
+                let image = live_image.or_else(|| {
+                    update.image.as_ref().and_then(|img| {
+                        composer_images::transcript_image_from_stored(
+                            &img.media_type,
+                            &img.sha256,
+                            img.byte_size,
+                            img.width,
+                            img.height,
+                        )
+                    })
                 });
                 return Ok(Self::BrowserViewportUpdated(Box::new(
                     BrowserViewportInput {
+                        live,
                         image,
                         url: update.url,
                         title: update.title,

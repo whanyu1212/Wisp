@@ -378,6 +378,7 @@ pub(crate) struct ImageCache {
     entries: HashMap<ImageCacheKey, Arc<DecodedThumbnail>>,
     order: VecDeque<ImageCacheKey>,
     viewport_entry: Option<(ImageCacheKey, Arc<DecodedThumbnail>)>,
+    viewport_png: Option<TranscriptImageSource>,
     failed: HashSet<ImageCacheKey>,
     failed_order: VecDeque<ImageCacheKey>,
     last_images_dir: Option<PathBuf>,
@@ -392,10 +393,25 @@ impl ImageCache {
             .or_else(|| self.entries.get(key))
     }
 
+    fn viewport_png(&self, placement: &NativePlacement) -> Option<&[u8]> {
+        if placement.placement != PlacementKey::BrowserViewport
+            || placement.first_image_row != 0
+            || placement.rect.height != placement.total_rows
+            || self.viewport_entry.as_ref()?.0 != placement.image_key
+        {
+            return None;
+        }
+        match self.viewport_png.as_ref()? {
+            TranscriptImageSource::Inline { bytes, .. } => Some(bytes),
+            TranscriptImageSource::Stored { .. } => None,
+        }
+    }
+
     fn sync_images_dir(&mut self, session_images_dir: Option<&Path>) {
         if self.last_images_dir.as_deref() != session_images_dir {
             self.last_images_dir = session_images_dir.map(Path::to_path_buf);
             self.viewport_entry = None;
+            self.viewport_png = None;
             self.failed.clear();
             self.failed_order.clear();
         }
@@ -471,6 +487,7 @@ impl ImageCache {
         self.sync_images_dir(session_images_dir);
         let Some(image) = image else {
             self.viewport_entry = None;
+            self.viewport_png = None;
             return None;
         };
         let key = ImageCacheKey(Arc::from(format!("viewport:{}", image.cache_key())));
@@ -483,6 +500,7 @@ impl ImageCache {
                 });
             }
         }
+        self.viewport_png = None;
         if self.failed.contains(&key) {
             self.viewport_entry = None;
             return None;
@@ -498,6 +516,20 @@ impl ImageCache {
                 pixel_width: thumb.pixel_width,
                 pixel_height: thumb.pixel_height,
             };
+            // Browser frames arrive as PNG. Pass the validated original to Kitty
+            // when it still matches the decoded frame's dimensions.
+            if let TranscriptImageSource::Inline { bytes, .. } = &image.source
+                && image.media_type == "image/png"
+                && image::ImageReader::with_format(
+                    std::io::Cursor::new(bytes.as_ref()),
+                    image::ImageFormat::Png,
+                )
+                .into_dimensions()
+                .ok()
+                    == Some((thumb.pixel_width, thumb.pixel_height))
+            {
+                self.viewport_png = Some(image.source.clone());
+            }
             self.viewport_entry = Some((key, Arc::new(thumb)));
             Some(meta)
         } else {
@@ -1093,57 +1125,46 @@ pub(crate) fn paint_kitty_unicode_placeholders(
     }
 }
 
-/// Emit Kitty Graphics Protocol chunked RGBA virtual placement (`U=1`) for ID `id`.
-pub(crate) fn encode_kitty_unicode(
-    out: &mut Vec<u8>,
-    id: u32,
-    cols: u16,
-    rows: u16,
-    rgba: &[u8],
-    width: u32,
-    height: u32,
-) {
-    if cols == 0 || rows == 0 || rgba.is_empty() || width == 0 || height == 0 {
-        return;
-    }
-    let encoded = base64::engine::general_purpose::STANDARD.encode(rgba);
-    let chunks: Vec<&[u8]> = encoded.as_bytes().chunks(KITTY_CHUNK_BYTES).collect();
-    for (index, chunk) in chunks.iter().enumerate() {
-        let more = usize::from(index + 1 < chunks.len());
-        if index == 0 {
-            let _ = write!(
-                out,
-                "\x1b_Ga=T,f=32,s={width},v={height},c={cols},r={rows},i={id},U=1,q=2,m={more};"
-            );
-        } else {
-            let _ = write!(out, "\x1b_Gm={more};");
-        }
-        out.extend_from_slice(chunk);
-        out.extend_from_slice(b"\x1b\\");
-    }
+enum KittyImage<'a> {
+    Rgba {
+        data: &'a [u8],
+        width: u32,
+        height: u32,
+    },
+    Png(&'a [u8]),
 }
 
-/// Emit Kitty Graphics Protocol chunked RGBA transmission for `rect` at ID `id`.
-pub(crate) fn encode_kitty(
-    out: &mut Vec<u8>,
-    id: u32,
-    rect: Rect,
-    rgba: &[u8],
-    width: u32,
-    height: u32,
-) {
-    if rect.is_empty() || rgba.is_empty() || width == 0 || height == 0 {
+/// Transmit one image to Kitty using a virtual or cursor-based placement.
+fn encode_kitty(out: &mut Vec<u8>, id: u32, rect: Rect, image: KittyImage<'_>, unicode: bool) {
+    if rect.is_empty() {
         return;
     }
-    let _ = write!(out, "\x1b[{};{}H", rect.y + 1, rect.x + 1);
-    let encoded = base64::engine::general_purpose::STANDARD.encode(rgba);
-    let chunks: Vec<&[u8]> = encoded.as_bytes().chunks(KITTY_CHUNK_BYTES).collect();
-    for (index, chunk) in chunks.iter().enumerate() {
-        let more = usize::from(index + 1 < chunks.len());
+    if !unicode {
+        let _ = write!(out, "\x1b[{};{}H", rect.y + 1, rect.x + 1);
+    }
+    let (data, dimensions) = match image {
+        KittyImage::Rgba {
+            data,
+            width,
+            height,
+        } => (data, Some((width, height))),
+        KittyImage::Png(data) => (data, None),
+    };
+    let encoded = base64::engine::general_purpose::STANDARD.encode(data);
+    let chunks = encoded.as_bytes().chunks(KITTY_CHUNK_BYTES);
+    let count = chunks.len();
+    let placement = if unicode { "U=1" } else { "p=1,C=1" };
+    for (index, chunk) in chunks.enumerate() {
+        let more = usize::from(index + 1 < count);
         if index == 0 {
+            if let Some((width, height)) = dimensions {
+                let _ = write!(out, "\x1b_Ga=T,f=32,s={width},v={height},");
+            } else {
+                out.extend_from_slice(b"\x1b_Ga=T,f=100,");
+            }
             let _ = write!(
                 out,
-                "\x1b_Ga=T,f=32,s={width},v={height},c={},r={},i={id},p=1,C=1,q=2,m={more};",
+                "c={},r={},i={id},{placement},q=2,m={more};",
                 rect.width, rect.height
             );
         } else {
@@ -1520,28 +1541,23 @@ impl ImagePlacementState {
                 continue;
             };
             let (kitty_id, unicode_placeholder) = match protocol {
-                ImageProtocol::KittyUnicode
-                    if item.rect.width <= KITTY_MAX_PLACEHOLDER_DIM
-                        && item.rect.height <= KITTY_MAX_PLACEHOLDER_DIM =>
-                {
+                ImageProtocol::Kitty | ImageProtocol::KittyUnicode => {
+                    let unicode = protocol == ImageProtocol::KittyUnicode
+                        && item.rect.width <= KITTY_MAX_PLACEHOLDER_DIM
+                        && item.rect.height <= KITTY_MAX_PLACEHOLDER_DIM;
                     let id = prepared_unicode
                         .remove(&item.placement)
                         .unwrap_or_else(|| self.alloc_kitty_id());
-                    encode_kitty_unicode(
-                        out,
-                        id,
-                        item.rect.width,
-                        item.rect.height,
-                        crop_rgba,
-                        crop_w,
-                        crop_h,
+                    let image = cache.viewport_png(item).map_or(
+                        KittyImage::Rgba {
+                            data: crop_rgba,
+                            width: crop_w,
+                            height: crop_h,
+                        },
+                        KittyImage::Png,
                     );
-                    (id, true)
-                }
-                ImageProtocol::Kitty | ImageProtocol::KittyUnicode => {
-                    let id = self.alloc_kitty_id();
-                    encode_kitty(out, id, item.rect, crop_rgba, crop_w, crop_h);
-                    (id, false)
+                    encode_kitty(out, id, item.rect, image, unicode);
+                    (id, unicode)
                 }
                 ImageProtocol::ITerm2 => {
                     encode_iterm2(out, item.rect, crop_rgba, crop_w, crop_h, item.bg);
@@ -1877,7 +1893,17 @@ mod tests {
     fn native_encoders_produce_valid_escape_frames() {
         let rgba = vec![255_u8; 4 * 4 * 4];
         let mut kitty = Vec::new();
-        encode_kitty(&mut kitty, 7, Rect::new(2, 3, 4, 2), &rgba, 4, 4);
+        encode_kitty(
+            &mut kitty,
+            7,
+            Rect::new(2, 3, 4, 2),
+            KittyImage::Rgba {
+                data: &rgba,
+                width: 4,
+                height: 4,
+            },
+            false,
+        );
         let kitty_str = String::from_utf8(kitty).unwrap();
         assert!(
             kitty_str.starts_with("\x1b[4;3H\x1b_Ga=T,f=32,s=4,v=4,c=4,r=2,i=7,p=1,C=1,q=2,m=0;")

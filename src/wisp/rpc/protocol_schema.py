@@ -908,6 +908,11 @@ def _add_command_semantic_constraints(schema: JsonObject) -> None:
         JsonValue,
         [
             {
+                "if": {"properties": {"action": {"const": "live_open"}}, "required": ["action"]},
+                "then": {"required": ["url"]},
+                "else": {"properties": {"url": {"type": "null"}}},
+            },
+            {
                 "if": {"properties": {"action": {"const": "click"}}, "required": ["action"]},
                 "then": {
                     "allOf": [
@@ -990,7 +995,18 @@ def _add_command_semantic_constraints(schema: JsonObject) -> None:
             },
             {
                 "if": {
-                    "properties": {"action": {"enum": ["back", "reload", "refresh"]}},
+                    "properties": {
+                        "action": {
+                            "enum": [
+                                "back",
+                                "reload",
+                                "refresh",
+                                "live_open",
+                                "live_frame",
+                                "live_close",
+                            ]
+                        }
+                    },
                     "required": ["action"],
                 },
                 "then": _forbid(

@@ -517,6 +517,27 @@ fn known_media_type(media_type: &str) -> Option<&'static str> {
         .find(|known| *known == media_type)
 }
 
+/// Reuse the in-memory image path for a transient Chromium screencast frame.
+pub(crate) fn transcript_image_from_live_png(
+    encoded: &str,
+    dimensions: Option<(u32, u32)>,
+) -> Option<TranscriptImage> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    if sniff_media_type(&bytes) != Some("image/png") {
+        return None;
+    }
+    Some(TranscriptImage {
+        source: TranscriptImageSource::Inline {
+            sha256: format!("{:x}", Sha256::digest(&bytes)).into(),
+            bytes: bytes.into(),
+        },
+        media_type: "image/png",
+        dimensions,
+    })
+}
+
 /// Identify PNG, JPEG, GIF or WebP from a file's first bytes.
 pub fn sniff_media_type(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {

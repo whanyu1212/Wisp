@@ -371,7 +371,15 @@ macro_rules! validated_wire_wrapper {
                     Some("preview_mcp_snippet") => {
                         value["snippet"] = serde_json::Value::String("<redacted>".into());
                     }
+                    Some("browser.viewport.updated") => {
+                        if value.get("live_png").is_some_and(|v| !v.is_null()) {
+                            value["live_png"] = serde_json::Value::String("<redacted>".into());
+                        }
+                    }
                     Some("browser_interact") => {
+                        if value.get("url").is_some_and(|v| !v.is_null()) {
+                            value["url"] = serde_json::Value::String("<redacted>".into());
+                        }
                         if value.get("text").is_some_and(|v| !v.is_null()) {
                             value["text"] = serde_json::Value::String("<redacted>".into());
                         }
@@ -579,6 +587,8 @@ pub mod commands {
         Back,
         Reload,
         Refresh,
+        LiveFrame,
+        LiveClose,
     }
 
     /// Backend execution mode, shared by command builders and frontend state.
@@ -1563,7 +1573,26 @@ pub mod commands {
             deserialize(value)
         }
 
-        /// Trigger browser history back, page reload, or screenshot refresh.
+        /// Open a user-controlled Chromium tab at the supplied address.
+        pub fn browser_live_open(id: &str, url: &str) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({
+                "type": "browser_interact",
+                "id": id,
+                "action": "live_open",
+                "url": url,
+            }))
+        }
+
+        /// Route the interaction to the isolated Chromium tab.
+        pub fn for_live_browser(self) -> Result<Self, super::ProtocolDecodeError> {
+            let mut value = self
+                .to_value()
+                .expect("validated commands serialize cleanly");
+            value["live"] = serde_json::Value::Bool(true);
+            deserialize(value)
+        }
+
+        /// Trigger browser navigation, frame retrieval, or closure.
         pub fn browser_interact_nav(
             id: &str,
             action: BrowserNavAction,
@@ -1832,8 +1861,9 @@ pub mod events {
     }
 
     /// Transient live snapshot of an agent browser session's current page and frame.
-    #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq)]
+    #[derive(Clone, serde::Deserialize, Eq, PartialEq)]
     pub struct BrowserViewportUpdate {
+        pub live_png: Option<String>,
         pub image: Option<BrowserViewportImage>,
         pub url: Option<String>,
         pub title: Option<String>,

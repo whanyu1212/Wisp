@@ -21,6 +21,7 @@ from anyio.streams.memory import MemoryObjectSendStream
 from typing_extensions import TypeAliasType
 
 from wisp.coding import CodingSession, resolve_coding_session_configuration
+from wisp.coding.browser_live import LiveBrowser
 from wisp.coding.prompt import resolve_project_context_root
 from wisp.config.runtime import WispConfig
 from wisp.config.settings import resolve_settings
@@ -32,6 +33,7 @@ from wisp.events import (
     RpcCommandFinished,
     RpcGitDiffReported,
     RpcProjectFilesReported,
+    RpcWorkspaceReported,
     SkillCatalogUpdated,
     TrustRequested,
     TrustResolved,
@@ -1022,6 +1024,8 @@ class RpcHost:
     ) -> bool:
         """Serve a bidirectional control stream until it is closed or shut down."""
 
+        live_browser = LiveBrowser(task_group)
+
         async def dispatch(
             command: ParsedRpcCommand,
             running_command: _RpcRunningCommand | None,
@@ -1033,6 +1037,25 @@ class RpcHost:
             capturing = True
 
             def write_event(event: WispEvent) -> None:
+                if (
+                    isinstance(event, RpcWorkspaceReported)
+                    and command.command_type == "change_directory"
+                ):
+                    live_browser.request_close()
+                elif (
+                    isinstance(event, RpcCommandFinished)
+                    and event.ok
+                    and event.command_type
+                    in {
+                        "new_session",
+                        "select_session",
+                        "clone_session",
+                        "fork_session",
+                        "navigate_session_tree",
+                        "unrevert_session_tree",
+                    }
+                ):
+                    live_browser.request_close()
                 if capturing:
                     buffered_events.append(event)
                 else:
@@ -1060,6 +1083,7 @@ class RpcHost:
                 outbound_frame_limit=self._outbound_frame_limit,
                 change_directory=self._change_directory,
                 settings_reloader=self.settings_reloader,
+                live_browser=live_browser,
             )
             try:
                 result = await executor.dispatch_parsed(command, running_command)
@@ -1133,6 +1157,7 @@ class RpcHost:
         finally:
             if self._process_exits is not None:
                 self._process_exits.set_wake_listener(None)
+            await live_browser.close()
             await self._wait_for_published_events()
             self._event_task_group = previous_event_task_group
 

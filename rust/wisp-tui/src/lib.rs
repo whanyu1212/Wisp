@@ -202,6 +202,7 @@ const PEEK_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const BROWSER_TYPE_DEBOUNCE: Duration = Duration::from_millis(80);
 const BROWSER_TYPE_FLUSH_CHARS: usize = 64;
 const BROWSER_TYPE_MAX_CHARS: usize = 1_024;
+const LIVE_BROWSER_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(66);
 const BROWSER_REFRESH_INTERVAL: Duration = Duration::from_millis(1_500);
 pub(crate) const BROWSER_DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
@@ -821,6 +822,7 @@ struct LiveUi {
     stream_pacer: stream_reveal::StreamPacer,
     stream_trace: Option<stream_reveal::StreamTrace>,
     browser_typing_buffer: BrowserTypingBuffer,
+    next_live_browser_frame: Option<std::time::Instant>,
     last_browser_click: Option<(u16, u16, std::time::Instant)>,
     next_browser_refresh: Option<std::time::Instant>,
 }
@@ -902,6 +904,7 @@ impl Default for LiveUi {
             stream_pacer: stream_reveal::StreamPacer::default(),
             stream_trace: None,
             browser_typing_buffer: BrowserTypingBuffer::default(),
+            next_live_browser_frame: None,
             last_browser_click: None,
             next_browser_refresh: None,
         }
@@ -4132,6 +4135,21 @@ impl LiveUi {
                 self.render_pending = true;
                 Ok(LoopControl::Continue)
             }
+            Command::BrowserLive(url) => {
+                self.editor.clear();
+                if self.browser_interaction_blocked() {
+                    return Ok(LoopControl::Continue);
+                }
+                self.exit_browser_takeover();
+                self.side_panel.show_browser();
+                self.render_pending = true;
+                self.dispatch(
+                    UiAction::BrowserInteract(BrowserInteractRequest::LiveOpen { url }),
+                    writer,
+                    limit,
+                )
+                .await
+            }
             Command::KillProcess(target) => {
                 self.editor.clear();
                 self.dispatch(UiAction::StopBackgroundProcess(target), writer, limit)
@@ -6421,12 +6439,46 @@ impl LiveUi {
         Ok(LoopControl::Continue)
     }
 
-    async fn poll_browser_takeover_refresh(
+    async fn poll_browser_viewport(
         &mut self,
         now: std::time::Instant,
         writer: &mpsc::Sender<WriterMessage>,
         limit: usize,
     ) -> Result<LoopControl, Error> {
+        if self
+            .state
+            .browser_viewport
+            .as_ref()
+            .is_some_and(|view| view.live)
+        {
+            if self.state.view_status != ViewStatus::Idle || self.state.current_command.is_some() {
+                return Ok(LoopControl::Continue);
+            }
+            if !self.state.browser_interact_in_flight()
+                && self.browser_typing_buffer.is_empty()
+                && self
+                    .next_live_browser_frame
+                    .is_none_or(|deadline| now >= deadline)
+            {
+                self.next_live_browser_frame = Some(now + LIVE_BROWSER_FRAME_INTERVAL);
+                let action = if self.side_panel.mode() != side_panel::PanelMode::Browser
+                    || !self.side_panel.visible()
+                {
+                    BrowserNavAction::LiveClose
+                } else {
+                    BrowserNavAction::LiveFrame
+                };
+                return self
+                    .dispatch(
+                        UiAction::BrowserInteract(BrowserInteractRequest::Nav(action)),
+                        writer,
+                        limit,
+                    )
+                    .await;
+            }
+            return Ok(LoopControl::Continue);
+        }
+        self.next_live_browser_frame = None;
         if !self.browser_takeover_active() {
             self.next_browser_refresh = None;
             return Ok(LoopControl::Continue);
@@ -6452,6 +6504,20 @@ impl LiveUi {
     }
 
     fn next_browser_timer_deadline(&self) -> Option<std::time::Instant> {
+        if self
+            .state
+            .browser_viewport
+            .as_ref()
+            .is_some_and(|view| view.live)
+        {
+            let next_frame = (self.state.view_status == ViewStatus::Idle
+                && self.state.current_command.is_none()
+                && !self.state.browser_interact_in_flight()
+                && self.browser_typing_buffer.is_empty())
+            .then_some(self.next_live_browser_frame)
+            .flatten();
+            return self.browser_typing_buffer.flush_at.or(next_frame);
+        }
         if !self.browser_takeover_active() {
             return None;
         }

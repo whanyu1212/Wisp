@@ -288,6 +288,20 @@
           ],
           "default": null
         },
+        "live_png": {
+          "anyOf": [
+            {
+              "maxLength": 3000000,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Live Png"
+        },
         "source_tool": {
           "anyOf": [
             {
@@ -373,6 +387,7 @@
       "required": [
         "type",
         "timestamp",
+        "live_png",
         "image",
         "url",
         "title",
@@ -9735,6 +9750,7 @@
         "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "width": 1280
       },
+      "live_png": null,
       "source_tool": "mcp__playwright__browser_take_screenshot",
       "timestamp": "2026-01-02T03:04:05Z",
       "title": "Fixture page",

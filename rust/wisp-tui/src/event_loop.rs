@@ -554,7 +554,7 @@ async fn run_with_interrupts<B: FrameBackend>(
                 return Ok(Exit::User);
             }
             if ui
-                .poll_browser_takeover_refresh(now.into_std(), writer, limit)
+                .poll_browser_viewport(now.into_std(), writer, limit)
                 .await?
                 == LoopControl::Exit
             {

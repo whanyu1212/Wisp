@@ -266,13 +266,40 @@
         "press_key",
         "back",
         "reload",
-        "refresh"
+        "refresh",
+        "live_open",
+        "live_frame",
+        "live_close"
       ],
       "type": "string"
     },
     "BrowserInteractCommand": {
       "additionalProperties": false,
       "allOf": [
+        {
+          "else": {
+            "properties": {
+              "url": {
+                "type": "null"
+              }
+            }
+          },
+          "if": {
+            "properties": {
+              "action": {
+                "const": "live_open"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "required": [
+              "url"
+            ]
+          }
+        },
         {
           "if": {
             "properties": {
@@ -594,7 +621,10 @@
                 "enum": [
                   "back",
                   "reload",
-                  "refresh"
+                  "refresh",
+                  "live_open",
+                  "live_frame",
+                  "live_close"
                 ]
               }
             },
@@ -715,6 +745,15 @@
           ],
           "title": "Key"
         },
+        "live": {
+          "anyOf": [
+            {
+              "const": true,
+              "type": "boolean"
+            }
+          ],
+          "title": "Live"
+        },
         "modifiers": {
           "anyOf": [
             {
@@ -744,6 +783,16 @@
           "default": "browser_interact",
           "title": "Type",
           "type": "string"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "maxLength": 2048,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Url"
         },
         "x": {
           "anyOf": [

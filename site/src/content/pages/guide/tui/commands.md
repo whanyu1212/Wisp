@@ -202,7 +202,7 @@ Adding or enabling a server needs confirmation; reconnecting clears per-tool ses
 /unrevert                                 restore the previous branch after navigation
 /cd <path>                                work from another folder, entering its project if needed
 /ps                                       focus the running background processes in the side panel
-/browser [interact]                       show the live browser viewport or enter interactive takeover
+/browser [interact | live <url>]          show the browser pane, take over, or open a live tab
 /kill <number|process-id>                 stop a background process the agent started
 /diff                                     review working-tree changes against HEAD
 /compact [instructions]                   summarize older context while preserving the JSONL audit
@@ -249,6 +249,13 @@ errors. In both browsers `r` refreshes and `Esc` or `Ctrl+C` closes; both stay a
 prompt is running.
 
 ## Browser viewport and interactive takeover
+
+Run `/browser live https://example.com` in a trusted project to open an isolated live tab using
+installed Chrome or Chromium. The pane shows the first frame automatically and updates while the
+page changes. Click the page or use `/browser interact` to type while Wisp is idle.
+Press `Esc` to give keyboard focus back to Wisp. Switch to `Work` or hide the pane to close the
+tab and discard its temporary browser profile. The live tab is for manual browsing, and MCP tools
+continue to use their own browser.
 
 When a browser MCP server such as Playwright (`@playwright/mcp`) or Chrome DevTools
 (`chrome-devtools-mcp`) is connected, Wisp adds a `Work · Browser` tab switcher at the top of the

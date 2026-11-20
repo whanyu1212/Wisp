@@ -829,6 +829,7 @@ impl RunProgress {
 /// Transient browser viewport snapshot shown in the side panel's Browser tab.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BrowserViewport {
+    pub live: bool,
     pub image: Option<composer_images::TranscriptImage>,
     pub url: Option<String>,
     pub title: Option<String>,
@@ -842,6 +843,7 @@ pub struct BrowserViewport {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct BrowserViewportInput {
+    pub live: bool,
     pub image: Option<composer_images::TranscriptImage>,
     pub url: Option<String>,
     pub title: Option<String>,
@@ -873,6 +875,9 @@ pub enum BrowserInteractRequest {
         modifiers: Vec<BrowserKeyModifier>,
     },
     Nav(BrowserNavAction),
+    LiveOpen {
+        url: String,
+    },
 }
 
 impl std::fmt::Debug for BrowserInteractRequest {
@@ -913,8 +918,16 @@ impl std::fmt::Debug for BrowserInteractRequest {
                 .field("modifiers", modifiers)
                 .finish(),
             Self::Nav(action) => f.debug_tuple("Nav").field(action).finish(),
+            Self::LiveOpen { .. } => f.write_str("LiveOpen([REDACTED])"),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BrowserCommandCompletion {
+    Input,
+    Frame,
+    Close,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1004,7 +1017,7 @@ pub struct UiState {
     pub(crate) codemode_picker_open: bool,
     pub(crate) project_files: project_files::ProjectFiles,
     pub browser_viewport: Option<BrowserViewport>,
-    pub(crate) browser_interact_pending: std::collections::BTreeSet<String>,
+    browser_interact_pending: std::collections::BTreeMap<String, BrowserCommandCompletion>,
     pending_queue_submissions: std::collections::BTreeMap<String, PendingQueueSubmission>,
     pending_queue_restore: Option<PendingQueueRestore>,
     next_queue_order: u64,
@@ -1101,7 +1114,7 @@ impl UiState {
             side_panel_visible: false,
             codemode_picker_open: false,
             browser_viewport: None,
-            browser_interact_pending: std::collections::BTreeSet::new(),
+            browser_interact_pending: std::collections::BTreeMap::new(),
             pending_queue_submissions: std::collections::BTreeMap::new(),
             pending_queue_restore: None,
             next_queue_order: 0,
@@ -5715,13 +5728,25 @@ fn handle_backend_event(
             Ok(vec![UiEffect::RequestRender])
         }
         BackendEvent::BrowserViewportUpdated(update) => {
+            if !update.live
+                && state
+                    .browser_viewport
+                    .as_ref()
+                    .is_some_and(|view| view.live)
+            {
+                return Ok(Vec::new());
+            }
             let generation = state
                 .browser_viewport
                 .as_ref()
                 .map_or(1, |prev| prev.generation.saturating_add(1));
-            let previous = state.browser_viewport.take();
+            let previous = state
+                .browser_viewport
+                .take()
+                .filter(|view| view.live == update.live);
             let updated_at_ms = crate::tool_cards::timestamp_ms(&update.timestamp);
             state.browser_viewport = Some(BrowserViewport {
+                live: update.live,
                 image: update
                     .image
                     .or_else(|| previous.as_ref().and_then(|prev| prev.image.clone())),
@@ -6369,6 +6394,15 @@ fn handle_browser_interact(
         ]);
     }
     let id = ids.next_id(CommandKind::BrowserInteract);
+    let live = state
+        .browser_viewport
+        .as_ref()
+        .is_some_and(|view| view.live);
+    let completion = match request {
+        BrowserInteractRequest::Nav(BrowserNavAction::LiveFrame) => BrowserCommandCompletion::Frame,
+        BrowserInteractRequest::Nav(BrowserNavAction::LiveClose) => BrowserCommandCompletion::Close,
+        _ => BrowserCommandCompletion::Input,
+    };
     let command = match request {
         BrowserInteractRequest::Click {
             x,
@@ -6391,8 +6425,16 @@ fn handle_browser_interact(
         BrowserInteractRequest::Nav(action) => {
             WispTypedClientRpcCommands::browser_interact_nav(&id, action)?
         }
+        BrowserInteractRequest::LiveOpen { url } => {
+            WispTypedClientRpcCommands::browser_live_open(&id, &url)?
+        }
     };
-    state.browser_interact_pending.insert(id);
+    let command = if live {
+        command.for_live_browser()?
+    } else {
+        command
+    };
+    state.browser_interact_pending.insert(id, completion);
     Ok(vec![UiEffect::SendCommand(command)])
 }
 
@@ -6407,11 +6449,24 @@ fn finish_command(
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
     if command_type == CommandKind::BrowserInteract.prefix() {
-        if !state.browser_interact_pending.remove(&command_id) {
+        let Some(completion) = state.browser_interact_pending.remove(&command_id) else {
             return Ok(Vec::new());
+        };
+        if ok && completion == BrowserCommandCompletion::Close {
+            clear_browser_viewport(state);
+            return Ok(vec![UiEffect::RequestRender]);
         }
         if !ok {
             let detail = error.unwrap_or_else(|| "browser interaction failed".into());
+            if completion != BrowserCommandCompletion::Input
+                && detail
+                    == "Finish or cancel the active operation before interacting with the browser"
+            {
+                return Ok(Vec::new());
+            }
+            if completion == BrowserCommandCompletion::Frame {
+                clear_browser_viewport(state);
+            }
             return Ok(vec![
                 UiEffect::Notice(bounded_session_text(
                     &format!("Browser interaction failed: {detail}"),

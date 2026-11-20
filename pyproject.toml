@@ -49,6 +49,7 @@ dependencies = [
     "typer>=0.26.8",
     # TypeAliasType for named type aliases, which Python 3.11 has no `type` statement for.
     "typing-extensions>=4.12",
+    "websockets>=15",
 ]
 
 [project.optional-dependencies]
