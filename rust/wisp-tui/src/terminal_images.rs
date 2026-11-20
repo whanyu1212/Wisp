@@ -10,10 +10,11 @@ use std::sync::Arc;
 use base64::Engine as _;
 use image::imageops::FilterType;
 use image::{ImageEncoder as _, RgbaImage};
-use ratatui::buffer::{Buffer, Cell};
+use ratatui::buffer::{Buffer, Cell, CellDiffOption};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use sha2::{Digest, Sha256};
+use std::num::NonZeroU16;
 
 use crate::color_depth::ColorDepth;
 use crate::composer_images::{MAX_IMAGE_BYTES, TranscriptImage, TranscriptImageSource};
@@ -58,6 +59,9 @@ pub(crate) const KITTY_DELETE_ALL: &[u8] = b"\x1b_Ga=d,d=a,q=2\x1b\\";
 /// Graphics protocol used to render thumbnails on the live terminal.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum ImageProtocol {
+    /// Kitty Graphics Protocol with `U=1` Unicode placeholders (`U+10EEEE`) for
+    /// flicker-free inline/viewport updates in Kitty and Ghostty.
+    KittyUnicode,
     Kitty,
     ITerm2,
     Sixel,
@@ -66,6 +70,20 @@ pub(crate) enum ImageProtocol {
 }
 
 impl ImageProtocol {
+    /// Resolve the active protocol for the current terminal color depth and `NO_COLOR`.
+    /// `KittyUnicode` encodes the 24-bit image ID in RGB foreground colors, so it
+    /// downgrades to classic `Kitty` below `TrueColor` and to `HalfBlock` on `Ansi16`
+    /// or `NO_COLOR`.
+    pub(crate) fn effective(self, color_depth: ColorDepth, no_color: bool) -> Self {
+        if no_color || color_depth == ColorDepth::Ansi16 {
+            return Self::HalfBlock;
+        }
+        if self == Self::KittyUnicode && color_depth != ColorDepth::TrueColor {
+            return Self::Kitty;
+        }
+        self
+    }
+
     /// Detect the terminal's image protocol from environment variables, falling back to
     /// [`Self::HalfBlock`] when `NO_COLOR`, `Ansi16`, `TMUX`, or an unknown terminal is active.
     pub(crate) fn from_env(color_depth: ColorDepth, no_color: bool) -> Self {
@@ -79,6 +97,9 @@ impl ImageProtocol {
     ) -> Self {
         if let Some(override_value) = var(OVERRIDE_VARIABLE) {
             match override_value.trim().to_ascii_lowercase().as_str() {
+                "kitty-unicode" | "kitty-u1" | "kitty_unicode" | "kitty_u1" => {
+                    return Self::KittyUnicode.effective(color_depth, no_color);
+                }
                 "kitty" => return Self::Kitty,
                 "iterm2" | "iterm" => return Self::ITerm2,
                 "sixel" => return Self::Sixel,
@@ -101,10 +122,18 @@ impl ImageProtocol {
         let term = var("TERM").unwrap_or_default().trim().to_ascii_lowercase();
 
         if var("KITTY_WINDOW_ID").is_some_and(|value| !value.trim().is_empty())
-            || matches!(term_program.as_str(), "ghostty" | "wezterm" | "kitty")
+            || matches!(term_program.as_str(), "ghostty" | "kitty")
             || term.contains("kitty")
             || term.contains("ghostty")
         {
+            return if color_depth == ColorDepth::TrueColor {
+                Self::KittyUnicode
+            } else {
+                Self::Kitty
+            };
+        }
+
+        if term_program == "wezterm" {
             return Self::Kitty;
         }
 
@@ -157,9 +186,16 @@ impl CellSize {
         if columns == 0 || rows == 0 || width_px == 0 || height_px == 0 {
             return Self::default();
         }
+        let cell_w = width_px / columns;
+        let cell_h = height_px / rows;
+        // Degenerate pixel values (e.g. `1×1` from a multiplexer or PTY that does not
+        // populate pixel dimensions) would skew aspect ratios if clamped to `4×6`.
+        if cell_w < 4 || cell_h < 6 {
+            return Self::default();
+        }
         Self {
-            width_px: (width_px / columns).clamp(4, 64),
-            height_px: (height_px / rows).clamp(6, 128),
+            width_px: cell_w.clamp(4, 64),
+            height_px: cell_h.clamp(6, 128),
         }
     }
 }
@@ -706,6 +742,387 @@ pub(crate) fn paint_half_blocks(
     }
 }
 
+/// Kitty Graphics Protocol Unicode placeholder base character (`U+10EEEE`).
+pub(crate) const KITTY_PLACEHOLDER: char = '\u{10EEEE}';
+
+/// Official Kitty row/column combining diacritics table (`gen/rowcolumn-diacritics.txt`).
+const KITTY_ROWCOL_DIACRITICS: [char; 297] = [
+    '\u{0305}',
+    '\u{030D}',
+    '\u{030E}',
+    '\u{0310}',
+    '\u{0312}',
+    '\u{033D}',
+    '\u{033E}',
+    '\u{033F}',
+    '\u{0346}',
+    '\u{034A}',
+    '\u{034B}',
+    '\u{034C}',
+    '\u{0350}',
+    '\u{0351}',
+    '\u{0352}',
+    '\u{0357}',
+    '\u{035B}',
+    '\u{0363}',
+    '\u{0364}',
+    '\u{0365}',
+    '\u{0366}',
+    '\u{0367}',
+    '\u{0368}',
+    '\u{0369}',
+    '\u{036A}',
+    '\u{036B}',
+    '\u{036C}',
+    '\u{036D}',
+    '\u{036E}',
+    '\u{036F}',
+    '\u{0483}',
+    '\u{0484}',
+    '\u{0485}',
+    '\u{0486}',
+    '\u{0487}',
+    '\u{0592}',
+    '\u{0593}',
+    '\u{0594}',
+    '\u{0595}',
+    '\u{0597}',
+    '\u{0598}',
+    '\u{0599}',
+    '\u{059C}',
+    '\u{059D}',
+    '\u{059E}',
+    '\u{059F}',
+    '\u{05A0}',
+    '\u{05A1}',
+    '\u{05A8}',
+    '\u{05A9}',
+    '\u{05AB}',
+    '\u{05AC}',
+    '\u{05AF}',
+    '\u{05C4}',
+    '\u{0610}',
+    '\u{0611}',
+    '\u{0612}',
+    '\u{0613}',
+    '\u{0614}',
+    '\u{0615}',
+    '\u{0616}',
+    '\u{0617}',
+    '\u{0657}',
+    '\u{0658}',
+    '\u{0659}',
+    '\u{065A}',
+    '\u{065B}',
+    '\u{065D}',
+    '\u{065E}',
+    '\u{06D6}',
+    '\u{06D7}',
+    '\u{06D8}',
+    '\u{06D9}',
+    '\u{06DA}',
+    '\u{06DB}',
+    '\u{06DC}',
+    '\u{06DF}',
+    '\u{06E0}',
+    '\u{06E1}',
+    '\u{06E2}',
+    '\u{06E4}',
+    '\u{06E7}',
+    '\u{06E8}',
+    '\u{06EB}',
+    '\u{06EC}',
+    '\u{0730}',
+    '\u{0732}',
+    '\u{0733}',
+    '\u{0735}',
+    '\u{0736}',
+    '\u{073A}',
+    '\u{073D}',
+    '\u{073F}',
+    '\u{0740}',
+    '\u{0741}',
+    '\u{0743}',
+    '\u{0745}',
+    '\u{0747}',
+    '\u{0749}',
+    '\u{074A}',
+    '\u{07EB}',
+    '\u{07EC}',
+    '\u{07ED}',
+    '\u{07EE}',
+    '\u{07EF}',
+    '\u{07F0}',
+    '\u{07F1}',
+    '\u{07F3}',
+    '\u{0816}',
+    '\u{0817}',
+    '\u{0818}',
+    '\u{0819}',
+    '\u{081B}',
+    '\u{081C}',
+    '\u{081D}',
+    '\u{081E}',
+    '\u{081F}',
+    '\u{0820}',
+    '\u{0821}',
+    '\u{0822}',
+    '\u{0823}',
+    '\u{0825}',
+    '\u{0826}',
+    '\u{0827}',
+    '\u{0829}',
+    '\u{082A}',
+    '\u{082B}',
+    '\u{082C}',
+    '\u{082D}',
+    '\u{0951}',
+    '\u{0953}',
+    '\u{0954}',
+    '\u{0F82}',
+    '\u{0F83}',
+    '\u{0F86}',
+    '\u{0F87}',
+    '\u{135D}',
+    '\u{135E}',
+    '\u{135F}',
+    '\u{17DD}',
+    '\u{193A}',
+    '\u{1A17}',
+    '\u{1A75}',
+    '\u{1A76}',
+    '\u{1A77}',
+    '\u{1A78}',
+    '\u{1A79}',
+    '\u{1A7A}',
+    '\u{1A7B}',
+    '\u{1A7C}',
+    '\u{1B6B}',
+    '\u{1B6D}',
+    '\u{1B6E}',
+    '\u{1B6F}',
+    '\u{1B70}',
+    '\u{1B71}',
+    '\u{1B72}',
+    '\u{1B73}',
+    '\u{1CD0}',
+    '\u{1CD1}',
+    '\u{1CD2}',
+    '\u{1CDA}',
+    '\u{1CDB}',
+    '\u{1CE0}',
+    '\u{1DC0}',
+    '\u{1DC1}',
+    '\u{1DC3}',
+    '\u{1DC4}',
+    '\u{1DC5}',
+    '\u{1DC6}',
+    '\u{1DC7}',
+    '\u{1DC8}',
+    '\u{1DC9}',
+    '\u{1DCB}',
+    '\u{1DCC}',
+    '\u{1DD1}',
+    '\u{1DD2}',
+    '\u{1DD3}',
+    '\u{1DD4}',
+    '\u{1DD5}',
+    '\u{1DD6}',
+    '\u{1DD7}',
+    '\u{1DD8}',
+    '\u{1DD9}',
+    '\u{1DDA}',
+    '\u{1DDB}',
+    '\u{1DDC}',
+    '\u{1DDD}',
+    '\u{1DDE}',
+    '\u{1DDF}',
+    '\u{1DE0}',
+    '\u{1DE1}',
+    '\u{1DE2}',
+    '\u{1DE3}',
+    '\u{1DE4}',
+    '\u{1DE5}',
+    '\u{1DE6}',
+    '\u{1DFE}',
+    '\u{20D0}',
+    '\u{20D1}',
+    '\u{20D4}',
+    '\u{20D5}',
+    '\u{20D6}',
+    '\u{20D7}',
+    '\u{20DB}',
+    '\u{20DC}',
+    '\u{20E1}',
+    '\u{20E7}',
+    '\u{20E9}',
+    '\u{20F0}',
+    '\u{2CEF}',
+    '\u{2CF0}',
+    '\u{2CF1}',
+    '\u{2DE0}',
+    '\u{2DE1}',
+    '\u{2DE2}',
+    '\u{2DE3}',
+    '\u{2DE4}',
+    '\u{2DE5}',
+    '\u{2DE6}',
+    '\u{2DE7}',
+    '\u{2DE8}',
+    '\u{2DE9}',
+    '\u{2DEA}',
+    '\u{2DEB}',
+    '\u{2DEC}',
+    '\u{2DED}',
+    '\u{2DEE}',
+    '\u{2DEF}',
+    '\u{2DF0}',
+    '\u{2DF1}',
+    '\u{2DF2}',
+    '\u{2DF3}',
+    '\u{2DF4}',
+    '\u{2DF5}',
+    '\u{2DF6}',
+    '\u{2DF7}',
+    '\u{2DF8}',
+    '\u{2DF9}',
+    '\u{2DFA}',
+    '\u{2DFB}',
+    '\u{2DFC}',
+    '\u{2DFD}',
+    '\u{2DFE}',
+    '\u{2DFF}',
+    '\u{A66F}',
+    '\u{A67C}',
+    '\u{A67D}',
+    '\u{A6F0}',
+    '\u{A6F1}',
+    '\u{A8E0}',
+    '\u{A8E1}',
+    '\u{A8E2}',
+    '\u{A8E3}',
+    '\u{A8E4}',
+    '\u{A8E5}',
+    '\u{A8E6}',
+    '\u{A8E7}',
+    '\u{A8E8}',
+    '\u{A8E9}',
+    '\u{A8EA}',
+    '\u{A8EB}',
+    '\u{A8EC}',
+    '\u{A8ED}',
+    '\u{A8EE}',
+    '\u{A8EF}',
+    '\u{A8F0}',
+    '\u{A8F1}',
+    '\u{AAB0}',
+    '\u{AAB2}',
+    '\u{AAB3}',
+    '\u{AAB7}',
+    '\u{AAB8}',
+    '\u{AABE}',
+    '\u{AABF}',
+    '\u{AAC1}',
+    '\u{FE20}',
+    '\u{FE21}',
+    '\u{FE22}',
+    '\u{FE23}',
+    '\u{FE24}',
+    '\u{FE25}',
+    '\u{FE26}',
+    '\u{10A0F}',
+    '\u{10A38}',
+    '\u{1D185}',
+    '\u{1D186}',
+    '\u{1D187}',
+    '\u{1D188}',
+    '\u{1D189}',
+    '\u{1D1AA}',
+    '\u{1D1AB}',
+    '\u{1D1AC}',
+    '\u{1D1AD}',
+    '\u{1D242}',
+    '\u{1D243}',
+    '\u{1D244}',
+];
+
+/// Maximum column or row dimension supported by Kitty `U=1` Unicode placeholders.
+pub(crate) const KITTY_MAX_PLACEHOLDER_DIM: u16 = KITTY_ROWCOL_DIACRITICS.len() as u16;
+
+/// Encode a 24-bit Kitty image ID as an RGB foreground color for `U=1` placeholders.
+pub(crate) fn kitty_id_color(id: u32) -> Color {
+    Color::Rgb(
+        ((id >> 16) & 0xFF) as u8,
+        ((id >> 8) & 0xFF) as u8,
+        (id & 0xFF) as u8,
+    )
+}
+
+/// Build the Kitty `U=1` Unicode placeholder cell string for `(row, col)`.
+pub(crate) fn kitty_placeholder_symbol(row: u16, col: u16) -> Option<String> {
+    let row_d = *KITTY_ROWCOL_DIACRITICS.get(usize::from(row))?;
+    let col_d = *KITTY_ROWCOL_DIACRITICS.get(usize::from(col))?;
+    let mut symbol = String::with_capacity(12);
+    symbol.push(KITTY_PLACEHOLDER);
+    symbol.push(row_d);
+    symbol.push(col_d);
+    Some(symbol)
+}
+
+/// Paint Kitty `U=1` Unicode placeholder cells across `rect` with `ForcedWidth(1)`.
+pub(crate) fn paint_kitty_unicode_placeholders(
+    buffer: &mut Buffer,
+    rect: Rect,
+    kitty_id: u32,
+    bg: Color,
+) {
+    let fg = kitty_id_color(kitty_id);
+    let forced_one = CellDiffOption::ForcedWidth(NonZeroU16::new(1).expect("non-zero width"));
+    for dy in 0..rect.height {
+        for dx in 0..rect.width {
+            let Some(symbol) = kitty_placeholder_symbol(dy, dx) else {
+                continue;
+            };
+            let cell = &mut buffer[(rect.x + dx, rect.y + dy)];
+            cell.set_symbol(&symbol);
+            cell.set_fg(fg);
+            cell.set_bg(bg);
+            cell.modifier = Modifier::empty();
+            cell.set_diff_option(forced_one);
+        }
+    }
+}
+
+/// Emit Kitty Graphics Protocol chunked RGBA virtual placement (`U=1`) for ID `id`.
+pub(crate) fn encode_kitty_unicode(
+    out: &mut Vec<u8>,
+    id: u32,
+    cols: u16,
+    rows: u16,
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+) {
+    if cols == 0 || rows == 0 || rgba.is_empty() || width == 0 || height == 0 {
+        return;
+    }
+    let encoded = base64::engine::general_purpose::STANDARD.encode(rgba);
+    let chunks: Vec<&[u8]> = encoded.as_bytes().chunks(KITTY_CHUNK_BYTES).collect();
+    for (index, chunk) in chunks.iter().enumerate() {
+        let more = usize::from(index + 1 < chunks.len());
+        if index == 0 {
+            let _ = write!(
+                out,
+                "\x1b_Ga=T,f=32,s={width},v={height},c={cols},r={rows},i={id},U=1,q=2,m={more};"
+            );
+        } else {
+            let _ = write!(out, "\x1b_Gm={more};");
+        }
+        out.extend_from_slice(chunk);
+        out.extend_from_slice(b"\x1b\\");
+    }
+}
+
 /// Emit Kitty Graphics Protocol chunked RGBA transmission for `rect` at ID `id`.
 pub(crate) fn encode_kitty(
     out: &mut Vec<u8>,
@@ -932,14 +1349,29 @@ pub(crate) struct NativePlacement {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ActivePlacement {
     kitty_id: u32,
+    unicode_placeholder: bool,
     spec: NativePlacement,
     cell_size: CellSize,
+}
+
+impl ActivePlacement {
+    fn matches_kitty_unicode(&self, want: &NativePlacement, cell_size: CellSize) -> bool {
+        self.unicode_placeholder
+            && self.kitty_id != 0
+            && self.cell_size == cell_size
+            && self.spec.image_key == want.image_key
+            && self.spec.rect.width == want.rect.width
+            && self.spec.rect.height == want.rect.height
+            && self.spec.total_rows == want.total_rows
+            && self.spec.first_image_row == want.first_image_row
+    }
 }
 
 /// Diff-based native graphics placement tracker across frames.
 #[derive(Debug, Default)]
 pub(crate) struct ImagePlacementState {
     active: HashMap<PlacementKey, ActivePlacement>,
+    prepared_unicode: HashMap<PlacementKey, u32>,
     next_kitty_id: u32,
     force_reemit: bool,
 }
@@ -965,21 +1397,44 @@ impl ImagePlacementState {
     ) -> bool {
         !self.force_reemit
             && protocol != ImageProtocol::HalfBlock
-            && self
-                .active
-                .get(&spec.placement)
-                .is_some_and(|existing| existing.spec == *spec && existing.cell_size == cell_size)
+            && self.active.get(&spec.placement).is_some_and(|existing| {
+                !existing.unicode_placeholder
+                    && existing.spec == *spec
+                    && existing.cell_size == cell_size
+            })
+    }
+
+    /// Resolve or allocate a 24-bit Kitty image ID for a `U=1` Unicode placeholder
+    /// before Ratatui flushes its cell buffer. Reuses the active ID when content and
+    /// cell dimensions are unchanged (even if `(x, y)` moved).
+    pub(crate) fn prepare_kitty_unicode(
+        &mut self,
+        spec: &NativePlacement,
+        cell_size: CellSize,
+    ) -> u32 {
+        if !self.force_reemit {
+            if let Some(existing) = self.active.get(&spec.placement) {
+                if existing.matches_kitty_unicode(spec, cell_size) {
+                    return existing.kitty_id;
+                }
+            }
+        }
+        let id = self.alloc_kitty_id();
+        self.prepared_unicode.insert(spec.placement.clone(), id);
+        id
     }
 
     /// Forget all active placements without deleting them (after `$EDITOR` suspend/resume).
     pub(crate) fn invalidate(&mut self) {
         self.active.clear();
+        self.prepared_unicode.clear();
         self.force_reemit = false;
     }
 
     fn alloc_kitty_id(&mut self) -> u32 {
         loop {
-            self.next_kitty_id = self.next_kitty_id.wrapping_add(1);
+            // Restrict to 24-bit non-zero IDs so `U=1` RGB foreground encoding is lossless.
+            self.next_kitty_id = (self.next_kitty_id.wrapping_add(1)) & 0x00FF_FFFF;
             if self.next_kitty_id != 0 {
                 return self.next_kitty_id;
             }
@@ -997,6 +1452,7 @@ impl ImagePlacementState {
         out: &mut Vec<u8>,
     ) {
         let force_reemit = std::mem::take(&mut self.force_reemit);
+        let mut prepared_unicode = std::mem::take(&mut self.prepared_unicode);
         if protocol == ImageProtocol::HalfBlock {
             for existing in self.active.values() {
                 if existing.kitty_id != 0 {
@@ -1012,13 +1468,27 @@ impl ImagePlacementState {
 
         // Remove placements that disappeared, changed geometry/image/cell_size, or need re-emit.
         let mut stale_keys = Vec::new();
+        let mut relocated_unicode = Vec::new();
         for (key, existing) in &self.active {
             let matches = !force_reemit
-                && desired_map
-                    .get(key)
-                    .is_some_and(|want| &existing.spec == *want && existing.cell_size == cell_size);
+                && desired_map.get(key).is_some_and(|want| {
+                    let want_unicode = protocol == ImageProtocol::KittyUnicode
+                        && want.rect.width <= KITTY_MAX_PLACEHOLDER_DIM
+                        && want.rect.height <= KITTY_MAX_PLACEHOLDER_DIM;
+                    if want_unicode {
+                        let ok = existing.matches_kitty_unicode(want, cell_size);
+                        if ok && existing.spec != **want {
+                            relocated_unicode.push((key.clone(), (*want).clone()));
+                        }
+                        ok
+                    } else {
+                        !existing.unicode_placeholder
+                            && existing.spec == **want
+                            && existing.cell_size == cell_size
+                    }
+                });
             if !matches {
-                if protocol == ImageProtocol::Kitty && existing.kitty_id != 0 {
+                if existing.kitty_id != 0 {
                     encode_kitty_delete(out, existing.kitty_id);
                 }
                 stale_keys.push(key.clone());
@@ -1026,6 +1496,11 @@ impl ImagePlacementState {
         }
         for key in stale_keys {
             self.active.remove(&key);
+        }
+        for (key, spec) in relocated_unicode {
+            if let Some(existing) = self.active.get_mut(&key) {
+                existing.spec = spec;
+            }
         }
 
         // Emit any new or updated placements in stable desired order.
@@ -1044,21 +1519,39 @@ impl ImagePlacementState {
             ) else {
                 continue;
             };
-            let kitty_id = match protocol {
-                ImageProtocol::Kitty => {
+            let (kitty_id, unicode_placeholder) = match protocol {
+                ImageProtocol::KittyUnicode
+                    if item.rect.width <= KITTY_MAX_PLACEHOLDER_DIM
+                        && item.rect.height <= KITTY_MAX_PLACEHOLDER_DIM =>
+                {
+                    let id = prepared_unicode
+                        .remove(&item.placement)
+                        .unwrap_or_else(|| self.alloc_kitty_id());
+                    encode_kitty_unicode(
+                        out,
+                        id,
+                        item.rect.width,
+                        item.rect.height,
+                        crop_rgba,
+                        crop_w,
+                        crop_h,
+                    );
+                    (id, true)
+                }
+                ImageProtocol::Kitty | ImageProtocol::KittyUnicode => {
                     let id = self.alloc_kitty_id();
                     encode_kitty(out, id, item.rect, crop_rgba, crop_w, crop_h);
-                    id
+                    (id, false)
                 }
                 ImageProtocol::ITerm2 => {
                     encode_iterm2(out, item.rect, crop_rgba, crop_w, crop_h, item.bg);
-                    0
+                    (0, false)
                 }
                 ImageProtocol::Sixel => {
                     encode_sixel(
                         out, item.rect, crop_rgba, crop_w, crop_h, cell_size, item.bg,
                     );
-                    0
+                    (0, false)
                 }
                 ImageProtocol::HalfBlock => unreachable!("handled above"),
             };
@@ -1066,6 +1559,7 @@ impl ImagePlacementState {
                 item.placement.clone(),
                 ActivePlacement {
                     kitty_id,
+                    unicode_placeholder,
                     spec: item.clone(),
                     cell_size,
                 },
@@ -1148,6 +1642,33 @@ mod tests {
             ImageProtocol::detect(
                 env_map(&[("TERM_PROGRAM", "ghostty")]),
                 ColorDepth::TrueColor,
+                false,
+            ),
+            ImageProtocol::KittyUnicode
+        );
+        assert_eq!(
+            ImageProtocol::detect(
+                env_map(&[("TERM_PROGRAM", "ghostty")]),
+                ColorDepth::Ansi256,
+                false,
+            ),
+            ImageProtocol::Kitty
+        );
+        assert_eq!(
+            ImageProtocol::detect(
+                env_map(&[("KITTY_WINDOW_ID", "1")]),
+                ColorDepth::TrueColor,
+                false,
+            ),
+            ImageProtocol::KittyUnicode
+        );
+        assert_eq!(
+            ImageProtocol::detect(
+                env_map(&[
+                    ("WISP_TUI_IMAGES", "kitty-unicode"),
+                    ("TERM_PROGRAM", "Apple_Terminal")
+                ]),
+                ColorDepth::Ansi256,
                 false,
             ),
             ImageProtocol::Kitty
@@ -1508,5 +2029,138 @@ mod tests {
         assert!(cache.prepare_browser_viewport(None, None).is_none());
         assert!(cache.get(&meta.key).is_none());
         assert!(cache.get(&thumb_key).is_some());
+    }
+
+    #[test]
+    fn degenerate_window_pixel_sizes_fall_back_to_default_cell_size() {
+        assert_eq!(
+            CellSize::from_window_size(100, 40, 0, 0),
+            CellSize::default()
+        );
+        assert_eq!(
+            CellSize::from_window_size(100, 40, 1, 1),
+            CellSize::default()
+        );
+        assert_eq!(
+            CellSize::from_window_size(100, 40, 1000, 800),
+            CellSize {
+                width_px: 10,
+                height_px: 20,
+            }
+        );
+    }
+
+    #[test]
+    fn kitty_unicode_placeholders_encode_virtual_placement_and_reuse_on_move() {
+        let mut cache = ImageCache::default();
+        let png = sample_png_bytes(16, 16);
+        let key = ImageCacheKey(Arc::from("u1-frame-1"));
+        cache.insert(key.clone(), Arc::new(decode_thumbnail(&png).unwrap()));
+
+        let mut placements = ImagePlacementState::default();
+        let spec_a = NativePlacement {
+            placement: PlacementKey::BrowserViewport,
+            image_key: key,
+            rect: Rect::new(4, 2, 3, 2),
+            total_rows: 2,
+            first_image_row: 0,
+            bg: Color::Rgb(16, 16, 20),
+        };
+        let id_a = placements.prepare_kitty_unicode(&spec_a, CellSize::default());
+        assert_ne!(id_a, 0);
+
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 10, 6));
+        paint_kitty_unicode_placeholders(&mut buffer, spec_a.rect, id_a, spec_a.bg);
+        let top_left = &buffer[(4, 2)];
+        assert_eq!(top_left.symbol(), "\u{10EEEE}\u{0305}\u{0305}");
+        assert_eq!(top_left.fg, kitty_id_color(id_a));
+        assert_eq!(
+            top_left.diff_option,
+            CellDiffOption::ForcedWidth(std::num::NonZeroU16::new(1).unwrap())
+        );
+        assert_eq!(buffer[(6, 3)].symbol(), "\u{10EEEE}\u{030D}\u{030E}");
+
+        let mut out = Vec::new();
+        placements.sync(
+            ImageProtocol::KittyUnicode,
+            &[spec_a.clone()],
+            &cache,
+            CellSize::default(),
+            &mut out,
+        );
+        let transmitted = String::from_utf8(out).unwrap();
+        assert!(
+            transmitted.starts_with(&format!(
+                "\x1b_Ga=T,f=32,s=16,v=16,c=3,r=2,i={id_a},U=1,q=2,m=0;"
+            )),
+            "{transmitted}"
+        );
+        assert!(placements.has_active_kitty());
+
+        // Relocating (x, y) without changing size or content reuses the virtual placement ID.
+        let spec_moved = NativePlacement {
+            rect: Rect::new(6, 3, 3, 2),
+            ..spec_a.clone()
+        };
+        assert_eq!(
+            placements.prepare_kitty_unicode(&spec_moved, CellSize::default()),
+            id_a
+        );
+        let mut out_move = Vec::new();
+        placements.sync(
+            ImageProtocol::KittyUnicode,
+            &[spec_moved],
+            &cache,
+            CellSize::default(),
+            &mut out_move,
+        );
+        assert!(
+            out_move.is_empty(),
+            "moving a U=1 image should emit zero bytes"
+        );
+
+        // Resizing allocates a new ID, deletes the old ID, and transmits the new virtual placement.
+        let spec_resized = NativePlacement {
+            rect: Rect::new(6, 3, 4, 2),
+            ..spec_a
+        };
+        let id_b = placements.prepare_kitty_unicode(&spec_resized, CellSize::default());
+        assert_ne!(id_b, id_a);
+        let mut out_resize = Vec::new();
+        placements.sync(
+            ImageProtocol::KittyUnicode,
+            &[spec_resized],
+            &cache,
+            CellSize::default(),
+            &mut out_resize,
+        );
+        let resize_str = String::from_utf8(out_resize).unwrap();
+        assert!(resize_str.contains(&format!("\x1b_Ga=d,d=i,i={id_a},q=2\x1b\\")));
+        assert!(resize_str.contains(&format!("c=4,r=2,i={id_b},U=1,q=2")));
+
+        // Oversized rects (>297 cols) fall back to classic Kitty and report steady state.
+        let oversized = NativePlacement {
+            placement: PlacementKey::BrowserViewport,
+            image_key: ImageCacheKey(Arc::from("u1-frame-1")),
+            rect: Rect::new(0, 0, KITTY_MAX_PLACEHOLDER_DIM + 1, 2),
+            total_rows: 2,
+            first_image_row: 0,
+            bg: Color::Rgb(16, 16, 20),
+        };
+        let mut out_oversized = Vec::new();
+        placements.sync(
+            ImageProtocol::KittyUnicode,
+            &[oversized.clone()],
+            &cache,
+            CellSize::default(),
+            &mut out_oversized,
+        );
+        let oversized_str = String::from_utf8(out_oversized).unwrap();
+        assert!(oversized_str.contains("p=1,C=1,q=2"));
+        assert!(placements.is_steady_state(
+            ImageProtocol::KittyUnicode,
+            &oversized,
+            CellSize::default()
+        ));
     }
 }

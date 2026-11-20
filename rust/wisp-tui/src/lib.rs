@@ -2175,9 +2175,9 @@ impl LiveUi {
         let native_placements = std::cell::RefCell::new(Vec::new());
         let hyperlinks = self.hyperlinks;
         let no_color = self.no_color;
-        let image_protocol = self.image_protocol;
-        let cell_size = self.cell_size;
         let color_depth = self.color_depth;
+        let image_protocol = self.image_protocol.effective(color_depth, no_color);
+        let cell_size = self.cell_size;
         let image_cache = std::mem::take(&mut self.image_cache);
         let image_placements = std::cell::RefCell::new(std::mem::take(&mut self.image_placements));
         let finish = |buffer: &mut ratatui::buffer::Buffer| {
@@ -2185,7 +2185,7 @@ impl LiveUi {
                 hyperlink::apply(buffer, &painted_links.borrow());
             }
             let popup = popup_rect.get();
-            let placements_guard = image_placements.borrow();
+            let mut placements_guard = image_placements.borrow_mut();
             let mut desired = Vec::new();
             for painted in painted_images.borrow().iter() {
                 let Some(thumb) = image_cache.get(&painted.key) else {
@@ -2231,26 +2231,40 @@ impl LiveUi {
                         first_image_row: painted.first_image_row,
                         bg: painted.bg,
                     };
-                    let diff_option = if placements_guard.is_steady_state(
-                        image_protocol,
-                        &placement,
-                        cell_size,
-                    ) {
-                        ratatui::buffer::CellDiffOption::Skip
+                    if image_protocol == terminal_images::ImageProtocol::KittyUnicode
+                        && painted.rect.width <= terminal_images::KITTY_MAX_PLACEHOLDER_DIM
+                        && painted.rect.height <= terminal_images::KITTY_MAX_PLACEHOLDER_DIM
+                    {
+                        let kitty_id =
+                            placements_guard.prepare_kitty_unicode(&placement, cell_size);
+                        terminal_images::paint_kitty_unicode_placeholders(
+                            buffer,
+                            painted.rect,
+                            kitty_id,
+                            painted.bg,
+                        );
                     } else {
-                        ratatui::buffer::CellDiffOption::AlwaysUpdate
-                    };
-                    // First or changed frames force-clear underlying cells before `post_draw`
-                    // paints native graphics; steady frames skip cell writes so Sixel/iTerm2/
-                    // Kitty placements do not flicker. Closing or occluding reverts cells to
-                    // `CellDiffOption::None`, forcing Ratatui to repaint clean background/UI.
-                    for dy in 0..painted.rect.height {
-                        for dx in 0..painted.rect.width {
-                            let cell = &mut buffer[(painted.rect.x + dx, painted.rect.y + dy)];
-                            cell.set_symbol(" ");
-                            cell.set_bg(painted.bg);
-                            cell.modifier = ratatui::style::Modifier::empty();
-                            cell.set_diff_option(diff_option);
+                        let diff_option = if placements_guard.is_steady_state(
+                            image_protocol,
+                            &placement,
+                            cell_size,
+                        ) {
+                            ratatui::buffer::CellDiffOption::Skip
+                        } else {
+                            ratatui::buffer::CellDiffOption::AlwaysUpdate
+                        };
+                        // First or changed frames force-clear underlying cells before `post_draw`
+                        // paints native graphics; steady frames skip cell writes so Sixel/iTerm2/
+                        // Kitty placements do not flicker. Closing or occluding reverts cells to
+                        // `CellDiffOption::None`, forcing Ratatui to repaint clean background/UI.
+                        for dy in 0..painted.rect.height {
+                            for dx in 0..painted.rect.width {
+                                let cell = &mut buffer[(painted.rect.x + dx, painted.rect.y + dy)];
+                                cell.set_symbol(" ");
+                                cell.set_bg(painted.bg);
+                                cell.modifier = ratatui::style::Modifier::empty();
+                                cell.set_diff_option(diff_option);
+                            }
                         }
                     }
                     desired.push(placement);
@@ -2471,7 +2485,11 @@ impl LiveUi {
                     panel_docked,
                 ),
                 // The side panel lies over the right of the transcript, down to the
-                // composer, so the prompt stays in view.
+                // composer, so the prompt stays in view — unless expanded, which opens
+                // a large centered overlay for both Work and Browser modes.
+                None if overlay == Some(OverlayKind::SidePanel) && self.side_panel.expanded() => {
+                    Some(side_panel::expanded_area(frame.area()))
+                }
                 None if overlay == Some(OverlayKind::SidePanel) && self.side_panel.docked() => {
                     Some(self.side_panel.split(frame.area()).1)
                 }

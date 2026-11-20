@@ -8,11 +8,12 @@ use chrono::Timelike;
 use ratatui::layout::Position;
 use ratatui::widgets::Paragraph;
 
-/// Draw the `Work | Browser` tab switcher at row 0 when browser state is active.
+/// Draw the `Work | Browser` tab switcher and right-aligned `Expand` / `Restore` toggle at row 0.
 pub(super) fn push_mode_tabs(
     rows: &mut PanelRows,
     active: PanelMode,
     interacting: bool,
+    expanded: bool,
     width: usize,
     palette: Palette,
 ) {
@@ -27,7 +28,7 @@ pub(super) fn push_mode_tabs(
     let sep = " · ";
 
     let mut spans = Vec::new();
-    let mut hits: Vec<(u16, u16, PanelMode)> = Vec::new();
+    let mut hits: Vec<(u16, u16, PanelAction)> = Vec::new();
     let mut col = 0usize;
 
     for (index, (label, mode)) in tabs.into_iter().enumerate() {
@@ -51,7 +52,7 @@ pub(super) fn push_mode_tabs(
         let end = u16::try_from(col + span_width).unwrap_or(u16::MAX);
         let style = if mode == active { active_style } else { muted };
         spans.push(Span::styled(clipped, style));
-        hits.push((start, end, mode));
+        hits.push((start, end, PanelAction::SwitchMode(mode)));
         col += span_width;
     }
 
@@ -60,13 +61,25 @@ pub(super) fn push_mode_tabs(
         col += sep.width();
         let clipped = ui::clip_columns("INTERACT", width.saturating_sub(col));
         if !clipped.is_empty() {
+            col += clipped.width();
             spans.push(Span::styled(clipped, active_style));
         }
     }
 
+    let toggle_label = if expanded { "[Restore]" } else { "[Expand]" };
+    let toggle_width = toggle_label.width();
+    if col + 1 + toggle_width <= width {
+        let gap = width - col - toggle_width;
+        spans.push(Span::raw(" ".repeat(gap)));
+        let start = u16::try_from(width - toggle_width).unwrap_or(u16::MAX);
+        let end = u16::try_from(width).unwrap_or(u16::MAX);
+        spans.push(Span::styled(toggle_label, muted));
+        hits.push((start, end, PanelAction::ToggleExpand));
+    }
+
     rows.section(Section::ModeTabs, vec![Line::from(spans)]);
-    for (start, end, mode) in hits {
-        rows.action_range(0, start, end, PanelAction::SwitchMode(mode));
+    for (start, end, action) in hits {
+        rows.action_range(0, start, end, action);
     }
 }
 

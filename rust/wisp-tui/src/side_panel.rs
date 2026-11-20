@@ -47,6 +47,19 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// plus the turn rail and the conversation margins.
 const MIN_TRANSCRIPT_WIDTH: u16 = 104;
 
+/// Minimum transcript width preserved when the user explicitly drags the docked panel wider.
+const MIN_DRAGGED_TRANSCRIPT_WIDTH: u16 = 60;
+
+/// Maximum share of terminal width (in percent) the docked panel may occupy when dragged.
+const MAX_DRAGGED_PANEL_PERCENT: u16 = 60;
+
+/// Widest width the docked panel may be dragged to on a terminal `total` columns wide.
+pub(crate) fn max_dragged_width(total: u16) -> u16 {
+    let by_transcript = total.saturating_sub(MIN_DRAGGED_TRANSCRIPT_WIDTH);
+    let by_ratio = (u32::from(total) * u32::from(MAX_DRAGGED_PANEL_PERCENT) / 100) as u16;
+    by_transcript.min(by_ratio).max(PANEL_WIDTH)
+}
+
 /// Whether a terminal this wide docks the panel beside the transcript.
 pub(crate) fn docks(width: u16) -> bool {
     width >= PANEL_WIDTH + MIN_TRANSCRIPT_WIDTH
@@ -77,6 +90,8 @@ pub(crate) struct SidePanel {
     hidden: bool,
     /// Opened with Ctrl+P on a terminal too narrow to dock it.
     overlay: bool,
+    /// Temporarily expanded into a large centered overlay (for both `Work` and `Browser`).
+    expanded: bool,
     /// Whether closing the overlay hides the panel again, because the background
     /// strip opened a panel the user had hidden.
     rehide: bool,
@@ -136,6 +151,7 @@ pub(crate) enum Disclosure {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PanelAction {
     SwitchMode(PanelMode),
+    ToggleExpand,
     Toggle(Disclosure),
     Open(Target),
 }
@@ -211,6 +227,21 @@ impl SidePanel {
         self.overlay
     }
 
+    pub(crate) fn expanded(&self) -> bool {
+        self.expanded
+    }
+
+    pub(crate) fn toggle_expanded(&mut self) {
+        self.expanded = !self.expanded;
+        if self.expanded {
+            self.hidden = false;
+            self.overlay = true;
+            self.rehide = false;
+        } else if docks(self.width) {
+            self.overlay = false;
+        }
+    }
+
     pub(crate) fn mode(&self) -> PanelMode {
         self.mode
     }
@@ -226,7 +257,9 @@ impl SidePanel {
         self.scroll.set(0);
         if docks(self.width) {
             self.hidden = false;
-            self.overlay = false;
+            if !self.expanded {
+                self.overlay = false;
+            }
         } else {
             self.overlay = true;
             self.rehide = false;
@@ -293,6 +326,7 @@ impl SidePanel {
     /// toggle a visible docked Browser tab back to LiveWork.
     pub(crate) fn toggle_browser(&mut self) {
         self.browser_interacting = false;
+        self.expanded = false;
         if docks(self.width) {
             self.rehide = false;
             self.overlay = false;
@@ -323,6 +357,7 @@ impl SidePanel {
     /// overlay opens with focus on the first row it can act on.
     pub(crate) fn toggle(&mut self) {
         self.browser_interacting = false;
+        self.expanded = false;
         if docks(self.width) {
             self.rehide = false;
             self.hidden = !self.hidden;
@@ -455,6 +490,10 @@ impl SidePanel {
         if key == KeyCode::Esc {
             return OverlayKey::Close;
         }
+        if key == KeyCode::Char('f') {
+            self.toggle_expanded();
+            return OverlayKey::Moved;
+        }
         if key == KeyCode::Char('b')
             && (state.browser_viewport.is_some() || self.mode == PanelMode::Browser)
         {
@@ -570,6 +609,9 @@ impl SidePanel {
     fn sections(&self, _state: &UiState) -> Vec<Section> {
         let mut sections = Vec::new();
         for hit in &self.painted.borrow().actions {
+            if matches!(hit.action, PanelAction::ToggleExpand) {
+                continue;
+            }
             if !sections.contains(&hit.section) {
                 sections.push(hit.section);
             }
@@ -582,7 +624,9 @@ impl SidePanel {
             .borrow()
             .actions
             .iter()
-            .filter(|hit| hit.section == section)
+            .filter(|hit| {
+                hit.section == section && !matches!(hit.action, PanelAction::ToggleExpand)
+            })
             .map(|hit| hit.action.clone())
             .collect()
     }
@@ -636,6 +680,10 @@ impl SidePanel {
                 self.cursor = None;
                 self.scroll.set(0);
                 self.close_peek();
+                OverlayKey::Moved
+            }
+            PanelAction::ToggleExpand => {
+                self.toggle_expanded();
                 OverlayKey::Moved
             }
             PanelAction::Open(target) => OverlayKey::Open(target),
@@ -736,6 +784,7 @@ impl SidePanel {
     pub(crate) fn close_overlay(&mut self) {
         self.browser_interacting = false;
         self.overlay = false;
+        self.expanded = false;
         self.close_peek();
         if std::mem::take(&mut self.rehide) {
             self.hidden = true;
@@ -743,9 +792,9 @@ impl SidePanel {
     }
 
     /// Follow the terminal's width. An overlay open when the terminal grows wide
-    /// enough becomes the docked panel.
+    /// enough becomes the docked panel, unless the user explicitly expanded it.
     pub(crate) fn observe_width(&mut self, width: u16) {
-        if self.overlay && !docks(self.width) && docks(width) {
+        if self.overlay && !self.expanded && !docks(self.width) && docks(width) {
             self.overlay = false;
             // A panel the background strip opened over a hidden one stays hidden.
             self.hidden = std::mem::take(&mut self.rehide);
@@ -757,16 +806,12 @@ impl SidePanel {
     }
 
     /// The docked panel's width on a terminal `total` columns wide, its border included:
-    /// the dragged width, kept to between [`PANEL_WIDTH`] and what leaves the transcript
-    /// its minimum, or [`auto_width`] when nothing was dragged.
+    /// the dragged width, kept to between [`PANEL_WIDTH`] and [`max_dragged_width`],
+    /// or [`auto_width`] when nothing was dragged.
     pub(crate) fn docked_width(&self, total: u16) -> u16 {
         self.dragged_width.map_or_else(
             || auto_width(total),
-            |width| {
-                width
-                    .min(total.saturating_sub(MIN_TRANSCRIPT_WIDTH))
-                    .max(PANEL_WIDTH)
-            },
+            |width| width.min(max_dragged_width(total)).max(PANEL_WIDTH),
         )
     }
 
@@ -841,11 +886,7 @@ impl SidePanel {
         let moved = resize.moved || (docked && column != held_at);
         if moved && docked {
             let width = total.saturating_sub(column.saturating_sub(resize.grab));
-            self.dragged_width = Some(
-                width
-                    .min(total.saturating_sub(MIN_TRANSCRIPT_WIDTH))
-                    .max(PANEL_WIDTH),
-            );
+            self.dragged_width = Some(width.min(max_dragged_width(total)).max(PANEL_WIDTH));
         }
         if matches!(kind, MouseEventKind::Up(_)) {
             self.last_border_click = (!moved).then_some(now);
@@ -893,6 +934,25 @@ pub(crate) fn overlay_area(above_composer: Rect) -> Rect {
         x: above_composer.right() - width,
         width,
         ..above_composer
+    }
+}
+
+/// The panel's area when expanded (`f` / `[Expand]`): a large centered overlay that
+/// gives either `Work` or `Browser` generous room on any terminal size.
+pub(crate) fn expanded_area(frame: Rect) -> Rect {
+    let margin_x = if frame.width >= 20 { 2 } else { 0 };
+    let margin_y = if frame.height >= 12 { 1 } else { 0 };
+    let max_w = frame.width.saturating_sub(margin_x * 2);
+    let max_h = frame.height.saturating_sub(margin_y * 2);
+    let width = ((u32::from(frame.width) * 90) / 100) as u16;
+    let height = ((u32::from(frame.height) * 88) / 100) as u16;
+    let width = width.clamp(PANEL_WIDTH.min(max_w), max_w);
+    let height = height.clamp(10.min(max_h), max_h);
+    Rect {
+        x: frame.x + (frame.width.saturating_sub(width)) / 2,
+        y: frame.y + (frame.height.saturating_sub(height)) / 2,
+        width,
+        height,
     }
 }
 
@@ -990,7 +1050,7 @@ pub(crate) fn render_with_preview(
     painted_images: Option<&mut Vec<PaintedImage>>,
     ignore_overlay_rect: bool,
 ) {
-    let overlay = !panel.docked();
+    let overlay = !panel.docked() || panel.expanded();
     let surface = if palette.shows_bands() {
         palette.base().bg(palette.surface)
     } else {
@@ -1029,7 +1089,14 @@ pub(crate) fn render_with_preview(
     let show_tabs = state.browser_viewport.is_some() || panel.mode == PanelMode::Browser;
     if panel.mode == PanelMode::Browser {
         let mut rows = PanelRows::default();
-        browser::push_mode_tabs(&mut rows, panel.mode, interacting, width, palette);
+        browser::push_mode_tabs(
+            &mut rows,
+            panel.mode,
+            interacting,
+            panel.expanded,
+            width,
+            palette,
+        );
         let footer_height = usize::from(panel.overlay_open() || interacting);
         let body = Rect {
             height: inner.height.saturating_sub(footer_height as u16),
@@ -1091,8 +1158,10 @@ pub(crate) fn render_with_preview(
             };
             let hints = if interacting {
                 "Esc exit · Click/Scroll · Type · Alt+← back · Ctrl+R reload"
+            } else if panel.expanded {
+                "Esc close · Tab tabs · b work · i interact · f restore · r refresh"
             } else {
-                "Esc close · Tab tabs · b work · i interact · r refresh"
+                "Esc · Tab · b work · i interact · f size · r refresh"
             };
             frame.render_widget(Paragraph::new(ui::keycap_hints(hints, palette)), footer);
         }
@@ -1102,7 +1171,7 @@ pub(crate) fn render_with_preview(
     let focus = Focus::of(state);
     let mut rows = PanelRows::default();
     if show_tabs {
-        browser::push_mode_tabs(&mut rows, panel.mode, false, width, palette);
+        browser::push_mode_tabs(&mut rows, panel.mode, false, panel.expanded, width, palette);
     }
     let (header, branch_row) = header_lines(state, bindings, width, palette);
     rows.section(Section::Header, header);
@@ -1204,7 +1273,13 @@ pub(crate) fn render_with_preview(
         ..inner
     };
     let hint = if panel.overlay_open() {
-        let hint_text = if show_tabs {
+        let hint_text = if panel.expanded {
+            if show_tabs {
+                "Esc close · Tab sections · b browser · f restore · Enter"
+            } else {
+                "Esc close · Tab sections · f restore · Enter"
+            }
+        } else if show_tabs {
             "Esc close · Tab sections · b browser · Enter"
         } else {
             "Esc close · Tab sections · Enter"
@@ -2321,19 +2396,36 @@ mod tests {
         // The border follows the pointer: column 110 leaves 90 columns.
         assert!(panel.continue_resize(DRAG, 110, now));
         assert_eq!(panel.docked_width(200), 90);
-        // Never below the narrowest width, and the transcript keeps its minimum.
+        // Never below the narrowest width, and clamped by the standardized drag ceiling.
         panel.continue_resize(DRAG, 190, now);
         assert_eq!(panel.docked_width(200), PANEL_WIDTH);
         panel.continue_resize(DRAG, 10, now);
-        assert_eq!(panel.docked_width(200), 200 - MIN_TRANSCRIPT_WIDTH);
+        assert_eq!(panel.docked_width(200), max_dragged_width(200));
         panel.continue_resize(DRAG, 110, now);
         assert!(panel.continue_resize(RELEASE, 110, now));
         assert!(!panel.resizing());
         // A terminal that shrinks squeezes the width, and growing back restores it.
-        assert_eq!(panel.docked_width(180), 76);
+        assert_eq!(panel.docked_width(140), max_dragged_width(140));
         assert_eq!(panel.docked_width(200), 90);
         // With no resize in progress, drags belong to someone else.
         assert!(!panel.continue_resize(DRAG, 120, now));
+    }
+
+    #[test]
+    fn expanded_area_and_toggle_apply_to_both_modes() {
+        let expanded = expanded_area(Rect::new(0, 0, 160, 40));
+        assert!(expanded.width >= 140 && expanded.width < 160);
+        assert!(expanded.height >= 34 && expanded.height < 40);
+
+        let mut panel = SidePanel::default();
+        panel.observe_width(160);
+        assert!(!panel.expanded());
+        panel.toggle_expanded();
+        assert!(panel.expanded());
+        assert!(panel.overlay_open());
+        panel.toggle_expanded();
+        assert!(!panel.expanded());
+        assert!(!panel.overlay_open());
     }
 
     #[test]

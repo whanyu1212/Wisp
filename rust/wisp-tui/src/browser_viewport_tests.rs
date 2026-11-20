@@ -1561,3 +1561,111 @@ async fn takeover_ignores_non_printable_unicode_format_chars_with_modifiers() {
         assert!(!ui.state.browser_interact_in_flight());
     }
 }
+
+#[tokio::test]
+async fn kitty_unicode_viewport_paints_placeholders_and_expands_panel() {
+    let dir = TempSessionDir::new("kitty-u1-expand");
+    let (mut ui, _) = setup_live_browser_ui(&dir).await;
+    // Use a desktop-resolution frame (1280×720) so expanding the panel grows the viewport rect.
+    let (sha, len) = write_split_tone_png(&dir.images_dir(), 1280, 720);
+    push_backend_event(
+        &mut ui,
+        viewport_event(
+            "2026-11-20T12:35:00Z",
+            Some((&sha, len, 1280, 720)),
+            Some("https://example.com/app"),
+            Some("Desktop App"),
+            Some("mcp__playwright__browser_take_screenshot"),
+        ),
+    )
+    .await;
+    ui.image_protocol = terminal_images::ImageProtocol::KittyUnicode;
+
+    let mut terminal = Terminal::new(RecordingBackend::new(160, 36)).unwrap();
+    ui.draw(&mut terminal, &conn()).unwrap();
+    let docked_rect = ui
+        .side_panel
+        .viewport_image_rect()
+        .expect("docked viewport image rect");
+    let events = terminal.backend_mut().take_events();
+    let bytes = events
+        .iter()
+        .find_map(|ev| ev.strip_prefix("bytes:"))
+        .expect("expected Kitty U=1 virtual placement payload");
+    assert!(bytes.contains("a=T,f=32,"), "{bytes}");
+    assert!(bytes.contains(",U=1,q=2,"), "{bytes}");
+
+    let buf = terminal.backend().inner.buffer();
+    let mut placeholder_cells = 0usize;
+    for y in 0..buf.area.height {
+        for x in 0..buf.area.width {
+            let cell = &buf[(x, y)];
+            if cell
+                .symbol()
+                .starts_with(terminal_images::KITTY_PLACEHOLDER)
+            {
+                assert_eq!(
+                    cell.diff_option,
+                    CellDiffOption::ForcedWidth(std::num::NonZeroU16::new(1).unwrap())
+                );
+                placeholder_cells += 1;
+            }
+        }
+    }
+    assert!(placeholder_cells > 0, "expected U=1 placeholder cells");
+
+    // Steady-state redraw emits zero native graphics bytes.
+    ui.draw(&mut terminal, &conn()).unwrap();
+    let steady_events = terminal.backend_mut().take_events();
+    assert!(
+        !steady_events.iter().any(|ev| ev.starts_with("bytes:")),
+        "steady U=1 frame should not re-transmit: {steady_events:?}"
+    );
+
+    // Focusing side panel and pressing `f` expands into a much larger centered overlay.
+    ui.side_panel.focus();
+    send_input(
+        &mut ui,
+        Input::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE)),
+    )
+    .await;
+    assert!(ui.side_panel.expanded());
+    ui.draw(&mut terminal, &conn()).unwrap();
+    let expanded_rect = ui
+        .side_panel
+        .viewport_image_rect()
+        .expect("expanded viewport image rect");
+    assert!(
+        expanded_rect.width > docked_rect.width,
+        "expanded viewport ({expanded_rect:?}) should be wider than docked ({docked_rect:?})"
+    );
+
+    // Entering interactive takeover while expanded must keep the expanded overlay open.
+    send_input(
+        &mut ui,
+        Input::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)),
+    )
+    .await;
+    assert!(ui.browser_takeover_active());
+    assert!(ui.side_panel.expanded());
+    assert!(ui.side_panel.overlay_open());
+
+    // First Esc leaves INTERACT while keeping the expanded overlay open.
+    send_input(
+        &mut ui,
+        Input::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+    )
+    .await;
+    assert!(!ui.browser_takeover_active());
+    assert!(ui.side_panel.expanded());
+    assert!(ui.side_panel.overlay_open());
+
+    // Pressing `f` restores the docked panel.
+    send_input(
+        &mut ui,
+        Input::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE)),
+    )
+    .await;
+    assert!(!ui.side_panel.expanded());
+    assert!(!ui.side_panel.overlay_open());
+}

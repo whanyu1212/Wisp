@@ -247,3 +247,31 @@ commands first, then skills, and typing `/skill:` narrows it to skills; `Tab` or
 suggestion, then `Enter` submits. `/mcp` shows server status, registered tools and connection
 errors. In both browsers `r` refreshes and `Esc` or `Ctrl+C` closes; both stay available while a
 prompt is running.
+
+## Browser viewport and interactive takeover
+
+When a browser MCP server such as Playwright (`@playwright/mcp`) or Chrome DevTools
+(`chrome-devtools-mcp`) is connected, Wisp adds a `Work · Browser` tab switcher at the top of the
+side panel and updates the viewport whenever the agent captures a page screenshot.
+
+- `/browser` switches to the `Browser` tab (or opens the side panel as an overlay on narrow
+  terminals). Running `/browser` again toggles back to `Work` (or closes the overlay).
+- `/browser interact`, pressing `i` while the `Browser` tab has focus (`F8`), or clicking inside
+  the viewport image enters **interactive takeover** (`INTERACT`) while the session is idle:
+  - Clicks and wheel scrolls map from terminal cells onto the browser viewport.
+  - Typed text and pasted snippets are forwarded to the active page without echoing typed values
+    into the transcript or session history.
+  - Navigation and editing keys (`Enter`, `Tab`, `Backspace`, `Delete`, arrows, `Home`/`End`,
+    `PageUp`/`PageDown`, `Alt+Left` back, `Ctrl+R` reload) control the page directly.
+  - Press `Esc` or `Ctrl+C` (or click outside the panel) to leave takeover. On your next prompt,
+    Wisp attaches a brief, secret-free summary of the takeover so the model knows to re-inspect the
+    page before acting.
+- **Side-panel sizing:** Drag the left border of a docked side panel wider (up to 60% of the
+  terminal width), or focus the side panel (`F8`) and press `f` (or click `[Expand]` / `[Restore]`
+  on the `Work · Browser` tab row) to expand either `Work` or `Browser` into a large centered
+  overlay on any terminal size.
+- **Terminal image protocols:** Wisp auto-detects Kitty `U=1` Unicode placeholders (Kitty and
+  Ghostty in true-color mode), classic Kitty graphics (WezTerm or 256-color), iTerm2 inline
+  images, Sixel, and Unicode half-blocks (`tmux`, `NO_COLOR`, 16-color, or fallback terminals).
+  Set `WISP_TUI_IMAGES` to `kitty-unicode`, `kitty`, `iterm2`, `sixel`, or `halfblock` to override
+  detection.

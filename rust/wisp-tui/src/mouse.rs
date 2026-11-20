@@ -772,6 +772,7 @@ impl LiveUi {
                     && (frame.layer == Layer::Conversation
                         || (frame.layer == Layer::Overlay(OverlayKind::SidePanel)
                             && self.side_panel.docked()
+                            && !self.side_panel.expanded()
                             && self.rendered_overlay == Some(OverlayKind::SidePanel)))
             })
             .and_then(|frame| frame.panel_border)
