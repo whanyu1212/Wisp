@@ -271,3 +271,65 @@ def test_signal_received_during_cleanup_overrides_success(
     monkeypatch.setattr(rust_launcher, "_cleanup_process_group", cleanup)
 
     assert rust_launcher.run_rust_tui(_options(tmp_path)) == 128 + signal.SIGTERM
+
+
+class _RunningProcess:
+    pid = _FakeProcess.pid
+
+    def poll(self) -> int | None:
+        return None
+
+
+def test_foreground_cleanup_waits_for_reclaim(monkeypatch: MonkeyPatch) -> None:
+    signals: list[tuple[int, int]] = []
+    groups = iter((555, 555, 555, _RunningProcess.pid))
+    sleeps: list[float] = []
+    now = 0.0
+
+    def fake_clock() -> float:
+        return now
+
+    def fake_sleep(seconds: float) -> None:
+        nonlocal now
+        sleeps.append(seconds)
+        now += seconds
+
+    monkeypatch.setattr(rust_launcher.os, "getpgrp", lambda: 99)
+    monkeypatch.setattr(rust_launcher.os, "tcgetpgrp", lambda _fd: next(groups))
+    monkeypatch.setattr(rust_launcher, "_wait_for_process_group", lambda *_args: True)
+    monkeypatch.setattr(
+        rust_launcher,
+        "_signal_process_group",
+        lambda pgid, signum: signals.append((pgid, signum)),
+    )
+    monkeypatch.setattr(rust_launcher.time, "monotonic", fake_clock)
+    monkeypatch.setattr(rust_launcher.time, "sleep", fake_sleep)
+
+    rust_launcher._cleanup_foreground_job(_SNAPSHOT, _RunningProcess())  # type: ignore[arg-type]
+
+    assert signals == [(555, signal.SIGHUP), (555, signal.SIGCONT)]
+    assert len(sleeps) == 2
+
+
+def test_foreground_cleanup_bounds_reclaim_wait(monkeypatch: MonkeyPatch) -> None:
+    now = 10.0
+
+    def fake_clock() -> float:
+        return now
+
+    def fake_sleep(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+
+    monkeypatch.setattr(rust_launcher.os, "tcgetpgrp", lambda _fd: 555)
+
+    rust_launcher._wait_for_foreground_reclaim(
+        _SNAPSHOT.fd,
+        555,
+        _RunningProcess(),  # type: ignore[arg-type]
+        timeout=0.05,
+        clock=fake_clock,
+        sleep=fake_sleep,
+    )
+
+    assert now == pytest.approx(10.05)

@@ -97,6 +97,9 @@ pub(crate) fn run(command: &str, request: EditorRequest, draft: &str) -> EditorO
 /// trailing newline, which most editors add on save, is removed on the way back, so an
 /// unchanged file returns the draft exactly. The temporary file is removed either way.
 pub(crate) fn edit(command: &str, draft: &str) -> Result<String, EditFailure> {
+    // Declare the foreground guard before the draft file so Rust always drops
+    // `file` (unlinking it) before restoring foreground on every exit or unwind path.
+    let mut restore = None;
     let file = DraftFile::create(&format!("{draft}\n")).map_err(EditFailure::File)?;
     let mut shell = Command::new("sh");
     shell
@@ -104,7 +107,7 @@ pub(crate) fn edit(command: &str, draft: &str) -> Result<String, EditFailure> {
         .arg(format!("{command} \"$1\""))
         .arg("sh")
         .arg(&file.path);
-    let status = run_in_foreground(shell).map_err(EditFailure::Spawn)?;
+    let status = run_in_foreground(shell, &mut restore).map_err(EditFailure::Spawn)?;
     if !status.success() {
         return Err(EditFailure::Exit(status));
     }
@@ -147,13 +150,14 @@ impl FileTarget {
 /// As with [`edit`], the command runs through `sh` and the arguments are passed as
 /// `"$@"`, never parsed by the shell.
 pub(crate) fn open_file(command: &str, target: &FileTarget) -> Result<(), EditFailure> {
+    let mut restore = None;
     let mut shell = Command::new("sh");
     shell
         .arg("-c")
         .arg(format!("{command} \"$@\""))
         .arg("sh")
         .args(line_arguments(command, target));
-    let status = run_in_foreground(shell).map_err(EditFailure::Spawn)?;
+    let status = run_in_foreground(shell, &mut restore).map_err(EditFailure::Spawn)?;
     if !status.success() {
         return Err(EditFailure::Exit(status));
     }
@@ -185,16 +189,32 @@ fn line_arguments(command: &str, target: &FileTarget) -> Vec<OsString> {
     }
 }
 
+/// Restores `foreground` as the controlling terminal's foreground group on drop.
+struct ForegroundRestore {
+    terminal: File,
+    foreground: nix::unistd::Pid,
+}
+
+impl Drop for ForegroundRestore {
+    fn drop(&mut self) {
+        set_foreground(&self.terminal, self.foreground);
+    }
+}
+
 /// Runs `command` as the terminal's foreground job and waits for it to exit.
 ///
 /// The child gets a process group of its own and the terminal's foreground, as a shell
 /// gives a job: Ctrl+C and Ctrl+Z then signal only the editor, not Wisp and its backend,
 /// which share Wisp's group. A child that stops, from Ctrl+Z or from reading the
 /// terminal before it became the foreground, is given the foreground again and
-/// continued, so suspending does nothing here. The foreground then returns to Wisp.
-/// When Wisp is not the terminal's foreground job, or there is no terminal, the child
-/// just runs.
-fn run_in_foreground(mut command: Command) -> io::Result<ExitStatus> {
+/// continued, so suspending does nothing here. When Wisp is not the terminal's
+/// foreground job, or there is no terminal, the child just runs. Places a
+/// [`ForegroundRestore`] guard in `restore` so the caller's locals drop before
+/// foreground returns to Wisp.
+fn run_in_foreground(
+    mut command: Command,
+    restore: &mut Option<ForegroundRestore>,
+) -> io::Result<ExitStatus> {
     use nix::sys::signal::{Signal, killpg};
     use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
     use nix::unistd::{Pid, getpgrp, tcgetpgrp};
@@ -219,23 +239,27 @@ fn run_in_foreground(mut command: Command) -> io::Result<ExitStatus> {
     // The child is reaped below with waitpid, never through this handle.
     let child = command.spawn()?;
     let job = Pid::from_raw(i32::try_from(child.id()).expect("process ids fit i32"));
-    set_foreground(&terminal, job);
-    let waited = loop {
+    let handle = &restore
+        .insert(ForegroundRestore {
+            terminal,
+            foreground,
+        })
+        .terminal;
+    set_foreground(handle, job);
+    loop {
         match waitpid(job, Some(WaitPidFlag::WUNTRACED)) {
             Ok(WaitStatus::Stopped(..)) => {
-                set_foreground(&terminal, job);
+                set_foreground(handle, job);
                 let _ = killpg(job, Signal::SIGCONT);
             }
-            Ok(WaitStatus::Exited(_, code)) => break Ok(ExitStatus::from_raw(code << 8)),
+            Ok(WaitStatus::Exited(_, code)) => return Ok(ExitStatus::from_raw(code << 8)),
             Ok(WaitStatus::Signaled(_, signal, _)) => {
-                break Ok(ExitStatus::from_raw(signal as i32));
+                return Ok(ExitStatus::from_raw(signal as i32));
             }
             Ok(_) | Err(nix::errno::Errno::EINTR) => {}
-            Err(error) => break Err(io::Error::from(error)),
+            Err(error) => return Err(io::Error::from(error)),
         }
-    };
-    set_foreground(&terminal, foreground);
-    waited
+    }
 }
 
 /// Makes `group` the terminal's foreground job. Once the child has the foreground, Wisp

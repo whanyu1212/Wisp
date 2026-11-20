@@ -269,7 +269,8 @@ def _cleanup_foreground_job(
 
     The frontend runs the editor in its own process group, outside the one
     `_cleanup_process_group` signals, so without this it would outlive the launcher.
-    Stopping it first also lets a still-running frontend remove the editor's draft file.
+    After stopping the job, wait briefly for a live frontend to reclaim foreground,
+    which it does only after unlinking the editor's temporary draft file.
 
     Args:
         terminal (_TerminalSnapshot | None): The terminal state captured at launch.
@@ -293,6 +294,37 @@ def _cleanup_foreground_job(
     _signal_process_group(pgid, signal.SIGHUP)
     _signal_process_group(pgid, signal.SIGCONT)
     _escalate_until_exit(pgid, None, name="foreground job")
+    _wait_for_foreground_reclaim(terminal.fd, pgid, process)
+
+
+def _wait_for_foreground_reclaim(
+    terminal_fd: int,
+    stopped_pgid: int,
+    process: subprocess.Popen[bytes],
+    *,
+    timeout: float = _GRACE_SECONDS,
+    clock: Callable[[], float] | None = None,
+    sleep: Callable[[float], None] | None = None,
+) -> None:
+    """Wait briefly for a live frontend to reclaim foreground after its editor exits.
+
+    The frontend removes the editor's temporary draft file before calling
+    ``tcsetpgrp`` back to itself. Waiting until foreground leaves ``stopped_pgid``
+    keeps the launcher's follow-up signal from killing the frontend mid-cleanup.
+    """
+    active_clock = time.monotonic if clock is None else clock
+    active_sleep = time.sleep if sleep is None else sleep
+    deadline = active_clock() + timeout
+    while process.poll() is None:
+        try:
+            if os.tcgetpgrp(terminal_fd) != stopped_pgid:
+                return
+        except OSError:
+            return
+        remaining = deadline - active_clock()
+        if remaining <= 0:
+            return
+        active_sleep(min(_POLL_SECONDS, remaining))
 
 
 def _escalate_until_exit(
