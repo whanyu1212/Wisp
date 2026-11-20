@@ -202,6 +202,7 @@ Adding or enabling a server needs confirmation; reconnecting clears per-tool ses
 /unrevert                                 restore the previous branch after navigation
 /cd <path>                                work from another folder, entering its project if needed
 /ps                                       focus the running background processes in the side panel
+/browser                                  show or toggle the live browser viewport in the side panel
 /kill <number|process-id>                 stop a background process the agent started
 /diff                                     review working-tree changes against HEAD
 /compact [instructions]                   summarize older context while preserving the JSONL audit

@@ -628,6 +628,7 @@ def test_build_runtime_activates_builtin_providers_tools_and_commands() -> None:
             "compact",
             "context",
             "search",
+            "browser",
             "history",
             "update",
             "skills",
