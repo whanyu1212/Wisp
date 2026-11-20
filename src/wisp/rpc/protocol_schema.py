@@ -20,7 +20,7 @@ from typing import Annotated, TypeAlias, TypeVar, cast, get_args, get_origin
 from pydantic import BaseModel, TypeAdapter
 
 from wisp.events import KnownWispEventAdapter
-from wisp.rpc.commands import RpcCommandAdapter
+from wisp.rpc.commands import ALLOWED_BROWSER_NAMED_KEYS, RpcCommandAdapter
 from wisp.rpc.protocol import (
     MAX_HANDSHAKE_FRAME_BYTES,
     MAX_LIVE_RPC_FRAME_BYTES,
@@ -258,6 +258,7 @@ _COMMAND_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     "get_process_output": {"process_id": "process-1"},
     "get_processes": {},
     "background_tool_call": {"call_id": "call-1"},
+    "browser_interact": {"action": "refresh"},
     "clear_queue": {},
     "clone_session": {},
     "compact": {},
@@ -892,6 +893,118 @@ def _add_command_semantic_constraints(schema: JsonObject) -> None:
                 },
                 "then": {"not": {"required": ["scope"]}},
             }
+        ],
+    )
+
+    browser_interact = _named_definition(definitions, "BrowserInteractCommand")
+    browser_properties = _object_member(browser_interact, "properties")
+    modifiers = _object_member(browser_properties, "modifiers")
+    modifiers["uniqueItems"] = True
+
+    def _forbid(*names: str) -> JsonObject:
+        return {"not": {"anyOf": [{"required": [name]} for name in names]}}
+
+    browser_interact["allOf"] = cast(
+        JsonValue,
+        [
+            {
+                "if": {"properties": {"action": {"const": "click"}}, "required": ["action"]},
+                "then": {
+                    "allOf": [
+                        {"required": ["x", "y"]},
+                        _forbid("delta_x", "delta_y", "text", "key", "modifiers"),
+                    ]
+                },
+            },
+            {
+                "if": {"properties": {"action": {"const": "scroll"}}, "required": ["action"]},
+                "then": {
+                    "allOf": [
+                        {"required": ["x", "y"]},
+                        {
+                            "anyOf": [
+                                {
+                                    "properties": {"delta_x": {"not": {"const": 0}}},
+                                    "required": ["delta_x"],
+                                },
+                                {
+                                    "properties": {"delta_y": {"not": {"const": 0}}},
+                                    "required": ["delta_y"],
+                                },
+                            ]
+                        },
+                        _forbid("button", "double_click", "text", "key", "modifiers"),
+                    ]
+                },
+            },
+            {
+                "if": {"properties": {"action": {"const": "type"}}, "required": ["action"]},
+                "then": {
+                    "allOf": [
+                        {"required": ["text"]},
+                        {
+                            "properties": {
+                                "text": {"pattern": "^[^\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]+$"}
+                            }
+                        },
+                        _forbid(
+                            "x",
+                            "y",
+                            "button",
+                            "double_click",
+                            "delta_x",
+                            "delta_y",
+                            "key",
+                            "modifiers",
+                        ),
+                    ]
+                },
+            },
+            {
+                "if": {"properties": {"action": {"const": "press_key"}}, "required": ["action"]},
+                "then": {
+                    "allOf": [
+                        {"required": ["key"]},
+                        {
+                            "properties": {
+                                "key": {
+                                    "anyOf": [
+                                        {
+                                            "enum": [
+                                                cast(JsonValue, name)
+                                                for name in sorted(ALLOWED_BROWSER_NAMED_KEYS)
+                                            ]
+                                        },
+                                        {
+                                            "minLength": 1,
+                                            "maxLength": 1,
+                                            "pattern": "^[^\x00-\x1f\x7f-\x9f]$",
+                                        },
+                                    ]
+                                }
+                            }
+                        },
+                        _forbid("x", "y", "button", "double_click", "delta_x", "delta_y", "text"),
+                    ]
+                },
+            },
+            {
+                "if": {
+                    "properties": {"action": {"enum": ["back", "reload", "refresh"]}},
+                    "required": ["action"],
+                },
+                "then": _forbid(
+                    "x",
+                    "y",
+                    "button",
+                    "double_click",
+                    "delta_x",
+                    "delta_y",
+                    "text",
+                    "key",
+                    "modifiers",
+                ),
+            },
         ],
     )
 

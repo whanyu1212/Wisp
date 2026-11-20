@@ -52,6 +52,8 @@ _FORBIDDEN_IMPORTS = (
     "wisp.cli.native_tui",
 )
 _CODING_MODULES = (
+    "browser_control.py",
+    "browser_viewport.py",
     "compaction.py",
     "persistence.py",
     "script_state.py",

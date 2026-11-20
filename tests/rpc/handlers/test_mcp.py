@@ -12,6 +12,7 @@ from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectSendStream
 
 from tests.support.paths import FIXTURES_DIR
+from wisp.coding.browser_viewport import BrowserMetadata
 from wisp.coding.session import CodingSession
 from wisp.config.mcp_servers import validated_mcp_server
 from wisp.events import RpcCommandFinished, RpcMcpServerSnapshot, WispEvent
@@ -299,10 +300,17 @@ def test_a_restart_after_the_run_waits_for_an_idle_session(tmp_path: Path) -> No
             agent._operation_active = True
             assert "after the next reply" in (await servers.restart_after_run() or "")
             agent._operation_active = False
+            agent.browser_handoff.observe_agent_tool("playwright", {"pageId": 4}, "", None)
+            agent.browser_handoff.record_user_action(
+                "click", server_name="playwright", metadata=BrowserMetadata(url="https://x.test")
+            )
             # The restart ran, and the server that could not start is reported.
             assert await servers.restart_after_run() == (
                 "MCP server docs is unavailable: the server could not be started or initialized"
             )
+            assert agent.browser_handoff.active_server_name is None
+            assert agent.browser_handoff.last_page_id is None
+            assert agent.browser_handoff.pending_snapshot() is None
             assert runtime.mcp_server_configs[0].name == "docs"
             assert await servers.restart_after_run() is None
         finally:

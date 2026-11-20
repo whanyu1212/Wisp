@@ -1,5 +1,6 @@
 //! Bounded hit regions captured by the paint that users actually saw.
 
+use crate::reducer::{BrowserInteractRequest, UiAction};
 use crate::{Error, Input, LiveUi, LoopControl, TranscriptViewAction, ViewStatus, WriterMessage};
 use crate::{OverlayKind, prompt_editor::PromptEditor};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -10,6 +11,7 @@ use ratatui::style::Modifier;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use unicode_width::UnicodeWidthStr;
+use wisp_protocol::commands::BrowserMouseButton;
 
 pub(crate) fn enabled(value: Option<&str>) -> bool {
     value.is_none_or(|value| {
@@ -20,8 +22,8 @@ pub(crate) fn enabled(value: Option<&str>) -> bool {
     })
 }
 
-/// Left-button press, drag, release, plain pointer motion, and the wheel. Other buttons are
-/// dropped by the reader so they never fill the input queue.
+/// Button press (Left, Right, Middle), left drag/release, plain pointer motion, and the wheel.
+/// Other buttons are dropped by the reader so they never fill the input queue.
 ///
 /// A modified press, move, or wheel report is dropped too. A drag or release keeps its
 /// modifiers: it only continues a selection an unmodified press started, and dropping a release
@@ -29,7 +31,7 @@ pub(crate) fn enabled(value: Option<&str>) -> bool {
 pub(crate) fn supported(event: MouseEvent) -> bool {
     match event.kind {
         MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left) => true,
-        MouseEventKind::Down(MouseButton::Left)
+        MouseEventKind::Down(MouseButton::Left | MouseButton::Right | MouseButton::Middle)
         | MouseEventKind::Moved
         | MouseEventKind::ScrollUp
         | MouseEventKind::ScrollDown => event.modifiers.is_empty(),
@@ -415,6 +417,88 @@ impl LiveUi {
             && (self.side_panel.docked() || self.rendered_overlay == Some(OverlayKind::SidePanel))
             && self.side_panel.contains(event.column, event.row)
         {
+            if self.side_panel.mode() == crate::side_panel::PanelMode::Browser
+                && let Some((x, y)) =
+                    self.side_panel
+                        .map_viewport_point(&self.state, event.column, event.row)
+            {
+                if matches!(
+                    self.state.view_status,
+                    ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
+                ) {
+                    return Ok(LoopControl::Continue);
+                }
+                if let Some(lines) = scroll_lines {
+                    if lines != 0 && !self.browser_interaction_blocked() {
+                        self.notice = None;
+                        if self.flush_browser_typing(writer, limit).await? == LoopControl::Exit {
+                            return Ok(LoopControl::Exit);
+                        }
+                        self.bump_browser_refresh_deadline();
+                        let delta_y = (i64::from(lines) * 120).clamp(-10_000, 10_000);
+                        return self
+                            .dispatch(
+                                UiAction::BrowserInteract(BrowserInteractRequest::Scroll {
+                                    x,
+                                    y,
+                                    delta_x: 0,
+                                    delta_y,
+                                }),
+                                writer,
+                                limit,
+                            )
+                            .await;
+                    }
+                    self.render_pending = true;
+                    return Ok(LoopControl::Continue);
+                }
+                if let MouseEventKind::Down(button) = event.kind {
+                    if self.browser_interaction_blocked() {
+                        return Ok(LoopControl::Continue);
+                    }
+                    self.notice = None;
+                    if !self.browser_takeover_active() {
+                        self.enter_browser_takeover();
+                    }
+                    if self.flush_browser_typing(writer, limit).await? == LoopControl::Exit {
+                        return Ok(LoopControl::Exit);
+                    }
+                    let now = Instant::now();
+                    let double_click = button == MouseButton::Left
+                        && self.last_browser_click.is_some_and(|(col, row, prev)| {
+                            col == event.column
+                                && row == event.row
+                                && now.saturating_duration_since(prev)
+                                    <= crate::BROWSER_DOUBLE_CLICK
+                        });
+                    self.last_browser_click = if button == MouseButton::Left && !double_click {
+                        Some((event.column, event.row, now))
+                    } else {
+                        None
+                    };
+                    let mapped_button = match button {
+                        MouseButton::Left => BrowserMouseButton::Left,
+                        MouseButton::Right => BrowserMouseButton::Right,
+                        MouseButton::Middle => BrowserMouseButton::Middle,
+                    };
+                    self.bump_browser_refresh_deadline();
+                    self.render_pending = true;
+                    return self
+                        .dispatch(
+                            UiAction::BrowserInteract(BrowserInteractRequest::Click {
+                                x,
+                                y,
+                                button: Some(mapped_button),
+                                double_click,
+                            }),
+                            writer,
+                            limit,
+                        )
+                        .await;
+                }
+                self.render_pending = true;
+                return Ok(LoopControl::Continue);
+            }
             if let Some(lines) = scroll_lines {
                 self.side_panel.scroll_by(lines);
             } else if matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
@@ -428,11 +512,27 @@ impl LiveUi {
                     self.side_panel.click(event.column, event.row)
                 {
                     self.side_panel.close_overlay();
+                    self.clear_browser_takeover_buffers();
                     self.render_pending = true;
                     return self.open_from_panel(target, writer, limit).await;
                 }
+                if !self.side_panel.browser_interacting() {
+                    self.clear_browser_takeover_buffers();
+                }
             }
             self.render_pending = true;
+            return Ok(LoopControl::Continue);
+        }
+        if scroll_lines.is_none()
+            && matches!(event.kind, MouseEventKind::Down(_))
+            && self.side_panel.browser_interacting()
+        {
+            self.exit_browser_takeover();
+        }
+        if matches!(
+            event.kind,
+            MouseEventKind::Down(MouseButton::Right | MouseButton::Middle)
+        ) {
             return Ok(LoopControl::Continue);
         }
         if let (Layer::Conversation, Some(lines)) = (self.mouse_layer(), scroll_lines) {

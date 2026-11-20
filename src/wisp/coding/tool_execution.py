@@ -507,6 +507,8 @@ class ConfiguredToolExecutor:
         image_store: ImageStore | None = None,
         background_requests: BackgroundRequests | None = None,
         command_reviewer: CommandReviewer | None = None,
+        on_browser_tool_observed: Callable[[str, Mapping[str, object], str, object], None]
+        | None = None,
     ) -> None:
         self._registry = registry
         # Where a running foreground `bash` call can be asked to move to the background.
@@ -520,6 +522,7 @@ class ConfiguredToolExecutor:
         # Stores a tool's images before its result references them; without one a
         # result's images are dropped and the model is told so.
         self._image_store = image_store
+        self._on_browser_tool_observed = on_browser_tool_observed
         # Nested calls a script makes concurrently take turns through this, unless
         # their tool is parallel-safe; those run at most as many at once as in a batch.
         self._nested_serial_lock = anyio.Lock()
@@ -567,6 +570,7 @@ class ConfiguredToolExecutor:
             progress_sink=self._progress_sink,
             mcp_catalog=self._mcp_catalog,
             command_reviewer=self._command_reviewer,
+            on_browser_tool_observed=self._on_browser_tool_observed,
         )
         executor._nested_serial_lock = self._nested_serial_lock
         executor._nested_approval_lock = self._nested_approval_lock
@@ -1731,11 +1735,17 @@ class ConfiguredToolExecutor:
         the primary tool's model-facing ``ToolResult``.
         """
 
-        sink = self._progress_sink
-        if sink is None or not isinstance(tool, McpCatalogTool):
+        if not isinstance(tool, McpCatalogTool):
             return
         candidates = self._browser_candidate_tools()
         if not is_browser_mcp_tool(tool, candidates):
+            return
+        if self._on_browser_tool_observed is not None:
+            self._on_browser_tool_observed(
+                tool.server_name, arguments, outcome.output, outcome.structured
+            )
+        sink = self._progress_sink
+        if sink is None:
             return
 
         image = outcome.images[-1] if outcome.images else None

@@ -57,6 +57,11 @@ from wisp.agent.validation import (
     validate_non_negative_integer,
     validate_optional_non_negative_integer,
 )
+from wisp.coding.browser_control import (
+    BrowserHandoffSnapshot,
+    BrowserHandoffTracker,
+    browser_prompt_guidance,
+)
 from wisp.coding.command_review import ModelCommandReviewer
 from wisp.coding.compaction import (
     CompactionSummary,
@@ -619,6 +624,9 @@ class CodingSession:
         # The operation whose saved prompt last delivered notices, and those notices,
         # so a cancelled run that rolls the prompt back can hold them again.
         self._delivered_notices: tuple[str | None, tuple[ProcessNotice, ...]] | None = None
+        # Process-local active browser server/page and undelivered human-takeover counts.
+        self._browser_handoff = BrowserHandoffTracker()
+        self._delivered_browser_handoff: tuple[str | None, BrowserHandoffSnapshot] | None = None
         self.tool_policy = tool_policy or ToolPolicy.allow_all_tools()
         self.tool_approval_policy = tool_approval_policy or ToolApprovalPolicy.require_approval()
         self.tools = (
@@ -802,6 +810,7 @@ class CodingSession:
             raise RuntimeError("CodingSession is busy")
         self._last_session_id = None
         self._retained_queues.clear()
+        self.clear_browser_state()
 
     async def follow_up(self, content: str, *, images: Sequence[bytes] = ()) -> QueueUpdated:
         """Queue a user message for the active run's next completed-turn boundary.
@@ -939,6 +948,18 @@ class CodingSession:
 
         return self._background_requests.request(call_id)
 
+    @property
+    def browser_handoff(self) -> BrowserHandoffTracker:
+        """Process-local browser MCP target and human-takeover handoff tracker."""
+
+        return self._browser_handoff
+
+    def clear_browser_state(self) -> None:
+        """Discard session-local browser MCP and takeover tracking."""
+
+        self._browser_handoff.clear()
+        self._delivered_browser_handoff = None
+
     def restore_process_notices(self, operation_id: str) -> None:
         """Hold again the notices a run delivered, after its prompt was rolled back.
 
@@ -952,6 +973,15 @@ class CodingSession:
             return
         self._delivered_notices = None
         self._process_notices.restore(delivered[1])
+
+    def restore_browser_handoff(self, operation_id: str) -> None:
+        """Hold again the browser takeover note a run delivered after rollback."""
+
+        delivered = self._delivered_browser_handoff
+        if delivered is None or delivered[0] != operation_id:
+            return
+        self._delivered_browser_handoff = None
+        self._browser_handoff.restore(delivered[1])
 
     def state_snapshot(self, session: JsonlSession | None = None) -> CodingSessionState:
         """Return an immediate configuration and queue summary without I/O."""
@@ -1385,6 +1415,10 @@ class CodingSession:
         if configuration is not None:
             self._apply_configuration(configuration)
         if project_root is not None:
+            if self.project_context_root is None or not _same_folder(
+                project_root, self.project_context_root
+            ):
+                self.clear_browser_state()
             self.project_context_root = project_root
         self.tool_context = replace(self.tool_context, cwd=target)
 
@@ -1560,6 +1594,7 @@ class CodingSession:
     ) -> AsyncGenerator[WispEvent, None]:
         # A cancelled run restores only the notices its own prompt delivered.
         self._delivered_notices = None
+        self._delivered_browser_handoff = None
         operation_context = tool_context or self.tool_context
         if images:
             self._require_image_input(images)
@@ -1694,6 +1729,9 @@ class CodingSession:
             # A poll reported the exits after the wake was claimed; there is nothing
             # left to tell the agent, and an empty prompt must not be sent.
             raise RuntimeError("No background-process exits are left to wake the agent for")
+        browser_handoff = self._browser_handoff.pending_snapshot()
+        handoff_note = self._browser_handoff.format_note(browser_handoff)
+        handoff_notes = (handoff_note,) if handoff_note is not None else ()
         user_message = user_message.with_process_notices(notices)
         # Allocate the prompt's identity before AgentStarted, preserving the
         # existing event order while allowing frontends to identify their echo.
@@ -1731,9 +1769,14 @@ class CodingSession:
         if notices and self._process_notices is not None:
             self._process_notices.mark_delivered(notices)
             self._delivered_notices = (operation_id, notices)
+        if browser_handoff is not None:
+            self._browser_handoff.mark_delivered(browser_handoff)
+            self._delivered_browser_handoff = (operation_id, browser_handoff)
         # Add the persisted prompt before checking the threshold so provider limits
         # apply to the complete next request, not only the resumed history.
-        harness.append_message(with_directory_notes(user_message, directory_notes))
+        harness.append_message(
+            with_directory_notes(user_message, (*directory_notes, *handoff_notes))
+        )
         if user_message.skill_invocation is not None:
             yield await emit(
                 SkillInvoked(
@@ -1763,6 +1806,14 @@ class CodingSession:
             status=auto_compaction_status,
             prompt_entry_id=user_entry.id,
             process_notices=notices,
+            browser_handoff=browser_handoff,
+            browser_handoff_note=handoff_note,
+            prompt_created_at=user_message.created_at,
+            prompt_raw_content=user_message.content,
+            prompt_with_dir_content=with_directory_notes(user_message, directory_notes).content,
+            prompt_with_handoff_content=with_directory_notes(
+                user_message, (*directory_notes, *handoff_notes)
+            ).content,
         )
         if provider_auto_compaction:
             async for event in self._fit_first_request(
@@ -2411,6 +2462,7 @@ class CodingSession:
             image_store=image_store,
             background_requests=self._background_requests,
             command_reviewer=command_reviewer,
+            on_browser_tool_observed=self._browser_handoff.observe_agent_tool,
         )
         return offered_tools, executor
 
@@ -3742,6 +3794,24 @@ class CodingSession:
             return WEB_SEARCH_GUIDANCE
         return WEB_SEARCH_UNAVAILABLE_GUIDANCE
 
+    def _browser_prompt_guidance(
+        self,
+        registry: ToolRegistry | None,
+        callable_names: set[str],
+        mcp_catalog: McpCatalog | None,
+    ) -> str:
+        """Return browser workflow guidance when connected browser MCP tools are offered."""
+
+        if mcp_catalog is not None:
+            catalog_tools: tuple[Tool, ...] = tuple(
+                entry.tool for entry in mcp_catalog.entries if entry.connected
+            )
+            return browser_prompt_guidance(catalog_tools)
+        if registry is None:
+            return ""
+        tools = tuple(tool for tool in registry.all() if tool.name in callable_names)
+        return browser_prompt_guidance(tools, connected=self._mcp_server_connected)
+
     def _allowed_tool_specs(self, tool_registry: ToolRegistry) -> tuple[ToolSpec, ...]:
         return tuple(
             ToolSpec.from_tool(tool)
@@ -3849,6 +3919,11 @@ class CodingSession:
                 "mcp_tools",
                 "mcp servers",
                 catalog_guidance(mcp_catalog) if mcp_catalog is not None else "",
+            ),
+            PromptPart(
+                "mcp_tools",
+                "browser",
+                self._browser_prompt_guidance(effective_registry, callable_names, mcp_catalog),
             ),
         )
         if self.prompt_messages is not None:
@@ -4271,6 +4346,12 @@ class _RunCompaction:
         status: _AutoCompactionStatus,
         prompt_entry_id: str,
         process_notices: Sequence[ProcessNotice] = (),
+        browser_handoff: BrowserHandoffSnapshot | None = None,
+        browser_handoff_note: str | None = None,
+        prompt_created_at: datetime | None = None,
+        prompt_raw_content: str = "",
+        prompt_with_dir_content: str = "",
+        prompt_with_handoff_content: str = "",
     ) -> None:
         """Bind the policy to one run.
 
@@ -4308,6 +4389,12 @@ class _RunCompaction:
         self._prompt_entry_id = prompt_entry_id
         self._active_entry_id = prompt_entry_id
         self._process_notices = tuple(process_notices)
+        self._browser_handoff = browser_handoff
+        self._browser_handoff_note = browser_handoff_note
+        self._prompt_created_at = prompt_created_at
+        self._prompt_raw_content = prompt_raw_content
+        self._prompt_with_dir_content = prompt_with_dir_content
+        self._prompt_with_handoff_content = prompt_with_handoff_content
         self._had_unsafe_tool_round = False
         self._overflow_recovery_attempted = False
         self._recovered_from_overflow = False
@@ -4385,6 +4472,10 @@ class _RunCompaction:
             source.restore(self._process_notices)
             # A second rollback of the same run must not hold them twice.
             self._process_notices = ()
+        if self._browser_handoff is not None:
+            self._owner._browser_handoff.restore(self._browser_handoff)
+            self._browser_handoff = None
+            self._owner._delivered_browser_handoff = None
 
     async def compact_before_first_request(self) -> AsyncIterator[WispEvent]:
         """Compact history before the first request, keeping the prompt's turn active.
@@ -4412,9 +4503,11 @@ class _RunCompaction:
                 compacted = True
             yield compaction_event
         if compacted:
-            active_history = await self._owner._with_image_bytes(
-                self._session,
-                await anyio.to_thread.run_sync(self._session.read_context_messages),
+            active_history = self._reattach_browser_handoff(
+                await self._owner._with_image_bytes(
+                    self._session,
+                    await anyio.to_thread.run_sync(self._session.read_context_messages),
+                )
             )
             self._owner._start_tool_image_allowance(
                 active_history, reserved_bytes=self._pending_queue_image_bytes()
@@ -4422,6 +4515,31 @@ class _RunCompaction:
             self._harness.replace_messages(
                 (*self._prompt_messages, *self._owner._conversation_history(active_history))
             )
+
+    def _reattach_browser_handoff(self, history: Sequence[Message]) -> tuple[Message, ...]:
+        """Reapply the active prompt's transient browser handoff after a session reload."""
+
+        note = self._browser_handoff_note
+        if note is None:
+            return tuple(history)
+        rebuilt = list(history)
+        for index in range(len(rebuilt) - 1, -1, -1):
+            msg = rebuilt[index]
+            if msg.role != "user":
+                continue
+            if self._prompt_created_at is not None and msg.created_at != self._prompt_created_at:
+                continue
+            if note in msg.content:
+                break
+            if msg.content == self._prompt_with_dir_content:
+                rebuilt[index] = msg.model_copy(
+                    update={"content": self._prompt_with_handoff_content}
+                )
+                break
+            if msg.content == self._prompt_raw_content:
+                rebuilt[index] = with_directory_notes(msg, (note,))
+                break
+        return tuple(rebuilt)
 
     async def prepare_boundary(
         self, *, context: HarnessBoundaryContext
@@ -4644,9 +4762,11 @@ class _RunCompaction:
         """Rehydrate durable context into the least disruptive loop transition."""
 
         owner = self._owner
-        active_history = await owner._with_image_bytes(
-            self._session,
-            await anyio.to_thread.run_sync(self._session.read_context_messages),
+        active_history = self._reattach_browser_handoff(
+            await owner._with_image_bytes(
+                self._session,
+                await anyio.to_thread.run_sync(self._session.read_context_messages),
+            )
         )
         replacement = (*self._prompt_messages, *owner._conversation_history(active_history))
         tail = tuple(continuation_messages)

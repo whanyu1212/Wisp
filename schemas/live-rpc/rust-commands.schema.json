@@ -238,6 +238,156 @@
       "title": "BeginDeviceCodeCommand",
       "type": "object"
     },
+    "BrowserInteractAction": {
+      "enum": [
+        "click",
+        "scroll",
+        "type",
+        "press_key",
+        "back",
+        "reload",
+        "refresh"
+      ],
+      "type": "string"
+    },
+    "BrowserInteractCommand": {
+      "additionalProperties": false,
+      "description": "Apply one bounded user interaction inside the live browser viewport.",
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/BrowserInteractAction",
+          "title": "BrowserInteractCommandAction"
+        },
+        "button": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BrowserMouseButton"
+            }
+          ],
+          "title": "BrowserInteractCommandButton"
+        },
+        "delta_x": {
+          "anyOf": [
+            {
+              "maximum": 10000,
+              "minimum": -10000,
+              "type": "integer"
+            }
+          ],
+          "title": "BrowserInteractCommandDeltaX"
+        },
+        "delta_y": {
+          "anyOf": [
+            {
+              "maximum": 10000,
+              "minimum": -10000,
+              "type": "integer"
+            }
+          ],
+          "title": "BrowserInteractCommandDeltaY"
+        },
+        "double_click": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            }
+          ],
+          "title": "BrowserInteractCommandDoubleClick"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "BrowserInteractCommandId"
+        },
+        "key": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "BrowserInteractCommandKey"
+        },
+        "modifiers": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/BrowserKeyModifier"
+              },
+              "maxItems": 4,
+              "minItems": 1,
+              "type": "array"
+            }
+          ],
+          "title": "BrowserInteractCommandModifiers"
+        },
+        "text": {
+          "anyOf": [
+            {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "BrowserInteractCommandText"
+        },
+        "type": {
+          "const": "browser_interact",
+          "default": "browser_interact",
+          "title": "BrowserInteractCommandType",
+          "type": "string"
+        },
+        "x": {
+          "anyOf": [
+            {
+              "maximum": 16384,
+              "minimum": 0,
+              "type": "integer"
+            }
+          ],
+          "title": "BrowserInteractCommandX"
+        },
+        "y": {
+          "anyOf": [
+            {
+              "maximum": 16384,
+              "minimum": 0,
+              "type": "integer"
+            }
+          ],
+          "title": "BrowserInteractCommandY"
+        }
+      },
+      "required": [
+        "type",
+        "action"
+      ],
+      "title": "BrowserInteractCommand",
+      "type": "object"
+    },
+    "BrowserKeyModifier": {
+      "enum": [
+        "Alt",
+        "Control",
+        "Meta",
+        "Shift"
+      ],
+      "type": "string"
+    },
+    "BrowserMouseButton": {
+      "enum": [
+        "left",
+        "right",
+        "middle"
+      ],
+      "type": "string"
+    },
     "CancelCommand": {
       "additionalProperties": false,
       "description": "Cancel a running prompt or compact command.",
@@ -2425,6 +2575,7 @@
       "approval": "#/$defs/ApprovalCommand",
       "background_tool_call": "#/$defs/BackgroundToolCallCommand",
       "begin_device_code": "#/$defs/BeginDeviceCodeCommand",
+      "browser_interact": "#/$defs/BrowserInteractCommand",
       "cancel": "#/$defs/CancelCommand",
       "cancel_process": "#/$defs/CancelProcessCommand",
       "change_directory": "#/$defs/ChangeDirectoryCommand",
@@ -2634,6 +2785,9 @@
     },
     {
       "$ref": "#/$defs/BackgroundToolCallCommand"
+    },
+    {
+      "$ref": "#/$defs/BrowserInteractCommand"
     },
     {
       "$ref": "#/$defs/ApprovalCommand"

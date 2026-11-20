@@ -370,7 +370,7 @@ async fn pre_frame_browser_command_stays_open_and_toggles() {
     let mut ui = ui_with_session(&dir);
     let _ = draw_text(&mut ui, 160, 36);
 
-    run_command(&mut ui, Command::Browser).await;
+    run_command(&mut ui, Command::Browser { interact: false }).await;
     let (_buf, screen) = draw_text(&mut ui, 160, 36);
     assert_eq!(ui.side_panel.mode(), PanelMode::Browser);
     assert!(screen.contains("No browser frame yet."), "{screen}");
@@ -381,7 +381,7 @@ async fn pre_frame_browser_command_stays_open_and_toggles() {
     assert!(second_screen.contains("No browser frame yet."));
 
     // Running /browser again toggles back to LiveWork on a docked panel.
-    run_command(&mut ui, Command::Browser).await;
+    run_command(&mut ui, Command::Browser { interact: false }).await;
     let (_buf, toggled_back) = draw_text(&mut ui, 160, 36);
     assert_eq!(ui.side_panel.mode(), PanelMode::LiveWork);
     assert!(!toggled_back.contains("Work · Browser"));
@@ -411,7 +411,7 @@ async fn narrow_terminal_does_not_auto_pop_overlay_and_browser_command_opens_wit
     assert!(!narrow.contains("Narrow Page"), "{narrow}");
 
     // `/browser` opens SidePanel overlay in Browser mode without self-occlusion (HalfBlock).
-    run_command(&mut ui, Command::Browser).await;
+    run_command(&mut ui, Command::Browser { interact: false }).await;
     let (overlay_buf, overlay_screen) = draw_text(&mut ui, 100, 28);
     assert!(ui.side_panel.overlay_open());
     assert_eq!(ui.side_panel.mode(), PanelMode::Browser);
@@ -446,7 +446,7 @@ async fn narrow_terminal_does_not_auto_pop_overlay_and_browser_command_opens_wit
     assert!(ui.side_panel.overlay_open());
 
     // Switch back to Browser for the Kitty overlay check.
-    run_command(&mut ui, Command::Browser).await;
+    run_command(&mut ui, Command::Browser { interact: false }).await;
     assert_eq!(ui.side_panel.mode(), PanelMode::Browser);
 
     // Switching to Kitty inside the SidePanel overlay emits native frame bytes (no self-occlusion).
@@ -481,7 +481,7 @@ async fn narrow_terminal_does_not_auto_pop_overlay_and_browser_command_opens_wit
 async fn hostile_browser_metadata_is_sanitized() {
     let dir = TempSessionDir::new("sanitize");
     let mut ui = ui_with_session(&dir);
-    run_command(&mut ui, Command::Browser).await;
+    run_command(&mut ui, Command::Browser { interact: false }).await;
 
     push_backend_event(
         &mut ui,
@@ -880,4 +880,684 @@ async fn fresh_and_new_sessions_resolve_frames_from_workspace_images_dir() {
         }),
         "expected rendered half-block pixels after /new"
     );
+}
+
+fn drain_sent_commands(rx: &mut mpsc::Receiver<WriterMessage>) -> Vec<serde_json::Value> {
+    let mut commands = Vec::new();
+    while let Ok(msg) = rx.try_recv() {
+        if let WriterMessage::Frame { payload, .. } = msg {
+            commands.push(serde_json::from_slice(&payload).unwrap());
+        }
+    }
+    commands
+}
+
+async fn send_input_collecting(ui: &mut LiveUi, input: Input) -> Vec<serde_json::Value> {
+    let (writer, mut rx) = mpsc::channel(32);
+    ui.handle_input(input, &writer, MAX_APPLICATION_FRAME_BYTES)
+        .await
+        .unwrap();
+    drain_sent_commands(&mut rx)
+}
+
+async fn setup_live_browser_ui(dir: &TempSessionDir) -> (LiveUi, Rect) {
+    let (sha, len) = write_split_tone_png(&dir.images_dir(), 256, 128);
+    let mut ui = ui_with_session(dir);
+    ui.mouse_enabled = true;
+    push_backend_event(
+        &mut ui,
+        viewport_event(
+            "2026-11-20T12:34:56Z",
+            Some((&sha, len, 256, 128)),
+            Some("https://app.test"),
+            Some("App"),
+            Some("mcp__playwright__browser_navigate"),
+        ),
+    )
+    .await;
+    let _ = draw_text(&mut ui, 160, 36);
+    let image_rect = ui
+        .side_panel
+        .viewport_image_rect()
+        .expect("expected rendered viewport image rect");
+    (ui, image_rect)
+}
+
+#[tokio::test]
+async fn cell_to_viewport_mapping_handles_bounds_and_image_dimension_fallback() {
+    let dir = TempSessionDir::new("map-coords");
+    let (sha, len) = write_split_tone_png(&dir.images_dir(), 256, 128);
+    let mut ui = ui_with_session(&dir);
+
+    push_backend_event(
+        &mut ui,
+        serde_json::json!({
+            "type": "browser.viewport.updated",
+            "timestamp": "2026-11-20T12:34:56Z",
+            "image": {
+                "media_type": "image/png",
+                "sha256": sha,
+                "byte_size": len,
+                "width": 1600,
+                "height": 900,
+            },
+            "url": "https://fallback.test",
+            "title": "Fallback",
+            "viewport_width": null,
+            "viewport_height": null,
+            "source_tool": "mcp__playwright__browser_take_screenshot",
+            "call_id": "call-browser-fallback",
+        }),
+    )
+    .await;
+
+    let _ = draw_text(&mut ui, 160, 36);
+    let rect = ui
+        .side_panel
+        .viewport_image_rect()
+        .expect("expected viewport image rect");
+
+    // Outside the image rect returns None.
+    assert_eq!(ui.side_panel.map_viewport_point(&ui.state, 0, 0), None);
+    assert_eq!(
+        ui.side_panel
+            .map_viewport_point(&ui.state, rect.right(), rect.y),
+        None
+    );
+
+    // Top-left cell maps near top-left; bottom-right maps near (1599, 899) via image dimensions.
+    let (tl_x, tl_y) = ui
+        .side_panel
+        .map_viewport_point(&ui.state, rect.x, rect.y)
+        .expect("top-left cell");
+    let (br_x, br_y) = ui
+        .side_panel
+        .map_viewport_point(&ui.state, rect.right() - 1, rect.bottom() - 1)
+        .expect("bottom-right cell");
+    assert!(tl_x > 0 && tl_x < 200, "unexpected tl_x={tl_x}");
+    assert!(tl_y > 0 && tl_y < 200, "unexpected tl_y={tl_y}");
+    assert!(br_x > 1400 && br_x < 1600, "unexpected br_x={br_x}");
+    assert!(br_y > 700 && br_y < 900, "unexpected br_y={br_y}");
+}
+
+#[tokio::test]
+async fn browser_takeover_entry_chrome_and_auto_exits() {
+    let dir = TempSessionDir::new("takeover-lifecycle");
+    let mut ui = ui_with_session(&dir);
+    let _ = draw_text(&mut ui, 160, 36);
+
+    // `/browser interact` before any frame opens Browser tab with notice and stays inactive.
+    run_command(&mut ui, Command::Browser { interact: true }).await;
+    assert_eq!(ui.side_panel.mode(), PanelMode::Browser);
+    assert!(!ui.browser_takeover_active());
+    assert_eq!(
+        ui.notice.as_deref(),
+        Some("No browser viewport is active yet.")
+    );
+
+    let (sha, len) = write_split_tone_png(&dir.images_dir(), 256, 128);
+    push_backend_event(
+        &mut ui,
+        viewport_event(
+            "2026-11-20T12:34:56Z",
+            Some((&sha, len, 256, 128)),
+            Some("https://takeover.test"),
+            Some("Takeover"),
+            Some("mcp__playwright__browser_snapshot"),
+        ),
+    )
+    .await;
+    let _ = draw_text(&mut ui, 160, 36);
+
+    // `/browser interact` activates docked takeover and renders badge + primary border + footer hints.
+    run_command(&mut ui, Command::Browser { interact: true }).await;
+    assert!(ui.browser_takeover_active());
+    assert!(ui.notice.is_none());
+    let (buf, screen) = draw_text(&mut ui, 160, 36);
+    assert!(screen.contains("Work · Browser · INTERACT"), "{screen}");
+    assert!(screen.contains("Esc exit · Click/Scroll"), "{screen}");
+    let panel_rect = ui.side_panel.split(buf.area).1;
+    assert_eq!(buf[(panel_rect.x, panel_rect.y)].fg, ui.palette().primary);
+
+    // Esc exits takeover without leaving Browser mode.
+    send_input(
+        &mut ui,
+        Input::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+    )
+    .await;
+    assert!(!ui.browser_takeover_active());
+    assert_eq!(ui.side_panel.mode(), PanelMode::Browser);
+
+    // Narrow overlay: `/browser` then `i` enters takeover, `Ctrl+C` exits takeover without closing overlay.
+    let _ = draw_text(&mut ui, 100, 28);
+    assert!(!ui.side_panel.overlay_open());
+    run_command(&mut ui, Command::Browser { interact: false }).await;
+    let _ = draw_text(&mut ui, 100, 28);
+    assert!(ui.side_panel.overlay_open());
+    send_input(
+        &mut ui,
+        Input::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)),
+    )
+    .await;
+    assert!(ui.browser_takeover_active());
+    let (_ov_buf, ov_screen) = draw_text(&mut ui, 100, 28);
+    assert!(
+        ov_screen.contains("Work · Browser · INTERACT"),
+        "{ov_screen}"
+    );
+    send_input(
+        &mut ui,
+        Input::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+    )
+    .await;
+    assert!(!ui.browser_takeover_active());
+    assert!(ui.side_panel.overlay_open());
+    send_input(
+        &mut ui,
+        Input::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+    )
+    .await;
+    assert!(!ui.side_panel.overlay_open());
+
+    // Back to wide docked: Ctrl+G opens key help and exits takeover.
+    let _ = draw_text(&mut ui, 160, 36);
+    run_command(&mut ui, Command::Browser { interact: true }).await;
+    assert!(ui.browser_takeover_active());
+    send_input(
+        &mut ui,
+        Input::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL)),
+    )
+    .await;
+    assert!(ui.key_help.is_some());
+    assert!(!ui.browser_takeover_active());
+    send_input(
+        &mut ui,
+        Input::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+    )
+    .await;
+    assert!(ui.key_help.is_none());
+
+    // Clicking outside the docked panel exits takeover.
+    ui.mouse_enabled = true;
+    let _ = draw_text(&mut ui, 160, 36);
+    run_command(&mut ui, Command::Browser { interact: true }).await;
+    assert!(ui.browser_takeover_active());
+    send_input(
+        &mut ui,
+        Input::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 2,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        }),
+    )
+    .await;
+    assert!(!ui.browser_takeover_active());
+
+    // Entering WaitingForApproval auto-exits takeover.
+    run_command(&mut ui, Command::Browser { interact: true }).await;
+    assert!(ui.browser_takeover_active());
+    push_backend_event(
+        &mut ui,
+        serde_json::json!({
+            "type": "tool.approval.requested",
+            "timestamp": "2026-11-20T12:35:10Z",
+            "call_id": "call-approve-1",
+            "name": "bash",
+            "arguments": {"command": "ls"},
+            "safety": "command",
+        }),
+    )
+    .await;
+    assert_eq!(ui.state.view_status, ViewStatus::WaitingForApproval);
+    assert!(!ui.browser_takeover_active());
+}
+
+#[tokio::test]
+async fn mouse_click_double_click_buttons_scroll_and_busy_guards() {
+    let dir = TempSessionDir::new("mouse-interact");
+    let (mut ui, rect) = setup_live_browser_ui(&dir).await;
+    let mid_col = rect.x + rect.width / 2;
+    let mid_row = rect.y + rect.height / 2;
+    let expected = ui
+        .side_panel
+        .map_viewport_point(&ui.state, mid_col, mid_row)
+        .unwrap();
+
+    // First left click enters takeover and emits single click.
+    let cmds = send_input_collecting(
+        &mut ui,
+        Input::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: mid_col,
+            row: mid_row,
+            modifiers: KeyModifiers::NONE,
+        }),
+    )
+    .await;
+    assert!(ui.browser_takeover_active());
+    assert_eq!(cmds.len(), 1);
+    assert_eq!(cmds[0]["type"], "browser_interact");
+    assert_eq!(cmds[0]["action"], "click");
+    assert_eq!(cmds[0]["button"], "left");
+    assert!(cmds[0].get("double_click").is_none());
+    assert_eq!(cmds[0]["x"], expected.0);
+    assert_eq!(cmds[0]["y"], expected.1);
+
+    // Second left click on same cell within 400ms emits double_click: true; third omits it.
+    let cmds2 = send_input_collecting(
+        &mut ui,
+        Input::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: mid_col,
+            row: mid_row,
+            modifiers: KeyModifiers::NONE,
+        }),
+    )
+    .await;
+    assert_eq!(cmds2[0]["double_click"], true);
+    let cmds3 = send_input_collecting(
+        &mut ui,
+        Input::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: mid_col,
+            row: mid_row,
+            modifiers: KeyModifiers::NONE,
+        }),
+    )
+    .await;
+    assert!(cmds3[0].get("double_click").is_none());
+
+    // Right and middle clicks inside viewport forward their button.
+    let right_cmds = send_input_collecting(
+        &mut ui,
+        Input::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: mid_col,
+            row: mid_row,
+            modifiers: KeyModifiers::NONE,
+        }),
+    )
+    .await;
+    assert_eq!(right_cmds[0]["button"], "right");
+    let middle_cmds = send_input_collecting(
+        &mut ui,
+        Input::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Middle),
+            column: mid_col,
+            row: mid_row,
+            modifiers: KeyModifiers::NONE,
+        }),
+    )
+    .await;
+    assert_eq!(middle_cmds[0]["button"], "middle");
+
+    // Scroll inside viewport emits scroll delta_y = lines * 120.
+    let scroll_cmds = send_input_collecting(
+        &mut ui,
+        Input::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: mid_col,
+            row: mid_row,
+            modifiers: KeyModifiers::NONE,
+        }),
+    )
+    .await;
+    assert_eq!(scroll_cmds.len(), 1);
+    assert_eq!(scroll_cmds[0]["action"], "scroll");
+    assert!(scroll_cmds[0]["delta_y"].as_i64().unwrap() > 0);
+
+    // Right click outside panel exits takeover cleanly without dispatching a command.
+    let outside_cmds = send_input_collecting(
+        &mut ui,
+        Input::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: 2,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        }),
+    )
+    .await;
+    assert!(outside_cmds.is_empty());
+    assert!(!ui.browser_takeover_active());
+
+    // Busy run blocks click/scroll and sets notice.
+    ui.state.view_status = ViewStatus::Running;
+    let busy_cmds = send_input_collecting(
+        &mut ui,
+        Input::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: mid_col,
+            row: mid_row,
+            modifiers: KeyModifiers::NONE,
+        }),
+    )
+    .await;
+    assert!(busy_cmds.is_empty());
+    assert!(!ui.browser_takeover_active());
+    assert_eq!(
+        ui.notice.as_deref(),
+        Some("Wait for the active run to finish before controlling the browser.")
+    );
+}
+
+#[tokio::test]
+async fn takeover_typing_coalescing_paste_nav_and_secret_redaction() {
+    let dir = TempSessionDir::new("typing-paste-nav");
+    let (mut ui, _rect) = setup_live_browser_ui(&dir).await;
+
+    run_command(&mut ui, Command::Browser { interact: true }).await;
+    assert!(ui.browser_takeover_active());
+
+    // Printable chars buffer instead of hitting the composer, and Debug redacts text.
+    for ch in ['s', 'e', 'c', 'r', 'e', 't'] {
+        let cmds = send_input_collecting(
+            &mut ui,
+            Input::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)),
+        )
+        .await;
+        assert!(cmds.is_empty());
+    }
+    assert_eq!(ui.editor.text(), "");
+    let buf_debug = format!("{:?}", ui.browser_typing_buffer);
+    assert!(!buf_debug.contains("secret"), "{buf_debug}");
+    assert!(buf_debug.contains("[REDACTED]"), "{buf_debug}");
+
+    let req_debug = format!(
+        "{:?}",
+        UiAction::BrowserInteract(BrowserInteractRequest::Type {
+            text: "top-secret-pw".into(),
+        })
+    );
+    assert!(!req_debug.contains("top-secret-pw"), "{req_debug}");
+    assert!(req_debug.contains("[REDACTED]"), "{req_debug}");
+
+    // Esc discards buffered chars without dispatching them.
+    let esc_cmds = send_input_collecting(
+        &mut ui,
+        Input::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+    )
+    .await;
+    assert!(esc_cmds.is_empty());
+    assert!(ui.browser_typing_buffer.is_empty());
+    assert!(!ui.browser_takeover_active());
+
+    // Enter flushes pending typed chars FIFO before sending press_key Enter.
+    run_command(&mut ui, Command::Browser { interact: true }).await;
+    for ch in ['h', 'i'] {
+        send_input(
+            &mut ui,
+            Input::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)),
+        )
+        .await;
+    }
+    let enter_cmds = send_input_collecting(
+        &mut ui,
+        Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+    )
+    .await;
+    assert_eq!(enter_cmds.len(), 2);
+    assert_eq!(enter_cmds[0]["action"], "type");
+    assert_eq!(enter_cmds[0]["text"], "hi");
+    assert_eq!(enter_cmds[1]["action"], "press_key");
+    assert_eq!(enter_cmds[1]["key"], "Enter");
+
+    // 64 printable chars flush immediately; debounced flush sends after deadline.
+    for i in 0..64 {
+        let ch = if i % 2 == 0 { 'a' } else { 'b' };
+        let cmds = send_input_collecting(
+            &mut ui,
+            Input::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)),
+        )
+        .await;
+        if i < 63 {
+            assert!(cmds.is_empty());
+        } else {
+            assert_eq!(cmds.len(), 1);
+            assert_eq!(cmds[0]["action"], "type");
+            assert_eq!(cmds[0]["text"].as_str().unwrap().chars().count(), 64);
+        }
+    }
+    send_input(
+        &mut ui,
+        Input::Key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE)),
+    )
+    .await;
+    let (writer, mut rx) = mpsc::channel(8);
+    ui.flush_due_browser_typing(
+        std::time::Instant::now() + BROWSER_TYPE_DEBOUNCE + Duration::from_millis(5),
+        &writer,
+        MAX_APPLICATION_FRAME_BYTES,
+    )
+    .await
+    .unwrap();
+    let flushed = drain_sent_commands(&mut rx);
+    assert_eq!(flushed.len(), 1);
+    assert_eq!(flushed[0]["text"], "z");
+
+    // Special/modified keys and navigation shortcuts.
+    let backtab = send_input_collecting(
+        &mut ui,
+        Input::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)),
+    )
+    .await;
+    assert_eq!(backtab[0]["key"], "Tab");
+    assert_eq!(backtab[0]["modifiers"], serde_json::json!(["Shift"]));
+
+    let ctrl_a = send_input_collecting(
+        &mut ui,
+        Input::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL)),
+    )
+    .await;
+    assert_eq!(ctrl_a[0]["key"], "a");
+    assert_eq!(ctrl_a[0]["modifiers"], serde_json::json!(["Control"]));
+
+    let back = send_input_collecting(
+        &mut ui,
+        Input::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::ALT)),
+    )
+    .await;
+    assert_eq!(back[0]["action"], "back");
+
+    let reload = send_input_collecting(
+        &mut ui,
+        Input::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)),
+    )
+    .await;
+    assert_eq!(reload[0]["action"], "reload");
+
+    // Paste strips disallowed controls, splits >1024 chars, and leaves editor untouched.
+    let long_paste = format!("x\x00{}", "p".repeat(1_030));
+    let paste_cmds = send_input_collecting(&mut ui, Input::Paste(long_paste)).await;
+    assert_eq!(paste_cmds.len(), 2);
+    assert_eq!(
+        paste_cmds[0]["text"].as_str().unwrap().chars().count(),
+        1_024
+    );
+    assert_eq!(paste_cmds[1]["text"].as_str().unwrap().chars().count(), 7);
+    assert_eq!(ui.editor.text(), "");
+}
+
+#[tokio::test]
+async fn browser_interact_non_blocking_completion_and_event_loop_guards() {
+    let dir = TempSessionDir::new("nonblocking-reducer");
+    let (mut ui, _rect) = setup_live_browser_ui(&dir).await;
+    run_command(&mut ui, Command::Browser { interact: true }).await;
+
+    // PendingInput during takeover does not classify keys as editor_input.
+    let pending = event_loop::PendingInput::capture(
+        Input::Key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE)),
+        &ui,
+        0,
+    );
+    assert!(!pending.is_editor_input());
+
+    // Viewport updates and browser_interact finishes never churn ActivationTarget.
+    let vp_event = BackendEvent::from_projection_value(&viewport_event(
+        "2026-11-20T12:35:00Z",
+        None,
+        Some("https://next.test"),
+        None,
+        None,
+    ))
+    .unwrap();
+    assert!(!event_loop::changes_activation_target(
+        &UiAction::BackendEvent(vp_event),
+        &ui.state,
+    ));
+
+    // Dispatching browser_interact leaves ViewStatus::Idle and current_command None.
+    let cmds = send_input_collecting(
+        &mut ui,
+        Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+    )
+    .await;
+    let cmd_id = cmds[0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(ui.state.view_status, ViewStatus::Idle);
+    assert!(ui.state.current_command.is_none());
+    assert!(ui.state.browser_interact_in_flight());
+
+    let finished_ok = serde_json::json!({
+        "type": "rpc.command.finished",
+        "command_id": cmd_id,
+        "command_type": "browser_interact",
+        "ok": true,
+        "error": null,
+    });
+    assert!(!event_loop::changes_activation_target(
+        &UiAction::BackendEvent(BackendEvent::from_projection_value(&finished_ok).unwrap()),
+        &ui.state,
+    ));
+    push_backend_event(&mut ui, finished_ok).await;
+    assert!(!ui.state.browser_interact_in_flight());
+    assert!(ui.notice.is_none());
+
+    // Failed browser_interact command emits Notice and clears in-flight state.
+    let cmds2 = send_input_collecting(
+        &mut ui,
+        Input::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+    )
+    .await;
+    let cmd_id2 = cmds2[0]["id"].as_str().unwrap().to_owned();
+    push_backend_event(
+        &mut ui,
+        serde_json::json!({
+            "type": "rpc.command.finished",
+            "command_id": cmd_id2,
+            "command_type": "browser_interact",
+            "ok": false,
+            "error": "No interactive browser MCP tool is connected.",
+        }),
+    )
+    .await;
+    assert!(!ui.state.browser_interact_in_flight());
+    assert!(
+        ui.notice
+            .as_deref()
+            .is_some_and(|n| n.contains("Browser interaction failed:")),
+        "{:?}",
+        ui.notice
+    );
+}
+
+#[tokio::test]
+async fn stale_takeover_exit_drops_captured_ctrl_c_and_escape_before_apply() {
+    let dir = TempSessionDir::new("stale-takeover-exit");
+    let (mut ui, _rect) = setup_live_browser_ui(&dir).await;
+
+    // 1) Ctrl+C captured in takeover must NOT cancel a run that started before apply.
+    run_command(&mut ui, Command::Browser { interact: true }).await;
+    assert!(ui.browser_takeover_active());
+    let pending_ctrl_c = event_loop::PendingInput::capture(
+        Input::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        &ui,
+        0,
+    );
+    let (run_tx, _run_rx) = mpsc::channel(8);
+    ui.dispatch(
+        UiAction::Submit("run".into()),
+        &run_tx,
+        MAX_APPLICATION_FRAME_BYTES,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ui.state.view_status, ViewStatus::Running);
+    assert!(!ui.browser_takeover_active());
+
+    let (writer, mut rx) = mpsc::channel(8);
+    pending_ctrl_c
+        .apply(&mut ui, &writer, MAX_APPLICATION_FRAME_BYTES)
+        .await
+        .unwrap();
+    let cmds = drain_sent_commands(&mut rx);
+    assert!(cmds.is_empty(), "stale takeover Ctrl+C leaked: {cmds:?}");
+    assert!(!ui.state.cancel_requested);
+
+    // Finish the submitted prompt cleanly before testing Esc vs unseen approval prompt.
+    let active_cmd_id = ui.state.current_command.as_ref().unwrap().id.clone();
+    push_backend_event(
+        &mut ui,
+        serde_json::json!({
+            "type": "rpc.command.finished",
+            "command_id": active_cmd_id,
+            "command_type": "prompt",
+            "ok": true,
+            "error": null,
+        }),
+    )
+    .await;
+    assert_eq!(ui.state.view_status, ViewStatus::Idle);
+
+    // 2) Esc captured in takeover must NOT silently deny an unseen approval prompt.
+    run_command(&mut ui, Command::Browser { interact: true }).await;
+    assert!(ui.browser_takeover_active());
+    let pending_esc = event_loop::PendingInput::capture(
+        Input::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+        &ui,
+        0,
+    );
+    push_backend_event(
+        &mut ui,
+        serde_json::json!({
+            "type": "tool.approval.requested",
+            "timestamp": "2026-11-20T12:35:20Z",
+            "call_id": "call-approve-stale",
+            "name": "bash",
+            "arguments": {"command": "ls"},
+            "safety": "command",
+        }),
+    )
+    .await;
+    assert_eq!(ui.state.view_status, ViewStatus::WaitingForApproval);
+    assert!(!ui.browser_takeover_active());
+
+    let (writer2, mut rx2) = mpsc::channel(8);
+    pending_esc
+        .apply(&mut ui, &writer2, MAX_APPLICATION_FRAME_BYTES)
+        .await
+        .unwrap();
+    let cmds2 = drain_sent_commands(&mut rx2);
+    assert!(cmds2.is_empty(), "stale takeover Esc leaked: {cmds2:?}");
+    assert_eq!(ui.state.view_status, ViewStatus::WaitingForApproval);
+}
+
+#[tokio::test]
+async fn takeover_ignores_non_printable_unicode_format_chars_with_modifiers() {
+    let dir = TempSessionDir::new("format-char-filter");
+    let (mut ui, _rect) = setup_live_browser_ui(&dir).await;
+    run_command(&mut ui, Command::Browser { interact: true }).await;
+    assert!(ui.browser_takeover_active());
+
+    for (ch, modifier) in [
+        ('\u{200b}', KeyModifiers::CONTROL),
+        ('\u{200e}', KeyModifiers::ALT),
+    ] {
+        let cmds = send_input_collecting(
+            &mut ui,
+            Input::Key(KeyEvent::new(KeyCode::Char(ch), modifier)),
+        )
+        .await;
+        assert!(cmds.is_empty(), "unexpected command emitted: {cmds:?}");
+        assert!(!ui.state.browser_interact_in_flight());
+    }
 }

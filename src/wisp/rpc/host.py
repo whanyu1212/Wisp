@@ -895,6 +895,7 @@ class RpcHost:
             runtime.process_supervisor.unlist_all()
             # After the cancel, so an exit that lands during it is dropped too.
             process_exits.clear()
+            agent.clear_browser_state()
             if failed:
                 processes = "process" if len(failed) == 1 else "processes"
                 process_ids = ", ".join(update.process_id for update in failed)

@@ -54,6 +54,42 @@ RpcMcpToolName = TypeAliasType(
 )
 MAX_RPC_COMMAND_TYPE_CHARS = 64
 MAX_RPC_API_KEY_CHARS = 8_192
+MAX_RPC_BROWSER_COORD = 16_384
+MAX_RPC_BROWSER_SCROLL_DELTA = 10_000
+MAX_RPC_BROWSER_TEXT_CHARS = 1_024
+MAX_RPC_BROWSER_KEY_CHARS = 64
+BrowserInteractAction = TypeAliasType(
+    "BrowserInteractAction",
+    Literal["click", "scroll", "type", "press_key", "back", "reload", "refresh"],
+)
+BrowserMouseButton = TypeAliasType(
+    "BrowserMouseButton",
+    Literal["left", "right", "middle"],
+)
+BrowserKeyModifier = TypeAliasType(
+    "BrowserKeyModifier",
+    Literal["Alt", "Control", "Meta", "Shift"],
+)
+ALLOWED_BROWSER_NAMED_KEYS = frozenset(
+    {
+        "Enter",
+        "Tab",
+        "Backspace",
+        "Delete",
+        "Escape",
+        "ArrowUp",
+        "ArrowDown",
+        "ArrowLeft",
+        "ArrowRight",
+        "Home",
+        "End",
+        "PageUp",
+        "PageDown",
+        "Insert",
+        "Space",
+        *(f"F{number}" for number in range(1, 13)),
+    }
+)
 # Base64 of the largest image Wisp accepts: 4 characters per 3 bytes, padded.
 MAX_RPC_IMAGE_BASE64_CHARS = -(-MAX_IMAGE_BYTES // 3) * 4
 # Six full-size images stay under the 64 MiB live frame limit, so an image-heavy
@@ -72,6 +108,7 @@ _SECRET_FIELDS: dict[str, tuple[str, ...]] = {
     "store_api_key": ("api_key",),
     "add_mcp_server": ("env", "headers"),
     "preview_mcp_snippet": ("snippet",),
+    "browser_interact": ("text",),
 }
 
 
@@ -831,6 +868,122 @@ class ConfigureCommand(RpcCommandModel):
         return self
 
 
+class BrowserInteractCommand(RpcCommandModel):
+    """Apply one bounded user interaction inside the live browser viewport."""
+
+    type: Literal["browser_interact"] = "browser_interact"
+    action: BrowserInteractAction
+    x: int | None = Field(default=None, ge=0, le=MAX_RPC_BROWSER_COORD)
+    y: int | None = Field(default=None, ge=0, le=MAX_RPC_BROWSER_COORD)
+    button: BrowserMouseButton | None = None
+    double_click: bool | None = None
+    delta_x: int | None = Field(
+        default=None,
+        ge=-MAX_RPC_BROWSER_SCROLL_DELTA,
+        le=MAX_RPC_BROWSER_SCROLL_DELTA,
+    )
+    delta_y: int | None = Field(
+        default=None,
+        ge=-MAX_RPC_BROWSER_SCROLL_DELTA,
+        le=MAX_RPC_BROWSER_SCROLL_DELTA,
+    )
+    text: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=MAX_RPC_BROWSER_TEXT_CHARS,
+        repr=False,
+    )
+    key: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=MAX_RPC_BROWSER_KEY_CHARS,
+    )
+    modifiers: tuple[BrowserKeyModifier, ...] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=4,
+        strict=False,
+    )
+
+    @model_validator(mode="after")
+    def _validate_action_fields(self) -> Self:
+        if self.action == "click":
+            if self.x is None or self.y is None:
+                raise ValueError("browser_interact click requires x and y coordinates")
+            self._reject_disallowed_fields("delta_x", "delta_y", "text", "key", "modifiers")
+            return self
+        if self.action == "scroll":
+            if self.x is None or self.y is None:
+                raise ValueError("browser_interact scroll requires x and y coordinates")
+            if self.delta_x is None and self.delta_y is None:
+                raise ValueError("browser_interact scroll requires delta_x or delta_y")
+            if (self.delta_x or 0) == 0 and (self.delta_y or 0) == 0:
+                raise ValueError("browser_interact scroll requires a non-zero delta")
+            self._reject_disallowed_fields("button", "double_click", "text", "key", "modifiers")
+            return self
+        if self.action == "type":
+            if self.text is None:
+                raise ValueError("browser_interact type requires text")
+            if any(
+                (ord(ch) < 32 and ch not in "\t\n\r") or 0x7F <= ord(ch) <= 0x9F for ch in self.text
+            ):
+                raise ValueError(
+                    "browser_interact type text contains unsupported control characters"
+                )
+            self._reject_disallowed_fields(
+                "x", "y", "button", "double_click", "delta_x", "delta_y", "key", "modifiers"
+            )
+            return self
+        if self.action == "press_key":
+            if self.key is None:
+                raise ValueError("browser_interact press_key requires key")
+            if not (
+                (len(self.key) == 1 and self.key.isprintable())
+                or self.key in ALLOWED_BROWSER_NAMED_KEYS
+            ):
+                raise ValueError(f"unsupported browser key: {self.key!r}")
+            if self.modifiers is not None and len(set(self.modifiers)) != len(self.modifiers):
+                raise ValueError("browser_interact modifiers must be unique")
+            self._reject_disallowed_fields(
+                "x", "y", "button", "double_click", "delta_x", "delta_y", "text"
+            )
+            return self
+        self._reject_disallowed_fields(
+            "x", "y", "button", "double_click", "delta_x", "delta_y", "text", "key", "modifiers"
+        )
+        return self
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _redact_text_validation_errors(
+        cls,
+        value: object,
+        handler: ModelWrapValidatorHandler[Self],
+    ) -> Self:
+        try:
+            return handler(value)
+        except ValidationError as exc:
+            raise redact_validation_error_inputs(exc) from None
+
+    def _reject_disallowed_fields(self, *names: str) -> None:
+        disallowed = [name for name in names if getattr(self, name) is not None]
+        if disallowed:
+            joined = ", ".join(disallowed)
+            raise ValueError(f"browser_interact {self.action} forbids fields: {joined}")
+
+    def __repr__(self) -> str:
+        text_part = f", text=<{len(self.text)} chars>" if self.text is not None else ""
+        return (
+            f"BrowserInteractCommand(id={self.id!r}, action={self.action!r}, "
+            f"x={self.x!r}, y={self.y!r}, button={self.button!r}, "
+            f"double_click={self.double_click!r}, delta_x={self.delta_x!r}, "
+            f"delta_y={self.delta_y!r}, key={self.key!r}, modifiers={self.modifiers!r}"
+            f"{text_part})"
+        )
+
+    __str__ = __repr__
+
+
 RpcCommand = TypeAliasType(
     "RpcCommand",
     Annotated[
@@ -885,6 +1038,7 @@ RpcCommand = TypeAliasType(
         | GetProcessesCommand
         | GetProcessOutputCommand
         | BackgroundToolCallCommand
+        | BrowserInteractCommand
         | ApprovalCommand
         | TrustCommand
         | ShutdownCommand

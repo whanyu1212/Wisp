@@ -64,6 +64,7 @@ struct ActivationTarget {
     rendered_session: Option<String>,
     session_query: Option<(String, String)>,
     composer_copy: bool,
+    browser_interacting: bool,
     mouse_frame: Option<mouse::Frame>,
 }
 
@@ -116,8 +117,10 @@ impl ActivationTarget {
                 .as_ref()
                 .and_then(|picker| picker.editing_identity()),
             composer_copy: matches!(input, Input::Key(key) if is_ctrl_c(*key)
+                && !ui.browser_takeover_active()
                 && ui.composer_clipboard_action(*key)
                     == Some(crate::clipboard::ClipboardAction::Copy)),
+            browser_interacting: ui.browser_takeover_active(),
             mouse_frame: matches!(input, Input::Mouse(_) | Input::Scroll(_))
                 .then(|| ui.mouse_frame.clone())
                 .flatten(),
@@ -139,11 +142,17 @@ pub(super) struct PendingInput {
 }
 
 impl PendingInput {
+    #[cfg(test)]
+    pub(super) fn is_editor_input(&self) -> bool {
+        self.editor_input
+    }
+
     pub fn capture(input: Input, ui: &LiveUi, remaining: usize) -> Self {
         let target = ActivationTarget::capture(ui, &input);
         // Ordinary draft editing must survive tool output and status changes.
         // Submission and rendered selections retain the stronger activation guard.
-        let editor_input = target.help_owner.is_none()
+        let editor_input = !target.browser_interacting
+            && target.help_owner.is_none()
             && target.overlay.is_none()
             && target.decision.is_none()
             && target.browse_entry.is_none()
@@ -260,13 +269,17 @@ impl PendingInput {
         limit: usize,
     ) -> Result<LoopControl, Error> {
         let current = ActivationTarget::capture(ui, &self.input);
+        let stale_takeover_exit = self.target.browser_interacting && !current.browser_interacting;
         // A negative decision may deny a replacement decision, but must never
-        // become literal text after the waiting workflow has finished.
-        let recovery = matches!(&self.input, Input::Key(key) if (is_ctrl_c(*key)
-            && !self.target.composer_copy) || is_escape(*key)
-            || (self.target.decision.is_some() && current.decision.is_some()
-                && printable_char(*key).is_some_and(|c| c.eq_ignore_ascii_case(&'n'))));
+        // become literal text after the waiting workflow has finished. And a
+        // Ctrl+C/Esc captured to leave takeover must not cancel or deny what exited it.
+        let recovery = !stale_takeover_exit
+            && matches!(&self.input, Input::Key(key) if (is_ctrl_c(*key)
+                && !self.target.composer_copy) || is_escape(*key)
+                || (self.target.decision.is_some() && current.decision.is_some()
+                    && printable_char(*key).is_some_and(|c| c.eq_ignore_ascii_case(&'n'))));
         let same_editor = self.editor_input
+            && !current.browser_interacting
             && self.target.help_owner == current.help_owner
             && self.target.overlay == current.overlay
             && self.target.decision == current.decision
@@ -319,7 +332,8 @@ pub(super) fn changes_activation_target(action: &UiAction, state: &UiState) -> b
         // post-prompt history read, which refreshes only session metadata.
         // Neither replaces a picker, decision or draft.
         BackendEvent::CommandFinished { command_type, .. }
-            if command_type == CommandKind::GetSessionStats.prefix() =>
+            if command_type == CommandKind::GetSessionStats.prefix()
+                || command_type == CommandKind::BrowserInteract.prefix() =>
         {
             false
         }
@@ -337,6 +351,7 @@ pub(super) fn changes_activation_target(action: &UiAction, state: &UiState) -> b
                 | BackendEvent::DeviceCodeProgress { .. }
                 | BackendEvent::RunCompleted(_)
                 | BackendEvent::WorkspaceReported { .. }
+                | BackendEvent::BrowserViewportUpdated(_)
                 | BackendEvent::Other { .. }
         ),
     }
@@ -530,6 +545,22 @@ async fn run_with_interrupts<B: FrameBackend>(
             ui.poll_session_catalog(writer, limit).await?;
         }
         let now = Instant::now();
+        if !eof {
+            if ui
+                .flush_due_browser_typing(now.into_std(), writer, limit)
+                .await?
+                == LoopControl::Exit
+            {
+                return Ok(Exit::User);
+            }
+            if ui
+                .poll_browser_takeover_refresh(now.into_std(), writer, limit)
+                .await?
+                == LoopControl::Exit
+            {
+                return Ok(Exit::User);
+            }
+        }
         ui.expire_notice(now.into_std());
         if now >= next_activity {
             ui.advance_activity_animation();
@@ -583,6 +614,7 @@ async fn run_with_interrupts<B: FrameBackend>(
                     && !ui.state.configuration_active()
             });
         let notice_deadline = ui.notice_deadline().map(Instant::from_std);
+        let browser_deadline = ui.next_browser_timer_deadline().map(Instant::from_std);
         tokio::select! {
             biased;
             result = receive_writer(sources.writer) => {
@@ -612,6 +644,7 @@ async fn run_with_interrupts<B: FrameBackend>(
             _ = tokio::time::sleep_until(next_activity), if ui.activity_animation_active() || ui.notice_scrolling => {}
             // An idle UI has no other timer, so a notice's deadline needs its own.
             _ = tokio::time::sleep_until(notice_deadline.unwrap_or(next_paint)), if notice_deadline.is_some() => {}
+            _ = tokio::time::sleep_until(browser_deadline.unwrap_or(next_paint)), if browser_deadline.is_some() => {}
             _ = tokio::time::sleep_until(next_age_tick), if ui.diff_age_shown() => {}
             _ = tokio::time::sleep_until(next_peek_poll), if ui.state.background_processes.peek_polling() => {}
             _ = tokio::time::sleep_until(catalog_deadline.unwrap_or(next_paint).max(Instant::now() + FRAME_INTERVAL)), if catalog_deadline.is_some() => {}

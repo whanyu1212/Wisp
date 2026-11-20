@@ -54,8 +54,10 @@ pub(crate) enum Command {
     ChangeDirectory(String),
     /// `/ps`: focus the running background processes in the side panel.
     Processes,
-    /// `/browser`: show or toggle the live browser viewport in the side panel.
-    Browser,
+    /// `/browser`: show or toggle the live browser viewport (or enter takeover).
+    Browser {
+        interact: bool,
+    },
     /// `/kill`: the process to stop, by `/ps` number or id.
     KillProcess(String),
     Quit,
@@ -101,7 +103,7 @@ fn usage(name: &str) -> Option<&'static str> {
         "unrevert" => "/unrevert",
         "cd" => "/cd <path>",
         "ps" => "/ps",
-        "browser" => "/browser",
+        "browser" => "/browser [interact]",
         "kill" => "/kill <number|process-id>",
         _ => return None,
     })
@@ -176,7 +178,7 @@ fn canonical_name<'a>(
 fn parse_command(canonical: &str, tail: &str, syntax: &str) -> Command {
     match canonical {
         "diff" | "help" | "init" | "history" | "plan" | "build" | "quit" | "skills" | "mcp"
-        | "queue" | "ps" | "browser" | "reload"
+        | "queue" | "ps" | "reload"
             if !tail.trim().is_empty() =>
         {
             Command::Invalid(format!("Usage: {syntax}"))
@@ -204,7 +206,7 @@ fn parse_command(canonical: &str, tail: &str, syntax: &str) -> Command {
         "cd" if tail.trim().is_empty() => Command::Invalid(format!("Usage: {syntax}")),
         "cd" => Command::ChangeDirectory(tail.trim().to_owned()),
         "ps" => Command::Processes,
-        "browser" => Command::Browser,
+        "browser" => parse_browser(tail, syntax),
         "kill" if tail.split_whitespace().count() != 1 => {
             Command::Invalid(format!("Usage: {syntax}"))
         }
@@ -214,6 +216,17 @@ fn parse_command(canonical: &str, tail: &str, syntax: &str) -> Command {
             model_picker::command(&format!("/{canonical}{tail}")).expect("known model command"),
         ),
         _ => Command::Session(session_command(&format!("/{canonical}{tail}"))),
+    }
+}
+
+fn parse_browser(tail: &str, syntax: &str) -> Command {
+    let trimmed = tail.trim();
+    if trimmed.is_empty() {
+        Command::Browser { interact: false }
+    } else if trimmed.eq_ignore_ascii_case("interact") {
+        Command::Browser { interact: true }
+    } else {
+        Command::Invalid(format!("Usage: {syntax}"))
     }
 }
 
@@ -1648,11 +1661,18 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn browser_command_accepts_no_arguments() {
-        assert!(matches!(classify("/browser", None), Some(Command::Browser)));
+    fn browser_command_accepts_optional_interact_argument() {
+        assert!(matches!(
+            classify("/browser", None),
+            Some(Command::Browser { interact: false })
+        ));
+        assert!(matches!(
+            classify("/browser interact", None),
+            Some(Command::Browser { interact: true })
+        ));
         assert!(matches!(
             classify("/browser extra", None),
-            Some(Command::Invalid(msg)) if msg == "Usage: /browser"
+            Some(Command::Invalid(msg)) if msg == "Usage: /browser [interact]"
         ));
     }
 }

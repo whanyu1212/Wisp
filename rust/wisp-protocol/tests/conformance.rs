@@ -88,6 +88,13 @@ fn secret_commands_redact_debug_output() {
 
     assert!(!debug.contains("sentinel-secret"));
     assert!(debug.contains("<redacted>"));
+
+    let typed =
+        commands::WispTypedClientRpcCommands::browser_interact_type("bi-1", "my-secret-password")
+            .unwrap();
+    let typed_debug = format!("{typed:?}");
+    assert!(!typed_debug.contains("my-secret-password"));
+    assert!(typed_debug.contains("<redacted>"));
 }
 
 #[test]
@@ -658,6 +665,52 @@ fn canonical_command_cross_field_constraints_fail_closed() {
             "effort": "high",
             "clear_effort": true
         }),
+        serde_json::json!({
+            "type": "browser_interact",
+            "action": "click",
+            "x": 10
+        }),
+        serde_json::json!({
+            "type": "browser_interact",
+            "action": "scroll",
+            "x": 10,
+            "y": 20
+        }),
+        serde_json::json!({
+            "type": "browser_interact",
+            "action": "scroll",
+            "x": 10,
+            "y": 20,
+            "delta_x": 0,
+            "delta_y": 0
+        }),
+        serde_json::json!({
+            "type": "browser_interact",
+            "action": "type",
+            "text": "hi",
+            "x": 1
+        }),
+        serde_json::json!({
+            "type": "browser_interact",
+            "action": "type",
+            "text": "a\u{0000}b"
+        }),
+        serde_json::json!({
+            "type": "browser_interact",
+            "action": "press_key",
+            "key": "NotAKey"
+        }),
+        serde_json::json!({
+            "type": "browser_interact",
+            "action": "press_key",
+            "key": "Enter",
+            "modifiers": ["Control", "Control"]
+        }),
+        serde_json::json!({
+            "type": "browser_interact",
+            "action": "refresh",
+            "x": 5
+        }),
     ];
 
     for command in invalid_commands {
@@ -1031,4 +1084,104 @@ fn browser_viewport_updated_projects_and_validates_fields() {
         "viewport_width": 0,
     });
     assert!(events::deserialize(bad).is_err());
+}
+
+#[test]
+fn browser_interact_builders_serialize_and_validate_canonical_shapes() {
+    use commands::{
+        BrowserKeyModifier, BrowserMouseButton, BrowserNavAction, WispTypedClientRpcCommands,
+    };
+
+    let click = WispTypedClientRpcCommands::browser_interact_click(
+        "bi-click",
+        120,
+        240,
+        Some(BrowserMouseButton::Right),
+        true,
+    )
+    .unwrap()
+    .into_value()
+    .unwrap();
+    assert_eq!(
+        click,
+        serde_json::json!({
+            "type": "browser_interact",
+            "id": "bi-click",
+            "action": "click",
+            "x": 120,
+            "y": 240,
+            "button": "right",
+            "double_click": true,
+        })
+    );
+
+    let scroll = WispTypedClientRpcCommands::browser_interact_scroll("bi-scroll", 50, 60, 0, -240)
+        .unwrap()
+        .into_value()
+        .unwrap();
+    assert_eq!(
+        scroll,
+        serde_json::json!({
+            "type": "browser_interact",
+            "id": "bi-scroll",
+            "action": "scroll",
+            "x": 50,
+            "y": 60,
+            "delta_x": 0,
+            "delta_y": -240,
+        })
+    );
+
+    let typed = WispTypedClientRpcCommands::browser_interact_type("bi-type", "hello")
+        .unwrap()
+        .into_value()
+        .unwrap();
+    assert_eq!(
+        typed,
+        serde_json::json!({
+            "type": "browser_interact",
+            "id": "bi-type",
+            "action": "type",
+            "text": "hello",
+        })
+    );
+    assert!(WispTypedClientRpcCommands::browser_interact_type("bi-empty", "").is_err());
+
+    let key = WispTypedClientRpcCommands::browser_interact_press_key(
+        "bi-key",
+        "Enter",
+        &[BrowserKeyModifier::Control],
+    )
+    .unwrap()
+    .into_value()
+    .unwrap();
+    assert_eq!(
+        key,
+        serde_json::json!({
+            "type": "browser_interact",
+            "id": "bi-key",
+            "action": "press_key",
+            "key": "Enter",
+            "modifiers": ["Control"],
+        })
+    );
+
+    for (action, expected) in [
+        (BrowserNavAction::Back, "back"),
+        (BrowserNavAction::Reload, "reload"),
+        (BrowserNavAction::Refresh, "refresh"),
+    ] {
+        let nav = WispTypedClientRpcCommands::browser_interact_nav("bi-nav", action)
+            .unwrap()
+            .into_value()
+            .unwrap();
+        assert_eq!(
+            nav,
+            serde_json::json!({
+                "type": "browser_interact",
+                "id": "bi-nav",
+                "action": expected,
+            })
+        );
+    }
 }
