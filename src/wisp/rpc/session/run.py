@@ -243,6 +243,7 @@ def start_rpc_prompt_command(
     else:
         prompt = ""
     encoded_images = (command.images or ()) if isinstance(command, PromptCommand) else ()
+    saved_session_id = command.saved_session_id if isinstance(command, PromptCommand) else None
 
     selected_session = session_state.session or sessions.create()
     cancel_scope = anyio.CancelScope()
@@ -270,6 +271,7 @@ def start_rpc_prompt_command(
         after_run,
         encoded_images,
         tools_ready,
+        saved_session_id,
     )
     return (
         running_command_factory(
@@ -493,6 +495,7 @@ async def run_rpc_prompt_command(
     after_run: Callable[[], Awaitable[str | None]] | None = None,
     encoded_images: tuple[str | ImagePart, ...] = (),
     tools_ready: Callable[[], Awaitable[None]] | None = None,
+    saved_session_id: str | None = None,
 ) -> None:
     error: str | None = None
     run_entry_start = entry_start
@@ -563,6 +566,7 @@ async def run_rpc_prompt_command(
                     operation_ready=mark_prompt_ready,
                     live_event_sink=publish_live,
                     process_wake=command_type == "process_wake",
+                    saved_session_id=saved_session_id,
                 )
                 if operation_context is None
                 else agent.run(
@@ -577,6 +581,7 @@ async def run_rpc_prompt_command(
                     operation_ready=mark_prompt_ready,
                     live_event_sink=publish_live,
                     process_wake=command_type == "process_wake",
+                    saved_session_id=saved_session_id,
                 )
             )
             await render_events(track_run_start(agent_events))

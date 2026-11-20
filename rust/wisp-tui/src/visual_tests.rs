@@ -762,6 +762,46 @@ fn row_containing(buffer: &ratatui::buffer::Buffer, text: &str) -> u16 {
 }
 
 #[test]
+fn saved_session_share_layout() {
+    for theme in theme::themes() {
+        for width in [40, 120] {
+            let id = "ab".repeat(16);
+            let mut picker = SessionPicker::new(
+                vec![reducer::SessionSummary {
+                    session_id: id.clone(),
+                    session_path: "/sessions/past.jsonl".into(),
+                    name: Some("Launcher cleanup".into()),
+                    updated_at: "Nov 19".into(),
+                    entry_count: 12,
+                }],
+                None,
+            );
+            picker.purpose = SessionPickerPurpose::Share;
+            let mut ui = LiveUi {
+                session_picker: Some(picker),
+                ..LiveUi::default()
+            };
+            ui.theme.active = theme;
+            ui.editor.insert_paste("Summarize the decision");
+            let overlay = draw(&mut ui, width, 27);
+            row_containing(&overlay, "share a saved session");
+            row_containing(&overlay, "Launcher cleanup");
+            let hint = if width < 60 {
+                "share once"
+            } else {
+                "share for one turn"
+            };
+            row_containing(&overlay, hint);
+
+            ui.attach_saved_session(id, "Launcher cleanup thread".into());
+            let composer = draw(&mut ui, width, 27);
+            row_containing(&composer, "[Saved Launcher clea");
+            row_containing(&composer, "Summarize the decision");
+        }
+    }
+}
+
+#[test]
 fn tool_activity_matches_the_mockup_across_themes_and_resize() {
     for selected in theme::themes() {
         for no_color in [false, true] {

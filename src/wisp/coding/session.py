@@ -86,6 +86,7 @@ from wisp.coding.prompt import (
     read_repository_status,
     scratch_folder_guidance,
 )
+from wisp.coding.saved_session import ReadSavedSessionTool
 from wisp.coding.script_state import RunScriptState
 from wisp.coding.stats import RunStats, build_session_stats
 from wisp.coding.subagent import (
@@ -1434,6 +1435,7 @@ class CodingSession:
         operation_ready: Callable[[], Awaitable[None]] | None = None,
         live_event_sink: LiveEventSink | None = None,
         process_wake: bool = False,
+        saved_session_id: str | None = None,
     ) -> AsyncIterator[WispEvent]:
         """Run one prompt to completion and stream its events.
 
@@ -1483,6 +1485,8 @@ class CodingSession:
             process_wake (bool, optional): Whether this is a wake run, whose
                 prompt is the held process notices alone; with none held it fails
                 before anything is saved. Defaults to False.
+            saved_session_id (str | None, optional): Full ID of a saved session the
+                caller explicitly shares for model reads during this run. Defaults to None.
 
         Yields:
             WispEvent: The run's events in publication order. A `QueueUpdated`
@@ -1514,6 +1518,7 @@ class CodingSession:
                 operation_ready=operation_ready,
                 live_event_sink=live_event_sink,
                 process_wake=process_wake,
+                saved_session_id=saved_session_id,
             )
             try:
                 async for event in events:
@@ -1551,6 +1556,7 @@ class CodingSession:
         operation_ready: Callable[[], Awaitable[None]] | None = None,
         live_event_sink: LiveEventSink | None = None,
         process_wake: bool = False,
+        saved_session_id: str | None = None,
     ) -> AsyncGenerator[WispEvent, None]:
         # A cancelled run restores only the notices its own prompt delivered.
         self._delivered_notices = None
@@ -1559,6 +1565,20 @@ class CodingSession:
             self._require_image_input(images)
         session = session or self.sessions.create()
         assert session is not None
+        saved_session_tool = None
+        if saved_session_id is not None:
+            if process_wake or operation_tool_names is not None:
+                raise ValueError("Saved sessions can be shared only with an ordinary prompt")
+            source = await anyio.to_thread.run_sync(
+                partial(
+                    self.sessions.saved_session_for_prompt,
+                    saved_session_id,
+                    current=session,
+                    check_cancelled=anyio.from_thread.check_cancelled,
+                ),
+                abandon_on_cancel=True,
+            )
+            saved_session_tool = ReadSavedSessionTool(source)
         operation_context = replace(
             operation_context,
             process_owner=self._process_owners.setdefault(session.session_id, object()),
@@ -1619,6 +1639,8 @@ class CodingSession:
         )
         self._active_command_reviewer = command_reviewer
         operation_registry = self._operation_tool_registry()
+        if saved_session_tool is not None and operation_registry is None:
+            operation_registry = ToolRegistry()
         effective_tools, executor = self._run_tools(
             operation_registry,
             operation_tool_names,
@@ -1627,6 +1649,7 @@ class CodingSession:
             image_store=session.store_image,
             session=session,
             command_reviewer=command_reviewer,
+            saved_session_tool=saved_session_tool,
         )
         harness, restored_queues = self._start_run_harness(
             session,
@@ -1762,12 +1785,14 @@ class CodingSession:
                     operation_id=operation_id,
                     emit=emit,
                     run_stats=run_stats,
+                    saved_session_tool=saved_session_tool,
                 ):
                     yield event
             finally:
                 self._accepting_queued_messages = True
 
         loop = _HarnessLoopState()
+        tool_is_unsafe = partial(self._tool_is_unsafe, saved_session_tool=saved_session_tool)
         harness_events = harness.continue_(
             boundary_preparer=compaction,
             context_overflow_hook=compaction,
@@ -1776,8 +1801,10 @@ class CodingSession:
             async for event in harness_events:
                 for compaction_event in compaction.take_events():
                     yield compaction_event
+                if saved_session_tool is not None and isinstance(event, QueueMessageInjected):
+                    saved_session_tool.revoke()
                 event = _with_unsaved_tool_details(event, executor)
-                loop.observe(event, compaction=compaction, tool_is_unsafe=self._tool_is_unsafe)
+                loop.observe(event, compaction=compaction, tool_is_unsafe=tool_is_unsafe)
                 for published in self._persist_loop_event(
                     event,
                     loop,
@@ -2010,6 +2037,7 @@ class CodingSession:
         operation_id: str | None,
         emit: Callable[[WispEvent], Awaitable[WispEvent]],
         run_stats: RunStats,
+        saved_session_tool: ReadSavedSessionTool | None,
     ) -> AsyncIterator[WispEvent]:
         """Add steering queued during preflight to the first request, then recheck its limit.
 
@@ -2023,6 +2051,8 @@ class CodingSession:
             operation_id (str | None): Operation owning the run's entries.
             emit (Callable[[WispEvent], Awaitable[WispEvent]]): Publishes a run event.
             run_stats (RunStats): The run's statistics, for its failed completion.
+            saved_session_tool (ReadSavedSessionTool | None): The previous
+                prompt's read permission, revoked before sending the steering.
 
         Yields:
             WispEvent: The drained queue events, each injected message preceded
@@ -2037,6 +2067,8 @@ class CodingSession:
         steering_injected = False
         for queue_event in harness.drain_steering():
             if isinstance(queue_event, QueueMessageInjected):
+                if saved_session_tool is not None:
+                    saved_session_tool.revoke()
                 steering_injected = True
                 queue_entry_id = self._persist_queue_injection(
                     session, queue_event, operation_id=operation_id
@@ -2275,6 +2307,7 @@ class CodingSession:
         image_store: ImageStore | None = None,
         session: JsonlSession | None = None,
         command_reviewer: CommandReviewer | None = None,
+        saved_session_tool: ReadSavedSessionTool | None = None,
     ) -> tuple[tuple[ToolSpec, ...], ConfiguredToolExecutor]:
         """Select the tools one run may use and build the executor that enforces them.
 
@@ -2292,6 +2325,8 @@ class CodingSession:
                 Git status a subagent's prompt reuses. Defaults to None.
             command_reviewer (CommandReviewer | None, optional): Isolated, bounded
                 reviewer for this run's explicit command consent. Defaults to None.
+            saved_session_tool (ReadSavedSessionTool | None, optional): Historical
+                session explicitly shared for this run. Defaults to None.
 
         Returns:
             tuple[tuple[ToolSpec, ...], ConfiguredToolExecutor]: The specs offered
@@ -2360,6 +2395,12 @@ class CodingSession:
             # The same holds for a subagent: each call it makes is checked as itself.
             offered_tools = (*offered_tools, ToolSpec.from_tool(spawn_agent))
             policy = replace(policy, allowed_tools=policy.allowed_tools | {SPAWN_AGENT})
+        if saved_session_tool is not None:
+            # The prompt's explicit approval grants only this specific tool.
+            assert registry is not None
+            registry.register(saved_session_tool, replace=False)
+            offered_tools = (*offered_tools, ToolSpec.from_tool(saved_session_tool))
+            policy = replace(policy, allowed_tools=policy.allowed_tools | {saved_session_tool.name})
         executor = ConfiguredToolExecutor(
             registry=registry,
             context=context,
@@ -3708,9 +3749,13 @@ class CodingSession:
             if self.tool_policy.allows(tool)
         )
 
-    def _tool_is_unsafe(self, name: str) -> bool:
+    def _tool_is_unsafe(
+        self, name: str, *, saved_session_tool: ReadSavedSessionTool | None = None
+    ) -> bool:
         """Return whether a replayed tool turn could repeat side effects on recovery."""
 
+        if saved_session_tool is not None and name == saved_session_tool.name:
+            return False
         # A script may have performed a mutation before failing or overflowing.
         # Its wrapper safety controls approval, not whether replay is safe.
         if name == CODEMODE or self.tool_registry is None:

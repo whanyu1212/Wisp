@@ -38,3 +38,17 @@ fn search_and_cursor_are_optional_bounded_wire_fields() {
         json!({"type":"get_sessions", "id":"catalog", "limit":50})
     );
 }
+
+#[test]
+fn sharing_catalog_requests_are_read_only() {
+    let command =
+        WispTypedClientRpcCommands::search_saved_sessions("catalog", "notes", Some("next"))
+            .unwrap()
+            .into_value()
+            .unwrap();
+    assert_eq!(
+        command,
+        json!({"type":"get_sessions", "id":"catalog", "limit":50,
+        "query":"notes", "cursor":"next", "read_only":true})
+    );
+}

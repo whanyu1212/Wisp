@@ -171,6 +171,8 @@ def start_rpc_sessions_command(
         command_completed_factory,
         command.query or "",
         command.cursor,
+        command.read_only is True,
+        session_state.name,
     )
     return running_command_factory(
         command_id=command_id,
@@ -394,6 +396,7 @@ def _session_catalog_report(
     selected_session_name: str | None,
     check_cancelled: Callable[[], None] = lambda: None,
     max_frame_bytes: int = MAX_LIVE_RPC_FRAME_BYTES,
+    read_only: bool = False,
 ) -> RpcSessionsReported:
     """Fit a catalog report, recomputing cursors at the actual page boundary.
 
@@ -407,6 +410,7 @@ def _session_catalog_report(
         selected_session_name (str | None): Current display name.
         check_cancelled (Callable): Cooperative scan cancellation callback.
         max_frame_bytes (int): Maximum encoded report size.
+        read_only (bool): List without repairing files or creating lock sidecars.
 
     Returns:
         RpcSessionsReported: A transport-safe page with truthful cursors.
@@ -417,7 +421,11 @@ def _session_catalog_report(
     """
     while True:
         page = sessions.catalog_page(
-            limit=limit, query=query, cursor=cursor, check_cancelled=check_cancelled
+            limit=limit,
+            query=query,
+            cursor=cursor,
+            check_cancelled=check_cancelled,
+            read_only=read_only,
         )
         report = RpcSessionsReported(
             command_id=command_id,
@@ -450,16 +458,18 @@ async def run_rpc_sessions_command(
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
     query: str = "",
     cursor: str | None = None,
+    read_only: bool = False,
+    cached_selected_name: str | None = None,
 ) -> None:
     ok = False
     error: str | None = None
     try:
         with cancel_scope:
-            selected_session_name = (
-                await _run_abandonable_session_read(selected_session.read_name)
-                if selected_session is not None
-                else None
-            )
+            selected_session_name = cached_selected_name
+            if not read_only and selected_session is not None:
+                selected_session_name = await _run_abandonable_session_read(
+                    selected_session.read_name
+                )
             if cancel_scope.cancel_called:
                 error = "RPC get_sessions command cancelled"
             else:
@@ -474,6 +484,7 @@ async def run_rpc_sessions_command(
                         selected_session=selected_session,
                         selected_session_name=selected_session_name,
                         check_cancelled=anyio.from_thread.check_cancelled,
+                        read_only=read_only,
                     )
                 )
                 write_event(report)

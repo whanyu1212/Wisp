@@ -118,7 +118,7 @@ impl KeyHelp {
                 "Sessions: type/paste to search names or IDs; Ctrl+U clears the query.",
                 "Up/Down/Page/Home/End select; Ctrl+Left/Right changes page.",
                 "Ctrl+R refreshes from the first page; Ctrl+Y retries the current page.",
-                "Enter resumes a painted choice; Esc closes. Ctrl+C retains cancellation/exit behavior.",
+                "Enter resumes or shares the painted choice as shown. Esc closes.",
             ],
             Owner::Overlay(OverlayKind::Discovery) => &[
                 "Skills/MCP: arrows and Page/Home/End navigate; r refreshes.",

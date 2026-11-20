@@ -766,6 +766,7 @@ impl ToolCardSnapshot {
         match self.name.as_str() {
             "bash" => "Bash".into(),
             "read" => "Read".into(),
+            "read_saved_session" => "Read saved session".into(),
             "grep" | "find" => "Search".into(),
             "ls" => "List".into(),
             "edit" => "Edit".into(),
@@ -784,6 +785,11 @@ impl ToolCardSnapshot {
         let (in_flight, finished, never_ran) = match self.name.as_str() {
             "bash" => ("Running", "Ran", "Run"),
             "read" => ("Reading", "Read", "Read"),
+            "read_saved_session" => (
+                "Reading saved session",
+                "Read saved session",
+                "Read saved session",
+            ),
             "grep" | "find" => ("Searching", "Searched", "Search"),
             "ls" => ("Listing", "Listed", "List"),
             "edit" => ("Editing", "Edited", "Edit"),

@@ -9,6 +9,7 @@ from typing import cast
 import anyio
 import pytest
 from anyio.abc import Process
+from pydantic import ValidationError
 from pytest import MonkeyPatch
 
 from tests.support.rpc import RecordingTransport
@@ -54,11 +55,39 @@ from wisp.rpc.commands import (
     ApprovalCommand,
     CancelCommand,
     PromptCommand,
+    RpcCommandAdapter,
     SetCodemodeCommand,
     ShutdownCommand,
     rpc_command_from_json,
 )
 from wisp.rpc.protocol import RpcHandshakeRequest
+
+
+@pytest.mark.parametrize("value", ["/tmp/source.jsonl", "a" * 8, "A" * 32, "a" * 32 + "\n", 123])
+def test_prompt_requires_full_saved_id(value: object) -> None:
+    with pytest.raises(ValidationError, match="saved_session_id"):
+        PromptCommand.model_validate({"prompt": "hello", "saved_session_id": value})
+
+
+@pytest.mark.parametrize("command", ["steer", "follow_up"])
+def test_queue_rejects_saved_id(command: str) -> None:
+    with pytest.raises(ValidationError, match="saved_session_id"):
+        RpcCommandAdapter.validate_python(
+            {"type": command, "message": "hello", "saved_session_id": "a" * 32}
+        )
+
+
+def test_controller_sends_saved_session_id() -> None:
+    async def scenario() -> None:
+        transport = RecordingTransport()
+        controller = RpcController(transport)
+        await controller.prompt("with share", saved_session_id="a" * 32, command_id="one")
+        await controller.prompt("without share", command_id="two")
+        first, second = transport.commands
+        assert json.loads(first.to_json_line())["saved_session_id"] == "a" * 32
+        assert "saved_session_id" not in json.loads(second.to_json_line())
+
+    anyio.run(scenario)
 
 
 def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:

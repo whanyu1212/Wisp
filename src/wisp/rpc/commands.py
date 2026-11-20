@@ -36,6 +36,7 @@ from wisp.events import (
 )
 from wisp.images import MAX_IMAGE_BYTES
 from wisp.mcp.config import MAX_MCP_TOOL_OVERRIDES
+from wisp.sessions.jsonl import SAVED_SESSION_ID_PATTERN
 from wisp.validation import redact_validation_error_inputs
 
 ApprovalScope = TypeAliasType(
@@ -158,6 +159,13 @@ class PromptCommand(RpcCommandModel):
 
     type: Literal["prompt"] = "prompt"
     prompt: str
+    saved_session_id: str | None = Field(
+        default=None,
+        min_length=32,
+        max_length=32,
+        pattern=SAVED_SESSION_ID_PATTERN,
+        description="Full ID of a saved session explicitly shared for reads during this run.",
+    )
     # Omitted rather than empty when nothing is attached, like Message.images.
     images: tuple[RpcImageData | ImagePart, ...] | None = Field(
         default=None,
@@ -541,6 +549,10 @@ class GetSessionsCommand(RpcCommandModel):
     limit: int = Field(default=50, ge=0, le=200, strict=True)
     query: str | None = Field(default=None, max_length=1024)
     cursor: str | None = Field(default=None, min_length=1, max_length=4096)
+    read_only: bool | None = Field(
+        default=None,
+        description="List committed session metadata without repairing files or creating locks.",
+    )
 
     @model_validator(mode="after")
     def _validate_catalog_query(self) -> Self:

@@ -32,3 +32,21 @@ def test_discovery_command_preserves_legacy_wire_shape() -> None:
     }
     command = GetSessionsCommand(id="catalog", query="Straße", cursor="opaque")
     assert GetSessionsCommand.model_validate_json(command.to_json_line()) == command
+
+
+def test_readonly_catalog_command_roundtrips() -> None:
+    command = GetSessionsCommand(id="catalog", read_only=True)
+    encoded = command.to_json_line()
+    assert json.loads(encoded)["read_only"] is True
+    assert GetSessionsCommand.model_validate_json(encoded) == command
+
+
+@pytest.mark.parametrize("schema_name", ["commands.schema.json", "rust-commands.schema.json"])
+def test_readonly_flag_is_optional(schema_name: str) -> None:
+    schema = json.loads(generate_protocol_artifacts()[schema_name])
+    validator = Draft202012Validator(schema)
+    command = {"type": "get_sessions", "id": "catalog", "limit": 50}
+    validator.validate(command)
+    validator.validate({**command, "read_only": True})
+    with pytest.raises(ValidationError):
+        validator.validate({**command, "read_only": "true"})

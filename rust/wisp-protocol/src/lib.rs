@@ -802,10 +802,24 @@ pub mod commands {
             prompt: &str,
             images: &[serde_json::Value],
         ) -> Result<Self, super::ProtocolDecodeError> {
-            deserialize(with_images(
+            Self::prompt_with_attachments(id, prompt, images, None)
+        }
+
+        /// Construct one agent-turn request with optional images and a saved session.
+        pub fn prompt_with_attachments(
+            id: &str,
+            prompt: &str,
+            images: &[serde_json::Value],
+            saved_session_id: Option<&str>,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            let mut command = with_images(
                 serde_json::json!({"type": "prompt", "id": id, "prompt": prompt}),
                 images,
-            ))
+            );
+            if let Some(session_id) = saved_session_id {
+                command["saved_session_id"] = serde_json::json!(session_id);
+            }
+            deserialize(command)
         }
 
         /// Initialize project guidance through the backend-owned workflow.
@@ -1052,6 +1066,24 @@ pub mod commands {
             query: &str,
             cursor: Option<&str>,
         ) -> Result<Self, super::ProtocolDecodeError> {
+            Self::search_session_catalog(id, query, cursor, false)
+        }
+
+        /// Search the saved-session catalog without preparing or repairing its files.
+        pub fn search_saved_sessions(
+            id: &str,
+            query: &str,
+            cursor: Option<&str>,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            Self::search_session_catalog(id, query, cursor, true)
+        }
+
+        fn search_session_catalog(
+            id: &str,
+            query: &str,
+            cursor: Option<&str>,
+            read_only: bool,
+        ) -> Result<Self, super::ProtocolDecodeError> {
             if query.len() > 1024 {
                 return Err(super::ProtocolDecodeError(
                     "Session query exceeds 1024 UTF-8 bytes".into(),
@@ -1063,6 +1095,9 @@ pub mod commands {
             }
             if let Some(cursor) = cursor {
                 value["cursor"] = serde_json::json!(cursor);
+            }
+            if read_only {
+                value["read_only"] = serde_json::json!(true);
             }
             deserialize(value)
         }

@@ -157,6 +157,17 @@ plain text. Very large sessions therefore require more startup time and memory.
 
 
 
+## Sharing a saved session
+
+Run `/past-sessions` to choose a saved session to share with your next prompt. Search by
+name or ID and press Enter on the highlighted session. The picker closes and a **Saved**
+chip appears above the draft. Use `/past-sessions clear` to remove the attachment.
+
+Ask your question in the current conversation. Wisp can read bounded pages of user and
+assistant text from the selected session during that prompt. Excerpts it reads can become
+part of the current conversation. The attachment is consumed when you send the prompt and
+is cleared if you switch sessions or working directories first.
+
 ## Changing directory
 
 `/cd <path>` moves the session to another folder: an absolute path, `~`, or a path relative to the

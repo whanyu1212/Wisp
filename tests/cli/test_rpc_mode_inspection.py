@@ -47,6 +47,7 @@ def test_rpc_mode_reports_commands_before_prompt(tmp_path: Path) -> None:
         "new",
         "resume",
         "name",
+        "past-sessions",
         "clone",
         "tree",
         "unrevert",
@@ -68,6 +69,12 @@ def test_rpc_mode_reports_commands_before_prompt(tmp_path: Path) -> None:
             "description": "Optional compaction guidance",
             "required": False,
         }
+    ]
+    sharing = next(command for command in report["commands"] if command["name"] == "past-sessions")
+    assert sharing["slash_command"] == "/past-sessions"
+    assert sharing["accepts_arguments"] is True
+    assert [(argument["name"], argument["required"]) for argument in sharing["arguments"]] == [
+        ("action", False)
     ]
     assert records[-1]["command_id"] == "commands-1"
     assert records[-1]["command_type"] == "get_commands"

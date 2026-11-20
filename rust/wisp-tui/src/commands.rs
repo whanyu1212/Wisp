@@ -91,6 +91,7 @@ fn usage(name: &str) -> Option<&'static str> {
         "provider" => "/provider [name]",
         "connect" => "/connect",
         "resume" => "/resume [session-id]",
+        "past-sessions" => "/past-sessions [clear]",
         "new" => "/new",
         "name" => "/name <display name> | /name --clear",
         "clone" => "/clone",
@@ -966,6 +967,8 @@ pub(crate) fn render_help(
 pub(crate) enum SessionCommand {
     Prompt,
     ResumeCatalog,
+    SharePastSession,
+    ClearSharedSession,
     ResumeSession(String),
     New,
     Name(String),
@@ -998,6 +1001,9 @@ pub(crate) fn session_command(prompt: &str) -> SessionCommand {
     }
     let parts = trimmed.split_whitespace().collect::<Vec<_>>();
     match parts.as_slice() {
+        ["/past-sessions"] => SessionCommand::SharePastSession,
+        ["/past-sessions", "clear"] => SessionCommand::ClearSharedSession,
+        ["/past-sessions", ..] => SessionCommand::Invalid("Usage: /past-sessions [clear]"),
         ["/resume", session_id] => SessionCommand::ResumeSession((*session_id).into()),
         ["/resume", ..] => SessionCommand::Invalid("Usage: /resume [session-id]"),
         ["/new", ..] => SessionCommand::Invalid("Usage: /new"),

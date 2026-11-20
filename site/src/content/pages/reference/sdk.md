@@ -151,7 +151,7 @@ request. Completion and results arrive through `events()`.
 
 | Method | Signature after `self` | Result event or effect |
 |---|---|---|
-| `prompt` | `(prompt: str, *, command_id: str \| None = None)` | Agent/message/tool events; terminal `RpcCommandFinished` |
+| `prompt` | `(prompt: str, *, images=(), saved_session_id: str \| None = None, command_id: str \| None = None)` | Agent/message/tool events; terminal `RpcCommandFinished` |
 | `init` | `(*, command_id: str \| None = None)` | Initialize project guidance |
 | `compact` | `(instructions: str \| None = None, *, command_id: str \| None = None)` | Compaction events |
 | `configure` | `(*, provider=None, model=None, effort=None, clear_effort=False, auto_compaction_enabled=None, mode=None, command_id=None)` | Configuration events and terminal status |
@@ -321,7 +321,7 @@ like `set_codemode`.
 
 | Method | Signature after `self` | Primary result event |
 |---|---|---|
-| `get_sessions` | `(*, limit: int = 50, query: str = "", cursor: str \| None = None, command_id: str \| None = None)` | `RpcSessionsReported` |
+| `get_sessions` | `(*, limit: int = 50, query: str = "", cursor: str \| None = None, read_only: bool = False, command_id: str \| None = None)` | `RpcSessionsReported` |
 | `new_session` | `(*, command_id: str \| None = None)` | Deselect; next prompt creates a session |
 | `select_session` | `(session_id: str, *, command_id: str \| None = None)` | `RpcSessionSelected` |
 | `set_session_name` | `(name: str, *, session_id: str \| None = None, command_id: str \| None = None)` | `RpcSessionNameChanged` |
@@ -335,6 +335,8 @@ like `set_codemode`.
 `query` is bounded to 1024 UTF-8 bytes and uses trimmed, Unicode-casefolded literal substring
 matching against current session names and full IDs. An empty query lists all sessions;
 unnamed sessions remain searchable by ID. Duplicate names remain separate identities.
+Use `read_only=True` when offering sessions to share. It lists metadata from complete records
+without repairing incomplete tails or creating lock files.
 
 `RpcSessionsReported` includes the normalized `query`, `next_cursor`, and `previous_cursor`.
 Pass a non-null cursor back with the same query to navigate. Cursors are opaque, bounded to
@@ -425,6 +427,13 @@ idempotent and re-raises a retained close failure.
 Each model is frozen, discriminated by `type`, accepts an optional `id`, and provides
 `to_json_line()`. Prefer `RpcController` unless an integration is implementing a lower-level
 transport.
+
+`RpcController.prompt` and `PromptCommand` accept `saved_session_id` after the user explicitly
+chooses to share a saved session with that prompt. Pass the full 32-character lowercase hex ID
+from the session catalog. The backend rejects the active session and unavailable sources. During
+the run, `read_saved_session` can retrieve bounded excerpts from the selected session's active
+branch. Delivering steering or a follow-up ends the permission. Tool results become part of the
+current conversation and can remain in its history.
 
 ## `wisp.events`
 

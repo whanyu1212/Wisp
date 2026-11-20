@@ -9,7 +9,7 @@ reader accepts.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -29,7 +29,12 @@ from wisp.sessions.errors import (
     UnsupportedPersistedEventVersionError,
     UnsupportedSessionEntryVersionError,
 )
-from wisp.sessions.file_io import interprocess_lock, recover_incomplete_tail, session_file_state
+from wisp.sessions.file_io import (
+    interprocess_lock,
+    open_session_snapshot,
+    recover_incomplete_tail,
+    session_file_state,
+)
 from wisp.sessions.replay import SessionReplayError
 
 
@@ -60,14 +65,15 @@ _SESSION_TREE_ENTRY_KINDS = frozenset({"message", "event", "compaction"})
 
 
 def read_session_summary_metadata(
-    path: Path, *, check_cancelled: Callable[[], None] | None = None
+    path: Path, *, check_cancelled: Callable[[], None] | None = None, read_only: bool = False
 ) -> SessionSummaryMetadata:
-    """Scan committed metadata under the existing recovery and locking boundary.
+    """Scan metadata from complete records in a session file.
 
     Args:
         path (Path): Authorized session file to inspect.
         check_cancelled (Callable | None): Optional check between JSONL records.
             Exceptions propagate after releasing the file locks.
+        read_only (bool): Leave incomplete tails and lock files untouched.
 
     Returns:
         SessionSummaryMetadata: Current identity, name, leaf, and entry count.
@@ -75,6 +81,17 @@ def read_session_summary_metadata(
     Raises:
         SessionError: The file or committed metadata cannot be read safely.
     """
+    if read_only:
+        try:
+            with open_session_snapshot(path) as (_, lines):
+                return _summary_from_lines(
+                    (line.decode("utf-8") for line in lines), path, check_cancelled=check_cancelled
+                )
+        except UnicodeDecodeError as exc:
+            raise SessionError(f"Session file is not valid UTF-8: {path}") from exc
+        except OSError as exc:
+            raise SessionError(f"Could not read session file: {path}") from exc
+
     state = session_file_state(path)
     with state.lock:
         with interprocess_lock(path, prepare_parent=False):
@@ -89,6 +106,19 @@ def _read_session_summary_metadata_unlocked(
     if not path.is_file():
         raise SessionNotFoundError(f"Session file does not exist: {path}")
 
+    try:
+        with path.open("r", encoding="utf-8") as session_file:
+            return _summary_from_lines(session_file, path, check_cancelled=check_cancelled)
+    except UnicodeDecodeError as exc:
+        raise SessionError(f"Session file is not valid UTF-8: {path}") from exc
+    except OSError as exc:
+        raise SessionError(f"Could not read session file: {path}") from exc
+
+
+def _summary_from_lines(
+    lines: Iterable[str], path: Path, *, check_cancelled: Callable[[], None] | None
+) -> SessionSummaryMetadata:
+
     session_id: str | None = None
     entry_count = 0
     active_leaf_id: str | None = None
@@ -98,42 +128,33 @@ def _read_session_summary_metadata_unlocked(
     transition_metadata: dict[str, _SessionSummaryEntryMetadata] = {}
     latest_history_entry_id: str | None = None
     seen_entry_ids: set[str] = set()
-    try:
-        with path.open("r", encoding="utf-8") as session_file:
-            for line_number, line in enumerate(session_file, start=1):
-                if check_cancelled is not None:
-                    check_cancelled()
-                if not line.strip():
-                    continue
-                source = f"{path}:{line_number}"
-                entry = _summary_entry_metadata_from_json(line, source=source)
-                if session_id is None:
-                    session_id = entry.session_id
-                elif entry.session_id != session_id:
-                    raise MalformedSessionEntryError(
-                        f"Session entry at {source} belongs to {entry.session_id}, "
-                        f"expected {session_id}"
-                    )
-                if entry.id in seen_entry_ids:
-                    raise MalformedSessionEntryError(
-                        f"Duplicate session entry id {entry.id} at {source}"
-                    )
-                seen_entry_ids.add(entry.id)
-                active_leaf_id, latest_history_entry_id = _resolve_summary_entry(
-                    entry,
-                    active_leaf_id=active_leaf_id,
-                    node_ids=node_ids,
-                    node_metadata=node_metadata,
-                    transition_metadata=transition_metadata,
-                    latest_history_entry_id=latest_history_entry_id,
-                )
-                if entry.kind == "session_info":
-                    name = entry.name
-                entry_count += 1
-    except UnicodeDecodeError as exc:
-        raise SessionError(f"Session file is not valid UTF-8: {path}") from exc
-    except OSError as exc:
-        raise SessionError(f"Could not read session file: {path}") from exc
+    for line_number, line in enumerate(lines, start=1):
+        if check_cancelled is not None:
+            check_cancelled()
+        if not line.strip():
+            continue
+        source = f"{path}:{line_number}"
+        entry = _summary_entry_metadata_from_json(line, source=source)
+        if session_id is None:
+            session_id = entry.session_id
+        elif entry.session_id != session_id:
+            raise MalformedSessionEntryError(
+                f"Session entry at {source} belongs to {entry.session_id}, expected {session_id}"
+            )
+        if entry.id in seen_entry_ids:
+            raise MalformedSessionEntryError(f"Duplicate session entry id {entry.id} at {source}")
+        seen_entry_ids.add(entry.id)
+        active_leaf_id, latest_history_entry_id = _resolve_summary_entry(
+            entry,
+            active_leaf_id=active_leaf_id,
+            node_ids=node_ids,
+            node_metadata=node_metadata,
+            transition_metadata=transition_metadata,
+            latest_history_entry_id=latest_history_entry_id,
+        )
+        if entry.kind == "session_info":
+            name = entry.name
+        entry_count += 1
     if session_id is None:
         raise SessionError(f"Session file is empty: {path}")
     return SessionSummaryMetadata(

@@ -141,6 +141,38 @@ def test_executor_sessions_reports_empty_catalog(tmp_path: Path) -> None:
     anyio.run(scenario)
 
 
+def test_readonly_catalog_preserves_selection(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        selected = fixture.sessions.create()
+        await selected.append_message(Message(role="user", content="first"))
+        await selected.set_name("Current session")
+        fixture.session_state.session = selected
+        fixture.session_state.name = "Current session"
+        contents = selected.path.read_bytes() + b"partial last row"
+        selected.path.write_bytes(contents)
+        lock = selected.path.with_suffix(".jsonl.lock")
+        lock.unlink()
+
+        send, receive = anyio.create_memory_object_stream(10)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+            _ = await dispatch_parsed(
+                executor, {"id": "share", "type": "get_sessions", "read_only": True}
+            )
+            completed = await receive.receive()
+
+        assert completed.ok is True
+        report = next(event for event in fixture.events if isinstance(event, RpcSessionsReported))
+        assert report.selected_session_id == selected.session_id
+        assert report.selected_session_name == "Current session"
+        assert [session.name for session in report.sessions] == ["Current session"]
+        assert selected.path.read_bytes() == contents
+        assert not lock.exists()
+
+    anyio.run(scenario)
+
+
 def test_executor_sessions_cancel_abandons_blocked_catalog_read(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
@@ -152,12 +184,21 @@ def test_executor_sessions_cancel_abandons_blocked_catalog_read(
         original_catalog = fixture.sessions.catalog_page
 
         def blocked_catalog(
-            *, limit: int, query: str, cursor: str | None, check_cancelled: Callable[[], None]
+            *,
+            limit: int,
+            query: str,
+            cursor: str | None,
+            check_cancelled: Callable[[], None],
+            read_only: bool,
         ) -> object:
             started.set()
             release.wait(timeout=5)
             return original_catalog(
-                limit=limit, query=query, cursor=cursor, check_cancelled=check_cancelled
+                limit=limit,
+                query=query,
+                cursor=cursor,
+                check_cancelled=check_cancelled,
+                read_only=read_only,
             )
 
         monkeypatch.setattr(fixture.sessions, "catalog_page", blocked_catalog)
