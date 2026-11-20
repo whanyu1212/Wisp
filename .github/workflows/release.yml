@@ -13,11 +13,16 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  # Match ci.yml so debug/test Rust builds keep line tables only and reuse
+  # main's warm rust-cache entries on release tags and dry runs.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
 jobs:
-  verify:
-    name: Verify release commit
+  verify-quality:
+    name: Verify formatting, lint, and types
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
 
     steps:
       - name: Check out repository
@@ -36,11 +41,6 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.88.0
-        with:
-          components: clippy,rustfmt
-
       - name: Check formatting
         run: uv run ruff format --check .
 
@@ -53,17 +53,100 @@ jobs:
       - name: Type-check
         run: uv run mypy
 
+  rust-lint:
+    name: Verify Rust lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # wisp-python targets abi3-py311 and does not run Python during Rust lint/test.
+      PYO3_NO_PYTHON: "1"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: clippy,rustfmt
+
+      # Job ID and key match ci.yml so releases hit main's warm rust-cache.
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: rust-lint-ubuntu-latest
+          cache-bin: false
+
       - name: Check Rust formatting
         run: cargo fmt --all --check
 
       - name: Lint Rust workspace
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+  rust-workspace:
+    name: Verify Rust workspace
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # wisp-python targets abi3-py311 and does not run Python during Rust lint/test.
+      PYO3_NO_PYTHON: "1"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.88.0
+
+      # Job ID and key match ci.yml so releases hit main's warm rust-cache.
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: rust-test-ubuntu-latest
+          cache-bin: false
+
       - name: Test Rust workspace
         run: cargo test --workspace --all-features
 
+  verify-python:
+    name: Verify Python tests (${{ matrix.suite }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: parallel
+            args: tests -m 'not (slow or process or benchmark)' -n auto
+          # Process, slow, and benchmark tests assert timing and resource
+          # bounds that flake when they compete with parallel workers.
+          - suite: serial-1
+            args: tests -m 'slow or process or benchmark' -k 'not test_every_module_imports_fresh' --shard 1/2
+          - suite: serial-2
+            args: tests -m 'slow or process or benchmark' -k 'not test_every_module_imports_fresh' --shard 2/2
+          # Spawns a fresh Python process per module (~38s on its own).
+          - suite: fresh-imports
+            args: tests/repository/test_architecture.py -k 'test_every_module_imports_fresh'
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+
+      - name: Install dependencies
+        run: uv sync --locked
+
       - name: Test
-        run: uv run pytest tests
+        run: uv run pytest ${{ matrix.args }} --durations=20
 
   verify-macos:
     name: Verify macOS support
@@ -101,11 +184,10 @@ jobs:
           WISP_TRUST: "1"
         run: uv run wisp -p "hello" --provider fake
 
+  # Wheel builds run in parallel with verification; `build` gates distribution
+  # assembly, attestation, and publishing on every verification job.
   native-wheels:
     name: Build native Rust TUI wheels
-    needs:
-      - verify
-      - verify-macos
     uses: ./.github/workflows/rust-tui-wheels.yml
     permissions:
       contents: read
@@ -113,7 +195,10 @@ jobs:
   build:
     name: Build distributions
     needs:
-      - verify
+      - verify-quality
+      - rust-lint
+      - rust-workspace
+      - verify-python
       - verify-macos
       - native-wheels
     runs-on: ubuntu-latest
