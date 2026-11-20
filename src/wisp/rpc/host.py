@@ -73,6 +73,7 @@ from wisp.tools.approval import ToolApprovalDecision, ToolApprovalPolicy, confir
 from wisp.tools.base import Tool, ToolSafety
 from wisp.tools.mcp_servers import PROPOSE_MCP_SERVER, PROPOSE_MCP_SERVER_CHANGE
 from wisp.tools.selection import select_session, select_tools, tool_approval_policy
+from wisp.tools.shell.external_reads import resolve_auto_command_read_dir
 from wisp.trust.permissions import (
     ignored_broad_root_yolo,
     load_permission_mode,
@@ -114,6 +115,9 @@ class InProcessOptions:
     the built-in file and search tools when it contains ``cwd`` and is not a broad
     folder such as the home folder; otherwise the boundary is ``cwd``. When only a
     project root is supplied, it also becomes the tool working directory.
+
+    ``auto_command_read_dir`` grants eligible sandboxed commands read access to
+    one external directory for the startup project and session.
     """
 
     all_tools: bool = False
@@ -126,6 +130,7 @@ class InProcessOptions:
     startup_trusted: bool = False
     project_context_root: Path | None = None
     cwd: Path | None = None
+    auto_command_read_dir: Path | None = None
 
     def __post_init__(self) -> None:
         if self.resume is not None and self.continue_latest:
@@ -221,6 +226,7 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
         """
 
         self.generation += 1
+        self.auto_command_read_dir = None
         self._project_path = project_path
         # YOLO is never saved for the home folder or a folder above it, so there it
         # is granted for this session only (see ``wisp.trust.scope``).
@@ -253,6 +259,7 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
     def reset_session_grants(self) -> None:
         """Expire temporary grants while retaining the selected project/startup mode."""
 
+        self.auto_command_read_dir = None
         self.approved_tools = self._baseline_approved_tools
         self.approved_safety = self._baseline_approved_safety
         self.mode = self._baseline_mode
@@ -298,34 +305,25 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
             OSError: Saving fails; current approvals remain unchanged.
         """
 
-        if mode in ("auto", "auto_commands", "yolo") and self.session_only_yolo:
-            self.generation += 1
-            self.approved_tools = frozenset()
-            self.approved_safety = (
-                frozenset({"read", "mutating", "command"}) if mode == "yolo" else frozenset()
-            )
-            self.mode = mode
-            self._drop_startup_grants()
-            # This choice is session-only, but it must permanently replace any
-            # startup --yes. Resetting the session must not resurrect that grant.
-            self._baseline_approved_tools = frozenset()
-            self._baseline_approved_safety = frozenset()
-            self._baseline_mode = self._saved_mode or "ask"
-            return
-        if self._project_path is None:
-            raise OSError("No project is available for saving permissions")
-        save_permission_mode(self._project_path, mode)
+        session_only = mode in ("auto", "auto_commands", "yolo") and self.session_only_yolo
+        if not session_only:
+            if self._project_path is None:
+                raise OSError("No project is available for saving permissions")
+            save_permission_mode(self._project_path, mode)
+            self._saved_mode = mode
         self.generation += 1
         self._drop_startup_grants()
-        self._saved_mode = mode
+        # The launch grant can wait for the first switch into Auto commands.
+        if self.mode == "auto_commands" and mode != "auto_commands":
+            self.auto_command_read_dir = None
         self.mode = mode
         self.approved_tools = frozenset()
         self.approved_safety = (
             frozenset({"read", "mutating", "command"}) if mode == "yolo" else frozenset()
         )
         self._baseline_approved_tools = self.approved_tools
-        self._baseline_approved_safety = self.approved_safety
-        self._baseline_mode = self.mode
+        self._baseline_approved_safety = frozenset() if session_only else self.approved_safety
+        self._baseline_mode = self._saved_mode or "ask"
 
     def prepare_approval(
         self,
@@ -786,6 +784,13 @@ class RpcHost:
             project_root=project_context_root,
             skill_catalog=skill_catalog,
         )
+        startup_read_dir: Path | None = None
+        if options.auto_command_read_dir is not None:
+            startup_read_dir = await anyio.to_thread.run_sync(
+                resolve_auto_command_read_dir,
+                options.auto_command_read_dir,
+                initial_configuration.tool_context,
+            )
         host: RpcHost | None = None
 
         def publish_event(event: WispEvent) -> None:
@@ -870,6 +875,11 @@ class RpcHost:
                 # A session whose project cannot be entered still resumes, here.
                 _logger.exception("Could not restore the resumed session's folder")
                 startup_move_events = (ErrorEvent(message=_restore_failure(agent, exc)),)
+                startup_read_dir = None
+        # The launch option belongs to the launch project, even when a session
+        # was resumed. Attach it only after the host knows the active project.
+        if agent.project_context_root == project_context_root:
+            approval_policy.auto_command_read_dir = startup_read_dir
 
         async def render_completion_events(events: tuple[WispEvent, ...]) -> None:
             assert host is not None

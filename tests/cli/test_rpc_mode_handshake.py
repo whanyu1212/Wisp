@@ -275,3 +275,29 @@ def test_rpc_mode_shutdown_emits_lifecycle_and_exits(tmp_path: Path) -> None:
 @pytest.fixture(autouse=True)
 def _guard_typed_command_execution(monkeypatch: MonkeyPatch) -> None:
     guard_rpc_command_serialization(monkeypatch)
+
+
+def test_rpc_rejects_invalid_auto_command_read_dir(
+    tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    result = _BaseCliRunner().invoke(
+        app,
+        [
+            "--mode",
+            "rpc",
+            "--session-dir",
+            str(tmp_path / "sessions"),
+            "--auto-command-read-dir",
+            str(tmp_path / "missing"),
+        ],
+        input=_RPC_TEST_HANDSHAKE,
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": "", "WISP_TRUST": "1"},
+    )
+
+    assert result.exit_code == 1, result.output
+    records = _base_jsonl_records(result.stdout)
+    assert [record["type"] for record in records] == ["rpc.handshake.accepted", "error"]
+    assert "missing" in str(records[-1]["message"])

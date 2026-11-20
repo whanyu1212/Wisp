@@ -102,6 +102,7 @@ runtime resources are retained.
 | `startup_trusted` | `bool` | `False` | Caller-supplied initial project trust decision. |
 | `project_context_root` | `Path \| None` | `None` | Root for trust, project settings, skills, and instructions. |
 | `cwd` | `Path \| None` | `None` | Working directory for built-in file and process tools. |
+| `auto_command_read_dir` | `Path \| None` | `None` | Read-only directory grant for eligible macOS Auto commands in the startup project and session. It expires when the session or project changes or Auto commands is disabled. |
 
 `resume` and `continue_latest` cannot both be set. A negative `max_tool_iterations` is rejected.
 When `cwd` is omitted and `project_context_root` is supplied, the project root also becomes the tool

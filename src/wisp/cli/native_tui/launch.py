@@ -61,6 +61,7 @@ class TuiOptions:
     user_model: str | None = None
     user_session_dir: Path | None = None
     user_auth_file: Path | None = None
+    auto_command_read_dir: Path | None = None
 
 
 async def _preflight_tui_options(options: TuiOptions) -> None:
@@ -125,6 +126,8 @@ def _rpc_command(options: TuiOptions) -> tuple[str, ...]:
         command.append("--yes")
     if options.max_tool_iterations is not None:
         command.extend(("--max-tool-iterations", str(options.max_tool_iterations)))
+    if options.auto_command_read_dir is not None:
+        command.extend(("--auto-command-read-dir", str(options.auto_command_read_dir)))
     return tuple(command)
 
 

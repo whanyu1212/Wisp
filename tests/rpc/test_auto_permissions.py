@@ -5,9 +5,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import anyio
 import pytest
 
-from wisp.rpc.host import RpcToolApprovalPolicy
+from tests.support.rpc import RecordingEventWriter
+from wisp.config.runtime import WispConfig
+from wisp.events import PermissionMode, SessionDirectoryChanged
+from wisp.messages import Message
+from wisp.rpc.host import InProcessOptions, RpcHost, RpcToolApprovalPolicy, build_session_runtime
+from wisp.sessions.jsonl import JsonlSessionStore
 from wisp.tools.approval import ToolApprovalPolicy
 from wisp.trust.permissions import (
     BroadRootYoloError,
@@ -141,3 +147,78 @@ def test_failed_save_does_not_change_current_mode(
     with pytest.raises(OSError, match="disk unavailable"):
         policy.set_permissions("auto")
     assert policy.mode == "ask"
+
+
+@pytest.mark.parametrize("other_project", [False, True])
+def test_read_grant_stays_in_launch_project(tmp_path: Path, other_project: bool) -> None:
+    launch = tmp_path / "launch"
+    resumed = tmp_path / "elsewhere" if other_project else launch / "nested"
+    fixtures = tmp_path / "fixtures"
+    for directory in (launch, resumed, fixtures):
+        directory.mkdir()
+    config = WispConfig(provider="fake", session_dir=tmp_path / "sessions")
+
+    async def scenario() -> None:
+        session = JsonlSessionStore(config.session_dir).create()
+        await session.append_message(Message(role="user", content="first"))
+        await session.append_event(
+            SessionDirectoryChanged(session_id=session.session_id, previous_cwd=launch, cwd=resumed)
+        )
+        writer = RecordingEventWriter()
+        runtime = await build_session_runtime(config, connect_mcp=False)
+        try:
+            host = await RpcHost.create(
+                config,
+                runtime,
+                options=InProcessOptions(
+                    cwd=launch,
+                    project_context_root=launch,
+                    resume=session.session_id,
+                    auto_command_read_dir=fixtures,
+                ),
+                write_event=writer,
+                render_events=writer.render_events,
+                wake_by_default=False,
+            )
+            assert host.agent.tool_context.cwd == resumed
+            assert host.approval_policy.auto_command_read_dir == (
+                None if other_project else fixtures
+            )
+        finally:
+            await runtime.aclose()
+
+    anyio.run(scenario)
+
+
+@pytest.mark.parametrize("exit_mode", ["ask", "auto", "yolo"])
+def test_leaving_auto_commands_revokes_read_dir(tmp_path: Path, exit_mode: PermissionMode) -> None:
+    policy = RpcToolApprovalPolicy(ToolApprovalPolicy(), project_path=tmp_path / "project")
+    fixtures = tmp_path / "fixtures"
+    policy.auto_command_read_dir = fixtures
+
+    policy.set_permissions("auto_commands")
+    assert policy.auto_command_read_dir == fixtures
+
+    generation = policy.generation
+    policy.set_permissions(exit_mode)
+    assert policy.generation > generation
+    policy.set_permissions("auto_commands")
+    assert policy.auto_command_read_dir is None
+
+
+@pytest.mark.parametrize("change_project", [False, True])
+def test_scope_change_revokes_read_dir(tmp_path: Path, change_project: bool) -> None:
+    project = tmp_path / "project"
+    policy = RpcToolApprovalPolicy(ToolApprovalPolicy(), project_path=project)
+    policy.auto_command_read_dir = tmp_path / "fixtures"
+    generation = policy.generation
+
+    if change_project:
+        policy.set_project(tmp_path / "other")
+        policy.set_project(project)
+    else:
+        policy.reset_session_grants()
+    assert policy.generation > generation
+    policy.set_permissions("auto_commands")
+
+    assert policy.auto_command_read_dir is None

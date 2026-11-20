@@ -16,6 +16,7 @@ from jsonschema import Draft202012Validator
 from wisp.tools.context import ToolContext
 from wisp.tools.files.paths import is_protected_path
 from wisp.tools.result import ToolError
+from wisp.tools.shell.external_reads import ExternalCommandRead, is_private_command_path
 from wisp.tools.shell.tool import BashTool
 from wisp.tools.shell.working_directory import command_context
 from wisp.trust.scope import is_broad_root
@@ -40,12 +41,6 @@ _REVIEW_ARGUMENTS = frozenset(
 )
 # Refuse composition even inside quotes. False negatives cost a prompt, not a grant.
 _SHELL_SYNTAX = frozenset("|;&<>`$\\\n\r#*?[]{}~")
-_PRIVATE_DIRECTORIES = frozenset(
-    {".git", ".wisp", ".claude", ".codex", ".agents", ".ssh", ".aws", ".azure", ".gnupg"}
-)
-_PRIVATE_FILES = frozenset(
-    {".npmrc", ".pypirc", ".git-credentials", "agents.md", "claude.md", "codex.md"}
-)
 _CREDENTIAL_OPTION = re.compile(r"password|token|secret|api[-_]?key|credential|authorization", re.I)
 _RUNNERS = frozenset({"pytest", "ruff", "mypy"})
 _SCRIPTS = frozenset(
@@ -116,7 +111,12 @@ class CommandReviewer(Protocol):
         ...
 
 
-def command_review_objection(arguments: Mapping[str, object], context: ToolContext) -> str | None:
+def command_review_objection(
+    arguments: Mapping[str, object],
+    context: ToolContext,
+    *,
+    external_read: ExternalCommandRead | None = None,
+) -> str | None:
     """Return why a proposal needs human approval before any model review.
 
     Eligibility alone never grants execution. The caller must require containment
@@ -127,6 +127,7 @@ def command_review_objection(arguments: Mapping[str, object], context: ToolConte
     Args:
         arguments (Mapping[str, object]): Exact built-in bash arguments.
         context (ToolContext): Working directory and existing path restrictions.
+        external_read (ExternalCommandRead | None): Validated single-input read grant for this call.
 
     Returns:
         str | None: A human-approval reason, or None when sandbox preparation may proceed.
@@ -174,6 +175,8 @@ def command_review_objection(arguments: Mapping[str, object], context: ToolConte
             return "Commands in broad or outside-workspace directories need human approval."
     except (OSError, ValueError, RuntimeError, ToolError):
         return "The working directory could not be resolved; human approval required."
+    if external_read is not None and external_read.command == command:
+        return None
     try:
         tokens = shlex.split(command, posix=True)
     except ValueError:
@@ -201,16 +204,6 @@ def _is_sensitive_option(option: str) -> bool:
         option.startswith("--")
         and len(option) >= 3
         and any(sensitive.startswith(option) for sensitive in _LONG_SENSITIVE_OPTIONS)
-    )
-
-
-def _is_private_path(path: Path, resolved: Path) -> bool:
-    return (
-        any(part.casefold() in _PRIVATE_DIRECTORIES for part in (*path.parts, *resolved.parts))
-        or path.name.casefold() in _PRIVATE_FILES
-        or resolved.name.casefold() in _PRIVATE_FILES
-        or path.name.casefold().startswith(".env")
-        or resolved.name.casefold().startswith(".env")
     )
 
 
@@ -301,7 +294,7 @@ def _argument_objection(
             resolved = path.resolve(strict=False)
             if not resolved.is_relative_to(boundary) or is_protected_path(path, context):
                 return "Outside-workspace and protected paths need human approval."
-            if _is_private_path(path, resolved):
+            if is_private_command_path(path, resolved):
                 return "Credential, Git metadata, and agent-control paths need human approval."
     return None
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 from collections.abc import AsyncIterator, Mapping, Sequence
 from pathlib import Path
 
@@ -39,6 +40,7 @@ from wisp.tools.base import Tool
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
 from wisp.tools.result import ToolResult
+from wisp.tools.shell.external_reads import ExternalCommandRead
 from wisp.tools.shell.seatbelt import SeatbeltLaunch
 from wisp.tools.shell.tool import BashTool
 
@@ -87,8 +89,20 @@ def _call(command: str = "ruff check .") -> ToolCall:
 def sandbox_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
     # Approval unit tests isolate the launch preflight; real OS enforcement is
     # exercised through the shared launcher in tests/tools/test_seatbelt.py.
-    def prepare(arguments: Mapping[str, object], context: ToolContext) -> SeatbeltLaunch:
-        return SeatbeltLaunch(str(arguments["command"]), context.cwd.resolve(), "", (), ())
+    def prepare(
+        arguments: Mapping[str, object],
+        context: ToolContext,
+        *,
+        external_read: ExternalCommandRead | None = None,
+    ) -> SeatbeltLaunch:
+        return SeatbeltLaunch(
+            str(arguments["command"]),
+            context.cwd.resolve(),
+            "",
+            (),
+            (),
+            external_read=external_read,
+        )
 
     monkeypatch.setattr("wisp.coding.tool_execution.prepare_seatbelt", prepare)
 
@@ -125,6 +139,51 @@ def test_sandbox_fast_path_skips_model_review(
     decision = next(event for event in events if isinstance(event, ToolApprovalResolved))
     assert decision.rule_id == "sandbox_development_v1" and decision.approved
     assert len(executions) == 1
+
+
+@pytest.mark.parametrize("granted", [True, False])
+def test_external_read_requires_grant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, granted: bool
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    external = tmp_path / "inputs"
+    external.mkdir()
+    target = external / "fixture.txt"
+    target.write_text("approved input")
+    policy = ToolApprovalPolicy.auto_commands()
+    if granted:
+        policy.auto_command_read_dir = external.resolve()
+    provider = _provider()
+    executor = _executor(workspace, provider, policy)
+    command = shlex.join(("/bin/cat", str(target.resolve())))
+    reads: list[Path] = []
+
+    async def read_in_sandbox(
+        self: BashTool, arguments: Mapping[str, object], context: ToolContext
+    ) -> ToolResult:
+        launch = context.command_sandbox
+        assert launch is not None and launch.external_read is not None
+        assert arguments["command"] == launch.command == command
+        reads.append(launch.external_read.target)
+        return ToolResult(text="approved input")
+
+    monkeypatch.setattr(BashTool, "run", read_in_sandbox)
+
+    async def run() -> list[WispEvent]:
+        return [event async for event in executor.execute(_call(command))]
+
+    events = anyio.run(run)
+    assert not provider.calls
+    assert any(isinstance(event, ToolApprovalRequested) for event in events) is not granted
+    assert (
+        any(
+            isinstance(event, ToolApprovalResolved) and event.approved and event.source == "auto"
+            for event in events
+        )
+        is granted
+    )
+    assert reads == ([target.resolve()] if granted else [])
 
 
 @pytest.mark.parametrize("nested", [False, True])

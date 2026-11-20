@@ -6,15 +6,19 @@ import asyncio
 import os
 import shlex
 import socket
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
 
 from wisp.tools.context import ToolContext
 from wisp.tools.result import ToolError
+from wisp.tools.shell.external_reads import external_command_read, resolve_auto_command_read_dir
 from wisp.tools.shell.process import _run_shell
 from wisp.tools.shell.seatbelt import (
+    SeatbeltLaunch,
     activate_seatbelt,
     prepare_seatbelt,
     sandbox_development_command,
@@ -87,6 +91,236 @@ def execute(command: str, context: ToolContext, *, timeout: float = 10) -> tuple
     return asyncio.run(run())
 
 
+@pytest.mark.parametrize("name", ["fixture.txt", "name with spaces.txt"])
+def test_external_read_matches_file(context: ToolContext, tmp_path: Path, name: str) -> None:
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    target = inputs / name
+    target.write_text("granted input")
+    root = resolve_auto_command_read_dir(inputs, context)
+
+    read = external_command_read(shlex.join(("/bin/cat", str(target))), root, context)
+
+    assert read is not None and read.target == target.resolve()
+    assert external_command_read(f"/bin/ls {root}", root, context) is not None
+
+
+def test_external_read_accepts_system_alias(macos: None, context: ToolContext) -> None:
+    with tempfile.TemporaryDirectory(dir="/tmp") as folder:
+        inputs = Path(folder)
+        target = inputs / "fixture.txt"
+        target.write_text("granted input")
+        root = resolve_auto_command_read_dir(inputs, context)
+
+        assert root == inputs.resolve()
+        for operand in (target, target.resolve()):
+            command = shlex.join(("/bin/cat", str(operand)))
+            read = external_command_read(command, root, context)
+            assert read is not None and read.target == target.resolve()
+
+
+def test_external_read_rejects_other_inputs(context: ToolContext, tmp_path: Path) -> None:
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    elsewhere = tmp_path / "other.txt"
+    elsewhere.write_text("not granted")
+    private = inputs / ".env"
+    private.write_text("protected")
+    (inputs / "symlink").symlink_to(elsewhere)
+    os.link(elsewhere, inputs / "hardlink")
+    root = resolve_auto_command_read_dir(inputs, context)
+
+    data_file = inputs / "fixture.txt"
+    data_file.write_text("granted input")
+    (inputs / "local-link").symlink_to(data_file)
+    nested = inputs / "nested"
+    nested.mkdir()
+    refused = (
+        elsewhere,
+        private,
+        inputs / "symlink",
+        inputs / "local-link",
+        inputs / "hardlink",
+        nested / ".." / data_file.name,
+        inputs,
+    )
+    for target in refused:
+        assert external_command_read(f"/bin/cat {target}", root, context) is None
+    assert external_command_read(f"/bin/ls -a {root}", root, context) is None
+    assert external_command_read(f"/bin/ls {root} {root}", root, context) is None
+
+
+@pytest.mark.parametrize("path", ["workspace", "workspace/..", ".wisp", "/"])
+def test_external_grant_rejects_unsafe_roots(
+    context: ToolContext, tmp_path: Path, path: str
+) -> None:
+    (tmp_path / ".wisp").mkdir()
+    with pytest.raises(ToolError, match="External inputs|Auto command read grant"):
+        resolve_auto_command_read_dir(tmp_path / path, context)
+
+
+def test_external_grant_rejects_workspace_alias(context: ToolContext) -> None:
+    alias = context.cwd.with_name(context.cwd.name.upper())
+    if not alias.is_dir() or not alias.samefile(context.cwd):
+        pytest.skip("The test directory is on a case-sensitive filesystem")
+    with pytest.raises(ToolError, match="outside the workspace"):
+        resolve_auto_command_read_dir(alias, context)
+
+
+@pytest.mark.process
+@pytest.mark.parametrize("program", ["/bin/ls", "/bin/cat"])
+def test_external_grant_is_literal(
+    macos: None, context: ToolContext, tmp_path: Path, program: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    target = inputs / "fixture.txt"
+    target.write_text("granted input")
+    sibling = tmp_path / "sibling.txt"
+    sibling.write_text("sibling input")
+    root = resolve_auto_command_read_dir(inputs, context)
+    operand = root if program == "/bin/ls" else target
+    command = shlex.join((program, str(operand)))
+    read = external_command_read(command, root, context)
+    assert read is not None
+    launch = prepare_seatbelt({"command": command}, context, external_read=read)
+
+    def unexpected_shell_discovery() -> str:
+        pytest.fail("An external read must use the system shell")
+
+    monkeypatch.setattr("wisp.tools.shell.process._command_shell", unexpected_shell_discovery)
+
+    async def run() -> tuple[int, str]:
+        with activate_seatbelt(launch):
+            result = await _run_shell(command, cwd=context.cwd, timeout=10, max_output_bytes=2000)
+        return result.exit_code, result.stdout
+
+    def profile_result(*argv: str) -> int:
+        return subprocess.run(
+            ["/usr/bin/sandbox-exec", "-p", launch.profile, *argv],
+            cwd=context.cwd,
+            capture_output=True,
+            timeout=5,
+        ).returncode
+
+    try:
+        assert profile_result("/bin/cat", str(sibling)) != 0
+        assert profile_result("/usr/bin/touch", str(target)) != 0
+        if program == "/bin/ls":
+            assert profile_result("/bin/cat", str(target)) != 0
+        code, stdout = asyncio.run(run())
+        assert code == 0
+        assert ("fixture.txt" if program == "/bin/ls" else "granted input") in stdout
+    finally:
+        launch.cleanup()
+
+
+@pytest.mark.process
+def test_external_read_uses_system_utilities(macos: None, context: ToolContext) -> None:
+    inputs = context.cwd.parent / "inputs"
+    inputs.mkdir()
+    venv_bin = context.cwd / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    workspace_sleep = venv_bin / "sleep"
+    workspace_sleep.write_text("#!/bin/sh\nexit 0\n")
+    workspace_sleep.chmod(0o700)
+
+    root = resolve_auto_command_read_dir(inputs, context)
+    command = f"/bin/ls {root}"
+    read = external_command_read(command, root, context)
+    assert read is not None
+    launch = prepare_seatbelt({"command": command}, context, external_read=read)
+
+    try:
+        probe = subprocess.run(
+            ["/bin/sh", "-c", "command -v sleep"],
+            env=dict(launch.environment),
+            cwd=context.cwd,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        )
+        assert Path(probe.stdout.strip()).parent in {Path("/bin"), Path("/usr/bin")}
+    finally:
+        launch.cleanup()
+
+
+def test_external_read_refuses_workspace_python(
+    macos: None, context: ToolContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inputs = context.cwd.parent / "inputs"
+    inputs.mkdir()
+    interpreter = context.cwd / "python"
+    interpreter.touch()
+
+    root = resolve_auto_command_read_dir(inputs, context)
+    command = f"/bin/ls {root}"
+    read = external_command_read(command, root, context)
+    assert read is not None
+    monkeypatch.setattr("wisp.tools.shell.seatbelt.sys.executable", str(interpreter))
+    with pytest.raises(ToolError, match="require Python outside"):
+        prepare_seatbelt({"command": command}, context, external_read=read)
+
+
+@pytest.mark.process
+@pytest.mark.parametrize("program", ["/bin/ls", "/bin/cat"])
+def test_external_grant_rejects_postcheck_replacement(
+    macos: None, context: ToolContext, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, program: str
+) -> None:
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    directory = inputs / "directory"
+    directory.mkdir()
+    target = directory if program == "/bin/ls" else inputs / "fixture.txt"
+    if program == "/bin/cat":
+        target.write_text("authorized file")
+    root = resolve_auto_command_read_dir(inputs, context)
+    command = shlex.join((program, str(target)))
+    read = external_command_read(command, root, context)
+    assert read is not None
+    launch = prepare_seatbelt({"command": command}, context, external_read=read)
+    validate = SeatbeltLaunch.validate
+
+    def replace_after_validation(self: SeatbeltLaunch, command: str, cwd: Path) -> None:
+        validate(self, command, cwd)
+        target.rename(inputs / "original")
+        if program == "/bin/ls":
+            target.mkdir()
+            (target / "replacement.txt").touch()
+        else:
+            target.write_text("replacement file")
+
+    monkeypatch.setattr(SeatbeltLaunch, "validate", replace_after_validation)
+
+    async def run() -> tuple[int, str, str]:
+        with activate_seatbelt(launch):
+            result = await _run_shell(command, cwd=context.cwd, timeout=10, max_output_bytes=2000)
+        return result.exit_code, result.stdout, result.stderr
+
+    try:
+        code, stdout, stderr = asyncio.run(run())
+        assert code != 0
+        assert "replacement" not in stdout
+        assert "the input changed" in stderr
+    finally:
+        launch.cleanup()
+
+
+def test_external_read_detects_replacement(context: ToolContext, tmp_path: Path) -> None:
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    target = inputs / "fixture.txt"
+    target.write_text("original")
+    root = resolve_auto_command_read_dir(inputs, context)
+    read = external_command_read(f"/bin/cat {target}", root, context)
+    assert read is not None
+    target.rename(inputs / "previous.txt")
+    target.write_text("replacement")
+    with pytest.raises(ToolError, match="External input changed"):
+        read.validate()
+
+
 def test_unsupported_platform_fails_closed(
     context: ToolContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -98,8 +332,6 @@ def test_unsupported_platform_fails_closed(
 def test_launch_rejects_unsupported_platform_before_spawning(
     context: ToolContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from wisp.tools.shell.seatbelt import SeatbeltLaunch
-
     launch = SeatbeltLaunch("echo must-not-run", context.cwd, "", (), ())
 
     async def run() -> None:

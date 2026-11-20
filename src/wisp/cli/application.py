@@ -78,6 +78,16 @@ def _version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
+_AutoCommandReadDirs = Annotated[
+    list[Path] | None,
+    typer.Option(
+        "--auto-command-read-dir",
+        metavar="PATH",
+        help="Allow sandboxed ls and cat to read one external directory in Auto commands (macOS).",
+    ),
+]
+
+
 app = typer.Typer(
     add_completion=False,
     help="Wisp: a terminal-first coding agent. Run without arguments to launch the TUI.",
@@ -180,6 +190,7 @@ def cli_callback(
             help="Optional cap on model/tool rounds. Defaults to uncapped.",
         ),
     ] = None,
+    auto_command_read_dirs: _AutoCommandReadDirs = None,
     timeout: Annotated[
         float | None,
         typer.Option(
@@ -194,6 +205,11 @@ def cli_callback(
     """Run Wisp through its selected or interactive-default interface."""
 
     if ctx.invoked_subcommand is not None:
+        if auto_command_read_dirs:
+            raise typer.BadParameter(
+                "pass this option after 'wisp tui' or with --mode tui/rpc",
+                param_hint="--auto-command-read-dir",
+            )
         return
 
     console = Console(stderr=True)
@@ -222,6 +238,9 @@ def cli_callback(
         if not rpc_handshake_complete:
             return
 
+    auto_command_read_dir = _select_auto_command_read_dir(
+        auto_command_read_dirs, mode=resolved_mode, console=console
+    )
     if (
         prompt is None
         and resolved_mode not in {OutputMode.rpc, OutputMode.tui}
@@ -309,6 +328,7 @@ def cli_callback(
                     config_overrides,
                     project_context_root,
                     handshake_complete=rpc_handshake_complete,
+                    auto_command_read_dir=auto_command_read_dir,
                 )
             )
         elif resolved_mode is OutputMode.tui:
@@ -322,6 +342,7 @@ def cli_callback(
                 approve_unsafe_tools=approve_unsafe_tools,
                 max_tool_iterations=max_tool_iterations,
                 project_trusted=trusted,
+                auto_command_read_dir=auto_command_read_dir,
                 # Forward the user's explicit --provider/--model/--session-dir/--auth-file
                 # (each None unless set) so `--mode tui` honors them; the launcher
                 # does not launder the resolved config into flags.
@@ -427,10 +448,14 @@ def tui_command(
             help="Optional cap on model/tool rounds. Defaults to uncapped.",
         ),
     ] = None,
+    auto_command_read_dirs: _AutoCommandReadDirs = None,
 ) -> None:
     """Start Wisp's terminal interface."""
 
     console = Console(stderr=True)
+    auto_command_read_dir = _select_auto_command_read_dir(
+        auto_command_read_dirs, mode=OutputMode.tui, console=console
+    )
     # Resolve trust before config, preflight, or terminal UI startup. The persisted
     # decision is then observed by the RPC subprocess, so normal TUI launches never
     # enter the terminal interface with project trust still undecided.
@@ -460,6 +485,7 @@ def tui_command(
             approve_unsafe_tools=approve_unsafe_tools,
             max_tool_iterations=max_tool_iterations,
             project_trusted=trusted,
+            auto_command_read_dir=auto_command_read_dir,
             # These default to None on the `tui` command, so they are non-None only when
             # the user explicitly set them — exactly the values that should override a
             # trusted project's settings in the RPC subprocess.
@@ -482,6 +508,26 @@ def main() -> None:
     """Console-script entry point."""
 
     app()
+
+
+def _select_auto_command_read_dir(
+    paths: list[Path] | None, *, mode: OutputMode, console: Console
+) -> Path | None:
+    if not paths:
+        return None
+    if mode not in {OutputMode.tui, OutputMode.rpc}:
+        _exit_with_error(
+            "--auto-command-read-dir applies only to TUI and RPC",
+            mode=mode,
+            console=console,
+        )
+    if len(paths) > 1:
+        _exit_with_error(
+            "--auto-command-read-dir can only be used once",
+            mode=mode,
+            console=console,
+        )
+    return paths[0]
 
 
 def _validate_session_and_iteration_options(
@@ -523,6 +569,7 @@ def _run_tui_from_cli_options(
     user_model: str | None = None,
     user_session_dir: Path | None = None,
     user_auth_file: Path | None = None,
+    auto_command_read_dir: Path | None = None,
 ) -> None:
     from wisp.cli.native_tui.launch import TuiOptions
     from wisp.cli.native_tui.rust_launcher import RustTuiLaunchError, run_rust_tui
@@ -543,6 +590,7 @@ def _run_tui_from_cli_options(
                 user_model=user_model,
                 user_session_dir=user_session_dir,
                 user_auth_file=user_auth_file,
+                auto_command_read_dir=auto_command_read_dir,
             )
         )
     except RustTuiLaunchError as exc:
