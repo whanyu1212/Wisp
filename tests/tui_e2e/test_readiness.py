@@ -81,27 +81,36 @@ class _TuiProcess:
                 break
         pytest.fail(f"{failure}; terminal tail={bytes(self.output[-8000:])!r}")
 
-    def submit(self, predicate: Callable[[bytes], bool], *, failure: str) -> None:
+    def submit(
+        self,
+        predicate: Callable[[bytes], bool],
+        *,
+        failure: str,
+        timeout: float = 15,
+    ) -> None:
         """Press Enter until ``predicate`` holds, again while a refresh refuses it.
 
         After a run the TUI refreshes session metadata, and a submit made during
         that refresh is refused with a notice and stays in the composer.
         """
+        offset = len(self.output)
         self.send(b"\r")
         last_submit = time.monotonic()
 
         def settled(output: bytes) -> bool:
-            nonlocal last_submit
+            nonlocal last_submit, offset
             if predicate(output):
                 return True
-            if time.monotonic() - last_submit > 0.5 and screen_shows(
-                output, "metadata refresh to finish"
+            if time.monotonic() - last_submit > 0.5 and (
+                b"metadata refresh to finish" in output[offset:]
+                or screen_shows(output, "metadata refresh to finish")
             ):
+                offset = len(output)
                 self.send(b"\r")
                 last_submit = time.monotonic()
             return False
 
-        self.wait_until(settled, failure=failure)
+        self.wait_until(settled, timeout=timeout, failure=failure)
 
     def wait_for(self, *markers: bytes, since: int = 0, failure: str) -> bytes:
         return self.wait_until(
@@ -135,13 +144,21 @@ class _TuiProcess:
                 pytest.fail(f"{failure}; last full repaint={frame!r}")
 
     def wait_ready(self) -> None:
-        self.wait_for(b"ctx", b"~", failure="Rust TUI context status did not render")
+        # Wait past initial `ctx ~?` / `ctx ~…` placeholders until startup
+        # session stats render, so prompt submits are not rejected as refreshing.
+        self.wait_for(b"ctx", b"%", failure="Rust TUI startup context stats did not render")
         self.resize(width=101)
         offset = len(self.output)
         # The composer border styles the model and mode apart, so read it from the
         # replayed screen rather than the raw bytes.
         self.wait_until(
-            lambda output: welcome_ready(output[offset:]) and screen_shows(output, "─ fake "),
+            lambda output: (
+                welcome_ready(output[offset:])
+                and screen_shows(output, "─ fake ")
+                and not screen_shows(output, "ctx ~?")
+                and not screen_shows(output, "ctx ~…")
+                and not screen_shows(output, "Refreshing context")
+            ),
             failure="Rust TUI did not finish startup hydration",
         )
 
@@ -743,11 +760,10 @@ def test_unicode_multiline_large_paste_is_compact_but_submits_exact_text(tmp_pat
         )
 
         offset = len(tui.output)
-        tui.send(b"\r")
         # Do not require a fresh "idle" after the submit: the fake reply can finish before
         # the running footer is painted, and an unchanged footer is never redrawn. With the reply
         # painted, run_settled's last-idle-after-last-working check proves the run ended.
-        tui.wait_until(
+        tui.submit(
             lambda output: run_settled(output, offset, b"END", *marker_fragments),
             timeout=20,
             failure="large pasted prompt did not complete with compact echo",
