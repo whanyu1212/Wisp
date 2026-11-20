@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import shutil
@@ -12,6 +13,7 @@ from collections.abc import Mapping
 from contextlib import suppress
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Literal
 from urllib.parse import urlsplit
 
 import anyio
@@ -20,10 +22,16 @@ from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import WebSocketException
 
 from wisp.coding.browser_control import BrowserControlError, BrowserInteraction
-from wisp.events import MAX_BROWSER_URL_CHARS, MAX_LIVE_BROWSER_FRAME_CHARS, BrowserViewportUpdated
+from wisp.events import (
+    MAX_BROWSER_URL_CHARS,
+    MAX_LIVE_BROWSER_FRAME_CHARS,
+    MAX_LIVE_BROWSER_HEIGHT,
+    MAX_LIVE_BROWSER_WIDTH,
+    BrowserViewportUpdated,
+    LiveBrowserViewport,
+)
 
-_WIDTH = 900
-_HEIGHT = 600
+_INITIAL_VIEWPORT = LiveBrowserViewport(width=900, height=600, device_scale_factor=1)
 _STARTUP_TIMEOUT = 20
 _TIMEOUT = 10
 _CHROME_MAC = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
@@ -91,6 +99,9 @@ class LiveBrowser:
         self._pending: dict[int, asyncio.Future[dict[str, object]]] = {}
         self._next_id = 0
         self._first_frame = anyio.Event()
+        self._viewport: LiveBrowserViewport | None = None
+        self._screencast_id = 0
+        self._capture_loader: str | None = None
         self._navigation = anyio.Event()
         self._loader: str | None = None
         self._main_frame: str | None = None
@@ -114,34 +125,141 @@ class LiveBrowser:
         url = validate_browser_url(url)
         await self.close()
         executable = _chrome_binary()
-        self._first_frame = anyio.Event()
         try:
             with anyio.fail_after(_STARTUP_TIMEOUT):
                 await self._tasks.start(self._run, executable)
-                await self._command(
-                    "Emulation.setDeviceMetricsOverride",
-                    {"width": _WIDTH, "height": _HEIGHT, "deviceScaleFactor": 1, "mobile": False},
-                )
+                await self._set_metrics(_INITIAL_VIEWPORT)
                 await self._command("Page.enable", {})
                 await self._command("Inspector.enable", {})
                 await self._command("Page.bringToFront", {})
-                result = await self._command("Page.navigate", {"url": url})
-                if result.get("errorText") or result.get("isDownload"):
-                    raise BrowserControlError("Chromium could not navigate to the requested page")
-                loader = result.get("loaderId")
-                if isinstance(loader, str):
-                    while self._loader != loader and self._socket is not None:
-                        await self._navigation.wait()
-                        self._navigation = anyio.Event()
-                await self._command("Page.startScreencast", {"format": "png"})
-                await self._first_frame.wait()
-                frame = self.take_frame()
-                if frame is None:
-                    raise BrowserControlError("Chromium did not return a usable first frame")
-                return frame
+                await self._navigate(url)
+                return await self._start_capture(_INITIAL_VIEWPORT)
         except BaseException:
             await self.close()
             raise
+
+    async def navigate(self, url: str) -> None:
+        """Navigate the existing tab to a validated HTTP or HTTPS address."""
+        await self._navigate(validate_browser_url(url))
+
+    async def _navigate(self, url: str) -> None:
+        result = await self._command("Page.navigate", {"url": url})
+        if result.get("errorText") or result.get("isDownload"):
+            raise BrowserControlError("Chromium could not navigate to the requested page")
+        loader = result.get("loaderId")
+        if isinstance(loader, str):
+            with anyio.move_on_after(_TIMEOUT):
+                while self._loader != loader and self._socket is not None:
+                    await self._navigation.wait()
+                    self._navigation = anyio.Event()
+            if self._loader != loader:
+                raise BrowserControlError(
+                    "Chromium did not finish navigating to the requested page"
+                )
+
+    async def move_in_history(self, offset: Literal[-1, 1]) -> None:
+        """Traverse one entry in this tab's history, staying put at either end."""
+        history = await self._command("Page.getNavigationHistory", {})
+        current = history.get("currentIndex")
+        entries = history.get("entries")
+        if not isinstance(current, int) or not isinstance(entries, list):
+            raise BrowserControlError("Chromium did not return its navigation history")
+        index = current + offset
+        if 0 <= index < len(entries):
+            await self._change_document(
+                "Page.navigateToHistoryEntry", {"entryId": entries[index]["id"]}
+            )
+
+    async def _change_document(self, method: str, params: Mapping[str, object]) -> None:
+        self._navigation = anyio.Event()
+        await self._command(method, params)
+        with anyio.move_on_after(_TIMEOUT):
+            await self._navigation.wait()
+            return
+        raise BrowserControlError("Chromium did not finish the requested navigation")
+
+    async def poll_frame(self) -> BrowserViewportUpdated | None:
+        """Return the newest frame, starting a fresh capture after a document change."""
+        if self._viewport is not None and self._capture_loader != self._loader:
+            return await self._restart_capture(self._viewport, resize=False)
+        return self.take_frame()
+
+    async def resize(self, viewport: LiveBrowserViewport) -> BrowserViewportUpdated:
+        """Apply CSS layout and device scale, then return a frame from the new capture.
+
+        Args:
+            viewport: Bounded CSS dimensions and device pixel ratio.
+
+        Returns:
+            The first matching frame, including on a static page.
+        """
+        return await self._restart_capture(viewport, resize=True)
+
+    async def _restart_capture(
+        self, viewport: LiveBrowserViewport, *, resize: bool
+    ) -> BrowserViewportUpdated:
+        # Stop retaining old frames before the first await. Chromium tags each new
+        # screencast with a new sessionId, including scale-only changes.
+        self._viewport = None
+        self._frame = self._delivered = None
+        try:
+            await self._command("Page.stopScreencast", {})
+            if resize:
+                await self._set_metrics(viewport)
+            return await self._start_capture(viewport)
+        except BaseException:
+            # Once capture has stopped its state is ambiguous on interruption.
+            await self.close()
+            raise
+
+    async def _set_metrics(self, viewport: LiveBrowserViewport) -> None:
+        await self._command(
+            "Emulation.setDeviceMetricsOverride",
+            {
+                "width": viewport.width,
+                "height": viewport.height,
+                "deviceScaleFactor": viewport.device_scale_factor,
+                "mobile": False,
+            },
+        )
+
+    async def _start_capture(self, viewport: LiveBrowserViewport) -> BrowserViewportUpdated:
+        self._viewport = viewport
+        # A redirect can commit during capture startup. Retire that generation
+        # and retry within the same deadline to bind pixels to the new document.
+        with anyio.move_on_after(_TIMEOUT):
+            while True:
+                self._capture_loader = self._loader
+                self._first_frame = anyio.Event()
+                self._screencast_id += 1
+                # A CDP metrics or navigation acknowledgement can precede repaint.
+                # A one-pixel surface copy waits for the compositor on static pages.
+                await self._command(
+                    "Page.captureScreenshot",
+                    {
+                        "captureBeyondViewport": False,
+                        "clip": {"x": 0, "y": 0, "width": 1, "height": 1, "scale": 1},
+                    },
+                )
+                await self._command(
+                    "Page.startScreencast",
+                    {
+                        "format": "png",
+                        "maxWidth": min(
+                            MAX_LIVE_BROWSER_WIDTH, viewport.width * viewport.device_scale_factor
+                        ),
+                        "maxHeight": min(
+                            MAX_LIVE_BROWSER_HEIGHT, viewport.height * viewport.device_scale_factor
+                        ),
+                    },
+                )
+                await self._first_frame.wait()
+                if (frame := self.take_frame()) is not None:
+                    return frame
+                if self._capture_loader == self._loader:
+                    break
+                await self._command("Page.stopScreencast", {})
+        raise BrowserControlError("Chromium did not return a frame for the requested viewport")
 
     async def close(self) -> None:
         """Stop capture and reap the browser before returning, even on cancellation."""
@@ -170,6 +288,9 @@ class LiveBrowser:
                     [
                         executable,
                         "--headless",
+                        # CDP captures the compositor surface. Emulating DPR alone
+                        # changes page layout but leaves native frames at 1×.
+                        "--force-device-scale-factor=2",
                         "--no-first-run",
                         "--no-default-browser-check",
                         *keychain_args,
@@ -233,6 +354,9 @@ class LiveBrowser:
             self._socket = None
             self._target = None
             self._frame = self._delivered = self._url = self._loader = self._main_frame = None
+            self._viewport = None
+            self._screencast_id = 0
+            self._capture_loader = None
             self._navigation.set()
             self._first_frame.set()
             stopped.set()
@@ -260,6 +384,9 @@ class LiveBrowser:
                         case "Page.frameNavigated":
                             frame = params["frame"]
                             if "parentId" not in frame:
+                                if self._loader != frame["loaderId"]:
+                                    self._frame = self._delivered = None
+                                    self._first_frame.set()
                                 self._main_frame = frame["id"]
                                 self._loader = frame["loaderId"]
                                 self._url = frame["url"]
@@ -267,8 +394,9 @@ class LiveBrowser:
                         case "Page.navigatedWithinDocument":
                             if params["frameId"] == self._main_frame:
                                 self._url = params["url"]
+                                self._navigation.set()
                         case "Page.screencastFrame":
-                            self._accept_frame(params.get("data"))
+                            self._accept_frame(params)
                             await self._send(
                                 "Page.screencastFrameAck", {"sessionId": params["sessionId"]}
                             )
@@ -279,8 +407,22 @@ class LiveBrowser:
                 if not reply.done():
                     reply.set_result({"error": True})
 
-    def _accept_frame(self, data: object) -> None:
-        if isinstance(data, str) and 0 < len(data) <= MAX_LIVE_BROWSER_FRAME_CHARS:
+    def _accept_frame(self, params: Mapping[str, object]) -> None:
+        viewport = self._viewport
+        capture_id = params.get("sessionId")
+        metadata = params.get("metadata")
+        data = params.get("data")
+        if (
+            viewport is not None
+            and self._capture_loader == self._loader
+            and capture_id == self._screencast_id
+            and isinstance(metadata, dict)
+            and metadata.get("deviceWidth") == viewport.width
+            and metadata.get("deviceHeight") == viewport.height
+            and isinstance(data, str)
+            and len(data) <= MAX_LIVE_BROWSER_FRAME_CHARS
+            and _png_matches_viewport(data, viewport)
+        ):
             self._frame = data
             self._first_frame.set()
 
@@ -330,15 +472,17 @@ class LiveBrowser:
         """
         if self._socket is None or self._scope is None or self._scope.cancel_called:
             raise BrowserControlError("The live browser is closed; reopen it with /browser live")
-        if self._frame is None or (self._frame, self._url) == self._delivered:
+        viewport = self._viewport
+        if viewport is None or self._frame is None or (self._frame, self._url) == self._delivered:
             return None
         self._delivered = (self._frame, self._url)
         return BrowserViewportUpdated(
             live_png=self._frame,
             url=self._url[:MAX_BROWSER_URL_CHARS] if self._url else None,
             title="Live Chromium",
-            viewport_width=_WIDTH,
-            viewport_height=_HEIGHT,
+            viewport_width=viewport.width,
+            viewport_height=viewport.height,
+            live_device_scale=viewport.device_scale_factor,
         )
 
     async def interact(self, request: BrowserInteraction) -> None:
@@ -374,14 +518,23 @@ class LiveBrowser:
                     keydown = {"type": "keyDown", "text": "\r", "unmodifiedText": "\r"}
                 await self._command("Input.dispatchKeyEvent", {**keydown, **params})
                 await self._command("Input.dispatchKeyEvent", {"type": "keyUp", **params})
+            case "back":
+                await self.move_in_history(-1)
             case "reload":
-                await self._command("Page.reload", {})
+                await self._change_document("Page.reload", {})
             case _:
                 raise BrowserControlError("This action is unavailable in the live browser preview")
 
     async def _mouse(self, request: BrowserInteraction) -> None:
         x, y = request.x, request.y
-        if x is None or y is None or not (0 <= x < _WIDTH and 0 <= y < _HEIGHT):
+        viewport = self._viewport
+        if (
+            viewport is None
+            or self._frame is None
+            or x is None
+            or y is None
+            or not (0 <= x < viewport.width and 0 <= y < viewport.height)
+        ):
             raise BrowserControlError("Click or scroll inside the live browser frame")
         params = {"x": x, "y": y}
         if request.action == "scroll":
@@ -417,6 +570,37 @@ class LiveBrowser:
                     "clickCount": count,
                 },
             )
+
+
+def _png_matches_viewport(data: str, viewport: LiveBrowserViewport) -> bool:
+    # CDP can describe new CSS bounds while encoding the previous surface.
+    # Read just the signature and IHDR dimensions (24 bytes / 32 base64 chars).
+    try:
+        header = base64.b64decode(data[:32], validate=True)
+    except ValueError:
+        return False
+    if len(header) != 24 or not header.startswith(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR"):
+        return False
+    width = int.from_bytes(header[16:20], "big")
+    height = int.from_bytes(header[20:24], "big")
+    scale = min(
+        viewport.device_scale_factor,
+        MAX_LIVE_BROWSER_WIDTH / viewport.width,
+        MAX_LIVE_BROWSER_HEIGHT / viewport.height,
+    )
+    # Chromium may fit twice: round the short edge to a whole pixel, then
+    # fit the long edge to preserve aspect. At 1152×45 CSS, a 1600×62.5 fit
+    # can therefore produce a perfectly valid 1587×62 PNG.
+    expected_short = min(viewport.width, viewport.height) * scale
+    aspect_error = abs(width * viewport.height - height * viewport.width)
+    return (
+        0 < width <= min(MAX_LIVE_BROWSER_WIDTH, viewport.width * viewport.device_scale_factor)
+        and 0
+        < height
+        <= min(MAX_LIVE_BROWSER_HEIGHT, viewport.height * viewport.device_scale_factor)
+        and abs(min(width, height) - expected_short) <= 0.501
+        and aspect_error <= max(viewport.width, viewport.height)
+    )
 
 
 async def _debugger_address(profile: Path, process: anyio.abc.Process) -> str:

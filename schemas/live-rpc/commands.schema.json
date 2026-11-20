@@ -269,6 +269,9 @@
         "refresh",
         "live_open",
         "live_frame",
+        "live_navigate",
+        "live_forward",
+        "live_resize",
         "live_close"
       ],
       "type": "string"
@@ -278,16 +281,23 @@
       "allOf": [
         {
           "else": {
-            "properties": {
-              "url": {
-                "type": "null"
-              }
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "url"
+                  ]
+                }
+              ]
             }
           },
           "if": {
             "properties": {
               "action": {
-                "const": "live_open"
+                "enum": [
+                  "live_open",
+                  "live_navigate"
+                ]
               }
             },
             "required": [
@@ -297,6 +307,34 @@
           "then": {
             "required": [
               "url"
+            ]
+          }
+        },
+        {
+          "else": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "viewport"
+                  ]
+                }
+              ]
+            }
+          },
+          "if": {
+            "properties": {
+              "action": {
+                "const": "live_resize"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "required": [
+              "viewport"
             ]
           }
         },
@@ -624,7 +662,10 @@
                   "refresh",
                   "live_open",
                   "live_frame",
-                  "live_close"
+                  "live_close",
+                  "live_navigate",
+                  "live_forward",
+                  "live_resize"
                 ]
               }
             },
@@ -793,6 +834,13 @@
             }
           ],
           "title": "Url"
+        },
+        "viewport": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LiveBrowserViewport"
+            }
+          ]
         },
         "x": {
           "anyOf": [
@@ -2124,6 +2172,37 @@
         "type"
       ],
       "title": "InitCommand",
+      "type": "object"
+    },
+    "LiveBrowserViewport": {
+      "additionalProperties": false,
+      "description": "CSS layout size and device pixel ratio requested for an isolated Chromium tab.",
+      "properties": {
+        "device_scale_factor": {
+          "maximum": 2,
+          "minimum": 1,
+          "title": "Device Scale Factor",
+          "type": "integer"
+        },
+        "height": {
+          "maximum": 1200,
+          "minimum": 1,
+          "title": "Height",
+          "type": "integer"
+        },
+        "width": {
+          "maximum": 1600,
+          "minimum": 1,
+          "title": "Width",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "width",
+        "height",
+        "device_scale_factor"
+      ],
+      "title": "LiveBrowserViewport",
       "type": "object"
     },
     "LoginMcpServerCommand": {

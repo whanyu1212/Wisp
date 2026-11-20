@@ -104,7 +104,14 @@ def _session_image_store(
 def _to_browser_interaction(command: BrowserInteractCommand) -> BrowserInteraction:
     action = command.action
     match action:
-        case "live_open" | "live_frame" | "live_close":
+        case (
+            "live_open"
+            | "live_frame"
+            | "live_close"
+            | "live_resize"
+            | "live_navigate"
+            | "live_forward"
+        ):
             raise AssertionError("Live browser lifecycle action is not an interaction")
     return BrowserInteraction(
         action=action,
@@ -139,7 +146,7 @@ async def _run_browser_interact(
     entry_count = session_state.entry_count
     try:
         with cancel_scope:
-            if command.live or command.action in {"live_open", "live_frame", "live_close"}:
+            if command.live or command.action.startswith("live_"):
                 await _run_live_browser_command(command, agent, lifecycle, live_browser)
             else:
                 if mcp_servers is not None:
@@ -204,10 +211,22 @@ async def _run_live_browser_command(
     if command.action == "live_open":
         assert command.url is not None
         frame = await browser.open(command.url)
+    elif command.action == "live_resize":
+        assert command.viewport is not None
+        frame = await browser.resize(command.viewport)
+    elif command.action == "live_navigate":
+        assert command.url is not None
+        await browser.navigate(command.url)
+        frame = await browser.poll_frame()
+    elif command.action == "live_forward":
+        await browser.move_in_history(1)
+        frame = await browser.poll_frame()
     elif command.action in {"live_frame", "refresh"}:
-        frame = browser.take_frame()
+        frame = await browser.poll_frame()
     else:
         await browser.interact(_to_browser_interaction(command))
-        return
+        if command.action not in {"back", "reload"}:
+            return
+        frame = await browser.poll_frame()
     if frame is not None:
         lifecycle.write_event(frame)

@@ -14,8 +14,8 @@ use crate::tool_cards::{
 pub use crate::tool_detail::ToolDetailSource;
 use crate::transcript::SharedTranscript;
 use wisp_protocol::commands::{
-    ApprovalScope, BrowserKeyModifier, BrowserMouseButton, BrowserNavAction, ModelConfiguration,
-    QueueKind, WispTypedClientRpcCommands,
+    ApprovalScope, BrowserKeyModifier, BrowserMouseButton, BrowserNavAction, LiveBrowserViewport,
+    ModelConfiguration, QueueKind, WispTypedClientRpcCommands,
 };
 
 pub use wisp_protocol::commands::AgentMode;
@@ -830,6 +830,7 @@ impl RunProgress {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BrowserViewport {
     pub live: bool,
+    pub live_device_scale: Option<u32>,
     pub image: Option<composer_images::TranscriptImage>,
     pub url: Option<String>,
     pub title: Option<String>,
@@ -841,9 +842,20 @@ pub struct BrowserViewport {
     pub generation: u64,
 }
 
+impl BrowserViewport {
+    pub(crate) fn live_geometry(&self) -> Option<LiveBrowserViewport> {
+        self.live.then_some(LiveBrowserViewport {
+            width: self.viewport_width?,
+            height: self.viewport_height?,
+            device_scale_factor: self.live_device_scale.unwrap_or(1),
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct BrowserViewportInput {
     pub live: bool,
+    pub live_device_scale: Option<u32>,
     pub image: Option<composer_images::TranscriptImage>,
     pub url: Option<String>,
     pub title: Option<String>,
@@ -878,6 +890,10 @@ pub enum BrowserInteractRequest {
     LiveOpen {
         url: String,
     },
+    LiveNavigate {
+        url: String,
+    },
+    LiveResize(LiveBrowserViewport),
 }
 
 impl std::fmt::Debug for BrowserInteractRequest {
@@ -919,6 +935,8 @@ impl std::fmt::Debug for BrowserInteractRequest {
                 .finish(),
             Self::Nav(action) => f.debug_tuple("Nav").field(action).finish(),
             Self::LiveOpen { .. } => f.write_str("LiveOpen([REDACTED])"),
+            Self::LiveNavigate { .. } => f.write_str("LiveNavigate([REDACTED])"),
+            Self::LiveResize(viewport) => f.debug_tuple("LiveResize").field(viewport).finish(),
         }
     }
 }
@@ -927,6 +945,8 @@ impl std::fmt::Debug for BrowserInteractRequest {
 enum BrowserCommandCompletion {
     Input,
     Frame,
+    Resize,
+    Navigation,
     Close,
 }
 
@@ -1017,6 +1037,8 @@ pub struct UiState {
     pub(crate) codemode_picker_open: bool,
     pub(crate) project_files: project_files::ProjectFiles,
     pub browser_viewport: Option<BrowserViewport>,
+    pub(crate) browser_requested_geometry: Option<LiveBrowserViewport>,
+    pub(crate) browser_page_revision: u64,
     browser_interact_pending: std::collections::BTreeMap<String, BrowserCommandCompletion>,
     pending_queue_submissions: std::collections::BTreeMap<String, PendingQueueSubmission>,
     pending_queue_restore: Option<PendingQueueRestore>,
@@ -1114,6 +1136,8 @@ impl UiState {
             side_panel_visible: false,
             codemode_picker_open: false,
             browser_viewport: None,
+            browser_requested_geometry: None,
+            browser_page_revision: 0,
             browser_interact_pending: std::collections::BTreeMap::new(),
             pending_queue_submissions: std::collections::BTreeMap::new(),
             pending_queue_restore: None,
@@ -1127,6 +1151,21 @@ impl UiState {
 
     pub fn browser_interact_in_flight(&self) -> bool {
         !self.browser_interact_pending.is_empty()
+    }
+
+    pub(crate) fn browser_page_transition_in_flight(&self) -> bool {
+        self.browser_interact_pending.values().any(|pending| {
+            matches!(
+                pending,
+                BrowserCommandCompletion::Resize | BrowserCommandCompletion::Navigation
+            )
+        })
+    }
+
+    pub(crate) fn browser_navigation_in_flight(&self) -> bool {
+        self.browser_interact_pending
+            .values()
+            .any(|pending| *pending == BrowserCommandCompletion::Navigation)
     }
 
     pub(crate) fn queue_management_available(&self, token: &str) -> bool {
@@ -5736,6 +5775,15 @@ fn handle_backend_event(
             {
                 return Ok(Vec::new());
             }
+            if update.live
+                && state
+                    .browser_viewport
+                    .as_ref()
+                    .and_then(|view| view.url.as_ref())
+                    != update.url.as_ref()
+            {
+                state.browser_page_revision = state.browser_page_revision.wrapping_add(1);
+            }
             let generation = state
                 .browser_viewport
                 .as_ref()
@@ -5747,6 +5795,7 @@ fn handle_backend_event(
             let updated_at_ms = crate::tool_cards::timestamp_ms(&update.timestamp);
             state.browser_viewport = Some(BrowserViewport {
                 live: update.live,
+                live_device_scale: update.live_device_scale,
                 image: update
                     .image
                     .or_else(|| previous.as_ref().and_then(|prev| prev.image.clone())),
@@ -6377,6 +6426,8 @@ fn apply_project_config(
 
 fn clear_browser_viewport(state: &mut UiState) {
     state.browser_viewport = None;
+    state.browser_page_revision = state.browser_page_revision.wrapping_add(1);
+    state.browser_requested_geometry = None;
     state.browser_interact_pending.clear();
 }
 
@@ -6401,6 +6452,14 @@ fn handle_browser_interact(
     let completion = match request {
         BrowserInteractRequest::Nav(BrowserNavAction::LiveFrame) => BrowserCommandCompletion::Frame,
         BrowserInteractRequest::Nav(BrowserNavAction::LiveClose) => BrowserCommandCompletion::Close,
+        BrowserInteractRequest::LiveResize(_) => BrowserCommandCompletion::Resize,
+        BrowserInteractRequest::LiveNavigate { .. }
+        | BrowserInteractRequest::Nav(BrowserNavAction::LiveForward) => {
+            BrowserCommandCompletion::Navigation
+        }
+        BrowserInteractRequest::Nav(BrowserNavAction::Back | BrowserNavAction::Reload) if live => {
+            BrowserCommandCompletion::Navigation
+        }
         _ => BrowserCommandCompletion::Input,
     };
     let command = match request {
@@ -6426,7 +6485,16 @@ fn handle_browser_interact(
             WispTypedClientRpcCommands::browser_interact_nav(&id, action)?
         }
         BrowserInteractRequest::LiveOpen { url } => {
+            state.browser_requested_geometry = None;
             WispTypedClientRpcCommands::browser_live_open(&id, &url)?
+        }
+        BrowserInteractRequest::LiveNavigate { url } => {
+            WispTypedClientRpcCommands::browser_live_navigate(&id, &url)?
+        }
+        BrowserInteractRequest::LiveResize(viewport) => {
+            let command = WispTypedClientRpcCommands::browser_live_resize(&id, viewport)?;
+            state.browser_requested_geometry = Some(viewport);
+            command
         }
     };
     let command = if live {
@@ -6456,15 +6524,29 @@ fn finish_command(
             clear_browser_viewport(state);
             return Ok(vec![UiEffect::RequestRender]);
         }
+        if ok && completion == BrowserCommandCompletion::Navigation {
+            state.browser_page_revision = state.browser_page_revision.wrapping_add(1);
+            return Ok(vec![UiEffect::RequestRender]);
+        }
         if !ok {
             let detail = error.unwrap_or_else(|| "browser interaction failed".into());
-            if completion != BrowserCommandCompletion::Input
-                && detail
-                    == "Finish or cancel the active operation before interacting with the browser"
+            if matches!(
+                completion,
+                BrowserCommandCompletion::Frame
+                    | BrowserCommandCompletion::Close
+                    | BrowserCommandCompletion::Resize
+            ) && detail
+                == "Finish or cancel the active operation before interacting with the browser"
             {
+                if completion == BrowserCommandCompletion::Resize {
+                    state.browser_requested_geometry = None;
+                }
                 return Ok(Vec::new());
             }
-            if completion == BrowserCommandCompletion::Frame {
+            if matches!(
+                completion,
+                BrowserCommandCompletion::Frame | BrowserCommandCompletion::Resize
+            ) {
                 clear_browser_viewport(state);
             }
             return Ok(vec![

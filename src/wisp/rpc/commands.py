@@ -29,6 +29,7 @@ from wisp.events import (
     CodemodePresentation,
     CodemodeSetting,
     ImagePart,
+    LiveBrowserViewport,
     PermissionMode,
     QueueKind,
     QueueMode,
@@ -70,6 +71,9 @@ BrowserInteractAction = TypeAliasType(
         "refresh",
         "live_open",
         "live_frame",
+        "live_navigate",
+        "live_forward",
+        "live_resize",
         "live_close",
     ],
 )
@@ -886,6 +890,7 @@ class BrowserInteractCommand(RpcCommandModel):
     action: BrowserInteractAction
     live: Literal[True] | None = None
     url: str | None = Field(default=None, min_length=1, max_length=2048, repr=False)
+    viewport: LiveBrowserViewport | None = None
     x: int | None = Field(default=None, ge=0, le=MAX_RPC_BROWSER_COORD)
     y: int | None = Field(default=None, ge=0, le=MAX_RPC_BROWSER_COORD)
     button: BrowserMouseButton | None = None
@@ -920,9 +925,14 @@ class BrowserInteractCommand(RpcCommandModel):
 
     @model_validator(mode="after")
     def _validate_action_fields(self) -> Self:
-        if self.action == "live_open":
+        if self.action == "live_resize":
+            if self.viewport is None:
+                raise ValueError("browser_interact live_resize requires viewport dimensions")
+        else:
+            self._reject_disallowed_fields("viewport")
+        if self.action in {"live_open", "live_navigate"}:
             if self.url is None:
-                raise ValueError("browser_interact live_open requires a URL")
+                raise ValueError(f"browser_interact {self.action} requires a URL")
         else:
             self._reject_disallowed_fields("url")
         if self.action == "click":

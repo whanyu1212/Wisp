@@ -39,6 +39,7 @@ mod key_help;
 #[cfg(test)]
 mod keybinding_tests;
 mod keybindings;
+mod live_browser_ui;
 mod logo_picker;
 mod markdown;
 mod mcp_manager;
@@ -202,7 +203,9 @@ const PEEK_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const BROWSER_TYPE_DEBOUNCE: Duration = Duration::from_millis(80);
 const BROWSER_TYPE_FLUSH_CHARS: usize = 64;
 const BROWSER_TYPE_MAX_CHARS: usize = 1_024;
-const LIVE_BROWSER_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(66);
+const LIVE_BROWSER_FRAME_INTERVAL: Duration = Duration::from_millis(33);
+const LIVE_BROWSER_RESIZE_INTERVAL: Duration = Duration::from_millis(100);
+const LIVE_BROWSER_TYPE_WINDOW: Duration = Duration::from_millis(12);
 const BROWSER_REFRESH_INTERVAL: Duration = Duration::from_millis(1_500);
 pub(crate) const BROWSER_DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
@@ -234,10 +237,15 @@ impl BrowserTypingBuffer {
         self.flush_at = None;
     }
 
-    fn push(&mut self, ch: char, now: std::time::Instant) -> bool {
+    fn push(&mut self, ch: char, now: std::time::Instant, live: bool) -> bool {
         self.text.push(ch);
         self.chars += 1;
-        self.flush_at = Some(now + BROWSER_TYPE_DEBOUNCE);
+        if live {
+            // Bound the delay from the first character even if more keep arriving.
+            self.flush_at.get_or_insert(now + LIVE_BROWSER_TYPE_WINDOW);
+        } else {
+            self.flush_at = Some(now + BROWSER_TYPE_DEBOUNCE);
+        }
         self.chars >= BROWSER_TYPE_FLUSH_CHARS
     }
 
@@ -1762,6 +1770,7 @@ impl LiveUi {
             || self.state.browser_viewport.is_none()
         {
             self.exit_browser_takeover();
+            self.clear_browser_address();
         } else if is_browser_viewport_update && self.browser_takeover_active() {
             self.bump_browser_refresh_deadline();
         }
@@ -2112,10 +2121,19 @@ impl LiveUi {
         connection: &ConnectionInfo,
     ) -> Result<(), Error> {
         if let Ok(size) = terminal.size() {
-            self.side_panel.observe_width(size.width);
+            let live_browser = self
+                .state
+                .browser_viewport
+                .as_ref()
+                .is_some_and(|viewport| viewport.live);
+            self.side_panel
+                .observe_terminal_width(size.width, live_browser);
         }
         self.side_panel
             .observe_browser_viewport(self.state.browser_viewport.as_ref());
+        if !self.browser_address_active() {
+            self.clear_browser_address();
+        }
         if !self.side_panel.browser_interacting() {
             self.clear_browser_takeover_buffers();
         }
@@ -2176,6 +2194,8 @@ impl LiveUi {
         let painted_images = std::cell::RefCell::new(Vec::<terminal_images::PaintedImage>::new());
         let popup_rect = std::cell::Cell::new(None::<ratatui::layout::Rect>);
         let native_placements = std::cell::RefCell::new(Vec::new());
+        let browser_keyboard_focus = self.browser_address_active()
+            || (self.live_browser_visible() && self.browser_takeover_active());
         let hyperlinks = self.hyperlinks;
         let no_color = self.no_color;
         let color_depth = self.color_depth;
@@ -2305,7 +2325,9 @@ impl LiveUi {
             backend.write_frame_bytes(&wrapped)
         };
         let render = |frame: &mut ratatui::Frame<'_>| {
-            let completion_view = (self.state.editor_editable() && self.browse_selected.is_none())
+            let completion_view = (self.state.editor_editable()
+                && self.browse_selected.is_none()
+                && !browser_keyboard_focus)
                 .then(|| {
                     self.completion.view(
                         self.state.command_catalog.as_deref(),
@@ -2327,7 +2349,7 @@ impl LiveUi {
                     shown_for: notice_shown_for,
                 }),
                 self.browse_selected,
-                overlay.is_none() && self.browse_selected.is_none(),
+                overlay.is_none() && self.browse_selected.is_none() && !browser_keyboard_focus,
                 completion_view.as_ref(),
                 self.activity_frame,
                 palette,
@@ -4141,6 +4163,7 @@ impl LiveUi {
                     return Ok(LoopControl::Continue);
                 }
                 self.exit_browser_takeover();
+                self.clear_browser_address();
                 self.side_panel.show_browser();
                 self.render_pending = true;
                 self.dispatch(
@@ -5584,6 +5607,7 @@ impl LiveUi {
             return Ok(LoopControl::Continue);
         }
         if !self.browser_takeover_active()
+            && !self.browser_address_active()
             && let Input::Key(key) = &input
             && let Some(action) = self.composer_clipboard_action(*key)
         {
@@ -5790,6 +5814,18 @@ impl LiveUi {
         writer: &mpsc::Sender<WriterMessage>,
         limit: usize,
     ) -> Result<LoopControl, Error> {
+        if self.browser_address_active() {
+            return self
+                .handle_browser_address_input(input, writer, limit)
+                .await;
+        }
+        if matches!(&input, Input::Key(key) if live_browser_ui::browser_address_shortcut(*key))
+            && self.live_browser_visible()
+        {
+            return self
+                .handle_live_browser_control(side_panel::BrowserControl::Address, writer, limit)
+                .await;
+        }
         if self.browser_takeover_active() {
             return self
                 .handle_browser_takeover_input(input, writer, limit)
@@ -6322,6 +6358,11 @@ impl LiveUi {
                         .await;
                 }
             }
+            side_panel::OverlayKey::BrowserControl(control) => {
+                return self
+                    .handle_live_browser_control(control, writer, limit)
+                    .await;
+            }
             side_panel::OverlayKey::Ignored => return Ok(LoopControl::Continue),
         }
         self.render_pending = true;
@@ -6461,19 +6502,28 @@ impl LiveUi {
                     .is_none_or(|deadline| now >= deadline)
             {
                 self.next_live_browser_frame = Some(now + LIVE_BROWSER_FRAME_INTERVAL);
-                let action = if self.side_panel.mode() != side_panel::PanelMode::Browser
+                let request = if self.side_panel.mode() != side_panel::PanelMode::Browser
                     || !self.side_panel.visible()
                 {
-                    BrowserNavAction::LiveClose
+                    BrowserInteractRequest::Nav(BrowserNavAction::LiveClose)
+                } else if let Some(viewport) =
+                    self.side_panel.desired_browser_geometry(self.cell_size)
+                    && !self.side_panel.resizing()
+                    && self.state.browser_requested_geometry != Some(viewport)
+                    && self
+                        .state
+                        .browser_viewport
+                        .as_ref()
+                        .and_then(|view| view.live_geometry())
+                        != Some(viewport)
+                {
+                    self.next_live_browser_frame = Some(now + LIVE_BROWSER_RESIZE_INTERVAL);
+                    BrowserInteractRequest::LiveResize(viewport)
                 } else {
-                    BrowserNavAction::LiveFrame
+                    BrowserInteractRequest::Nav(BrowserNavAction::LiveFrame)
                 };
                 return self
-                    .dispatch(
-                        UiAction::BrowserInteract(BrowserInteractRequest::Nav(action)),
-                        writer,
-                        limit,
-                    )
+                    .dispatch(UiAction::BrowserInteract(request), writer, limit)
                     .await;
             }
             return Ok(LoopControl::Continue);
@@ -6544,6 +6594,11 @@ impl LiveUi {
                 self.exit_browser_takeover();
                 Ok(LoopControl::Continue)
             }
+            Input::Key(_) | Input::Paste(_) if self.state.browser_navigation_in_flight() => {
+                self.notice = Some("Wait for the browser page to update.".into());
+                self.render_pending = true;
+                Ok(LoopControl::Continue)
+            }
             Input::Key(key) if key.code == KeyCode::Left && key.modifiers == KeyModifiers::ALT => {
                 if self.flush_browser_typing(writer, limit).await? == LoopControl::Exit {
                     return Ok(LoopControl::Exit);
@@ -6551,6 +6606,23 @@ impl LiveUi {
                 self.bump_browser_refresh_deadline();
                 self.dispatch(
                     UiAction::BrowserInteract(BrowserInteractRequest::Nav(BrowserNavAction::Back)),
+                    writer,
+                    limit,
+                )
+                .await
+            }
+            Input::Key(key)
+                if key.code == KeyCode::Right
+                    && key.modifiers == KeyModifiers::ALT
+                    && self.live_browser_visible() =>
+            {
+                if self.flush_browser_typing(writer, limit).await? == LoopControl::Exit {
+                    return Ok(LoopControl::Exit);
+                }
+                self.dispatch(
+                    UiAction::BrowserInteract(BrowserInteractRequest::Nav(
+                        BrowserNavAction::LiveForward,
+                    )),
                     writer,
                     limit,
                 )
@@ -6579,9 +6651,14 @@ impl LiveUi {
                     && is_allowed_browser_text_char(ch)
                     && !ch.is_control()
                 {
-                    let should_flush = self
-                        .browser_typing_buffer
-                        .push(ch, std::time::Instant::now());
+                    let live = self
+                        .state
+                        .browser_viewport
+                        .as_ref()
+                        .is_some_and(|view| view.live);
+                    let should_flush =
+                        self.browser_typing_buffer
+                            .push(ch, std::time::Instant::now(), live);
                     if should_flush {
                         return self.flush_browser_typing(writer, limit).await;
                     }

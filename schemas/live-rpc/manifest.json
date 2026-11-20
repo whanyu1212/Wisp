@@ -4,10 +4,10 @@
   "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
   "schema_hashes": {
     "client-handshake.schema.json": "2ba0112f0a8df9451f6a70aeeadb35c613474c66a167f4ff135ca9fabeebebdd",
-    "commands.schema.json": "a78bbf408401a33daaaff98f7c7049ff1f203b47c297c37aac98cc460e1169d4",
-    "events.schema.json": "99f0b6c07f681e4180c0c5a1d93bc62cddce4bf3588cf174c7880ba03cc84ffb",
-    "rust-commands.schema.json": "dc095002f364f570e10dfe8f605a3f7ad1a0270d5392bc21a93cafc7661fb658",
-    "rust-events.schema.json": "6322f5adcde1b87c8933d114334fee55494b2c9f971a93ff4dd658cecceaef2c",
+    "commands.schema.json": "59ede497c7ac37e004bb445f4d84dfc8b6900196231f9d14b7722623a00bda3d",
+    "events.schema.json": "c450236df8a3b03241c972944a0fed2b6b3789b8ff8ab94c484bb3d25e3c1101",
+    "rust-commands.schema.json": "2c7d5584c1d6adec25e133e35bbc9353e6dba631ffd43c5aa4b093c575b0c0ff",
+    "rust-events.schema.json": "25dbe373fd220e0a474b4135bc518ec95a108ec08f3c471062c9904173eba982",
     "server-handshake.schema.json": "d2e352d42b90576a4151b42967603ec0d6301d5c81c8c405b531ab665f3e4c4b"
   },
   "schemas": {

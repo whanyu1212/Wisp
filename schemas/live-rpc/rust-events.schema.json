@@ -291,10 +291,24 @@
           "default": null,
           "title": "BrowserViewportUpdatedImage"
         },
+        "live_device_scale": {
+          "anyOf": [
+            {
+              "maximum": 2,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "BrowserViewportUpdatedLiveDeviceScale"
+        },
         "live_png": {
           "anyOf": [
             {
-              "maxLength": 3000000,
+              "maxLength": 11000000,
               "minLength": 1,
               "type": "string"
             },
@@ -396,6 +410,7 @@
         "title",
         "viewport_width",
         "viewport_height",
+        "live_device_scale",
         "source_tool",
         "call_id"
       ],

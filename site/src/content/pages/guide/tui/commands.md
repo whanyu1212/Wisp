@@ -251,11 +251,16 @@ prompt is running.
 ## Browser viewport and interactive takeover
 
 Run `/browser live https://example.com` in a trusted project to open an isolated live tab using
-installed Chrome or Chromium. The pane shows the first frame automatically and updates while the
-page changes. Click the page or use `/browser interact` to type while Wisp is idle.
-Press `Esc` to give keyboard focus back to Wisp. Switch to `Work` or hide the pane to close the
-tab and discard its temporary browser profile. The live tab is for manual browsing, and MCP tools
-continue to use their own browser.
+installed Chrome or Chromium. The page reflows as you resize or expand the pane, and the pane
+updates while the page changes. Use Kitty or Ghostty graphics in true color to see the full
+image resolution.
+
+- Click the address bar or press `Ctrl+L` to edit the address. Press `Enter` to navigate in the
+  current tab or `Esc` to cancel. Use the toolbar buttons to go back, go forward, or reload.
+- Click the page or use `/browser interact` to type while Wisp is idle. While the page has focus,
+  `Alt+Left` and `Alt+Right` move through history, `Ctrl+R` reloads, and `Esc` returns focus to Wisp.
+- Switch to `Work` or hide the pane to close the tab and discard its temporary browser profile.
+  The live tab is for manual browsing, and MCP tools continue to use their own browser.
 
 When a browser MCP server such as Playwright (`@playwright/mcp`) or Chrome DevTools
 (`chrome-devtools-mcp`) is connected, Wisp adds a `Work · Browser` tab switcher at the top of the

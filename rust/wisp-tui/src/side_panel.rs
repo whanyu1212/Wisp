@@ -80,6 +80,7 @@ pub(crate) struct SidePanel {
     mode: PanelMode,
     /// Whether live interactive browser takeover owns keyboard and viewport routing.
     browser_interacting: bool,
+    browser_address: Option<browser::AddressBar>,
     /// Whether the docked panel already auto-switched to `Browser` on the first frame
     /// of the current browser session, so manual switches back to `Work` are respected.
     auto_switched_browser: bool,
@@ -140,6 +141,9 @@ struct Painted {
     total: usize,
     actions: Vec<ActionHit>,
     viewport_image_rect: Option<Rect>,
+    browser_content_rect: Option<Rect>,
+    painted_browser_geometry: Option<wisp_protocol::commands::LiveBrowserViewport>,
+    painted_browser_revision: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -154,6 +158,16 @@ pub(crate) enum PanelAction {
     ToggleExpand,
     Toggle(Disclosure),
     Open(Target),
+    BrowserControl(BrowserControl),
+}
+
+/// User-facing controls for the live Chromium pane.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BrowserControl {
+    Address,
+    Back,
+    Forward,
+    Reload,
 }
 
 /// A drag of the docked panel's border in progress.
@@ -171,6 +185,7 @@ struct Resize {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Section {
     ModeTabs,
+    BrowserControls,
     Header,
     Queue,
     Running,
@@ -215,6 +230,7 @@ pub(crate) enum OverlayKey {
     EnterBrowserInteract,
     /// Trigger a manual browser screenshot refresh.
     RefreshBrowser,
+    BrowserControl(BrowserControl),
     Ignored,
 }
 
@@ -268,11 +284,56 @@ impl SidePanel {
 
     pub(crate) fn enter_browser_interact(&mut self) {
         self.show_browser();
+        self.browser_address = None;
         self.browser_interacting = true;
+    }
+
+    pub(crate) fn focus_browser_address(&mut self, address: &str) {
+        let mut editor = crate::prompt_editor::PromptEditor::default();
+        editor.replace_range(0..0, &sanitize_for_terminal(address));
+        editor.handle_key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('a'),
+            crossterm::event::KeyModifiers::ALT,
+        ));
+        self.browser_address = Some(browser::AddressBar(editor));
+    }
+
+    pub(crate) fn browser_address_editor(
+        &mut self,
+    ) -> Option<&mut crate::prompt_editor::PromptEditor> {
+        self.browser_address.as_mut().map(|address| &mut address.0)
+    }
+
+    pub(crate) fn browser_address_focused(&self) -> bool {
+        self.browser_address.is_some()
+    }
+
+    pub(crate) fn dismiss_browser_address(&mut self) -> bool {
+        self.browser_address.take().is_some()
     }
 
     pub(crate) fn exit_browser_interact(&mut self) -> bool {
         std::mem::take(&mut self.browser_interacting)
+    }
+
+    pub(crate) fn desired_browser_geometry(
+        &self,
+        cell_size: crate::terminal_images::CellSize,
+    ) -> Option<wisp_protocol::commands::LiveBrowserViewport> {
+        self.painted
+            .borrow()
+            .browser_content_rect
+            .map(|rect| browser::viewport_for_cells(rect, cell_size))
+    }
+
+    pub(crate) fn painted_browser_target(
+        &self,
+    ) -> Option<(wisp_protocol::commands::LiveBrowserViewport, u64)> {
+        let painted = self.painted.borrow();
+        Some((
+            painted.painted_browser_geometry?,
+            painted.painted_browser_revision,
+        ))
     }
 
     #[cfg(test)]
@@ -291,7 +352,15 @@ impl SidePanel {
             return None;
         }
         let vp = state.browser_viewport.as_ref()?;
-        let image_rect = self.painted.borrow().viewport_image_rect?;
+        let painted = self.painted.borrow();
+        let image_rect = painted.viewport_image_rect?;
+        if vp.live
+            && (state.browser_page_transition_in_flight()
+                || painted.painted_browser_geometry != vp.live_geometry()
+                || painted.painted_browser_revision != state.browser_page_revision)
+        {
+            return None;
+        }
         let image_dims = vp.image.as_ref().and_then(|img| img.dimensions);
         let vw = vp.viewport_width.or_else(|| image_dims.map(|(w, _)| w))?;
         let vh = vp.viewport_height.or_else(|| image_dims.map(|(_, h)| h))?;
@@ -510,6 +579,14 @@ impl SidePanel {
         if self.mode == PanelMode::Browser {
             match key {
                 KeyCode::Char('i') => return OverlayKey::EnterBrowserInteract,
+                KeyCode::Char('r')
+                    if state
+                        .browser_viewport
+                        .as_ref()
+                        .is_some_and(|view| view.live) =>
+                {
+                    return OverlayKey::BrowserControl(BrowserControl::Reload);
+                }
                 KeyCode::Char('r') => return OverlayKey::RefreshBrowser,
                 _ => {}
             }
@@ -687,6 +764,7 @@ impl SidePanel {
                 OverlayKey::Moved
             }
             PanelAction::Open(target) => OverlayKey::Open(target),
+            PanelAction::BrowserControl(control) => OverlayKey::BrowserControl(control),
             PanelAction::Toggle(Disclosure::Process(process_id)) => {
                 self.browser_interacting = false;
                 if self.peek.as_ref() == Some(&process_id) {
@@ -803,6 +881,14 @@ impl SidePanel {
         if !self.visible() || self.mode != PanelMode::Browser {
             self.browser_interacting = false;
         }
+    }
+
+    pub(crate) fn observe_terminal_width(&mut self, width: u16, live_browser: bool) {
+        if live_browser && self.mode == PanelMode::Browser && self.docked() && !docks(width) {
+            // Keep an open tab and its focus when a dock becomes an overlay.
+            self.overlay = true;
+        }
+        self.observe_width(width);
     }
 
     /// The docked panel's width on a terminal `total` columns wide, its border included:
@@ -1088,6 +1174,10 @@ pub(crate) fn render_with_preview(
 
     let show_tabs = state.browser_viewport.is_some() || panel.mode == PanelMode::Browser;
     if panel.mode == PanelMode::Browser {
+        let live = state
+            .browser_viewport
+            .as_ref()
+            .filter(|viewport| viewport.live);
         let mut rows = PanelRows::default();
         browser::push_mode_tabs(
             &mut rows,
@@ -1097,7 +1187,16 @@ pub(crate) fn render_with_preview(
             width,
             palette,
         );
-        let footer_height = usize::from(panel.overlay_open() || interacting);
+        let chrome_cursor = live.and_then(|viewport| {
+            browser::push_live_toolbar(
+                &mut rows,
+                viewport,
+                panel.browser_address.as_ref().map(|address| &address.0),
+                inner.width,
+                palette,
+            )
+        });
+        let footer_height = usize::from(panel.overlay_open() || interacting || live.is_some());
         let body = Rect {
             height: inner.height.saturating_sub(footer_height as u16),
             ..inner
@@ -1109,6 +1208,9 @@ pub(crate) fn render_with_preview(
             total: rows.lines.len(),
             actions: rows.actions,
             viewport_image_rect: None,
+            browser_content_rect: None,
+            painted_browser_geometry: None,
+            painted_browser_revision: state.browser_page_revision,
         };
         if let Some(cursor) = panel.overlay_open().then(|| panel.focused(state)).flatten() {
             if let Some(hit) = panel
@@ -1123,16 +1225,23 @@ pub(crate) fn render_with_preview(
                 mark_focus(&mut rows.lines, &hit, width, palette);
             }
         }
-        let tab_rect = Rect {
-            height: body.height.min(1),
-            ..body
-        };
-        frame.render_widget(Paragraph::new(rows.lines), tab_rect);
-        let tab_rows = if body.height > 2 {
+        let tab_rows = if live.is_some() {
+            body.height.min(rows.lines.len() as u16 + 1)
+        } else if body.height > 2 {
             2
         } else {
             1.min(body.height)
         };
+        let tab_rect = Rect {
+            height: tab_rows,
+            ..body
+        };
+        frame.render_widget(Paragraph::new(rows.lines), tab_rect);
+        if let Some((col, row)) =
+            chrome_cursor.filter(|&(col, row)| col < tab_rect.width && row < tab_rows)
+        {
+            frame.set_cursor_position((body.x + col, body.y + row));
+        }
         let browser_body = Rect {
             y: body.y + tab_rows,
             height: body.height.saturating_sub(tab_rows),
@@ -1149,14 +1258,27 @@ pub(crate) fn render_with_preview(
             painted_images,
             ignore_overlay_rect,
         );
-        panel.painted.borrow_mut().viewport_image_rect = viewport_image_rect;
+        {
+            let mut painted = panel.painted.borrow_mut();
+            painted.viewport_image_rect = viewport_image_rect;
+            if live.is_some() && !browser_body.is_empty() {
+                painted.browser_content_rect = Some(browser_body);
+                painted.painted_browser_geometry = live.and_then(BrowserViewport::live_geometry);
+            }
+        }
         if footer_height > 0 {
             let footer = Rect {
                 y: body.bottom(),
                 height: footer_height as u16,
                 ..inner
             };
-            let hints = if interacting {
+            let hints = if panel.browser_address_focused() {
+                "Enter go · Esc cancel"
+            } else if live.is_some() && interacting {
+                "Esc exit · Ctrl+L address · Alt+←/→ history · Ctrl+R reload"
+            } else if live.is_some() {
+                "Ctrl+L address · Click page to interact"
+            } else if interacting {
                 "Esc exit · Click/Scroll · Type · Alt+← back · Ctrl+R reload"
             } else if panel.expanded {
                 "Esc close · Tab tabs · b work · i interact · f restore · r refresh"
@@ -1245,6 +1367,7 @@ pub(crate) fn render_with_preview(
         total: rows.lines.len(),
         actions: rows.actions,
         viewport_image_rect: None,
+        ..Painted::default()
     };
     if let Some(cursor) = panel.overlay_open().then(|| panel.focused(state)).flatten() {
         if let Some(hit) = panel

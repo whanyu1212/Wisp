@@ -363,6 +363,7 @@ impl BackendEvent {
                 return Ok(Self::BrowserViewportUpdated(Box::new(
                     BrowserViewportInput {
                         live,
+                        live_device_scale: update.live_device_scale,
                         image,
                         url: update.url,
                         title: update.title,

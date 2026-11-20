@@ -151,6 +151,7 @@ characters per chord.
 | `F8` | Focus the side panel for keyboard navigation (`f` expands/restores; `b` switches Work/Browser; `i` enters browser takeover; `r` refreshes) |
 | `F6` | Browse transcript cards; Right expands, Left collapses, and Enter opens retained detail |
 | `Ctrl+G` | Toggle contextual help for the focused Rust surface |
+| `Ctrl+L` | Edit the address of the visible live Chromium tab |
 | `Ctrl+R` | Search prompt history for this TUI run |
 | `Ctrl+O` | Edit the draft in `$VISUAL`, `$EDITOR`, or `vi`, then return with the saved text; while browsing cards, open the selected card's file |
 | Mouse wheel / trackpad | Scroll the transcript without moving editor focus |
