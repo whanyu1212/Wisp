@@ -103,6 +103,8 @@ pub(crate) fn project_chronological_history<'a>(
             "user" => {
                 let content = user_content(message, index)?;
                 let images = composer_images::reported_image_lines(message.get("images"));
+                let image_parts =
+                    composer_images::reported_transcript_images(message.get("images"));
                 if message.get("process_wake").and_then(Value::as_bool) == Some(true) {
                     // Its content, the notices, went to the model only; the backend
                     // sends it empty.
@@ -110,10 +112,10 @@ pub(crate) fn project_chronological_history<'a>(
                         crate::reducer::background_processes::WAKE_PROMPT_LABEL.to_owned(),
                     );
                 } else if images.is_empty() {
-                    transcript.append_prompt(content);
+                    transcript.append_prompt_with_images(content, None, image_parts);
                 } else {
                     let display = composer_images::with_image_lines(&content, &images);
-                    transcript.append_prompt_with_display(content, Some(display));
+                    transcript.append_prompt_with_images(content, Some(display), image_parts);
                 }
                 None
             }
@@ -492,6 +494,7 @@ fn tool_result(message: &Value, index: usize) -> Result<ToolResultInput, History
             result.and_then(|result| result.get("nested_calls_omitted")),
         ),
         images: composer_images::reported_image_lines(message.get("images")),
+        image_parts: composer_images::reported_transcript_images(message.get("images")),
         call_id,
         name: bounded_tool_name(name),
         output_source_bytes: source_count(message, "content_original_bytes", output.len()),

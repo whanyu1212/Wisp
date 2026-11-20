@@ -713,6 +713,7 @@ impl BackendEvent {
                         value.get("nested_calls_omitted"),
                     ),
                     images: composer_images::reported_image_lines(value.get("images")),
+                    image_parts: composer_images::reported_transcript_images(value.get("images")),
                     call_id: bounded_identity(&string_field(value, &event_type, "call_id")?),
                     name: bounded_tool_name(raw_name),
                     output,
@@ -881,6 +882,7 @@ impl BackendEvent {
                     kind: queue_kind_field(value, &event_type, "kind")?,
                     content: visible_content,
                     images: composer_images::reported_image_lines(value.get("images")),
+                    image_parts: composer_images::reported_transcript_images(value.get("images")),
                 }
             }
             "rpc.sessions" => Self::SessionsReported {

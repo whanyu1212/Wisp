@@ -1466,6 +1466,8 @@ pub enum BackendEvent {
         content: String,
         /// Transcript lines for the message's images, one per image.
         images: Vec<String>,
+        /// Stored image references for thumbnail rendering, when complete.
+        image_parts: Vec<composer_images::TranscriptImage>,
     },
     SessionsReported {
         command_id: String,
@@ -2071,9 +2073,11 @@ fn submit(
     state.cancel_requested = false;
     state.context.operation_started();
     let local_display = display_with_images(&content, local_display, images);
-    let prompt = state
-        .transcript
-        .append_prompt_with_display(content.clone(), local_display);
+    let prompt = state.transcript.append_prompt_with_images(
+        content.clone(),
+        local_display,
+        images.transcript_images(),
+    );
     state.run_progress = Some(RunProgress::new(prompt));
     state.finished_run_cost = None;
     let mut effects = vec![UiEffect::SendCommand(command)];
@@ -5763,6 +5767,7 @@ fn handle_backend_event(
             kind,
             content,
             images,
+            image_parts,
         } => {
             let mut local_display = state
                 .queue
@@ -5774,7 +5779,7 @@ fn handle_backend_event(
             }
             state
                 .transcript
-                .append_prompt_with_display(content, local_display);
+                .append_prompt_with_images(content, local_display, image_parts);
             Ok(vec![UiEffect::RequestRender])
         }
         BackendEvent::GitDiffReported { .. }
@@ -10360,6 +10365,7 @@ mod tests {
                 kind: QueueKind::Steering,
                 content: "/skill request".into(),
                 images: Vec::new(),
+                image_parts: Vec::new(),
             }
         );
 
@@ -10512,6 +10518,7 @@ mod tests {
                 kind: QueueKind::Steering,
                 content: "duplicate".into(),
                 images: Vec::new(),
+                image_parts: Vec::new(),
             }),
             &mut ids,
         )
@@ -10589,6 +10596,7 @@ mod tests {
                     kind: QueueKind::Steering,
                     content: "duplicate".into(),
                     images: Vec::new(),
+                    image_parts: Vec::new(),
                 }),
                 &mut ids,
             )

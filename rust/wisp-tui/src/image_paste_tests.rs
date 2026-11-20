@@ -507,3 +507,619 @@ async fn unreadable_path_pastes_as_text() {
     assert_eq!(ui.editor.text(), locked.display().to_string());
     std::fs::remove_dir_all(&directory).unwrap();
 }
+
+fn split_tone_image(width: usize, height: usize) -> ClipboardImage {
+    let mut rgba = Vec::with_capacity(width * height * 4);
+    for y in 0..height {
+        let color = if y < height / 2 {
+            [220, 20, 20, 255]
+        } else {
+            [20, 40, 220, 255]
+        };
+        for _ in 0..width {
+            rgba.extend_from_slice(&color);
+        }
+    }
+    ClipboardImage {
+        width,
+        height,
+        rgba,
+    }
+}
+
+fn encode_png_rgba(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
+    use image::ImageEncoder as _;
+    let mut png = Vec::new();
+    let encoder = image::codecs::png::PngEncoder::new(&mut png);
+    encoder
+        .write_image(rgba, width, height, image::ExtendedColorType::Rgba8)
+        .unwrap();
+    png
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
+fn draw_buffer(ui: &mut LiveUi, width: u16, height: u16) -> ratatui::buffer::Buffer {
+    let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+    ui.draw(
+        &mut terminal,
+        &ConnectionInfo {
+            backend_version: "test".into(),
+        },
+    )
+    .unwrap();
+    terminal.backend().buffer().clone()
+}
+
+fn buffer_lines(buffer: &ratatui::buffer::Buffer) -> Vec<String> {
+    (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn pasted_prompt_renders_half_block_thumbnail_below_image_label() {
+    let (mut ui, clipboard) = ui_with_clipboard();
+    clipboard
+        .lock()
+        .unwrap()
+        .image_pastes
+        .push_back(split_tone_image(32, 32));
+    send(&mut ui, ctrl_v()).await;
+    ui.editor.insert_paste("check shot");
+    send(&mut ui, key(KeyCode::Enter)).await;
+
+    let buffer = draw_buffer(&mut ui, 80, 24);
+    let lines = buffer_lines(&buffer);
+    let label_row = lines
+        .iter()
+        .position(|line| line.contains("[image 32×32 png]"))
+        .unwrap_or_else(|| panic!("missing image label in:\n{}", lines.join("\n")));
+
+    assert!(lines[label_row + 1].contains('▀'), "{}", lines.join("\n"));
+    let thumb_x = lines[label_row + 1]
+        .chars()
+        .take_while(|c| *c != '▀')
+        .count() as u16;
+    let first_cell = &buffer[(thumb_x, (label_row + 1) as u16)];
+    let second_cell = &buffer[(thumb_x, (label_row + 2) as u16)];
+    assert_ne!(first_cell.fg, second_cell.bg);
+}
+
+#[tokio::test]
+async fn stored_history_and_corrupt_tool_images_render_and_degrade_cleanly() {
+    let dir = std::env::temp_dir().join(format!("wisp-stored-preview-{}", std::process::id()));
+    let images_dir = dir.join("images");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&images_dir).unwrap();
+
+    let clip = split_tone_image(32, 32);
+    let png = encode_png_rgba(32, 32, &clip.rgba);
+    let valid_sha = sha256_hex(&png);
+    std::fs::write(images_dir.join(&valid_sha), &png).unwrap();
+
+    // Tampered file (wrong digest) for the tool result so it must degrade without blank rows.
+    let bad_sha = "f".repeat(64);
+    let mut bad_png = png.clone();
+    bad_png[0] ^= 0xff;
+    std::fs::write(images_dir.join(&bad_sha), &bad_png).unwrap();
+
+    let messages = [
+        serde_json::json!({
+            "entry_id": "entry-user",
+            "role": "user",
+            "content": "inspect these",
+            "content_truncated": false,
+            "images": [{
+                "media_type": "image/png",
+                "sha256": valid_sha,
+                "byte_size": png.len(),
+                "width": 32,
+                "height": 32,
+            }],
+        }),
+        serde_json::json!({
+            "entry_id": "entry-tool",
+            "role": "tool",
+            "tool_call_id": "read-bad",
+            "tool_name": "read",
+            "tool_arguments": {"path": "tampered.png"},
+            "content": "Image file tampered.png",
+            "content_truncated": false,
+            "images": [{
+                "media_type": "image/png",
+                "sha256": bad_sha,
+                "byte_size": bad_png.len(),
+                "width": 32,
+                "height": 32,
+            }],
+        }),
+    ];
+
+    let projected = crate::history::project_chronological_history(messages.iter()).unwrap();
+    let mut ui = LiveUi::default();
+    ui.state.transcript = projected.transcript;
+    ui.state.selected_session = Some(reducer::SessionIdentity {
+        session_id: "s1".into(),
+        session_path: dir.join("session.jsonl").display().to_string(),
+        session_name: None,
+    });
+
+    let buffer = draw_buffer(&mut ui, 80, 24);
+    let lines = buffer_lines(&buffer);
+    let joined = lines.join("\n");
+    let user_label = lines
+        .iter()
+        .position(|line| line.contains("[image 32×32 png]") && !line.contains("Read"))
+        .unwrap_or_else(|| panic!("missing user image label:\n{joined}"));
+    assert!(lines[user_label + 1].contains('▀'), "{joined}");
+
+    let tool_row = lines
+        .iter()
+        .position(|line| line.contains("Read") && line.contains("[image 32×32 png]"))
+        .unwrap_or_else(|| panic!("missing tool card row:\n{joined}"));
+    // Corrupt stored image must emit no half-block or orphan connector row under Read.
+    assert!(!lines[tool_row + 1].contains('▀'), "{joined}");
+    assert!(!lines[tool_row + 1].contains('└'), "{joined}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn overlay_occludes_thumbnail_without_leaking_half_blocks() {
+    let (mut ui, clipboard) = ui_with_clipboard();
+    clipboard
+        .lock()
+        .unwrap()
+        .image_pastes
+        .push_back(split_tone_image(288, 128));
+    send(&mut ui, ctrl_v()).await;
+    send(&mut ui, key(KeyCode::Enter)).await;
+
+    let unoccluded = draw_buffer(&mut ui, 80, 24);
+    assert!(
+        buffer_lines(&unoccluded)
+            .iter()
+            .any(|line| line.contains('▀'))
+    );
+
+    ui.key_help = Some(crate::key_help::KeyHelp::new(ui.key_help_owner()));
+    let occluded = draw_buffer(&mut ui, 80, 24);
+    let popup = ui::overlay_area(ratatui::layout::Rect::new(0, 0, 80, 24)).unwrap();
+    let mut overlaps = false;
+    for y in popup.top()..popup.bottom() {
+        for x in popup.left()..popup.right() {
+            if unoccluded[(x, y)].symbol() == "▀" {
+                overlaps = true;
+            }
+            assert_ne!(
+                occluded[(x, y)].symbol(),
+                "▀",
+                "half-block leaked into overlay at ({x}, {y})"
+            );
+        }
+    }
+    assert!(overlaps, "test overlay did not overlap thumbnail");
+}
+
+struct RecordingBackend {
+    inner: ratatui::backend::TestBackend,
+    events: Vec<String>,
+}
+
+impl RecordingBackend {
+    fn new(width: u16, height: u16) -> Self {
+        Self {
+            inner: ratatui::backend::TestBackend::new(width, height),
+            events: Vec::new(),
+        }
+    }
+
+    fn take_events(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.events)
+    }
+}
+
+impl ratatui::backend::Backend for RecordingBackend {
+    type Error = std::convert::Infallible;
+
+    fn draw<'a, I>(&mut self, content: I) -> Result<(), Self::Error>
+    where
+        I: Iterator<Item = (u16, u16, &'a ratatui::buffer::Cell)>,
+    {
+        self.inner.draw(content)
+    }
+
+    fn hide_cursor(&mut self) -> Result<(), Self::Error> {
+        self.inner.hide_cursor()
+    }
+
+    fn show_cursor(&mut self) -> Result<(), Self::Error> {
+        self.inner.show_cursor()
+    }
+
+    fn get_cursor_position(&mut self) -> Result<ratatui::layout::Position, Self::Error> {
+        self.inner.get_cursor_position()
+    }
+
+    fn set_cursor_position<P: Into<ratatui::layout::Position>>(
+        &mut self,
+        position: P,
+    ) -> Result<(), Self::Error> {
+        self.inner.set_cursor_position(position)
+    }
+
+    fn clear(&mut self) -> Result<(), Self::Error> {
+        self.inner.clear()
+    }
+
+    fn clear_region(&mut self, clear_type: ratatui::backend::ClearType) -> Result<(), Self::Error> {
+        self.inner.clear_region(clear_type)
+    }
+
+    fn append_lines(&mut self, n: u16) -> Result<(), Self::Error> {
+        self.inner.append_lines(n)
+    }
+
+    fn size(&self) -> Result<ratatui::layout::Size, Self::Error> {
+        self.inner.size()
+    }
+
+    fn window_size(&mut self) -> Result<ratatui::backend::WindowSize, Self::Error> {
+        self.inner.window_size()
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        self.events.push("flush".into());
+        self.inner.flush()
+    }
+}
+
+impl terminal::FrameBackend for RecordingBackend {
+    fn begin_frame(&mut self) -> std::io::Result<()> {
+        self.events.push("begin".into());
+        Ok(())
+    }
+
+    fn end_frame(&mut self) -> std::io::Result<()> {
+        self.events.push("end".into());
+        Ok(())
+    }
+
+    fn into_io_error(error: std::convert::Infallible) -> std::io::Error {
+        match error {}
+    }
+
+    fn write_control(&mut self, _bytes: &[u8]) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    fn write_frame_bytes(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.events
+            .push(format!("bytes:{}", String::from_utf8_lossy(bytes)));
+        Ok(())
+    }
+
+    fn suspend(&mut self) -> std::io::Result<terminal::Suspended> {
+        self.inner.suspend()
+    }
+
+    fn resume(&mut self, suspended: terminal::Suspended) -> std::io::Result<()> {
+        self.inner.resume(suspended)
+    }
+}
+
+#[tokio::test]
+async fn kitty_protocol_recording_backend_emits_sync_updates_occludes_scrolls_and_resizes() {
+    let (mut ui, clipboard) = ui_with_clipboard();
+    ui.image_protocol = terminal_images::ImageProtocol::Kitty;
+    clipboard
+        .lock()
+        .unwrap()
+        .image_pastes
+        .push_back(split_tone_image(288, 96));
+    send(&mut ui, ctrl_v()).await;
+    send(&mut ui, key(KeyCode::Enter)).await;
+    // Append extra lines after the prompt so scrolling up unpins and crops the thumbnail.
+    let long_reply = (0..12)
+        .map(|i| format!("reply line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    ui.state.transcript.complete_message(1, long_reply);
+
+    let mut terminal = Terminal::new(RecordingBackend::new(80, 20)).unwrap();
+    let conn = ConnectionInfo {
+        backend_version: "test".into(),
+    };
+
+    // Frame 1: emits Kitty placement inside synchronized begin..flush..bytes..end.
+    ui.draw(&mut terminal, &conn).unwrap();
+    let f1 = terminal.backend_mut().take_events();
+    assert_eq!(f1.first().map(String::as_str), Some("begin"));
+    assert_eq!(f1.last().map(String::as_str), Some("end"));
+    let f1_bytes = f1
+        .iter()
+        .find_map(|event| event.strip_prefix("bytes:"))
+        .expect("expected Kitty payload");
+    assert!(f1_bytes.starts_with("\x1b7") && f1_bytes.ends_with("\x1b8"));
+    assert!(f1_bytes.contains("a=T,f=32,") && f1_bytes.contains(",q=2,"));
+
+    // Frame 2 (unchanged): emits zero graphics bytes.
+    ui.draw(&mut terminal, &conn).unwrap();
+    let f2 = terminal.backend_mut().take_events();
+    assert!(
+        !f2.iter().any(|event| event.starts_with("bytes:")),
+        "{f2:?}"
+    );
+
+    // Frame 3: scroll up to top, then down 3 rows so RowPosition::Image { index: 0, row: 1 } is top.
+    ui.transcript_viewport.reduce(
+        crate::transcript_view::TranscriptViewAction::ScrollLines(-30),
+        &ui.state.transcript,
+        &mut ui.transcript_row_cache,
+    );
+    ui.transcript_viewport.reduce(
+        crate::transcript_view::TranscriptViewAction::ScrollLines(3),
+        &ui.state.transcript,
+        &mut ui.transcript_row_cache,
+    );
+    ui.draw(&mut terminal, &conn).unwrap();
+    let f3 = terminal.backend_mut().take_events();
+    let f3_bytes = f3
+        .iter()
+        .find_map(|event| event.strip_prefix("bytes:"))
+        .expect("expected scroll deletion+re-emit");
+    assert!(
+        f3_bytes.contains("\x1b_Ga=d,d=i,i=1,q=2\x1b\\"),
+        "{f3_bytes}"
+    );
+    assert!(f3_bytes.contains("a=T,f=32,"), "{f3_bytes}");
+
+    // Frame 4 (`Input::Redraw` resize invalidation): forces delete + re-emit at same viewport.
+    send(&mut ui, Input::Redraw).await;
+    ui.draw(&mut terminal, &conn).unwrap();
+    let f4 = terminal.backend_mut().take_events();
+    let f4_bytes = f4
+        .iter()
+        .find_map(|event| event.strip_prefix("bytes:"))
+        .expect("expected redraw deletion+re-emit");
+    assert!(
+        f4_bytes.contains("\x1b_Ga=d,d=i,i=2,q=2\x1b\\"),
+        "{f4_bytes}"
+    );
+    assert!(f4_bytes.contains("a=T,f=32,"), "{f4_bytes}");
+
+    // Frame 5 (overlay opens over thumbnail): deletes active Kitty placement.
+    ui.key_help = Some(crate::key_help::KeyHelp::new(ui.key_help_owner()));
+    ui.draw(&mut terminal, &conn).unwrap();
+    let f5 = terminal.backend_mut().take_events();
+    let f5_bytes = f5
+        .iter()
+        .find_map(|event| event.strip_prefix("bytes:"))
+        .expect("expected occlusion deletion");
+    assert!(
+        f5_bytes.contains("\x1b_Ga=d,d=i,i=3,q=2\x1b\\"),
+        "{f5_bytes}"
+    );
+    assert!(!f5_bytes.contains("a=T,"), "{f5_bytes}");
+    assert!(!ui.image_placements.has_active_kitty());
+}
+
+#[tokio::test]
+async fn overlay_occludes_tool_card_thumbnail_on_matching_background() {
+    let dir = std::env::temp_dir().join(format!("wisp-tool-overlay-{}", std::process::id()));
+    let images_dir = dir.join("images");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&images_dir).unwrap();
+
+    let clip = split_tone_image(288, 128);
+    let png = encode_png_rgba(288, 128, &clip.rgba);
+    let sha = sha256_hex(&png);
+    std::fs::write(images_dir.join(&sha), &png).unwrap();
+
+    let mut ui = LiveUi::default();
+    ui.state.selected_session = Some(reducer::SessionIdentity {
+        session_id: "s-tool-occ".into(),
+        session_path: dir.join("session.jsonl").display().to_string(),
+        session_name: None,
+    });
+    for event in [
+        serde_json::json!({
+            "type": "tool.call",
+            "call_id": "read-occ-1",
+            "name": "read",
+            "arguments": {"path": "shot.png"}
+        }),
+        serde_json::json!({
+            "type": "tool.result",
+            "message_entry_id": null,
+            "call_id": "read-occ-1",
+            "name": "read",
+            "output": "shot.png",
+            "is_error": false,
+            "images": [{
+                "media_type": "image/png",
+                "sha256": sha,
+                "byte_size": png.len(),
+                "width": 288,
+                "height": 128,
+            }]
+        }),
+    ] {
+        match BackendEvent::from_projection_value(&event).unwrap() {
+            BackendEvent::ToolCall(call) => {
+                ui.state.transcript.observe_tool_call(call);
+            }
+            BackendEvent::ToolResult(result) => {
+                ui.state.transcript.observe_tool_result(*result);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    // Half-block over default solid theme (where palette.base() == palette.overlay()).
+    let unoccluded = draw_buffer(&mut ui, 80, 24);
+    ui.key_help = Some(crate::key_help::KeyHelp::new(ui.key_help_owner()));
+    let occluded = draw_buffer(&mut ui, 80, 24);
+    let popup = ui::overlay_area(ratatui::layout::Rect::new(0, 0, 80, 24)).unwrap();
+    let mut overlaps = false;
+    for y in popup.top()..popup.bottom() {
+        for x in popup.left()..popup.right() {
+            if unoccluded[(x, y)].symbol() == "▀" {
+                overlaps = true;
+            }
+            assert_ne!(
+                occluded[(x, y)].symbol(),
+                "▀",
+                "tool-card half-block leaked into overlay at ({x}, {y})"
+            );
+        }
+    }
+    assert!(overlaps, "test overlay did not overlap tool thumbnail");
+
+    // Kitty placement covering blank overlay cells must also be deleted.
+    ui.key_help = None;
+    ui.image_protocol = terminal_images::ImageProtocol::Kitty;
+    let mut terminal = Terminal::new(RecordingBackend::new(80, 24)).unwrap();
+    let conn = ConnectionInfo {
+        backend_version: "test".into(),
+    };
+    ui.draw(&mut terminal, &conn).unwrap();
+    let emit_events = terminal.backend_mut().take_events();
+    assert!(emit_events.iter().any(|ev| ev.contains("a=T,f=32,")));
+
+    ui.key_help = Some(crate::key_help::KeyHelp::new(ui.key_help_owner()));
+    ui.draw(&mut terminal, &conn).unwrap();
+    let occ_events = terminal.backend_mut().take_events();
+    let occ_bytes = occ_events
+        .iter()
+        .find_map(|ev| ev.strip_prefix("bytes:"))
+        .expect("expected Kitty delete on tool-card overlay occlusion");
+    assert!(occ_bytes.contains("a=d,d=i,i=1,q=2"), "{occ_bytes}");
+    assert!(!occ_bytes.contains("a=T,"), "{occ_bytes}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn redraw_while_key_help_open_reemits_kitty_placement() {
+    let (mut ui, clipboard) = ui_with_clipboard();
+    ui.image_protocol = terminal_images::ImageProtocol::Kitty;
+    clipboard
+        .lock()
+        .unwrap()
+        .image_pastes
+        .push_back(split_tone_image(32, 32));
+    send(&mut ui, ctrl_v()).await;
+    send(&mut ui, key(KeyCode::Enter)).await;
+
+    // On an 80×50 screen, key_help overlay sits at y=11..39 while top prompt stays unoccluded.
+    ui.key_help = Some(crate::key_help::KeyHelp::new(ui.key_help_owner()));
+    let mut terminal = Terminal::new(RecordingBackend::new(80, 50)).unwrap();
+    let conn = ConnectionInfo {
+        backend_version: "test".into(),
+    };
+
+    ui.draw(&mut terminal, &conn).unwrap();
+    let f1 = terminal.backend_mut().take_events();
+    assert!(
+        f1.iter()
+            .any(|ev| ev.contains("a=T,f=32,") && ev.contains(",i=1,"))
+    );
+
+    send(&mut ui, Input::Redraw).await;
+    assert!(ui.key_help.is_some());
+    ui.draw(&mut terminal, &conn).unwrap();
+    let f2 = terminal.backend_mut().take_events();
+    let f2_bytes = f2
+        .iter()
+        .find_map(|ev| ev.strip_prefix("bytes:"))
+        .expect("expected Kitty delete + re-emit after Input::Redraw while key_help is open");
+    assert!(
+        f2_bytes.contains("\x1b_Ga=d,d=i,i=1,q=2\x1b\\"),
+        "{f2_bytes}"
+    );
+    assert!(
+        f2_bytes.contains("a=T,f=32,") && f2_bytes.contains(",i=2,"),
+        "{f2_bytes}"
+    );
+}
+
+#[tokio::test]
+async fn iterm2_and_sixel_recording_backend_mark_hidden_cells_and_reemit_after_occlusion() {
+    for (protocol, needle) in [
+        (
+            terminal_images::ImageProtocol::ITerm2,
+            "\x1b]1337;File=inline=1;",
+        ),
+        (terminal_images::ImageProtocol::Sixel, "\x1bP0;1q"),
+    ] {
+        let (mut ui, clipboard) = ui_with_clipboard();
+        ui.image_protocol = protocol;
+        clipboard
+            .lock()
+            .unwrap()
+            .image_pastes
+            .push_back(split_tone_image(288, 128));
+        send(&mut ui, ctrl_v()).await;
+        send(&mut ui, key(KeyCode::Enter)).await;
+
+        let mut terminal = Terminal::new(RecordingBackend::new(80, 24)).unwrap();
+        let conn = ConnectionInfo {
+            backend_version: "test".into(),
+        };
+
+        ui.draw(&mut terminal, &conn).unwrap();
+        let f1 = terminal.backend_mut().take_events();
+        let f1_bytes = f1
+            .iter()
+            .find_map(|ev| ev.strip_prefix("bytes:"))
+            .expect("expected native image payload");
+        assert!(f1_bytes.starts_with("\x1b7") && f1_bytes.ends_with("\x1b8"));
+        assert!(f1_bytes.contains(needle), "{f1_bytes}");
+        assert!(
+            terminal
+                .backend()
+                .inner
+                .buffer()
+                .content
+                .iter()
+                .any(|cell| cell.modifier.contains(ratatui::style::Modifier::HIDDEN)),
+            "expected HIDDEN cells for {protocol:?}"
+        );
+
+        // Unchanged second frame emits nothing.
+        ui.draw(&mut terminal, &conn).unwrap();
+        let f2 = terminal.backend_mut().take_events();
+        assert!(!f2.iter().any(|ev| ev.starts_with("bytes:")), "{f2:?}");
+
+        // Overlay occludes placement; uncovered left edge falls back to half-blocks.
+        ui.key_help = Some(crate::key_help::KeyHelp::new(ui.key_help_owner()));
+        ui.draw(&mut terminal, &conn).unwrap();
+        let f3 = terminal.backend_mut().take_events();
+        assert!(!f3.iter().any(|ev| ev.starts_with("bytes:")), "{f3:?}");
+
+        // Dismissing overlay re-emits the native placement cleanly.
+        ui.key_help = None;
+        ui.draw(&mut terminal, &conn).unwrap();
+        let f4 = terminal.backend_mut().take_events();
+        let f4_bytes = f4
+            .iter()
+            .find_map(|ev| ev.strip_prefix("bytes:"))
+            .expect("expected re-emit after dismissing overlay");
+        assert!(f4_bytes.contains(needle), "{f4_bytes}");
+    }
+}

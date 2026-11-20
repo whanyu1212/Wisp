@@ -32,6 +32,9 @@ pub(crate) trait FrameBackend: Backend {
     /// Writes terminal control output that is not part of a frame, such as the window
     /// title or a notification.
     fn write_control(&mut self, bytes: &[u8]) -> io::Result<()>;
+    /// Writes raw escape sequences inside a synchronized frame update (after ratatui
+    /// flushes the text buffer and before `end_frame` commits the frame).
+    fn write_frame_bytes(&mut self, bytes: &[u8]) -> io::Result<()>;
     /// Gives the terminal to a child process: leaves raw mode, the alternate screen and
     /// every input mode the TUI turned on. The saved window title stays saved, so the
     /// title Wisp restores on exit is still the one from before it started.
@@ -59,6 +62,10 @@ impl<W: Write> FrameBackend for CrosstermBackend<W> {
     fn write_control(&mut self, bytes: &[u8]) -> io::Result<()> {
         self.write_all(bytes)?;
         Write::flush(self)
+    }
+
+    fn write_frame_bytes(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.write_all(bytes)
     }
 
     fn into_io_error(error: io::Error) -> io::Error {
@@ -98,6 +105,10 @@ impl FrameBackend for ratatui::backend::TestBackend {
         Ok(())
     }
 
+    fn write_frame_bytes(&mut self, _bytes: &[u8]) -> io::Result<()> {
+        Ok(())
+    }
+
     fn suspend(&mut self) -> io::Result<Suspended> {
         Ok(Suspended {
             mouse_capture: false,
@@ -111,12 +122,14 @@ impl FrameBackend for ratatui::backend::TestBackend {
 
 /// Draws one frame inside a synchronized update. After `render` fills the buffer,
 /// `finish` gets the complete frame, then its colours are downconverted to `depth`,
-/// before ratatui diffs and flushes it.
+/// before ratatui diffs and flushes it, and `post_draw` writes frame graphics bytes
+/// before [`FrameBackend::end_frame`] ends the synchronized update.
 pub(crate) fn draw_frame<B: FrameBackend>(
     terminal: &mut Terminal<B>,
     depth: ColorDepth,
     render: impl FnOnce(&mut ratatui::Frame<'_>),
     finish: impl FnOnce(&mut ratatui::buffer::Buffer),
+    post_draw: impl FnOnce(&mut B) -> io::Result<()>,
 ) -> io::Result<()> {
     terminal.backend_mut().begin_frame()?;
     let draw_result = terminal
@@ -127,8 +140,14 @@ pub(crate) fn draw_frame<B: FrameBackend>(
         })
         .map(drop)
         .map_err(B::into_io_error);
+    let post_result = if draw_result.is_ok() {
+        post_draw(terminal.backend_mut())
+    } else {
+        Ok(())
+    };
     let end_result = terminal.backend_mut().end_frame();
     draw_result?;
+    post_result?;
     end_result
 }
 
@@ -148,6 +167,13 @@ pub(crate) fn repaint_all<B: FrameBackend>(terminal: &mut Terminal<B>) -> io::Re
 // A panic may occur between requesting capture and constructing the terminal guard.
 // Both restoration paths must observe ownership of that partially applied request.
 static MOUSE_CAPTURE: MouseCapture = MouseCapture::new();
+static KITTY_IMAGES_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Records whether Kitty graphics placements are currently displayed on the terminal
+/// so shutdown and suspend paths clean them up before leaving the alternate screen.
+pub(crate) fn set_kitty_images_active(active: bool) {
+    KITTY_IMAGES_ACTIVE.store(active, Ordering::SeqCst);
+}
 /// The kitty keyboard protocol's first level, which reports keys a legacy terminal
 /// sends alike apart (Shift+Enter from Enter, Esc from an Alt chord) while printable
 /// keys still arrive as text. Terminals without the protocol ignore the request.
@@ -367,6 +393,11 @@ fn leave_screen() {
 
 /// The part of [`leave_screen`] after raw mode: the alternate screen and input modes.
 fn leave_input_modes() {
+    if KITTY_IMAGES_ACTIVE.swap(false, Ordering::SeqCst) {
+        let mut stdout = io::stdout();
+        let _ = stdout.write_all(crate::terminal_images::KITTY_DELETE_ALL);
+        let _ = stdout.flush();
+    }
     let _ = MOUSE_CAPTURE.restore(&mut io::stdout());
     let _ = KEYBOARD_PROTOCOL.restore(&mut io::stdout());
     let _ = execute!(

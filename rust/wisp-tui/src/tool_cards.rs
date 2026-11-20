@@ -230,6 +230,8 @@ pub struct ToolResultInput {
     pub edit_locations: Vec<crate::tool_detail::EditLocation>,
     /// Each image the result returned, as a `[image 640×480 png]` line, in order.
     pub images: Vec<String>,
+    /// Thumbnail payloads for `images`, when stored references are available.
+    pub image_parts: Vec<crate::composer_images::TranscriptImage>,
     /// The calls a codemode script made, as its result records them.
     pub nested: crate::script_card::ScriptResult,
 }
@@ -334,6 +336,8 @@ pub struct ToolCardSnapshot {
     /// Each image the result returned, as a `[image 640×480 png]` line. The
     /// backend sends at most six.
     pub images: Vec<String>,
+    /// Thumbnail payloads for `images`, when stored references are available.
+    pub image_parts: Vec<crate::composer_images::TranscriptImage>,
     /// A codemode call's script and the calls it made; None for every other tool.
     pub script: Option<Box<crate::script_card::ScriptCard>>,
 }
@@ -417,6 +421,7 @@ impl ToolCardSnapshot {
             live_line: None,
             file_reference: FileReference::of_call(&input.name, &input.arguments),
             images: Vec::new(),
+            image_parts: Vec::new(),
             script: script_of_call(input),
         }
     }
@@ -611,6 +616,7 @@ impl ToolCardSnapshot {
         self.detail = preferred_result_detail(input, &preview.text, self.status);
         self.backend_truncated = input.truncated;
         self.images.clone_from(&input.images);
+        self.image_parts.clone_from(&input.image_parts);
         if let Some(script) = &mut self.script {
             script.settle(&input.nested);
         }
@@ -2418,6 +2424,7 @@ mod tests {
             process_ended_at_ms: None,
             edit_locations: Vec::new(),
             images: Vec::new(),
+            image_parts: Vec::new(),
         }
     }
 

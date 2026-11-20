@@ -2042,6 +2042,7 @@ fn complete_tool(ui: &mut LiveUi, call_id: &str, name: &str, output: &str) {
             process_ended_at_ms: None,
             edit_locations: Vec::new(),
             images: Vec::new(),
+            image_parts: Vec::new(),
         });
 }
 

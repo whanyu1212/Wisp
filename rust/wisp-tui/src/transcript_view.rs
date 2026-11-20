@@ -56,6 +56,11 @@ pub enum RowPosition {
     Content(usize),
     Markdown(MarkdownPosition),
     Card(CardPosition),
+    /// Row `row` of image thumbnail `index` rendered beneath the entry's text or card.
+    Image {
+        index: u8,
+        row: u16,
+    },
     Spacer,
     /// Highlighted padding above the next user's prompt. The preceding entry owns it so its
     /// `Spacer` stays a plain gap and every entry still starts at `Header`.
@@ -145,6 +150,8 @@ pub enum TranscriptRowKind {
     CardGroup,
     CardDetail,
     CardOmission,
+    /// One row of an image thumbnail (or the 1-row separator between thumbnails).
+    Image,
     Spacer,
     /// The muted totals that end a finished turn's rail.
     RunSummary,
@@ -227,6 +234,16 @@ pub enum RowGutter {
     Indent,
 }
 
+/// Metadata describing one row slice of an image thumbnail for post-overlay rendering.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImageRowSpec {
+    pub(crate) key: crate::terminal_images::ImageCacheKey,
+    pub index: u8,
+    pub image_row: u16,
+    pub total_rows: u16,
+    pub cols: u16,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TranscriptRow {
     pub anchor: RowAnchor,
@@ -255,6 +272,8 @@ pub struct TranscriptRow {
     /// A call still in progress keeps the trailing columns for a live timer, which
     /// the renderer paints each frame so the cached row never goes stale.
     pub live_timer: bool,
+    /// Image slice rendered on this row (`None` for text, gap, and non-image rows).
+    pub image: Option<ImageRowSpec>,
 }
 
 /// Columns a live timer keeps, enough for `59m 59s`.
@@ -300,6 +319,9 @@ impl TranscriptRow {
                     .saturating_mul(std::mem::size_of::<TranscriptSpan>()),
             )
             .saturating_add(self.trailing.as_ref().map_or(0, String::len))
+            .saturating_add(self.image.as_ref().map_or(0, |spec| {
+                std::mem::size_of::<ImageRowSpec>().saturating_add(spec.key.0.len())
+            }))
     }
 
     /// Splits `lead` off the start of a single-span row into a span of its own, which it
@@ -355,6 +377,7 @@ impl TranscriptRow {
             fold_arrow: None,
             trailing: None,
             live_timer: false,
+            image: None,
         }
     }
 }
@@ -1119,8 +1142,14 @@ pub struct TranscriptRowCache {
     card_retained_bytes: usize,
     work: LayoutWork,
     fold: FoldState,
+    /// Decoded preview image metadata keyed by entry ID, pushed before layout.
+    image_previews: HashMap<TranscriptEntryId, Vec<crate::terminal_images::ImagePreviewMeta>>,
+    /// Cell pixel size used when converting preview dimensions into rows/columns.
+    cell_size: crate::terminal_images::CellSize,
     /// The links the latest transcript paint drew, for the frame to apply once complete.
     pub(crate) painted_links: Vec<crate::hyperlink::PaintedLink>,
+    /// Thumbnail screen regions recorded during the latest transcript paint.
+    pub(crate) painted_images: Vec<crate::terminal_images::PaintedImage>,
 }
 
 impl TranscriptRowCache {
@@ -1130,6 +1159,78 @@ impl TranscriptRowCache {
 
     pub fn fold_mut(&mut self) -> &mut FoldState {
         &mut self.fold
+    }
+
+    /// Update the decoded image preview metadata and terminal cell aspect ratio,
+    /// invalidating cached row projections if either changed.
+    pub(crate) fn set_image_previews(
+        &mut self,
+        mut previews: HashMap<TranscriptEntryId, Vec<crate::terminal_images::ImagePreviewMeta>>,
+        cell_size: crate::terminal_images::CellSize,
+    ) {
+        previews.retain(|_, items| !items.is_empty());
+        if self.image_previews == previews && self.cell_size == cell_size {
+            return;
+        }
+        self.image_previews = previews;
+        self.cell_size = cell_size;
+        self.rows.clear();
+        self.predecessors.clear();
+        self.furthest_content.clear();
+        self.insertion_order.clear();
+        self.retained_bytes = 0;
+    }
+
+    fn entry_images_enabled(&self, transcript: &Transcript, entry: &TranscriptEntry) -> bool {
+        self.image_previews
+            .get(&entry.id)
+            .is_some_and(|items| !items.is_empty())
+            && collapsed_group_start(&self.fold, transcript, entry.id).is_none()
+    }
+
+    fn image_layout(
+        &self,
+        entry: &TranscriptEntry,
+        effective_width: usize,
+    ) -> Vec<(crate::terminal_images::ImagePreviewMeta, u16, u16)> {
+        let Some(metas) = self.image_previews.get(&entry.id) else {
+            return Vec::new();
+        };
+        let content_width = if entry.role == TranscriptRole::Tool {
+            result_width(effective_width)
+        } else {
+            effective_width
+        };
+        let max_cols = crate::terminal_images::THUMBNAIL_MAX_COLS
+            .min(u16::try_from(content_width.max(1)).unwrap_or(u16::MAX));
+        metas
+            .iter()
+            .take(crate::terminal_images::MAX_PREVIEW_IMAGES_PER_ENTRY)
+            .filter_map(|meta| {
+                let (cols, rows) = crate::terminal_images::thumbnail_cells(
+                    meta.pixel_width,
+                    meta.pixel_height,
+                    self.cell_size,
+                    max_cols,
+                    crate::terminal_images::THUMBNAIL_MAX_ROWS,
+                );
+                (cols > 0 && rows > 0).then(|| (meta.clone(), cols, rows))
+            })
+            .collect()
+    }
+
+    fn after_entry_body(
+        &self,
+        transcript: &Transcript,
+        entry: &TranscriptEntry,
+    ) -> Option<RowAnchor> {
+        if self.entry_images_enabled(transcript, entry) {
+            return Some(RowAnchor {
+                entry_id: entry.id,
+                position: RowPosition::Image { index: 0, row: 0 },
+            });
+        }
+        separator_after(&self.fold, &self.image_previews, transcript, entry)
     }
 
     fn row_key(&self, entry: &TranscriptEntry, width: usize, position: RowPosition) -> RowKey {
@@ -1166,6 +1267,7 @@ impl TranscriptRowCache {
             if cached_row_valid(
                 transcript,
                 &self.fold,
+                &self.image_previews,
                 &cached,
                 entry,
                 markdown_snapshot.as_deref(),
@@ -1273,6 +1375,9 @@ impl TranscriptRowCache {
                     position.absolute_byte_offset,
                     width,
                 )?,
+            RowPosition::Image { index, row } if self.entry_images_enabled(transcript, entry) => {
+                self.build_image_row(transcript, entry, anchor, index, row, width)?
+            }
             RowPosition::RunSummary => {
                 // Model and effort names come from providers: keep terminal controls
                 // inert and the row to one line.
@@ -1297,7 +1402,7 @@ impl TranscriptRowCache {
                 }
                 ProjectedRow {
                     row,
-                    next: after_run_summary(&self.fold, transcript, entry),
+                    next: after_run_summary(&self.fold, &self.image_previews, transcript, entry),
                 }
             }
             RowPosition::DirectoryChange => {
@@ -1321,7 +1426,8 @@ impl TranscriptRowCache {
             }
             // Cards that stack flush have no gap row between them.
             RowPosition::Spacer
-                if next_entry().is_some() && !stacks_flush(&self.fold, transcript, entry) =>
+                if next_entry().is_some()
+                    && !stacks_flush(&self.fold, &self.image_previews, transcript, entry) =>
             {
                 ProjectedRow {
                     row: TranscriptRow::plain(
@@ -1421,7 +1527,7 @@ impl TranscriptRowCache {
             });
         }
         if hides_body(entry) {
-            return separator_after(&self.fold, transcript, entry);
+            return self.after_entry_body(transcript, entry);
         }
         Some(RowAnchor {
             entry_id: entry.id,
@@ -1438,7 +1544,7 @@ impl TranscriptRowCache {
         width: usize,
     ) -> Option<RowAnchor> {
         if hides_body(entry) {
-            return separator_after(&self.fold, transcript, entry);
+            return self.after_entry_body(transcript, entry);
         }
         Some(RowAnchor {
             entry_id: entry.id,
@@ -1666,7 +1772,7 @@ impl TranscriptRowCache {
         let next = if expanded {
             Some(card_action_anchor(entry.id))
         } else {
-            separator_after(&self.fold, transcript, last)
+            separator_after(&self.fold, &self.image_previews, transcript, last)
         };
         let hint = if expanded {
             self.fold.collapse_hint()
@@ -1794,7 +1900,7 @@ impl TranscriptRowCache {
                     },
                     0,
                 ),
-                next: separator_after(&self.fold, transcript, entry),
+                next: self.after_entry_body(transcript, entry),
             };
         }
         if start == content.len() {
@@ -1806,7 +1912,7 @@ impl TranscriptRowCache {
                     String::new(),
                     start,
                 ),
-                next: separator_after(&self.fold, transcript, entry),
+                next: self.after_entry_body(transcript, entry),
             };
         }
 
@@ -1862,7 +1968,7 @@ impl TranscriptRowCache {
                 entry_id: entry.id,
                 position: RowPosition::Content(offset),
             }),
-            _ => separator_after(&self.fold, transcript, entry),
+            _ => self.after_entry_body(transcript, entry),
         };
         ProjectedRow {
             row: TranscriptRow::plain(anchor, entry.role, TranscriptRowKind::Content, text, start),
@@ -1922,11 +2028,11 @@ impl TranscriptRowCache {
             CardSection::Action => {
                 let next = if self.fold.is_expanded(entry.id) || projection.inline_detail {
                     card_position_after_action(entry, &projection)
-                        .or_else(|| separator_after(&self.fold, transcript, entry))
+                        .or_else(|| self.after_entry_body(transcript, entry))
                 } else if projection.error_peek.is_some() {
                     Some(card_anchor(entry.id, CardSection::ErrorPeek))
                 } else {
-                    separator_after(&self.fold, transcript, entry)
+                    self.after_entry_body(transcript, entry)
                 };
                 let style = CardRowStyle {
                     marker_end: projection.action_marker_end,
@@ -2042,7 +2148,7 @@ impl TranscriptRowCache {
             }
             CardSection::Metadata if !projection.metadata.is_empty() => {
                 let next = card_position_after_metadata(entry, &projection)
-                    .or_else(|| separator_after(&self.fold, transcript, entry));
+                    .or_else(|| self.after_entry_body(transcript, entry));
                 let mut projected = self.build_card_text_row(
                     entry,
                     anchor,
@@ -2062,7 +2168,7 @@ impl TranscriptRowCache {
             CardSection::Detail if !projection.detail.is_empty() => {
                 let next = if projection.omission_before_detail {
                     card_footer_position(entry, &projection)
-                        .or_else(|| separator_after(&self.fold, transcript, entry))
+                        .or_else(|| self.after_entry_body(transcript, entry))
                 } else {
                     projection
                         .omission
@@ -2075,7 +2181,7 @@ impl TranscriptRowCache {
                             }),
                         })
                         .or_else(|| card_footer_position(entry, &projection))
-                        .or_else(|| separator_after(&self.fold, transcript, entry))
+                        .or_else(|| self.after_entry_body(transcript, entry))
                 };
                 let tone = projection.detail_tone(absolute_offset);
                 let mut projected = self.build_card_text_row(
@@ -2111,7 +2217,7 @@ impl TranscriptRowCache {
                     })
                 } else {
                     card_footer_position(entry, &projection)
-                        .or_else(|| separator_after(&self.fold, transcript, entry))
+                        .or_else(|| self.after_entry_body(transcript, entry))
                 };
                 let mut projected = self.build_card_text_row(
                     entry,
@@ -2158,7 +2264,7 @@ impl TranscriptRowCache {
                     TranscriptRowKind::CardOmission,
                     TranscriptRowTone::SurfaceNote,
                     CardRowStyle::PLAIN,
-                    separator_after(&self.fold, transcript, entry),
+                    self.after_entry_body(transcript, entry),
                 );
                 projected.row.gutter = result_gutter(entry, &projection, anchor);
                 Some(projected)
@@ -2194,7 +2300,7 @@ impl TranscriptRowCache {
             let next = if peek.hidden_lines > 0 {
                 Some(card_anchor(entry.id, CardSection::ErrorPeekHint))
             } else {
-                separator_after(&self.fold, transcript, entry)
+                self.after_entry_body(transcript, entry)
             };
             (line, RowGutter::Connector, TranscriptRowTone::Default, next)
         } else {
@@ -2210,7 +2316,7 @@ impl TranscriptRowCache {
                 format!("+ {} more {noun}", peek.hidden_lines),
                 RowGutter::Indent,
                 TranscriptRowTone::Muted,
-                separator_after(&self.fold, transcript, entry),
+                self.after_entry_body(transcript, entry),
             )
         };
         let text = self.clip_to_columns(&text, result_width(width));
@@ -2825,7 +2931,7 @@ impl TranscriptRowCache {
                     String::new(),
                     entry.content.len(),
                 ),
-                next: separator_after(&self.fold, transcript, entry),
+                next: self.after_entry_body(transcript, entry),
             };
         }
 
@@ -3028,7 +3134,7 @@ impl TranscriptRowCache {
                 entry_id: entry.id,
                 position: RowPosition::Markdown(snapshot.position_at(offset)),
             }),
-            _ => separator_after(&self.fold, transcript, entry),
+            _ => self.after_entry_body(transcript, entry),
         };
         ProjectedRow {
             row: TranscriptRow {
@@ -3043,9 +3149,80 @@ impl TranscriptRowCache {
                 fold_arrow: None,
                 trailing: None,
                 live_timer: false,
+                image: None,
             },
             next,
         }
+    }
+
+    fn build_image_row(
+        &mut self,
+        transcript: &Transcript,
+        entry: &TranscriptEntry,
+        anchor: RowAnchor,
+        index: u8,
+        row_in_image: u16,
+        effective_width: usize,
+    ) -> Option<ProjectedRow> {
+        let layout = self.image_layout(entry, effective_width);
+        let idx = usize::from(index);
+        let (meta, cols, height) = layout.get(idx)?;
+        let has_gap_below = idx + 1 < layout.len();
+        let span_rows = height.saturating_add(u16::from(has_gap_below));
+        if row_in_image >= span_rows {
+            return None;
+        }
+        let is_gap = row_in_image == *height;
+        let mut row = TranscriptRow::plain(
+            anchor,
+            entry.role,
+            TranscriptRowKind::Image,
+            String::new(),
+            entry.display_content().len(),
+        );
+        if !is_gap {
+            row.image = Some(ImageRowSpec {
+                key: meta.key.clone(),
+                index,
+                image_row: row_in_image,
+                total_rows: *height,
+                cols: *cols,
+            });
+        }
+        if entry.role == TranscriptRole::Tool {
+            let has_prior_detail = self.card_snapshot(entry).is_some_and(|projection| {
+                if self.fold.is_expanded(entry.id) || projection.inline_detail {
+                    card_position_after_action(entry, &projection).is_some()
+                } else {
+                    projection.error_peek.is_some()
+                }
+            });
+            row.gutter = if index == 0 && row_in_image == 0 && !has_prior_detail {
+                RowGutter::Connector
+            } else {
+                RowGutter::Indent
+            };
+        }
+        let next = if row_in_image + 1 < span_rows {
+            Some(RowAnchor {
+                entry_id: entry.id,
+                position: RowPosition::Image {
+                    index,
+                    row: row_in_image + 1,
+                },
+            })
+        } else if idx + 1 < layout.len() {
+            Some(RowAnchor {
+                entry_id: entry.id,
+                position: RowPosition::Image {
+                    index: index + 1,
+                    row: 0,
+                },
+            })
+        } else {
+            separator_after(&self.fold, &self.image_previews, transcript, entry)
+        };
+        Some(ProjectedRow { row, next })
     }
 
     fn previous_anchor(
@@ -3058,7 +3235,7 @@ impl TranscriptRowCache {
         match anchor.position {
             RowPosition::Header => {
                 let previous = shown_before(transcript, entry.id)?;
-                if stacks_flush(&self.fold, transcript, previous) {
+                if stacks_flush(&self.fold, &self.image_previews, transcript, previous) {
                     // A flush card follows the previous card's last row directly: walk that
                     // card's rows, from its closed group's line when it has one.
                     let owner = collapsed_group_start(&self.fold, transcript, previous.id)
@@ -3105,6 +3282,42 @@ impl TranscriptRowCache {
                 self.content_anchor_before(transcript, entry, position.output_offset, width)
             }
             RowPosition::Card(_) => self.card_anchor_before(transcript, entry, anchor, width),
+            RowPosition::Image { index, row } => {
+                if row > 0 {
+                    return Some(RowAnchor {
+                        entry_id: entry.id,
+                        position: RowPosition::Image {
+                            index,
+                            row: row - 1,
+                        },
+                    });
+                }
+                if index > 0 {
+                    let effective_width =
+                        if group_member_gutter(&self.fold, transcript, entry, anchor)
+                            != RowGutter::None
+                        {
+                            result_width(width)
+                        } else {
+                            width
+                        };
+                    let layout = self.image_layout(entry, effective_width);
+                    let prev_idx = index - 1;
+                    let (_, _, prev_height) = layout.get(usize::from(prev_idx))?;
+                    return Some(RowAnchor {
+                        entry_id: entry.id,
+                        position: RowPosition::Image {
+                            index: prev_idx,
+                            row: *prev_height,
+                        },
+                    });
+                }
+                if !matches!(entry.kind, TranscriptEntryKind::Message) {
+                    self.card_anchor_before(transcript, entry, anchor, width)
+                } else {
+                    Some(self.last_body_anchor(transcript, entry, width))
+                }
+            }
             RowPosition::UserLeadIn | RowPosition::UserLeadOut => Some(RowAnchor {
                 entry_id: entry.id,
                 position: RowPosition::Spacer,
@@ -3202,7 +3415,10 @@ impl TranscriptRowCache {
                 Some(_) => return Some(anchor),
                 None if matches!(
                     next.position,
-                    RowPosition::Spacer | RowPosition::RunSummary | RowPosition::DirectoryChange
+                    RowPosition::Image { .. }
+                        | RowPosition::Spacer
+                        | RowPosition::RunSummary
+                        | RowPosition::DirectoryChange
                 ) =>
                 {
                     return Some(anchor);
@@ -3355,6 +3571,27 @@ impl TranscriptRowCache {
                 current = next;
             }
         }
+        if self.entry_images_enabled(transcript, entry) {
+            let layout = self.image_layout(entry, width);
+            if let Some((_, _, height)) = layout.last() {
+                return RowAnchor {
+                    entry_id: entry.id,
+                    position: RowPosition::Image {
+                        index: u8::try_from(layout.len() - 1).unwrap_or(0),
+                        row: height.saturating_sub(1),
+                    },
+                };
+            }
+        }
+        self.last_body_anchor(transcript, entry, width)
+    }
+
+    fn last_body_anchor(
+        &mut self,
+        transcript: &Transcript,
+        entry: &TranscriptEntry,
+        width: usize,
+    ) -> RowAnchor {
         if reply_lead(entry) == ReplyLead::Working {
             return RowAnchor {
                 entry_id: entry.id,
@@ -4742,8 +4979,10 @@ fn group_member_gutter(
     entry: &TranscriptEntry,
     anchor: RowAnchor,
 ) -> RowGutter {
-    if !matches!(anchor.position, RowPosition::Header | RowPosition::Card(_))
-        || matches!(entry.kind, TranscriptEntryKind::Message)
+    if !matches!(
+        anchor.position,
+        RowPosition::Header | RowPosition::Card(_) | RowPosition::Image { .. }
+    ) || matches!(entry.kind, TranscriptEntryKind::Message)
     {
         return RowGutter::None;
     }
@@ -4786,6 +5025,7 @@ fn card_action_anchor(entry_id: TranscriptEntryId) -> RowAnchor {
 fn card_header_cache_valid(
     transcript: &Transcript,
     fold: &FoldState,
+    image_previews: &HashMap<TranscriptEntryId, Vec<crate::terminal_images::ImagePreviewMeta>>,
     entry: &TranscriptEntry,
     cached: &CachedRow,
 ) -> bool {
@@ -4806,7 +5046,7 @@ fn card_header_cache_valid(
             let next = if fold.is_run_expanded(&members) {
                 Some(card_action_anchor(entry.id))
             } else {
-                separator_after(fold, transcript, last)
+                separator_after(fold, image_previews, transcript, last)
             };
             if cached.next != next {
                 return false;
@@ -5336,6 +5576,7 @@ impl TranscriptViewport {
 fn cached_row_valid(
     transcript: &Transcript,
     fold: &FoldState,
+    image_previews: &HashMap<TranscriptEntryId, Vec<crate::terminal_images::ImagePreviewMeta>>,
     cached: &CachedRow,
     entry: &TranscriptEntry,
     markdown: Option<&MarkdownSnapshot>,
@@ -5352,14 +5593,14 @@ fn cached_row_valid(
     {
         return false;
     }
-    if !leads_where_entry_ends(transcript, fold, cached, entry) {
+    if !leads_where_entry_ends(transcript, fold, image_previews, cached, entry) {
         return false;
     }
     if matches!(
         cached.row.kind,
         TranscriptRowKind::CardAction | TranscriptRowKind::CardGroup
     ) {
-        return card_header_cache_valid(transcript, fold, entry, cached);
+        return card_header_cache_valid(transcript, fold, image_previews, entry, cached);
     }
     if cached.entry_revision == entry.revision() {
         return true;
@@ -5370,17 +5611,33 @@ fn cached_row_valid(
         next.entry_id == entry.id
             && matches!(
                 next.position,
-                RowPosition::Spacer | RowPosition::RunSummary | RowPosition::DirectoryChange
+                RowPosition::Image { .. }
+                    | RowPosition::Spacer
+                    | RowPosition::RunSummary
+                    | RowPosition::DirectoryChange
             )
     });
+    let expected_after_body = if image_previews
+        .get(&entry.id)
+        .is_some_and(|items| !items.is_empty())
+        && collapsed_group_start(fold, transcript, entry.id).is_none()
+    {
+        Some(RowAnchor {
+            entry_id: entry.id,
+            position: RowPosition::Image { index: 0, row: 0 },
+        })
+    } else {
+        separator_after(fold, image_previews, transcript, entry)
+    };
     if ended_body
         && !matches!(
             cached.row.kind,
-            TranscriptRowKind::Spacer
+            TranscriptRowKind::Image
+                | TranscriptRowKind::Spacer
                 | TranscriptRowKind::RunSummary
                 | TranscriptRowKind::DirectoryChange
         )
-        && cached.next != separator_after(fold, transcript, entry)
+        && cached.next != expected_after_body
     {
         return false;
     }
@@ -5445,6 +5702,7 @@ fn cached_row_valid(
         | TranscriptRowKind::CardGroup
         | TranscriptRowKind::CardDetail
         | TranscriptRowKind::CardOmission
+        | TranscriptRowKind::Image
         | TranscriptRowKind::Placeholder
         | TranscriptRowKind::Thought
         | TranscriptRowKind::Evidence => false,
@@ -5459,6 +5717,7 @@ fn cached_row_valid(
 fn leads_where_entry_ends(
     transcript: &Transcript,
     fold: &FoldState,
+    image_previews: &HashMap<TranscriptEntryId, Vec<crate::terminal_images::ImagePreviewMeta>>,
     cached: &CachedRow,
     entry: &TranscriptEntry,
 ) -> bool {
@@ -5475,7 +5734,7 @@ fn leads_where_entry_ends(
         }
         (TranscriptRowKind::Spacer, _) => cached.next == spacer_next(transcript, entry),
         (TranscriptRowKind::RunSummary, _) => {
-            cached.next == after_run_summary(fold, transcript, entry)
+            cached.next == after_run_summary(fold, image_previews, transcript, entry)
         }
         (TranscriptRowKind::DirectoryChange, _) => cached.next == spacer_after(transcript, entry),
         _ => {
@@ -5488,7 +5747,7 @@ fn leads_where_entry_ends(
                             | RowPosition::DirectoryChange
                     )
             });
-            !ends_entry || cached.next == separator_after(fold, transcript, entry)
+            !ends_entry || cached.next == separator_after(fold, image_previews, transcript, entry)
         }
     }
 }
@@ -5594,6 +5853,37 @@ fn normalize_anchor(
         RowPosition::Card(position) => {
             normalize_card_anchor(transcript, cache, entry, position, width)
         }
+        RowPosition::Image { index, row } => {
+            if let Some(start) = collapsed_group_start(&cache.fold, transcript, entry.id) {
+                return Some(RowAnchor {
+                    entry_id: start,
+                    position: RowPosition::Header,
+                });
+            }
+            let effective_width =
+                if group_member_gutter(&cache.fold, transcript, entry, anchor) != RowGutter::None {
+                    result_width(width)
+                } else {
+                    width
+                };
+            let layout = cache.image_layout(entry, effective_width);
+            if layout.is_empty() {
+                return Some(cache.last_anchor(transcript, entry, width));
+            }
+            let idx = usize::from(index).min(layout.len() - 1);
+            let has_gap_below = idx + 1 < layout.len();
+            let max_row = layout[idx]
+                .2
+                .saturating_sub(1)
+                .saturating_add(u16::from(has_gap_below));
+            Some(RowAnchor {
+                entry_id: entry.id,
+                position: RowPosition::Image {
+                    index: u8::try_from(idx).unwrap_or(0),
+                    row: row.min(max_row),
+                },
+            })
+        }
         // The lead-in exists only while a prompt directly follows its owner. A history page or
         // recovery can splice entries between them, which would leave an unbuildable top row
         // and a blank viewport, so resume at the owner's own gap instead. A page of explore
@@ -5605,19 +5895,21 @@ fn normalize_anchor(
                     position: RowPosition::Header,
                 });
             }
-            Some(match separator_after(&cache.fold, transcript, entry) {
-                Some(spacer) => spacer,
-                None => cache.end_anchor(transcript, entry, width),
-            })
+            Some(
+                match separator_after(&cache.fold, &cache.image_previews, transcript, entry) {
+                    Some(spacer) => spacer,
+                    None => cache.end_anchor(transcript, entry, width),
+                },
+            )
         }
         // The lead-out likewise needs its prompt to still be followed by a reply or card; the
         // prompt's own surface padding is the nearest row that exists either way.
-        RowPosition::UserLeadOut if user_lead_out(transcript, entry) != Some(anchor) => {
-            Some(match separator_after(&cache.fold, transcript, entry) {
+        RowPosition::UserLeadOut if user_lead_out(transcript, entry) != Some(anchor) => Some(
+            match separator_after(&cache.fold, &cache.image_previews, transcript, entry) {
                 Some(spacer) => spacer,
                 None => cache.end_anchor(transcript, entry, width),
-            })
-        }
+            },
+        ),
         // A divider that is no longer shown resumes at the entry's own gap or final row.
         RowPosition::DirectoryChange if entry.moved_to().is_none() => {
             Some(match spacer_after(transcript, entry) {
@@ -5630,7 +5922,9 @@ fn normalize_anchor(
             Some(cache.end_anchor(transcript, entry, width))
         }
         // A gap that cards now stack across resumes at the next card.
-        RowPosition::Spacer if stacks_flush(&cache.fold, transcript, entry) => {
+        RowPosition::Spacer
+            if stacks_flush(&cache.fold, &cache.image_previews, transcript, entry) =>
+        {
             shown_after(transcript, entry.id).map(|next| RowAnchor {
                 entry_id: collapsed_group_start(&cache.fold, transcript, next.id)
                     .unwrap_or(next.id),
@@ -5776,6 +6070,7 @@ fn row_position_offset(position: RowPosition) -> Option<usize> {
         | RowPosition::Evidence(_)
         | RowPosition::Thought
         | RowPosition::Card(_)
+        | RowPosition::Image { .. }
         | RowPosition::Spacer
         | RowPosition::UserLeadIn
         | RowPosition::UserLeadOut
@@ -5946,6 +6241,7 @@ fn card_file_link(card: &crate::tool_cards::ToolCardSnapshot) -> Option<std::syn
 /// divider of a move after it, then the gap before the next entry.
 fn separator_after(
     fold: &FoldState,
+    image_previews: &HashMap<TranscriptEntryId, Vec<crate::terminal_images::ImagePreviewMeta>>,
     transcript: &Transcript,
     entry: &TranscriptEntry,
 ) -> Option<RowAnchor> {
@@ -5955,13 +6251,14 @@ fn separator_after(
             position: RowPosition::RunSummary,
         });
     }
-    after_run_summary(fold, transcript, entry)
+    after_run_summary(fold, image_previews, transcript, entry)
 }
 
 /// What follows an entry's run summary: the divider of a move after it, then the gap, or
 /// straight the next card when the two stack flush.
 fn after_run_summary(
     fold: &FoldState,
+    image_previews: &HashMap<TranscriptEntryId, Vec<crate::terminal_images::ImagePreviewMeta>>,
     transcript: &Transcript,
     entry: &TranscriptEntry,
 ) -> Option<RowAnchor> {
@@ -5971,7 +6268,7 @@ fn after_run_summary(
             position: RowPosition::DirectoryChange,
         });
     }
-    if stacks_flush(fold, transcript, entry) {
+    if stacks_flush(fold, image_previews, transcript, entry) {
         return shown_after(transcript, entry.id).map(|next| RowAnchor {
             entry_id: next.id,
             position: RowPosition::Header,
@@ -5985,7 +6282,12 @@ fn after_run_summary(
 /// showing rows below its action (expanded, a diff preview, or a failed command's peek)
 /// keeps a blank row before the next. A member of a closed group shows nothing of its
 /// own, so the group's line stacks like a card's.
-fn stacks_flush(fold: &FoldState, transcript: &Transcript, entry: &TranscriptEntry) -> bool {
+fn stacks_flush(
+    fold: &FoldState,
+    image_previews: &HashMap<TranscriptEntryId, Vec<crate::terminal_images::ImagePreviewMeta>>,
+    transcript: &Transcript,
+    entry: &TranscriptEntry,
+) -> bool {
     // A card that closes a turn keeps its summary, any move divider and the gap after them.
     if entry.run_summary().is_some()
         || entry.moved_to().is_some()
@@ -5997,6 +6299,9 @@ fn stacks_flush(fold: &FoldState, transcript: &Transcript, entry: &TranscriptEnt
         return true;
     }
     let shows_rows = fold.is_expanded(entry.id)
+        || image_previews
+            .get(&entry.id)
+            .is_some_and(|items| !items.is_empty())
         || entry.tool_card().is_some_and(|card| {
             ErrorPeek::of(card).is_some()
                 || matches!(
@@ -7488,6 +7793,7 @@ mod tests {
             process_ended_at_ms: None,
             edit_locations: Vec::new(),
             images: Vec::new(),
+            image_parts: Vec::new(),
         }
     }
 

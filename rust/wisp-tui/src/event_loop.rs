@@ -686,6 +686,7 @@ pub(super) async fn run_editor<B: FrameBackend>(
         .backend_mut()
         .resume(suspended)
         .and_then(|()| crate::terminal::repaint_all(terminal));
+    ui.image_placements.invalidate();
     if let Some(gate) = &gate {
         gate.resume();
     }

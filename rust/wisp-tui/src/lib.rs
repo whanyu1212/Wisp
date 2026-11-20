@@ -72,6 +72,7 @@ mod stream_reveal;
 mod subagents_view;
 mod syntax;
 mod terminal;
+mod terminal_images;
 mod theme;
 mod theme_picker;
 mod theme_preferences;
@@ -598,6 +599,14 @@ struct LiveUi {
     motion_allowed: bool,
     /// Whether the transcript's links are drawn as OSC 8 hyperlinks.
     hyperlinks: bool,
+    /// Graphics protocol used to render inline transcript image thumbnails.
+    image_protocol: terminal_images::ImageProtocol,
+    /// Terminal cell pixel dimensions for aspect-preserving thumbnail layout.
+    cell_size: terminal_images::CellSize,
+    /// Bounded cache of decoded image thumbnails for the active session.
+    image_cache: terminal_images::ImageCache,
+    /// Active native terminal image placements synchronized across frames.
+    image_placements: terminal_images::ImagePlacementState,
     /// The editor command for the draft and for files (`$VISUAL`, `$EDITOR`, then `vi`).
     editor_command: String,
     /// Set by the key that opens the editor; the event loop runs the editor after the
@@ -694,6 +703,10 @@ impl Default for LiveUi {
             attention: Attention::default(),
             motion_allowed: true,
             hyperlinks: false,
+            image_protocol: terminal_images::ImageProtocol::HalfBlock,
+            cell_size: terminal_images::CellSize::default(),
+            image_cache: terminal_images::ImageCache::default(),
+            image_placements: terminal_images::ImagePlacementState::default(),
             editor_command: "vi".into(),
             editor_request: None,
             input_gate: None,
@@ -1640,6 +1653,9 @@ impl LiveUi {
             && (self.state.transcript.generation() != transcript_generation
                 || history_window_changed)
         {
+            if !self.state.transcript.entries().is_empty() {
+                self.prepare_transcript_images();
+            }
             let action = if history_window_changed {
                 self.transcript_row_cache
                     .retain_entries(&self.state.transcript);
@@ -1902,6 +1918,26 @@ impl LiveUi {
         }
     }
 
+    fn prepare_transcript_images(&mut self) {
+        let session_images_dir = self
+            .state
+            .selected_session
+            .as_ref()
+            .and_then(|session| std::path::Path::new(&session.session_path).parent())
+            .map(|dir| dir.join("images"));
+        let focus_entry = self
+            .transcript_viewport
+            .scrolled_top()
+            .map(|anchor| anchor.entry_id);
+        self.image_cache.prepare_transcript(
+            &self.state.transcript,
+            focus_entry,
+            session_images_dir.as_deref(),
+            self.cell_size,
+            &mut self.transcript_row_cache,
+        );
+    }
+
     fn draw<B: FrameBackend>(
         &mut self,
         terminal: &mut Terminal<B>,
@@ -1961,14 +1997,115 @@ impl LiveUi {
         self.transcript_row_cache
             .fold_mut()
             .set_click_hints(self.mouse_enabled);
-        // Taken from the transcript's paint inside `render`, applied in `finish`.
+        self.prepare_transcript_images();
+        // Taken from the transcript's paint inside `render`, applied in `finish` / `post_draw`.
         let painted_links = std::cell::RefCell::new(Vec::new());
+        let painted_images = std::cell::RefCell::new(Vec::<terminal_images::PaintedImage>::new());
+        let popup_rect = std::cell::Cell::new(None::<ratatui::layout::Rect>);
+        let native_placements = std::cell::RefCell::new(Vec::new());
         let hyperlinks = self.hyperlinks;
+        let no_color = self.no_color;
+        let image_protocol = self.image_protocol;
+        let cell_size = self.cell_size;
         let color_depth = self.color_depth;
+        let image_cache = std::mem::take(&mut self.image_cache);
+        let mut image_placements = std::mem::take(&mut self.image_placements);
         let finish = |buffer: &mut ratatui::buffer::Buffer| {
             if hyperlinks {
                 hyperlink::apply(buffer, &painted_links.borrow());
             }
+            let popup = popup_rect.get();
+            let mut desired = Vec::new();
+            for painted in painted_images.borrow().iter() {
+                let Some(thumb) = image_cache.get(&painted.key) else {
+                    continue;
+                };
+                let total_cells =
+                    usize::from(painted.rect.width) * usize::from(painted.rect.height);
+                if total_cells == 0 || painted.snapshot.len() != total_cells {
+                    continue;
+                }
+                let mut uncovered = Vec::with_capacity(total_cells);
+                let mut all_uncovered = true;
+                for dy in 0..painted.rect.height {
+                    for dx in 0..painted.rect.width {
+                        let x = painted.rect.x + dx;
+                        let y = painted.rect.y + dy;
+                        let idx =
+                            usize::from(dy) * usize::from(painted.rect.width) + usize::from(dx);
+                        let cell = &buffer[(x, y)];
+                        let occluded_by_popup = popup.is_some_and(|area| {
+                            area.contains(ratatui::layout::Position::new(x, y))
+                        });
+                        let same = !occluded_by_popup && cell == &painted.snapshot[idx];
+                        uncovered.push(same);
+                        all_uncovered &= same;
+                    }
+                }
+                if no_color || image_protocol == terminal_images::ImageProtocol::HalfBlock {
+                    terminal_images::paint_half_blocks(
+                        buffer,
+                        thumb,
+                        painted,
+                        no_color,
+                        Some(&uncovered),
+                    );
+                } else if all_uncovered {
+                    if matches!(
+                        image_protocol,
+                        terminal_images::ImageProtocol::ITerm2
+                            | terminal_images::ImageProtocol::Sixel
+                    ) {
+                        for dy in 0..painted.rect.height {
+                            for dx in 0..painted.rect.width {
+                                let cell = &mut buffer[(painted.rect.x + dx, painted.rect.y + dy)];
+                                cell.set_symbol(" ");
+                                cell.modifier.insert(ratatui::style::Modifier::HIDDEN);
+                            }
+                        }
+                    }
+                    desired.push(terminal_images::NativePlacement {
+                        placement: terminal_images::PlacementKey {
+                            entry_id: painted.entry_id,
+                            image_index: painted.image_index,
+                        },
+                        image_key: painted.key.clone(),
+                        rect: painted.rect,
+                        total_rows: painted.total_rows,
+                        first_image_row: painted.first_image_row,
+                        bg: painted.bg,
+                    });
+                } else {
+                    terminal_images::paint_half_blocks(
+                        buffer,
+                        thumb,
+                        painted,
+                        no_color,
+                        Some(&uncovered),
+                    );
+                }
+            }
+            *native_placements.borrow_mut() = desired;
+        };
+        let post_draw = |backend: &mut B| -> std::io::Result<()> {
+            let desired = native_placements.borrow();
+            let mut bytes = Vec::new();
+            image_placements.sync(
+                image_protocol,
+                &desired,
+                &image_cache,
+                cell_size,
+                &mut bytes,
+            );
+            terminal::set_kitty_images_active(image_placements.has_active_kitty());
+            if bytes.is_empty() {
+                return Ok(());
+            }
+            let mut wrapped = Vec::with_capacity(bytes.len() + 4);
+            wrapped.extend_from_slice(b"\x1b7");
+            wrapped.extend_from_slice(&bytes);
+            wrapped.extend_from_slice(b"\x1b8");
+            backend.write_frame_bytes(&wrapped)
         };
         let render = |frame: &mut ratatui::Frame<'_>| {
             let completion_view = (self.state.editor_editable() && self.browse_selected.is_none())
@@ -2015,6 +2152,8 @@ impl LiveUi {
             );
             *painted_links.borrow_mut() =
                 std::mem::take(&mut self.transcript_row_cache.painted_links);
+            *painted_images.borrow_mut() =
+                std::mem::take(&mut self.transcript_row_cache.painted_images);
             // Popups docked to the composer lay out in the conversation's column, beside
             // a docked side panel; centred popups still centre on the whole screen.
             let panel_docked = self.side_panel.docked();
@@ -2047,6 +2186,7 @@ impl LiveUi {
             if let Some(help) = &mut self.key_help {
                 if let Some(area) = ui::overlay_area(frame.area()) {
                     painted.popup = Some(area);
+                    popup_rect.set(Some(area));
                     painted.dialog_controls =
                         help.render(frame, area, &self.bindings, palette, Some(connection));
                 }
@@ -2078,6 +2218,7 @@ impl LiveUi {
                     panel_docked,
                 ) {
                     painted.popup = Some(area);
+                    popup_rect.set(Some(area));
                     let dialog =
                         self.file_picker
                             .render(frame, area, &self.state.project_files, palette);
@@ -2170,6 +2311,7 @@ impl LiveUi {
             };
             ui::clear_overlay(frame, area, palette);
             painted.popup = Some(area);
+            popup_rect.set(Some(area));
             painted.rows = match kind {
                 OverlayKind::Theme => {
                     let dialog = self.theme_picker.as_mut().expect("active theme").render(
@@ -2320,7 +2462,10 @@ impl LiveUi {
             };
             rendered_overlay = Some(kind);
         };
-        terminal::draw_frame(terminal, color_depth, render, finish)?;
+        let draw_result = terminal::draw_frame(terminal, color_depth, render, finish, post_draw);
+        self.image_cache = image_cache;
+        self.image_placements = image_placements;
+        draw_result?;
         // After the frame's synchronized update, so the title and any notification are
         // not held back with it.
         let mut attention = self.attention.observe(
@@ -4888,6 +5033,9 @@ impl LiveUi {
         limit: usize,
     ) -> Result<LoopControl, Error> {
         let previous_pending = self.pending_history_navigation.take();
+        if !self.state.transcript.entries().is_empty() {
+            self.prepare_transcript_images();
+        }
         let outcome = self.transcript_viewport.reduce_with_newer_history(
             action,
             &self.state.transcript,
@@ -5193,8 +5341,7 @@ impl LiveUi {
                     }
                 }
                 Input::Redraw => {
-                    self.render_pending = true;
-                    self.mouse_frame = None;
+                    self.refresh_on_redraw();
                 }
                 _ => {}
             }
@@ -5447,7 +5594,7 @@ impl LiveUi {
             }
             Input::Paste(pasted) => Ok(self.handle_prompt_paste(&pasted, decision_pending)),
             Input::Redraw => {
-                self.invalidate_rendered_frame();
+                self.refresh_on_redraw();
                 Ok(LoopControl::Continue)
             }
             Input::Error(error) => Err(Error::Io(error)),
@@ -6301,6 +6448,13 @@ impl LiveUi {
         self.render_pending = true;
     }
 
+    fn refresh_on_redraw(&mut self) {
+        if self.input_gate.is_some() {
+            self.cell_size = terminal_images::CellSize::query_stdout();
+        }
+        self.invalidate_rendered_frame();
+    }
+
     fn invalidate_rendered_frame(&mut self) {
         self.mouse_frame = None;
         self.transcript_selection = None;
@@ -6316,6 +6470,7 @@ impl LiveUi {
         self.rendered_decision_context = None;
         self.rendered_decision_choice = None;
         self.rendered_model_picker = false;
+        self.image_placements.request_reemit();
         self.render_pending = true;
     }
 }
@@ -6672,6 +6827,8 @@ where
                 attention,
                 motion_allowed,
                 hyperlinks: hyperlink::supported(std::env::var("TERM").ok().as_deref()),
+                image_protocol: terminal_images::ImageProtocol::from_env(color_depth, no_color),
+                cell_size: terminal_images::CellSize::query_stdout(),
                 editor_command: external_editor::editor_command(|name| std::env::var(name).ok()),
                 input_gate: Some(input_gate),
                 mouse_enabled,

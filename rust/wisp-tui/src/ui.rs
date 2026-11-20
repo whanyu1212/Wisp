@@ -268,6 +268,8 @@ pub fn render_interactive(
     side_panel: Option<&SidePanel>,
 ) -> mouse::Conversation {
     let area = frame.area();
+    row_cache.painted_images.clear();
+    row_cache.painted_links.clear();
     frame.render_widget(Block::default().style(palette.base()), area);
     if !decision_context_visible(area) {
         frame.render_widget(
@@ -744,17 +746,23 @@ fn pinned_user_rows(
         entry_id: user.id,
         position: RowPosition::Header,
     };
+    let mut text_rows = 0_usize;
     let mut clipped = false;
     loop {
         let cached = row_cache.row_at(&state.transcript, anchor, width)?;
         if cached.row.kind == TranscriptRowKind::Spacer || cached.row.anchor.entry_id != user.id {
             break;
         }
-        if rows.len() == PINNED_USER_ROWS {
-            clipped = true;
-            break;
+        if cached.row.kind == TranscriptRowKind::Image {
+            rows.push(cached.row);
+        } else {
+            if text_rows == PINNED_USER_ROWS {
+                clipped = true;
+                break;
+            }
+            text_rows += 1;
+            rows.push(cached.row);
         }
-        rows.push(cached.row);
         let Some(next) = cached.next.filter(|next| next.entry_id == user.id) else {
             break;
         };
@@ -842,6 +850,7 @@ fn render_transcript(
     welcome: Welcome,
     motion: Motion<'_>,
 ) -> (Option<Rect>, Vec<mouse::FoldRow>, Vec<mouse::WelcomeRow>) {
+    row_cache.painted_images.clear();
     let padding = u16::from(
         !state.transcript.entries().is_empty()
             && area.height >= if decision_pending(state) { 10 } else { 8 },
@@ -884,30 +893,8 @@ fn render_transcript(
     // Size first: a resize can normalize the scrolled top that decides whether the prompt pins.
     viewport.set_geometry(&state.transcript, row_cache, content_width, visible_lines);
     let mut links = Vec::new();
-    let mut pinned = pinned_user_rows(state, viewport, row_cache, content_width);
-    if let Some((user_id, rows)) = &mut pinned {
-        let has_reply = crate::transcript_view::shown_after(&state.transcript, *user_id).is_some();
-        let reply_rows = if has_reply {
-            visible_lines.saturating_sub(1).min(2)
-        } else {
-            0
-        };
-        rows.truncate(visible_lines.saturating_sub(reply_rows));
-        if visible_lines >= rows.len().saturating_add(reply_rows).saturating_add(1) {
-            let mut spacer = rows.last().expect("nonempty user projection").clone();
-            spacer.kind = TranscriptRowKind::Spacer;
-            spacer.anchor.position = RowPosition::Spacer;
-            spacer.spans.clear();
-            rows.push(spacer.clone());
-            // The plain gap that separates the pinned prompt from its reply, as in place.
-            if has_reply && visible_lines >= rows.len().saturating_add(reply_rows).saturating_add(1)
-            {
-                spacer.role = TranscriptRole::Assistant;
-                spacer.anchor.position = RowPosition::UserLeadOut;
-                rows.push(spacer);
-            }
-        }
-    }
+    let mut painted_images = Vec::new();
+    let pinned = pinned_user_rows(state, viewport, row_cache, content_width);
     let mut rows = viewport.visible_rows(&state.transcript, row_cache);
     if let Some((user_id, mut user_rows)) = pinned {
         let user_index = state.transcript.entry_index(user_id).unwrap_or(usize::MAX);
@@ -917,6 +904,51 @@ fn render_transcript(
                 .entry_index(row.anchor.entry_id)
                 .is_some_and(|index| index > user_index)
         });
+        let has_reply = crate::transcript_view::shown_after(&state.transcript, user_id).is_some();
+        let base_reply_reserve = if has_reply {
+            visible_lines.saturating_sub(1).min(2)
+        } else {
+            0
+        };
+        let has_images = user_rows
+            .iter()
+            .any(|row| row.kind == TranscriptRowKind::Image);
+        let reply_overflows = rows
+            .len()
+            .saturating_add(user_rows.len())
+            .saturating_add(usize::from(has_reply) * 2)
+            > visible_lines;
+        let reply_reserve = if has_reply && has_images && reply_overflows {
+            base_reply_reserve.max(visible_lines / 2)
+        } else {
+            base_reply_reserve
+        };
+        user_rows.truncate(visible_lines.saturating_sub(reply_reserve));
+        if visible_lines
+            >= user_rows
+                .len()
+                .saturating_add(base_reply_reserve)
+                .saturating_add(1)
+        {
+            let mut spacer = user_rows.last().expect("nonempty user projection").clone();
+            spacer.kind = TranscriptRowKind::Spacer;
+            spacer.anchor.position = RowPosition::Spacer;
+            spacer.spans.clear();
+            spacer.image = None;
+            user_rows.push(spacer.clone());
+            // The plain gap that separates the pinned prompt from its reply, as in place.
+            if has_reply
+                && visible_lines
+                    >= user_rows
+                        .len()
+                        .saturating_add(base_reply_reserve)
+                        .saturating_add(1)
+            {
+                spacer.role = TranscriptRole::Assistant;
+                spacer.anchor.position = RowPosition::UserLeadOut;
+                user_rows.push(spacer);
+            }
+        }
         let mut tail_budget = visible_lines.saturating_sub(user_rows.len());
         let anchored_output = !viewport.follows_tail()
             && rows.first().is_some_and(|row| {
@@ -1086,6 +1118,7 @@ fn render_transcript(
                 turn_rail(state, row, prompts, palette),
                 glow,
                 &mut links,
+                &mut painted_images,
             );
         }
     }
@@ -1115,6 +1148,7 @@ fn render_transcript(
         })
         .flatten();
     row_cache.painted_links = links;
+    row_cache.painted_images = painted_images;
     (jump_to_latest, fold_rows, welcome_rows)
 }
 
@@ -1767,6 +1801,7 @@ fn render_transcript_row(
     rail: Option<(&'static str, Color)>,
     glow: Option<Color>,
     links: &mut Vec<crate::hyperlink::PaintedLink>,
+    painted_images: &mut Vec<crate::terminal_images::PaintedImage>,
 ) {
     let selected = selected_row == Some(row.anchor);
     let user = user_surface;
@@ -1948,6 +1983,40 @@ fn render_transcript_row(
             frame.buffer_mut()[position]
                 .set_symbol(arrow.symbol())
                 .set_style(on_row(Style::default().fg(palette.muted)));
+        }
+    }
+    if let Some(spec) = row.image {
+        let img_width = spec.cols.min(content.width);
+        if img_width > 0 && content.height > 0 {
+            let img_rect = Rect::new(content.x, content.y, img_width, 1);
+            let bg = base.bg.unwrap_or(Color::Reset);
+            let buffer = frame.buffer_mut();
+            let row_cells: Vec<ratatui::buffer::Cell> = (img_rect.left()..img_rect.right())
+                .map(|x| buffer[(x, img_rect.y)].clone())
+                .collect();
+            if let Some(last) = painted_images.last_mut().filter(|last| {
+                last.entry_id == row.anchor.entry_id
+                    && last.image_index == spec.index
+                    && last.rect.x == img_rect.x
+                    && last.rect.width == img_rect.width
+                    && last.rect.bottom() == img_rect.y
+                    && last.first_image_row.saturating_add(last.rect.height) == spec.image_row
+                    && last.bg == bg
+            }) {
+                last.rect.height += 1;
+                last.snapshot.extend(row_cells);
+            } else {
+                painted_images.push(crate::terminal_images::PaintedImage {
+                    entry_id: row.anchor.entry_id,
+                    image_index: spec.index,
+                    key: spec.key,
+                    rect: img_rect,
+                    total_rows: spec.total_rows,
+                    first_image_row: spec.image_row,
+                    bg,
+                    snapshot: row_cells,
+                });
+            }
         }
     }
 }
@@ -4900,6 +4969,7 @@ mod tests {
             process_ended_at_ms: None,
             edit_locations: Vec::new(),
             images: Vec::new(),
+            image_parts: Vec::new(),
         }
     }
 
@@ -7956,6 +8026,7 @@ mod tests {
             fold_arrow: None,
             trailing: None,
             live_timer: false,
+            image: None,
         };
         let prompts = TurnBounds {
             first: Some(0),
@@ -8674,6 +8745,7 @@ mod tests {
             fold_arrow: None,
             trailing: None,
             live_timer: false,
+            image: None,
         };
         let action = row(
             TranscriptRowKind::CardAction,
@@ -8710,6 +8782,7 @@ mod tests {
                             None,
                             None,
                             &mut Vec::new(),
+                            &mut Vec::new(),
                         );
                     }
                     let selected = Some(action.anchor);
@@ -8725,6 +8798,7 @@ mod tests {
                         None,
                         None,
                         None,
+                        &mut Vec::new(),
                         &mut Vec::new(),
                     );
                 })
@@ -8804,6 +8878,7 @@ mod tests {
             fold_arrow: None,
             trailing: Some("4m 12s".into()),
             live_timer: false,
+            image: None,
         };
         let mut terminal = Terminal::new(TestBackend::new(60, 2)).unwrap();
         terminal
@@ -8820,6 +8895,7 @@ mod tests {
                         None,
                         None,
                         None,
+                        &mut Vec::new(),
                         &mut Vec::new(),
                     );
                 }
@@ -8868,6 +8944,7 @@ mod tests {
                 fold_arrow: None,
                 trailing: None,
                 live_timer: false,
+                image: None,
             };
             // The selected row draws its band under the same text: only the background
             // changes, or in monochrome the row reverses.
@@ -8886,6 +8963,7 @@ mod tests {
                             None,
                             None,
                             None,
+                            &mut Vec::new(),
                             &mut Vec::new(),
                         );
                     }
