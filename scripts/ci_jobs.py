@@ -14,7 +14,7 @@ GROUP_JOBS = {
     "quality": ("quality",),
     "python": ("python-tests", "macos-smoke"),
     "python_oldest": ("python-tests-oldest",),
-    "rust": ("rust-workspace",),
+    "rust": ("rust-lint", "rust-workspace"),
     "handoff": ("tui-handoff",),
     "package": ("package",),
     "contracts": ("contracts",),
