@@ -19,6 +19,7 @@ const DEBOUNCE: Duration = Duration::from_millis(200);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionPicker {
+    pub purpose: SessionPickerPurpose,
     sessions: Vec<SessionSummary>,
     selected_id: Option<String>,
     query: String,
@@ -32,6 +33,12 @@ pub struct SessionPicker {
     page_cursor: Option<String>,
     error: Option<String>,
     pub selecting: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionPickerPurpose {
+    Resume,
+    Share,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -49,6 +56,7 @@ impl SessionPicker {
             .map(str::to_owned)
             .or_else(|| sessions.first().map(|s| s.session_id.clone()));
         Self {
+            purpose: SessionPickerPurpose::Resume,
             sessions,
             selected_id,
             query: String::new(),
@@ -69,6 +77,17 @@ impl SessionPicker {
         let mut picker = Self::new(Vec::new(), None);
         picker.schedule(None, Duration::ZERO);
         picker
+    }
+
+    pub fn for_sharing() -> Self {
+        Self {
+            purpose: SessionPickerPurpose::Share,
+            ..Self::loading()
+        }
+    }
+
+    pub fn selected_summary(&self) -> Option<&SessionSummary> {
+        self.selected().and_then(|index| self.sessions.get(index))
     }
 
     fn invalidate(&mut self) {
@@ -304,7 +323,11 @@ pub fn render(
         hints.extend([
             Hint {
                 label: "Enter",
-                description: "select",
+                description: match picker.purpose {
+                    SessionPickerPurpose::Resume => "select",
+                    SessionPickerPurpose::Share if compact => "share once",
+                    SessionPickerPurpose::Share => "share for one turn",
+                },
                 key: key(KeyCode::Enter, KeyModifiers::NONE),
             },
             Hint {
@@ -345,7 +368,10 @@ pub fn render(
     }
     let filter = format!("/ Search: {}", picker.query);
     let layout = Dialog {
-        title: "resume session",
+        title: match picker.purpose {
+            SessionPickerPurpose::Resume => "resume session",
+            SessionPickerPurpose::Share => "share a saved session",
+        },
         tabs: &[],
         filter: Some(&filter),
         hints: &hints,

@@ -132,9 +132,27 @@ def validate_message_page_limit(limit: int) -> None:
 
 def message_page_index_from_entries(
     entries: Iterable[SessionEntry],
+    *,
+    conversation_only: bool = False,
 ) -> MessagePageIndex:
     tree = resolve_session_tree(tuple(entries))
     messages = tuple(entry for entry in tree.active_path if isinstance(entry, MessageSessionEntry))
+    if conversation_only:
+        messages = tuple(
+            entry
+            for entry in messages
+            if entry.message.role in ("user", "assistant") and entry.message.user_visible_content
+        )
+        return MessagePageIndex(
+            active_leaf_id=tree.active_leaf_id,
+            messages=messages,
+            positions={entry.id: index for index, entry in enumerate(messages)},
+            web_searches={},
+            run_totals={},
+            moves={},
+            auto_approved=frozenset(),
+            approval_notes={},
+        )
     searches: dict[str, tuple[WebSearchPerformed, ...]] = {}
     pending: list[WebSearchPerformed] = []
     run_totals: dict[str, AgentCompleted] = {}
@@ -264,6 +282,7 @@ def message_page_from_index(
     entry_ids: tuple[str, ...] = (),
     complete_structure: bool = False,
     full_content: bool = False,
+    conversation_only: bool = False,
 ) -> SessionMessagePage:
     validate_message_page_limit(limit)
     if before_entry_id is not None and after_entry_id is not None:
@@ -318,6 +337,7 @@ def message_page_from_index(
             auto_approved=entry.id in index.auto_approved,
             approval_note=index.approval_notes.get(entry.id),
             complete_structure=complete_structure or full_content,
+            conversation_only=conversation_only,
         )
         for entry in reversed(selected)
     )
@@ -350,8 +370,22 @@ def _rpc_message_snapshot(
     moved_to: Path | None = None,
     auto_approved: bool = False,
     approval_note: str | None = None,
+    conversation_only: bool = False,
 ) -> RpcMessageSnapshot:
     message = entry.message
+    if conversation_only:
+        assert text_budget is not None
+        content, original_bytes, truncated = _clip_text_with_budget(
+            message.user_visible_content, limit=MESSAGE_CONTENT_BYTE_LIMIT, text_budget=text_budget
+        )
+        return RpcMessageSnapshot(
+            entry_id=entry.id,
+            created_at=entry.created_at,
+            role=message.role,
+            content=content,
+            content_original_bytes=original_bytes,
+            content_truncated=truncated,
+        )
     skill_invocation = _rpc_skill_invocation_snapshot(
         message.skill_invocation,
         text_budget=text_budget,

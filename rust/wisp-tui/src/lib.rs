@@ -128,7 +128,7 @@ use reducer::{
     BackendEvent, CommandIdSource, CommandKind, ImageMessageTarget, InteractionStatus,
     PendingApproval, UiAction, UiEffect, UiState, ViewStatus,
 };
-use session_picker::{SessionPicker, SessionPickerAction};
+use session_picker::{SessionPicker, SessionPickerAction, SessionPickerPurpose};
 use session_tree_picker::{SessionTreePicker, SessionTreePickerAction};
 use startup_logo::LogoChoice;
 use std::collections::{HashSet, VecDeque};
@@ -1544,7 +1544,11 @@ impl LiveUi {
             }
             _ => None,
         };
+        let had_shared_session = self.state.saved_session_attachment.is_some();
         let effects = reducer::reduce(&mut self.state, action, &mut self.ids)?;
+        if had_shared_session && self.state.saved_session_attachment.is_none() {
+            self.sync_composer_chips();
+        }
         if let Some(call_id) = finished_call {
             self.note_finished_card(&call_id);
         }
@@ -3155,7 +3159,7 @@ impl LiveUi {
         self.notice = Some(format!(
             "Attached {label}. Backspace on an empty draft removes it."
         ));
-        self.sync_image_chips();
+        self.sync_composer_chips();
         Ok(())
     }
 
@@ -3179,7 +3183,7 @@ impl LiveUi {
             return false;
         }
         self.notice = Some("Removed the last attached image.".into());
-        self.sync_image_chips();
+        self.sync_composer_chips();
         true
     }
 
@@ -3192,7 +3196,7 @@ impl LiveUi {
         self.images
             .prepend_restored(restored)
             .expect("restored images were checked to fit");
-        self.sync_image_chips();
+        self.sync_composer_chips();
     }
 
     /// Why popping `message` now would leave its images without room, checked before
@@ -3221,20 +3225,26 @@ impl LiveUi {
             self.notice = Some(format!(
                 "Removed {dropped} restored image(s): they are stored with the previous session."
             ));
-            self.sync_image_chips();
+            self.sync_composer_chips();
         }
     }
 
     fn clear_images(&mut self) {
         if !self.images.is_empty() {
             self.images.clear();
-            self.sync_image_chips();
+            self.sync_composer_chips();
         }
     }
 
-    fn sync_image_chips(&mut self) {
-        self.composer_layout_cache
-            .set_chips(self.images.chip_labels());
+    fn sync_composer_chips(&mut self) {
+        let mut chips = self.images.chip_labels();
+        if let Some(source) = &self.state.saved_session_attachment {
+            // Keep the share indicator visible in the narrow composer, even
+            // when the saved session's title is long.
+            let label = session_picker::terminal_row(&source.label, 14);
+            chips.insert(0, format!("Saved {label}"));
+        }
+        self.composer_layout_cache.set_chips(chips);
         self.render_pending = true;
     }
 
@@ -3268,10 +3278,14 @@ impl LiveUi {
         limit: usize,
     ) -> Result<Option<String>, Error> {
         let id = self.ids.peek_id(CommandKind::Prompt);
-        let command = WispTypedClientRpcCommands::prompt_with_images(
+        let command = WispTypedClientRpcCommands::prompt_with_attachments(
             &id,
             prompt,
             &self.images.wire_images(),
+            self.state
+                .saved_session_attachment
+                .as_ref()
+                .map(|source| source.session_id.as_str()),
         )?;
         let encoded_len = serde_json::to_vec(&command)?.len();
         if encoded_len <= limit {
@@ -3891,6 +3905,29 @@ impl LiveUi {
                 self.render_pending = true;
                 self.poll_session_catalog(writer, limit).await
             }
+            SessionCommand::SharePastSession => {
+                if matches!(
+                    commands::classify(self.editor.text(), self.state.command_catalog.as_deref()),
+                    Some(Command::Session(SessionCommand::SharePastSession))
+                ) {
+                    self.editor.clear();
+                }
+                self.session_picker = Some(SessionPicker::for_sharing());
+                self.render_pending = true;
+                self.poll_session_catalog(writer, limit).await
+            }
+            SessionCommand::ClearSharedSession => {
+                if matches!(
+                    commands::classify(self.editor.text(), self.state.command_catalog.as_deref()),
+                    Some(Command::Session(SessionCommand::ClearSharedSession))
+                ) {
+                    self.editor.clear();
+                }
+                self.state.saved_session_attachment = None;
+                self.sync_composer_chips();
+                self.notice = Some("No saved session attached.".into());
+                Ok(LoopControl::Continue)
+            }
             SessionCommand::ResumeSession(session_id) => {
                 if !reducer::valid_session_id(&session_id) {
                     self.notice =
@@ -4385,15 +4422,18 @@ impl LiveUi {
         {
             return Ok(LoopControl::Continue);
         }
-        let Some((query, cursor)) = self
-            .session_picker
-            .as_ref()
-            .and_then(SessionPicker::request_due)
-        else {
+        let Some(picker) = self.session_picker.as_ref() else {
+            return Ok(LoopControl::Continue);
+        };
+        let Some((query, cursor)) = picker.request_due() else {
             return Ok(LoopControl::Continue);
         };
         self.dispatch(
-            UiAction::SearchSessionCatalog { query, cursor },
+            UiAction::SearchSessionCatalog {
+                query,
+                cursor,
+                read_only: picker.purpose == SessionPickerPurpose::Share,
+            },
             writer,
             limit,
         )
@@ -4421,6 +4461,19 @@ impl LiveUi {
                 Ok(LoopControl::Continue)
             }
             SessionPickerAction::Selected(session_id) => {
+                if picker.purpose == SessionPickerPurpose::Share {
+                    if let Some(summary) = picker
+                        .selected_summary()
+                        .filter(|s| s.session_id == session_id)
+                    {
+                        let label = summary
+                            .name
+                            .clone()
+                            .unwrap_or_else(|| session_id.chars().take(8).collect());
+                        self.attach_saved_session(session_id, label);
+                    }
+                    return Ok(LoopControl::Continue);
+                }
                 if !reducer::valid_session_id(&session_id) {
                     self.notice =
                         Some("Session ID is empty or exceeds the 4096-byte limit.".into());
@@ -4445,6 +4498,29 @@ impl LiveUi {
                     .await
             }
         }
+    }
+
+    fn attach_saved_session(&mut self, session_id: String, label: String) {
+        if !reducer::valid_saved_session_id(&session_id) {
+            self.notice = Some("This saved session has an invalid ID.".into());
+        } else if self
+            .state
+            .selected_session
+            .as_ref()
+            .is_some_and(|active| active.session_id == session_id)
+        {
+            self.notice = Some("Choose a saved session other than the current one.".into());
+        } else {
+            self.state.saved_session_attachment =
+                Some(reducer::SavedSessionAttachment { session_id, label });
+            self.session_picker = None;
+            self.notice = Some(
+                "Shared for your next prompt. Excerpts may be saved here. /past-sessions clear removes it."
+                    .into(),
+            );
+            self.sync_composer_chips();
+        }
+        self.render_pending = true;
     }
 
     async fn handle_session_tree_picker_key(
@@ -6106,6 +6182,14 @@ impl LiveUi {
             Some(KeyAction::Submit | KeyAction::AlternateSubmit)
                 if self.active_prompt_editable() =>
             {
+                if self.state.saved_session_attachment.is_some() {
+                    self.notice = Some(
+                        "Wait for the current run to finish before sending this shared session."
+                            .into(),
+                    );
+                    self.render_pending = true;
+                    return Ok(LoopControl::Continue);
+                }
                 let content = self.editor.text().to_owned();
                 let alternate = self.bindings.action(key) == Some(KeyAction::AlternateSubmit);
                 // Enter queues a follow-up, so a stray Enter waits for the run
@@ -11126,6 +11210,74 @@ mod tests {
             .unwrap();
         assert_eq!(control, LoopControl::Exit);
         assert!(matches!(writer_rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn sharing_attaches_next_prompt() {
+        let saved_id = "ab".repeat(16);
+        let active_id = "cd".repeat(16);
+        let mut picker = SessionPicker::new(
+            vec![reducer::SessionSummary {
+                session_id: saved_id.clone(),
+                session_path: "/sessions/past.jsonl".into(),
+                name: Some("Earlier work".into()),
+                updated_at: "yesterday".into(),
+                entry_count: 3,
+            }],
+            None,
+        );
+        picker.purpose = SessionPickerPurpose::Share;
+        let mut ui = LiveUi {
+            session_picker: Some(picker),
+            ..LiveUi::default()
+        };
+        ui.state.selected_session = Some(reducer::SessionIdentity {
+            session_id: active_id.clone(),
+            session_path: "/sessions/current.jsonl".into(),
+            session_name: None,
+        });
+        ui.state
+            .transcript
+            .append_prompt("current conversation".into());
+        ui.editor.insert_paste("What did we decide?");
+        let (writer, mut receiver) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+
+        // A highlighted row needs to be painted before Enter can authorize it.
+        ui.handle_session_picker_key(enter, &writer, 8192)
+            .await
+            .unwrap();
+        assert!(ui.state.saved_session_attachment.is_none());
+        ui.session_picker.as_mut().unwrap().mark_rendered();
+        ui.handle_session_picker_key(enter, &writer, 8192)
+            .await
+            .unwrap();
+
+        assert!(ui.session_picker.is_none());
+        assert_eq!(ui.editor.text(), "What did we decide?");
+        assert_eq!(
+            ui.state.transcript.latest_user_text(),
+            Some("current conversation")
+        );
+        assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
+
+        ui.submit_editor(&writer, 32).await.unwrap();
+        assert!(ui.state.saved_session_attachment.is_some());
+        assert_eq!(ui.editor.text(), "What did we decide?");
+
+        ui.submit_editor(&writer, 8192).await.unwrap();
+        let Ok(WriterMessage::Frame { payload, .. }) = receiver.try_recv() else {
+            panic!("expected one prompt");
+        };
+        let command: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(command["type"], "prompt");
+        assert_eq!(command["saved_session_id"], saved_id);
+        assert_eq!(command["prompt"], "What did we decide?");
+        assert_eq!(
+            ui.state.selected_session.as_ref().unwrap().session_id,
+            active_id
+        );
+        assert!(ui.state.saved_session_attachment.is_none());
     }
 
     #[tokio::test]

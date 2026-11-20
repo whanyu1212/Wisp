@@ -137,6 +137,7 @@ class RpcController:
         prompt: str,
         *,
         images: Sequence[bytes | ImagePart] = (),
+        saved_session_id: str | None = None,
         command_id: str | None = None,
     ) -> str:
         """Send a prompt command and return its command id.
@@ -148,6 +149,8 @@ class RpcController:
                 session's store such as a forked message's ``selected_images``, at
                 most ``MAX_RPC_MESSAGE_IMAGES``. The backend checks them and fails
                 the command if one is rejected. Defaults to ().
+            saved_session_id (str | None, optional): The full ID of a past session
+                explicitly shared for model reads during this prompt's run. Defaults to None.
             command_id (str | None, optional): Command id to use instead of a
                 generated one. Defaults to None.
 
@@ -157,7 +160,12 @@ class RpcController:
 
         selected_id = command_id or self._command_id_factory("prompt")
         await self._transport.send(
-            PromptCommand(id=selected_id, prompt=prompt, images=_encoded_images(images))
+            PromptCommand(
+                id=selected_id,
+                prompt=prompt,
+                images=_encoded_images(images),
+                saved_session_id=saved_session_id,
+            )
         )
         return selected_id
 
@@ -572,6 +580,7 @@ class RpcController:
         limit: int = 50,
         query: str = "",
         cursor: str | None = None,
+        read_only: bool = False,
         command_id: str | None = None,
     ) -> str:
         """Request a bounded, searchable persisted session catalog page.
@@ -580,6 +589,7 @@ class RpcController:
             limit (int): Maximum summaries, from zero through 200.
             query (str): Literal case-insensitive name or session ID substring.
             cursor (str | None): Opaque next/previous cursor from a matching query.
+            read_only (bool): List metadata without repairing files or creating locks.
             command_id (str | None): Optional caller-supplied correlation ID.
 
         Returns:
@@ -587,7 +597,13 @@ class RpcController:
         """
         selected_id = command_id or self._command_id_factory("sessions")
         await self._transport.send(
-            GetSessionsCommand(id=selected_id, limit=limit, query=query or None, cursor=cursor)
+            GetSessionsCommand(
+                id=selected_id,
+                limit=limit,
+                query=query or None,
+                cursor=cursor,
+                read_only=read_only or None,
+            )
         )
         return selected_id
 

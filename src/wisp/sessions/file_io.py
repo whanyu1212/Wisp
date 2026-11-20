@@ -359,3 +359,50 @@ def unlink_if_same_file(path: Path, expected: tuple[int, int]) -> None:
 
 def session_file_signature(info: os.stat_result) -> FileSignature:
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+
+
+@contextmanager
+def open_session_snapshot(
+    path: Path,
+    *,
+    expected_identity: tuple[int, int] | None = None,
+    check_cancelled: Callable[[], None] | None = None,
+) -> Iterator[tuple[FileSignature, Iterator[bytes]]]:
+    """Read complete rows from a stable file without recovery or creating a lock."""
+
+    path_info = path.lstat()
+    identity = expected_identity or (path_info.st_dev, path_info.st_ino)
+    _check_snapshot_file(path_info, identity)
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    descriptor = os.open(path, flags)
+    with os.fdopen(descriptor, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        _check_snapshot_file(info, identity)
+        signature = session_file_signature(info)
+        remaining = info.st_size
+
+        def complete_lines() -> Iterator[bytes]:
+            nonlocal remaining
+            while remaining > 0:
+                if check_cancelled is not None:
+                    check_cancelled()
+                line = stream.readline(remaining)
+                if not line.endswith(b"\n"):
+                    break
+                remaining -= len(line)
+                yield line
+
+        yield signature, complete_lines()
+        final_info = path.lstat()
+        _check_snapshot_file(final_info, identity)
+        if session_file_signature(final_info) != signature:
+            raise SessionError("The saved session changed while it was being read")
+
+
+def _check_snapshot_file(info: os.stat_result, identity: tuple[int, int]) -> None:
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_nlink != 1
+        or (info.st_dev, info.st_ino) != identity
+    ):
+        raise SessionError("The saved session is not a regular, unaliased file")

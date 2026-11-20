@@ -9,6 +9,44 @@ import pytest
 import wisp.coding.tool_execution as tool_execution
 from tests.support.cli import *
 from tests.support.rpc import guard_rpc_command_serialization
+from wisp.messages import Message
+from wisp.sessions.jsonl import JsonlSessionStore
+
+
+@pytest.mark.parametrize("available", [False, True])
+def test_prompt_resolves_saved_session(tmp_path: Path, available: bool) -> None:
+    source = JsonlSessionStore(tmp_path).create()
+    anyio.run(source.append_message, Message(role="user", content="historical prompt"))
+    if not available:
+        source.path.unlink()
+    result = CliRunner().invoke(
+        app,
+        ["--mode", "rpc", "--session-dir", str(tmp_path)],
+        input=json.dumps(
+            {
+                "id": "shared",
+                "type": "prompt",
+                "prompt": "hello",
+                "saved_session_id": source.session_id,
+            }
+        )
+        + "\n",
+        env={"WISP_PROVIDER": "fake", "WISP_MODEL": "", "WISP_TRUST": "1"},
+    )
+
+    assert result.exit_code == 0, result.output
+    records = _jsonl_records(result.stdout)
+    finished = records[-1]
+    assert finished["type"] == "rpc.command.finished"
+    assert finished["ok"] is available
+    starts = [record for record in records if record["type"] == "agent.started"]
+    if available:
+        (started,) = starts
+        assert "read_saved_session" in started["setup"]["tool_names"]
+        assert started["session_id"] != source.session_id
+    else:
+        assert not starts
+        assert finished["error"] == "The selected saved session is unavailable"
 
 
 def test_rpc_mode_accepts_zero_tool_iteration_cap(tmp_path: Path) -> None:

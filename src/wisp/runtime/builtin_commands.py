@@ -216,6 +216,15 @@ def builtin_command_descriptors() -> tuple[CommandDescriptor, ...]:
             order=41,
         ),
         CommandDescriptor(
+            name="past-sessions",
+            title="Share a past session",
+            description="Choose a saved session to share with the next prompt",
+            category=CommandCategory.session,
+            arguments=(CommandArgument("action", "Optional 'clear' to remove the attachment"),),
+            accepts_arguments=True,
+            order=41,
+        ),
+        CommandDescriptor(
             name="clone",
             title="Clone session",
             description="Clone the current session",

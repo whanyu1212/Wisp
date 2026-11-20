@@ -183,6 +183,7 @@ def test_executor_reports_commands_from_runtime_registry_without_replacing_runni
             "new",
             "resume",
             "name",
+            "past-sessions",
             "clone",
             "tree",
             "unrevert",

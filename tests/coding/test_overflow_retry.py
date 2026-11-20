@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import anyio
@@ -617,12 +618,15 @@ def test_skips_overflow_retry_when_ineligible(
     assert not any(entry.kind == "compaction" for entry in session.read_entries())
 
 
-def test_retry_reuses_completed_tool_round(
-    tmp_path: Path,
-) -> None:
+@pytest.mark.parametrize("read_saved", [False, True])
+def test_retry_reuses_completed_tool_round(tmp_path: Path, read_saved: bool) -> None:
     source = tmp_path / "input.txt"
     source.write_text("tool output", encoding="utf-8")
-    call = ToolCall(call_id="call-1", name="read", arguments={"path": source.name})
+    call = (
+        ToolCall(call_id="call-1", name="read_saved_session", arguments={})
+        if read_saved
+        else ToolCall(call_id="call-1", name="read", arguments={"path": source.name})
+    )
     provider = ScriptedProvider(
         [
             [
@@ -658,6 +662,11 @@ def test_retry_reuses_completed_tool_round(
     async def run() -> list[WispEvent]:
         await _append_turn(session, "one")
         await _append_turn(session, "two")
+        saved_session_id = None
+        if read_saved:
+            historical = store.create()
+            await historical.append_message(Message(role="user", content="tool output"))
+            saved_session_id = historical.session_id
         agent = CodingSession(
             provider=provider,
             sessions=store,
@@ -668,7 +677,12 @@ def test_retry_reuses_completed_tool_round(
             prompt_messages=(Message(role="system", content="system"),),
             context_reserve_tokens=20,
         )
-        return [event async for event in agent.run("question three", session=session)]
+        return [
+            event
+            async for event in agent.run(
+                "question three", session=session, saved_session_id=saved_session_id
+            )
+        ]
 
     events = anyio.run(run)
 
@@ -683,11 +697,16 @@ def test_retry_reuses_completed_tool_round(
         )
         == 1
     )
-    assert [
+    (result,) = [
         message.content
         for message in session.read_context_messages()
         if message.role == "tool" and message.tool_call_id == "call-1"
-    ] == ["tool output"]
+    ]
+    if read_saved:
+        report = json.loads(result.split("\n", maxsplit=1)[1])
+        assert [message["text"] for message in report["messages"]] == ["tool output"]
+    else:
+        assert result == "tool output"
 
 
 def test_retry_keeps_the_prompt_tool_iteration_limit(tmp_path: Path) -> None:

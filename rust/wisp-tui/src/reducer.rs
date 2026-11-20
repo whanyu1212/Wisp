@@ -72,6 +72,12 @@ pub struct SessionSummary {
     pub entry_count: u32,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SavedSessionAttachment {
+    pub(crate) session_id: String,
+    pub(crate) label: String,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CatalogNavigation {
     pub next_cursor: Option<String>,
@@ -470,6 +476,13 @@ impl SessionOperation {
     }
 }
 
+pub(crate) fn valid_saved_session_id(id: &str) -> bool {
+    id.len() == 32
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 pub fn valid_session_id(session_id: &str) -> bool {
     !session_id.is_empty() && session_id.len() <= SESSION_ID_MAX_BYTES
 }
@@ -838,6 +851,7 @@ pub struct UiState {
     mode_change: Option<PendingModeChange>,
     pub last_session: Option<String>,
     pub selected_session: Option<SessionIdentity>,
+    pub(crate) saved_session_attachment: Option<SavedSessionAttachment>,
     pub session_operation: Option<SessionOperation>,
     pub connection_catalog: ConnectionCatalogSnapshot,
     pub model_catalog: Option<ModelCatalogSnapshot>,
@@ -947,6 +961,7 @@ impl UiState {
             mode_change: None,
             last_session: None,
             selected_session: None,
+            saved_session_attachment: None,
             session_operation: None,
             connection_catalog: ConnectionCatalogSnapshot {
                 providers: Vec::new(),
@@ -1615,6 +1630,7 @@ pub enum UiAction {
     SearchSessionCatalog {
         query: String,
         cursor: Option<String>,
+        read_only: bool,
     },
     SelectSession {
         session_id: String,
@@ -1903,10 +1919,12 @@ pub fn reduce(
         UiAction::DisconnectProvider { provider } => disconnect_provider(state, provider, ids),
         UiAction::BeginDeviceCode { provider } => begin_device_code(state, provider, ids),
         UiAction::CancelDeviceCode => cancel_device_code(state, ids),
-        UiAction::LoadSessionCatalog => session_catalog::load(state, ids, "", None),
-        UiAction::SearchSessionCatalog { query, cursor } => {
-            session_catalog::load(state, ids, &query, cursor.as_deref())
-        }
+        UiAction::LoadSessionCatalog => session_catalog::load(state, ids, "", None, false),
+        UiAction::SearchSessionCatalog {
+            query,
+            cursor,
+            read_only,
+        } => session_catalog::load(state, ids, &query, cursor.as_deref(), read_only),
         UiAction::SelectSession { session_id } => select_session(state, session_id, ids),
         UiAction::NewSession => new_session(state, ids),
         UiAction::SetSessionName(name) => set_session_name(state, name, ids),
@@ -2031,8 +2049,16 @@ fn submit(
         return Err(ReduceError::PromptAlreadyActive(current.id.clone()));
     }
     let id = ids.next_id(CommandKind::Prompt);
-    let command =
-        WispTypedClientRpcCommands::prompt_with_images(&id, &content, &images.wire_images())?;
+    let command = WispTypedClientRpcCommands::prompt_with_attachments(
+        &id,
+        &content,
+        &images.wire_images(),
+        state
+            .saved_session_attachment
+            .as_ref()
+            .map(|source| source.session_id.as_str()),
+    )?;
+    state.saved_session_attachment = None;
     state.last_command_error = None;
     state.last_command_failed = false;
     state.view_status = ViewStatus::Running;
@@ -3271,6 +3297,7 @@ fn commit_session_and_hydrate(
     });
     state.context.invalidate();
     state.selected_session = Some(selected.clone());
+    state.saved_session_attachment = None;
     state.last_session = Some(selected.session_id.clone());
     // Committing to another session (resume, clone, fork, tree navigation) drops the
     // previous session's failure; same-session history syncs keep it.
@@ -4418,6 +4445,7 @@ fn finish_new_session(
             state.run_progress = None;
             state.finished_run_cost = None;
             state.selected_session = None;
+            state.saved_session_attachment = None;
             state.last_session = None;
             state.history = HistoryWindow::default();
             clear_queue_cache(state);
@@ -5548,6 +5576,13 @@ fn handle_backend_event(
             Ok(vec![UiEffect::RequestRender])
         }
         BackendEvent::WorkspaceReported { cwd, git_branch } => {
+            if state
+                .workspace_cwd
+                .as_ref()
+                .is_some_and(|previous| previous != &cwd)
+            {
+                state.saved_session_attachment = None;
+            }
             state.transcript.set_tool_cwd(&cwd);
             state.workspace_cwd = Some(cwd);
             state.git_branch = git_branch;

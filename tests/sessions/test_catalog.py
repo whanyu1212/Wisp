@@ -65,6 +65,29 @@ def test_search_literal_unicode_names_ids_and_renames(tmp_path: Path) -> None:
     assert len(store.catalog_page(query="strasse").sessions) == 1
 
 
+def test_readonly_catalog_preserves_files(tmp_path: Path) -> None:
+    store, sessions = seed(tmp_path, 4)
+    expected = {session.path: session.path.read_bytes() + b'{"unfinished":' for session in sessions}
+    expected[tmp_path / "uncommitted.jsonl"] = b'{"partial first entry":'
+    for path, data in expected.items():
+        path.write_bytes(data)
+        path.with_suffix(".jsonl.lock").unlink(missing_ok=True)
+    before = set(tmp_path.iterdir())
+
+    first = store.catalog_page(query="strasse", limit=1, read_only=True)
+    second = store.catalog_page(query="strasse", cursor=first.next_cursor, read_only=True)
+    assert first.next_cursor is not None
+    assert second.previous_cursor is not None
+    assert {first.sessions[0].session_id, second.sessions[0].session_id} == {
+        sessions[1].session_id,
+        sessions[3].session_id,
+    }
+    assert all(page.sessions[0].name == "Straße duplicate" for page in (first, second))
+    assert len(store.catalog_page(read_only=True).sessions) == 4
+    assert set(tmp_path.iterdir()) == before
+    assert {path: path.read_bytes() for path in expected} == expected
+
+
 def test_ties_are_deterministic_and_deletion_invalidates_cursor(tmp_path: Path) -> None:
     store, sessions = seed(tmp_path, 4)
     for session in sessions:
@@ -105,9 +128,11 @@ def test_unfiltered_page_only_parses_returned_summaries(
     read = store._summary_for_path
     seen: list[Path] = []
 
-    def summary(path: Path, *, check_cancelled: Callable[[], None] | None = None) -> SessionSummary:
+    def summary(
+        path: Path, *, check_cancelled: Callable[[], None] | None = None, read_only: bool = False
+    ) -> SessionSummary:
         seen.append(path)
-        return read(path, check_cancelled=check_cancelled)
+        return read(path, check_cancelled=check_cancelled, read_only=read_only)
 
     monkeypatch.setattr(store, "_summary_for_path", summary)
     assert len(store.catalog_page(limit=3).sessions) == 3

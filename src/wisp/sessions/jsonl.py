@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 import stat
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -56,6 +56,7 @@ from wisp.sessions.file_io import (
     FileSignature,
     ensure_private_directory,
     interprocess_lock,
+    open_session_snapshot,
     prepare_session_file,
     recover_incomplete_tail,
     session_file_signature,
@@ -95,6 +96,8 @@ SCRATCH_DIRECTORY_NAME = "scratch"
 # A session id names its scratch folder only when it is one plain path component.
 # Wisp's own ids are hex; an id read from a session file is otherwise unchecked.
 _SCRATCH_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
+SAVED_SESSION_ID_PATTERN = r"^[0-9a-f]{32}$"
+_SAVED_SESSION_ID = re.compile(SAVED_SESSION_ID_PATTERN)
 
 
 class _UnconditionalAppend:
@@ -271,6 +274,75 @@ class JsonlSessionStore:
         path = self._resolve_path(reference)
         return JsonlSession(session_id=_read_session_id(path), path=path)
 
+    def saved_session_for_prompt(
+        self,
+        session_id: str,
+        *,
+        current: JsonlSession,
+        check_cancelled: Callable[[], None] = lambda: None,
+    ) -> SavedSessionReader:
+        """Bind a full saved ID to one local active-path snapshot for a prompt.
+
+        Args:
+            session_id (str): The full ID the user chose to share.
+            current (JsonlSession): The conversation receiving the prompt.
+            check_cancelled (Callable): Raise to stop file lookup or parsing.
+
+        Returns:
+            SavedSessionReader: A reader pinned to the chosen session snapshot.
+
+        Raises:
+            ValueError: The selection is invalid, ambiguous, or unavailable.
+        """
+
+        if _SAVED_SESSION_ID.fullmatch(session_id) is None:
+            raise ValueError("Sharing requires a full saved session ID")
+        if current.session_id == session_id:
+            raise ValueError("The current session cannot be shared as a past session")
+
+        try:
+            root = self.root.resolve()
+            current_path = current.path.resolve()
+            try:
+                current_file = _file_identity(current_path.stat())
+            except FileNotFoundError:
+                current_file = None
+            selected: tuple[Path, tuple[int, int]] | None = None
+            for path in root.glob("*.jsonl"):
+                check_cancelled()
+                try:
+                    info = path.lstat()
+                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                        continue
+                    file_id = _file_identity(info)
+                    entries, _ = _read_saved_entries(
+                        path, file_id, check_cancelled=check_cancelled, limit=1
+                    )
+                except (OSError, SessionError):
+                    continue  # An unreadable candidate cannot establish its saved ID.
+                if not entries or entries[0].session_id != session_id:
+                    continue
+                if path == current_path or file_id == current_file:
+                    raise ValueError("The current session cannot be shared as a past session")
+                if selected is not None:
+                    raise ValueError("The saved session ID matches more than one file")
+                selected = path, file_id
+        except OSError as exc:
+            raise ValueError("Could not read the saved session store") from exc
+        if selected is None:
+            raise ValueError("The selected saved session is unavailable")
+        path, file_id = selected
+        try:
+            entries, signature = _read_saved_entries(path, file_id, check_cancelled=check_cancelled)
+            if not entries or entries[0].session_id != session_id:
+                raise SessionError("The selected saved session changed")
+            index = message_page_index_from_entries(entries, conversation_only=True)
+        except (OSError, SessionError) as exc:
+            raise ValueError(
+                "The selected saved session or its active history is unavailable"
+            ) from exc
+        return SavedSessionReader(session_id, path, signature, index)
+
     def latest(self) -> JsonlSession:
         """Open the newest session file in the store."""
 
@@ -302,6 +374,7 @@ class JsonlSessionStore:
         query: str = "",
         cursor: str | None = None,
         check_cancelled: Callable[[], None] = lambda: None,
+        read_only: bool = False,
     ) -> SessionCatalogPage:
         """Search current session names and IDs using bounded, stable pages.
 
@@ -310,6 +383,7 @@ class JsonlSessionStore:
             query (str): Case-insensitive literal name or ID substring.
             cursor (str | None): Opaque continuation from an earlier result.
             check_cancelled (Callable): Raise to stop scanning cancelled work.
+            read_only (bool): Leave session files and lock sidecars untouched.
 
         Returns:
             SessionCatalogPage: Results with opaque forward/backward cursors.
@@ -319,8 +393,12 @@ class JsonlSessionStore:
             SessionError: Metadata is invalid or the catalog cursor is stale.
         """
         return read_catalog_page(
-            files=self._session_files,
-            summary=lambda path: self._summary_for_path(path, check_cancelled=check_cancelled),
+            files=(lambda: self._read_only_session_files(check_cancelled))
+            if read_only
+            else self._session_files,
+            summary=lambda path: self._summary_for_path(
+                path, check_cancelled=check_cancelled, read_only=read_only
+            ),
             limit=limit,
             query=query,
             cursor=cursor,
@@ -399,13 +477,19 @@ class JsonlSessionStore:
         return target
 
     def _summary_for_path(
-        self, path: Path, *, check_cancelled: Callable[[], None] | None = None
+        self,
+        path: Path,
+        *,
+        check_cancelled: Callable[[], None] | None = None,
+        read_only: bool = False,
     ) -> SessionSummary:
         info = path.stat()
-        metadata = read_session_summary_metadata(path, check_cancelled=check_cancelled)
+        metadata = read_session_summary_metadata(
+            path, check_cancelled=check_cancelled, read_only=read_only
+        )
         return SessionSummary(
             session_id=metadata.session_id,
-            path=path.resolve(strict=False),
+            path=path if read_only else path.resolve(strict=False),
             updated_at=datetime.fromtimestamp(info.st_mtime, UTC),
             entry_count=metadata.entry_count,
             active_leaf_id=metadata.active_leaf_id,
@@ -446,6 +530,80 @@ class JsonlSessionStore:
             return ()
         files = (path for path in self.root.glob("*.jsonl") if prepare_session_file(path))
         return tuple(sorted(files, key=lambda path: path.name))
+
+    def _read_only_session_files(self, check_cancelled: Callable[[], None]) -> tuple[Path, ...]:
+        files: list[Path] = []
+        for path in self.root.resolve().glob("*.jsonl"):
+            check_cancelled()
+            try:
+                info = path.lstat()
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size == 0:
+                    continue
+                with open_session_snapshot(path, expected_identity=_file_identity(info)) as (
+                    _,
+                    lines,
+                ):
+                    committed = next(lines, None) is not None
+            except FileNotFoundError:
+                continue
+            if committed:
+                files.append(path)
+        return tuple(sorted(files, key=lambda path: path.name))
+
+
+@dataclass(frozen=True, slots=True)
+class SavedSessionReader:
+    """Read pages from the single physical file selected for a prompt."""
+
+    session_id: str
+    path: Path
+    signature: FileSignature
+    index: MessagePageIndex
+
+    def read_message_page(
+        self, *, limit: int, before_entry_id: str | None = None
+    ) -> SessionMessagePage:
+        """Project only user and assistant text on the selected session's active path."""
+
+        info = self.path.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or session_file_signature(info) != self.signature
+        ):
+            raise SessionError("The selected saved session changed")
+        return message_page_from_index(
+            self.index,
+            session_id=self.session_id,
+            path=self.path,
+            limit=limit,
+            before_entry_id=before_entry_id,
+            after_entry_id=None,
+            conversation_only=True,
+        )
+
+
+def _read_saved_entries(
+    path: Path,
+    file_id: tuple[int, int],
+    *,
+    check_cancelled: Callable[[], None],
+    limit: int | None = None,
+) -> tuple[list[SessionEntry], FileSignature]:
+    try:
+        with open_session_snapshot(
+            path, expected_identity=file_id, check_cancelled=check_cancelled
+        ) as (signature, lines):
+            return (
+                _parse_session_entries((line.decode("utf-8") for line in lines), path, limit=limit),
+                signature,
+            )
+    except UnicodeDecodeError as exc:
+        raise SessionError("The selected saved session is invalid") from exc
+
+
+def _file_identity(info: os.stat_result) -> tuple[int, int]:
+    return info.st_dev, info.st_ino
 
 
 class JsonlSession:
@@ -1643,34 +1801,37 @@ def _read_entries_unlocked(path: Path, *, limit: int | None = None) -> list[Sess
     if not path.is_file():
         raise SessionNotFoundError(f"Session file does not exist: {path}")
 
-    entries: list[SessionEntry] = []
-    session_id: str | None = None
-    seen_entry_ids: set[str] = set()
     try:
         with path.open("r", encoding="utf-8") as session_file:
-            for line_number, line in enumerate(session_file, start=1):
-                if not line.strip():
-                    continue
-                source = f"{path}:{line_number}"
-                entry = session_entry_from_json(line, source=source)
-                if session_id is None:
-                    session_id = entry.session_id
-                elif entry.session_id != session_id:
-                    raise MalformedSessionEntryError(
-                        f"Session entry at {source} belongs to {entry.session_id}, "
-                        f"expected {session_id}"
-                    )
-                if entry.id in seen_entry_ids:
-                    raise MalformedSessionEntryError(
-                        f"Duplicate session entry id {entry.id} at {source}"
-                    )
-                seen_entry_ids.add(entry.id)
-                entries.append(entry)
-                if limit is not None and len(entries) >= limit:
-                    break
+            return _parse_session_entries(session_file, path, limit=limit)
     except UnicodeDecodeError as exc:
         raise SessionError(f"Session file is not valid UTF-8: {path}") from exc
     except OSError as exc:
         raise SessionError(f"Could not read session file: {path}") from exc
+
+
+def _parse_session_entries(
+    lines: Iterable[str], path: Path, *, limit: int | None
+) -> list[SessionEntry]:
+    entries: list[SessionEntry] = []
+    session_id: str | None = None
+    seen_entry_ids: set[str] = set()
+    for line_number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        source = f"{path}:{line_number}"
+        entry = session_entry_from_json(line, source=source)
+        if session_id is None:
+            session_id = entry.session_id
+        elif entry.session_id != session_id:
+            raise MalformedSessionEntryError(
+                f"Session entry at {source} belongs to {entry.session_id}, expected {session_id}"
+            )
+        if entry.id in seen_entry_ids:
+            raise MalformedSessionEntryError(f"Duplicate session entry id {entry.id} at {source}")
+        seen_entry_ids.add(entry.id)
+        entries.append(entry)
+        if limit is not None and len(entries) >= limit:
+            break
     resolve_session_tree(entries)
     return entries
