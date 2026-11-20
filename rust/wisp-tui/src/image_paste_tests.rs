@@ -1059,7 +1059,7 @@ async fn redraw_while_key_help_open_reemits_kitty_placement() {
 }
 
 #[tokio::test]
-async fn iterm2_and_sixel_recording_backend_mark_hidden_cells_and_reemit_after_occlusion() {
+async fn iterm2_and_sixel_recording_backend_mark_diff_options_and_reemit_after_occlusion() {
     for (protocol, needle) in [
         (
             terminal_images::ImageProtocol::ITerm2,
@@ -1097,11 +1097,21 @@ async fn iterm2_and_sixel_recording_backend_mark_hidden_cells_and_reemit_after_o
                 .buffer()
                 .content
                 .iter()
+                .any(|cell| cell.diff_option == ratatui::buffer::CellDiffOption::AlwaysUpdate),
+            "expected AlwaysUpdate cells on first frame for {protocol:?}"
+        );
+        assert!(
+            !terminal
+                .backend()
+                .inner
+                .buffer()
+                .content
+                .iter()
                 .any(|cell| cell.modifier.contains(ratatui::style::Modifier::HIDDEN)),
-            "expected HIDDEN cells for {protocol:?}"
+            "should use CellDiffOption rather than Modifier::HIDDEN for {protocol:?}"
         );
 
-        // Unchanged second frame emits nothing.
+        // Unchanged second frame skips image cells and emits no native bytes.
         ui.draw(&mut terminal, &conn).unwrap();
         let f2 = terminal.backend_mut().take_events();
         assert!(!f2.iter().any(|ev| ev.starts_with("bytes:")), "{f2:?}");

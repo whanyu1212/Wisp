@@ -286,7 +286,18 @@ pub fn render_interactive(
     let column = match side_panel.filter(|panel| panel.docked()) {
         Some(panel) => {
             let (column, panel_area) = panel.split(area);
-            side_panel::render(frame, panel_area, state, panel, bindings, palette);
+            side_panel::render_with_preview(
+                frame,
+                panel_area,
+                state,
+                panel,
+                bindings,
+                palette,
+                row_cache.browser_image_preview.as_ref(),
+                row_cache.cell_size(),
+                Some(&mut row_cache.painted_images),
+                false,
+            );
             column
         }
         None => area,
@@ -850,7 +861,12 @@ fn render_transcript(
     welcome: Welcome,
     motion: Motion<'_>,
 ) -> (Option<Rect>, Vec<mouse::FoldRow>, Vec<mouse::WelcomeRow>) {
-    row_cache.painted_images.clear();
+    row_cache.painted_images.retain(|img| {
+        !matches!(
+            img.placement,
+            crate::terminal_images::PlacementKey::Transcript { .. }
+        )
+    });
     let padding = u16::from(
         !state.transcript.entries().is_empty()
             && area.height >= if decision_pending(state) { 10 } else { 8 },
@@ -1148,7 +1164,7 @@ fn render_transcript(
         })
         .flatten();
     row_cache.painted_links = links;
-    row_cache.painted_images = painted_images;
+    row_cache.painted_images.extend(painted_images);
     (jump_to_latest, fold_rows, welcome_rows)
 }
 
@@ -1990,13 +2006,16 @@ fn render_transcript_row(
         if img_width > 0 && content.height > 0 {
             let img_rect = Rect::new(content.x, content.y, img_width, 1);
             let bg = base.bg.unwrap_or(Color::Reset);
+            let placement = crate::terminal_images::PlacementKey::Transcript {
+                entry_id: row.anchor.entry_id,
+                image_index: spec.index,
+            };
             let buffer = frame.buffer_mut();
             let row_cells: Vec<ratatui::buffer::Cell> = (img_rect.left()..img_rect.right())
                 .map(|x| buffer[(x, img_rect.y)].clone())
                 .collect();
             if let Some(last) = painted_images.last_mut().filter(|last| {
-                last.entry_id == row.anchor.entry_id
-                    && last.image_index == spec.index
+                last.placement == placement
                     && last.rect.x == img_rect.x
                     && last.rect.width == img_rect.width
                     && last.rect.bottom() == img_rect.y
@@ -2007,14 +2026,14 @@ fn render_transcript_row(
                 last.snapshot.extend(row_cells);
             } else {
                 painted_images.push(crate::terminal_images::PaintedImage {
-                    entry_id: row.anchor.entry_id,
-                    image_index: spec.index,
+                    placement,
                     key: spec.key,
                     rect: img_rect,
                     total_rows: spec.total_rows,
                     first_image_row: spec.image_row,
                     bg,
                     snapshot: row_cells,
+                    ignore_overlay_rect: false,
                 });
             }
         }

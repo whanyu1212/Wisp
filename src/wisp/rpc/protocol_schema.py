@@ -366,6 +366,21 @@ _RPC_PROCESS = {
 _EVENT_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     "agent.completed": {"session_id": "session-1", "turns": 1, "outcome": "completed"},
     "agent.started": {"session_id": "session-1"},
+    "browser.viewport.updated": {
+        "image": {
+            "media_type": "image/png",
+            "sha256": "a" * 64,
+            "byte_size": 84,
+            "width": 1280,
+            "height": 800,
+        },
+        "url": "https://example.test/",
+        "title": "Fixture page",
+        "viewport_width": 1280,
+        "viewport_height": 800,
+        "source_tool": "mcp__playwright__browser_take_screenshot",
+        "call_id": "call-1",
+    },
     "compaction.completed": {
         "session_id": "session-1",
         "outcome": "completed",
@@ -611,7 +626,11 @@ _EVENT_FIXTURE_VALUES: dict[str, dict[str, object]] = {
         ),
         "omitted_bytes": 0,
     },
-    "rpc.workspace": {"cwd": Path("/workspace"), "git_branch": "main"},
+    "rpc.workspace": {
+        "cwd": Path("/workspace"),
+        "git_branch": "main",
+        "session_images_dir": Path("/sessions/images"),
+    },
     "rpc.permissions": {"command_id": "command-1", "permissions": {"mode": "ask"}},
     "rpc.codemode": {
         "command_id": "command-1",

@@ -994,3 +994,41 @@ fn codemode_presentation_preserves_availability() {
         }
     }
 }
+
+#[test]
+fn browser_viewport_updated_projects_and_validates_fields() {
+    let raw = serde_json::json!({
+        "type": "browser.viewport.updated",
+        "timestamp": "2026-11-20T00:00:00Z",
+        "image": {
+            "media_type": "image/png",
+            "sha256": "a".repeat(64),
+            "byte_size": 84,
+            "width": 1280,
+            "height": 800,
+        },
+        "url": "https://example.test/",
+        "title": "Example",
+        "viewport_width": 1280,
+        "viewport_height": 800,
+        "source_tool": "mcp__playwright__browser_take_screenshot",
+        "call_id": "call-1",
+    });
+    let event = events::deserialize(raw).expect("valid browser.viewport.updated");
+    let update = event
+        .browser_viewport_updated()
+        .expect("projection must match");
+    assert_eq!(update.url.as_deref(), Some("https://example.test/"));
+    assert_eq!(update.title.as_deref(), Some("Example"));
+    assert_eq!(update.viewport_width, Some(1280));
+    assert_eq!(update.viewport_height, Some(800));
+    assert_eq!(update.image.as_ref().map(|img| img.sha256.len()), Some(64));
+
+    // Non-positive dimensions fail schema validation cleanly.
+    let bad = serde_json::json!({
+        "type": "browser.viewport.updated",
+        "timestamp": "2026-11-20T00:00:00Z",
+        "viewport_width": 0,
+    });
+    assert!(events::deserialize(bad).is_err());
+}

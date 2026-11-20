@@ -169,6 +169,7 @@ def test_executor_reports_commands_from_runtime_registry_without_replacing_runni
             "compact",
             "context",
             "search",
+            "browser",
             "history",
             "update",
             "skills",

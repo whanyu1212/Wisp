@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use super::{
-    BackendEvent, CatalogNavigation, MessageContentKind, PendingApproval,
+    BackendEvent, BrowserViewportInput, CatalogNavigation, MessageContentKind, PendingApproval,
     QUEUE_CONTENT_BYTES_LIMIT, QUEUE_MESSAGE_LIMIT, QueueRemovalOperation, SESSION_CATALOG_LIMIT,
     SESSION_ENTRY_COUNT_MAX, SESSION_ID_MAX_BYTES, SESSION_LABEL_MAX_BYTES, SESSION_PATH_MAX_BYTES,
     SESSION_TREE_PAGE_LIMIT, SESSION_UPDATED_AT_MAX_BYTES, SessionDerivation, SessionIdentity,
@@ -329,6 +329,34 @@ impl BackendEvent {
                     .map(|error| super::bounded_session_text(error, 1024));
                 return Ok(Self::CompactionCompleted(completed));
             }
+            "browser.viewport.updated" => {
+                let update = event.browser_viewport_updated().ok_or_else(|| {
+                    EventProjectionError::InvalidField {
+                        event_type: event_type.clone(),
+                        field: "browser.viewport.updated",
+                    }
+                })?;
+                let image = update.image.as_ref().and_then(|img| {
+                    composer_images::transcript_image_from_stored(
+                        &img.media_type,
+                        &img.sha256,
+                        img.byte_size,
+                        img.width,
+                        img.height,
+                    )
+                });
+                return Ok(Self::BrowserViewportUpdated(Box::new(
+                    BrowserViewportInput {
+                        image,
+                        url: update.url,
+                        title: update.title,
+                        viewport_width: update.viewport_width,
+                        viewport_height: update.viewport_height,
+                        source_tool: update.source_tool,
+                        timestamp: update.timestamp,
+                    },
+                )));
+            }
             _ => {}
         }
         let command_id = match event_type.as_str() {
@@ -463,7 +491,8 @@ impl BackendEvent {
             | "session.stats"
             | "context.estimated"
             | "compaction.started"
-            | "compaction.completed" => {
+            | "compaction.completed"
+            | "browser.viewport.updated" => {
                 let event = wisp_protocol::events::deserialize(value.clone()).map_err(|_| {
                     EventProjectionError::InvalidField {
                         event_type: event_type.clone(),
@@ -509,6 +538,11 @@ impl BackendEvent {
                     .get("git_branch")
                     .and_then(Value::as_str)
                     .map(str::to_owned),
+                session_images_dir: value
+                    .get("session_images_dir")
+                    .and_then(Value::as_str)
+                    .filter(|path| !path.is_empty())
+                    .map(std::path::PathBuf::from),
             },
             "agent.completed" => Self::RunCompleted(crate::transcript::RunTotals {
                 outcome: string_field(value, &event_type, "outcome")?,

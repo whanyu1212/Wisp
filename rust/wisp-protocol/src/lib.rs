@@ -1701,6 +1701,29 @@ pub mod events {
         pub attempt: u32,
     }
 
+    /// Stored image reference carried on [`BrowserViewportUpdate`].
+    #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq)]
+    pub struct BrowserViewportImage {
+        pub media_type: String,
+        pub sha256: String,
+        pub byte_size: u64,
+        pub width: u32,
+        pub height: u32,
+    }
+
+    /// Transient live snapshot of an agent browser session's current page and frame.
+    #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq)]
+    pub struct BrowserViewportUpdate {
+        pub image: Option<BrowserViewportImage>,
+        pub url: Option<String>,
+        pub title: Option<String>,
+        pub viewport_width: Option<u32>,
+        pub viewport_height: Option<u32>,
+        pub source_tool: Option<String>,
+        pub call_id: Option<String>,
+        pub timestamp: String,
+    }
+
     impl WispCurrentLiveEventOutput {
         fn wire_value(&self) -> serde_json::Value {
             serde_json::to_value(&self.0).expect("validated generated events must serialize")
@@ -1781,6 +1804,15 @@ pub mod events {
         pub fn context_estimated(&self) -> Option<ContextEstimated> {
             let value = self.wire_value();
             if value["type"] != "context.estimated" {
+                return None;
+            }
+            serde_json::from_value(value).ok()
+        }
+
+        /// Project a transient live browser viewport frame and metadata update.
+        pub fn browser_viewport_updated(&self) -> Option<BrowserViewportUpdate> {
+            let value = self.wire_value();
+            if value["type"] != "browser.viewport.updated" {
                 return None;
             }
             serde_json::from_value(value).ok()

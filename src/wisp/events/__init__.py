@@ -46,6 +46,10 @@ from wisp.events._base import (
 from wisp.events.errors import ErrorEvent, WarningEvent
 from wisp.events.rpc import (
     DEFAULT_AGENT_MODE,
+    MAX_BROWSER_SOURCE_TOOL_CHARS,
+    MAX_BROWSER_TITLE_CHARS,
+    MAX_BROWSER_URL_CHARS,
+    MAX_BROWSER_VIEWPORT_SIDE,
     MAX_GIT_DIFF_FILE_EDITS,
     MAX_RPC_CONNECTION_LABEL_CHARS,
     MAX_RPC_CONNECTION_METHODS,
@@ -64,6 +68,7 @@ from wisp.events.rpc import (
     MAX_RPC_PROVIDER_ID_CHARS,
     AgentMode,
     BackgroundProcess,
+    BrowserViewportUpdated,
     CodemodePresentation,
     CodemodeSetting,
     CodemodeState,
@@ -247,6 +252,10 @@ __all__ = [
     "MAX_RPC_MODEL_CATALOG_PROVIDERS",
     "MAX_RPC_MODEL_DISPLAY_CHARS",
     "MAX_GIT_DIFF_FILE_EDITS",
+    "MAX_BROWSER_SOURCE_TOOL_CHARS",
+    "MAX_BROWSER_TITLE_CHARS",
+    "MAX_BROWSER_URL_CHARS",
+    "MAX_BROWSER_VIEWPORT_SIDE",
     "MAX_RPC_MODEL_EFFORT_CHARS",
     "MAX_RPC_MODEL_ID_CHARS",
     "MAX_RPC_OAUTH_EXPIRY_CHARS",
@@ -255,6 +264,7 @@ __all__ = [
     "AgentMode",
     "AgentStarted",
     "BillableTokenUsage",
+    "BrowserViewportUpdated",
     "CodemodePresentation",
     "CodemodeSetting",
     "CodemodeState",
@@ -488,7 +498,8 @@ KnownWispEvent = TypeAliasType(
         | ToolNestedCallStarted
         | ToolNestedCallEnded
         | WarningEvent
-        | ToolApprovalReviewed,
+        | ToolApprovalReviewed
+        | BrowserViewportUpdated,
         Field(discriminator="type"),
     ],
 )

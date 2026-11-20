@@ -90,6 +90,11 @@ def test_rpc_mode_reports_workspace(tmp_path: Path, monkeypatch: MonkeyPatch) ->
     finish = types.index("rpc.workspace", run_start + 1)
     assert finish == types.index("rpc.command.finished") - 1
     assert all(Path(str(record["cwd"])) == cwd.resolve() for record in workspace)
+    # Startup reports the session store's shared image directory before persistence.
+    assert (
+        Path(str(workspace[0]["session_images_dir"]))
+        == (tmp_path / "sessions" / "images").resolve()
+    )
     # The isolated folder is not a Git work tree.
     assert all(record["git_branch"] is None for record in workspace)
 

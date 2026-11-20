@@ -825,6 +825,31 @@ impl RunProgress {
     }
 }
 
+/// Transient browser viewport snapshot shown in the side panel's Browser tab.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BrowserViewport {
+    pub image: Option<composer_images::TranscriptImage>,
+    pub url: Option<String>,
+    pub title: Option<String>,
+    pub viewport_width: Option<u32>,
+    pub viewport_height: Option<u32>,
+    pub source_tool: Option<String>,
+    pub updated_at: Option<String>,
+    pub updated_at_ms: Option<i64>,
+    pub generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct BrowserViewportInput {
+    pub image: Option<composer_images::TranscriptImage>,
+    pub url: Option<String>,
+    pub title: Option<String>,
+    pub viewport_width: Option<u32>,
+    pub viewport_height: Option<u32>,
+    pub source_tool: Option<String>,
+    pub timestamp: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct UiState {
     pub view_status: ViewStatus,
@@ -837,6 +862,9 @@ pub struct UiState {
     pub workspace_cwd: Option<String>,
     /// The Git branch checked out there, or the short commit for a detached HEAD.
     pub git_branch: Option<String>,
+    /// Shared session store `images` directory reported at startup so fresh or `/new`
+    /// sessions can resolve stored frames before `selected_session` is committed.
+    pub default_session_images_dir: Option<std::path::PathBuf>,
     pub mode: AgentMode,
     pub mode_confirmed: bool,
     pub(crate) command_catalog: Option<CommandCatalog>,
@@ -908,6 +936,7 @@ pub struct UiState {
     /// Whether the `/codemode` picker is open, which shows the codemode snapshot.
     pub(crate) codemode_picker_open: bool,
     pub(crate) project_files: project_files::ProjectFiles,
+    pub browser_viewport: Option<BrowserViewport>,
     pending_queue_submissions: std::collections::BTreeMap<String, PendingQueueSubmission>,
     pending_queue_restore: Option<PendingQueueRestore>,
     next_queue_order: u64,
@@ -948,6 +977,7 @@ impl UiState {
             effort,
             workspace_cwd: None,
             git_branch: None,
+            default_session_images_dir: None,
             mode: AgentMode::Build,
             mode_confirmed: false,
             command_catalog: None,
@@ -1002,6 +1032,7 @@ impl UiState {
             git_diff: git_diff::GitDiff::default(),
             side_panel_visible: false,
             codemode_picker_open: false,
+            browser_viewport: None,
             pending_queue_submissions: std::collections::BTreeMap::new(),
             pending_queue_restore: None,
             next_queue_order: 0,
@@ -1372,6 +1403,7 @@ pub enum BackendEvent {
     WorkspaceReported {
         cwd: String,
         git_branch: Option<String>,
+        session_images_dir: Option<std::path::PathBuf>,
     },
     /// The session moved from `previous` to `cwd`; the transcript shows a divider after
     /// its last entry.
@@ -1433,6 +1465,7 @@ pub enum BackendEvent {
         background_processes: Vec<background_processes::BackgroundProcess>,
     },
     Diagnostic(String),
+    BrowserViewportUpdated(Box<BrowserViewportInput>),
     DeviceCodeReported {
         command_id: String,
         challenge: DeviceCodeChallenge,
@@ -3310,6 +3343,7 @@ fn commit_session_and_hydrate(
     state.transcript = SharedTranscript::default();
     state.run_progress = None;
     state.finished_run_cost = None;
+    state.browser_viewport = None;
     state.history = HistoryWindow::default();
     clear_queue_cache(state);
     state.history_request = None;
@@ -3723,6 +3757,7 @@ fn finish_startup_hydration(
                 .as_ref()
                 .map(|session| session.session_id.clone());
             clear_queue_cache(state);
+            state.browser_viewport = None;
             state.last_command_error = None;
             state.last_command_failed = false;
             install_history_snapshot(state, report);
@@ -4450,6 +4485,7 @@ fn finish_new_session(
             state.finished_run_cost = None;
             state.selected_session = None;
             state.saved_session_attachment = None;
+            state.browser_viewport = None;
             state.last_session = None;
             state.history = HistoryWindow::default();
             clear_queue_cache(state);
@@ -5579,17 +5615,57 @@ fn handle_backend_event(
                 .attach_directory_change(Some(previous), cwd);
             Ok(vec![UiEffect::RequestRender])
         }
-        BackendEvent::WorkspaceReported { cwd, git_branch } => {
+        BackendEvent::WorkspaceReported {
+            cwd,
+            git_branch,
+            session_images_dir,
+        } => {
             if state
                 .workspace_cwd
                 .as_ref()
                 .is_some_and(|previous| previous != &cwd)
             {
                 state.saved_session_attachment = None;
+                state.browser_viewport = None;
+            }
+            if let Some(dir) = session_images_dir {
+                state.default_session_images_dir = Some(dir);
             }
             state.transcript.set_tool_cwd(&cwd);
             state.workspace_cwd = Some(cwd);
             state.git_branch = git_branch;
+            Ok(vec![UiEffect::RequestRender])
+        }
+        BackendEvent::BrowserViewportUpdated(update) => {
+            let generation = state
+                .browser_viewport
+                .as_ref()
+                .map_or(1, |prev| prev.generation.saturating_add(1));
+            let previous = state.browser_viewport.take();
+            let updated_at_ms = crate::tool_cards::timestamp_ms(&update.timestamp);
+            state.browser_viewport = Some(BrowserViewport {
+                image: update
+                    .image
+                    .or_else(|| previous.as_ref().and_then(|prev| prev.image.clone())),
+                url: update
+                    .url
+                    .or_else(|| previous.as_ref().and_then(|prev| prev.url.clone())),
+                title: update
+                    .title
+                    .or_else(|| previous.as_ref().and_then(|prev| prev.title.clone())),
+                viewport_width: update
+                    .viewport_width
+                    .or_else(|| previous.as_ref().and_then(|prev| prev.viewport_width)),
+                viewport_height: update
+                    .viewport_height
+                    .or_else(|| previous.as_ref().and_then(|prev| prev.viewport_height)),
+                source_tool: update
+                    .source_tool
+                    .or_else(|| previous.as_ref().and_then(|prev| prev.source_tool.clone())),
+                updated_at: Some(update.timestamp),
+                updated_at_ms,
+                generation,
+            });
             Ok(vec![UiEffect::RequestRender])
         }
         BackendEvent::RunCompleted(totals) => Ok(finish_run(state, totals)),

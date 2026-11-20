@@ -259,6 +259,131 @@
       "title": "BillableTokenUsage",
       "type": "object"
     },
+    "BrowserViewportUpdated": {
+      "additionalProperties": false,
+      "description": "Transient live snapshot of an agent browser session's current page and frame.",
+      "properties": {
+        "call_id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Call Id"
+        },
+        "image": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ImagePart"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "source_tool": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Tool"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
+        },
+        "type": {
+          "const": "browser.viewport.updated",
+          "default": "browser.viewport.updated",
+          "title": "Type",
+          "type": "string"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "maxLength": 2048,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Url"
+        },
+        "viewport_height": {
+          "anyOf": [
+            {
+              "maximum": 16384,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Viewport Height"
+        },
+        "viewport_width": {
+          "anyOf": [
+            {
+              "maximum": 16384,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Viewport Width"
+        }
+      },
+      "required": [
+        "type",
+        "timestamp",
+        "image",
+        "url",
+        "title",
+        "viewport_width",
+        "viewport_height",
+        "source_tool",
+        "call_id"
+      ],
+      "title": "BrowserViewportUpdated",
+      "type": "object"
+    },
     "CodemodePresentation": {
       "enum": [
         "direct_and_codemode",
@@ -6544,6 +6669,19 @@
           "default": null,
           "title": "Git Branch"
         },
+        "session_images_dir": {
+          "anyOf": [
+            {
+              "format": "path",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session Images Dir"
+        },
         "timestamp": {
           "format": "date-time",
           "title": "Timestamp",
@@ -6560,7 +6698,8 @@
         "type",
         "timestamp",
         "cwd",
-        "git_branch"
+        "git_branch",
+        "session_images_dir"
       ],
       "title": "RpcWorkspaceReported",
       "type": "object"
@@ -9273,6 +9412,7 @@
     "mapping": {
       "agent.completed": "#/$defs/AgentCompleted",
       "agent.started": "#/$defs/AgentStarted",
+      "browser.viewport.updated": "#/$defs/BrowserViewportUpdated",
       "compaction.completed": "#/$defs/CompactionCompleted",
       "compaction.started": "#/$defs/CompactionStarted",
       "context.estimated": "#/$defs/ContextEstimated",
@@ -9558,6 +9698,9 @@
     },
     {
       "$ref": "#/$defs/ToolApprovalReviewed"
+    },
+    {
+      "$ref": "#/$defs/BrowserViewportUpdated"
     }
   ],
   "title": "Wisp current live event output",
@@ -9582,6 +9725,23 @@
       "setup": null,
       "timestamp": "2026-01-02T03:04:05Z",
       "type": "agent.started"
+    },
+    "browser.viewport.updated": {
+      "call_id": "call-1",
+      "image": {
+        "byte_size": 84,
+        "height": 800,
+        "media_type": "image/png",
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "width": 1280
+      },
+      "source_tool": "mcp__playwright__browser_take_screenshot",
+      "timestamp": "2026-01-02T03:04:05Z",
+      "title": "Fixture page",
+      "type": "browser.viewport.updated",
+      "url": "https://example.test/",
+      "viewport_height": 800,
+      "viewport_width": 1280
     },
     "compaction.completed": {
       "compaction_id": null,
@@ -10226,6 +10386,7 @@
     "rpc.workspace": {
       "cwd": "/workspace",
       "git_branch": "main",
+      "session_images_dir": "/sessions/images",
       "timestamp": "2026-01-02T03:04:05Z",
       "type": "rpc.workspace"
     },

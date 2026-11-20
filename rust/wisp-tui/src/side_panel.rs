@@ -12,8 +12,9 @@ use std::time::{Duration, Instant};
 
 use crate::context_split::Split;
 use crate::keybindings::{Action as KeyAction, Bindings};
-use crate::reducer::UiState;
 use crate::reducer::git_diff::{GitDiff, GitDiffSnapshot};
+use crate::reducer::{BrowserViewport, UiState};
+use crate::terminal_images::{CellSize, ImagePreviewMeta, PaintedImage};
 use crate::theme::Palette;
 use crate::transcript::TranscriptRole;
 use crate::ui::{self, sanitize_for_terminal};
@@ -51,9 +52,25 @@ pub(crate) fn docks(width: u16) -> bool {
     width >= PANEL_WIDTH + MIN_TRANSCRIPT_WIDTH
 }
 
+/// Which view the side panel shows.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum PanelMode {
+    #[default]
+    LiveWork,
+    Browser,
+}
+
 /// Where the panel is and whether the reducer knows it is on screen.
 #[derive(Debug, Default)]
 pub(crate) struct SidePanel {
+    /// Active view shown inside the panel (`LiveWork` vs `Browser`).
+    mode: PanelMode,
+    /// Whether the docked panel already auto-switched to `Browser` on the first frame
+    /// of the current browser session, so manual switches back to `Work` are respected.
+    auto_switched_browser: bool,
+    /// Whether this session has seen any browser viewport state, so manual `/browser`
+    /// toggles before the first frame are not reset back to `LiveWork`.
+    had_browser_viewport: bool,
     /// Hidden with Ctrl+P on a terminal wide enough to dock it.
     hidden: bool,
     /// Opened with Ctrl+P on a terminal too narrow to dock it.
@@ -115,6 +132,7 @@ pub(crate) enum Disclosure {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PanelAction {
+    SwitchMode(PanelMode),
     Toggle(Disclosure),
     Open(Target),
 }
@@ -133,6 +151,7 @@ struct Resize {
 /// A section of the panel that focus can land on.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Section {
+    ModeTabs,
     Header,
     Queue,
     Running,
@@ -185,6 +204,58 @@ impl SidePanel {
         self.overlay
     }
 
+    #[cfg(test)]
+    pub(crate) fn mode(&self) -> PanelMode {
+        self.mode
+    }
+
+    /// Auto-switch a docked panel to `Browser` on the first frame of a session,
+    /// resetting back to `LiveWork` when the session clears its browser viewport.
+    pub(crate) fn observe_browser_viewport(&mut self, viewport: Option<&BrowserViewport>) {
+        match viewport {
+            None => {
+                if std::mem::take(&mut self.had_browser_viewport) {
+                    self.auto_switched_browser = false;
+                    self.mode = PanelMode::LiveWork;
+                }
+            }
+            Some(view) => {
+                self.had_browser_viewport = true;
+                if view.image.is_some() && !self.auto_switched_browser {
+                    self.auto_switched_browser = true;
+                    if self.docked() {
+                        self.mode = PanelMode::Browser;
+                    }
+                }
+            }
+        }
+    }
+
+    /// `/browser`: focus/show the Browser viewport on wide or narrow terminals, or
+    /// toggle a visible docked Browser tab back to LiveWork.
+    pub(crate) fn toggle_browser(&mut self) {
+        if docks(self.width) {
+            self.rehide = false;
+            self.overlay = false;
+            if !self.hidden && self.mode == PanelMode::Browser {
+                self.mode = PanelMode::LiveWork;
+            } else {
+                self.hidden = false;
+                self.mode = PanelMode::Browser;
+            }
+        } else if self.overlay && self.mode == PanelMode::Browser {
+            self.close_overlay();
+        } else {
+            self.mode = PanelMode::Browser;
+            self.overlay = true;
+            self.rehide = false;
+            self.cursor = None;
+            *self.painted.borrow_mut() = Painted::default();
+        }
+        self.scroll.set(0);
+        self.close_peek();
+    }
+
     fn visible(&self) -> bool {
         self.docked() || self.overlay_open()
     }
@@ -220,6 +291,7 @@ impl SidePanel {
     pub(crate) fn focus_background(&mut self) {
         let hidden = self.hidden;
         self.focus();
+        self.mode = PanelMode::LiveWork;
         self.rehide = hidden;
         self.cursor = Some(Cursor {
             section: Section::Running,
@@ -321,6 +393,18 @@ impl SidePanel {
         if key == KeyCode::Esc {
             return OverlayKey::Close;
         }
+        if key == KeyCode::Char('b')
+            && (state.browser_viewport.is_some() || self.mode == PanelMode::Browser)
+        {
+            self.mode = match self.mode {
+                PanelMode::LiveWork => PanelMode::Browser,
+                PanelMode::Browser => PanelMode::LiveWork,
+            };
+            self.cursor = None;
+            self.scroll.set(0);
+            self.close_peek();
+            return OverlayKey::Moved;
+        }
         if matches!(key, KeyCode::PageUp | KeyCode::PageDown) {
             let height = self.painted.borrow().area.height.max(1) as i32;
             self.scroll_by(if key == KeyCode::PageUp {
@@ -340,6 +424,26 @@ impl SidePanel {
             .position(|section| *section == cursor.section)
             .unwrap();
         let moved = match key {
+            KeyCode::Tab
+                if sections.len() == 1
+                    && cursor.section == Section::ModeTabs
+                    && targets.len() > 1 =>
+            {
+                Cursor {
+                    row: (cursor.row + 1) % targets.len(),
+                    ..cursor
+                }
+            }
+            KeyCode::BackTab
+                if sections.len() == 1
+                    && cursor.section == Section::ModeTabs
+                    && targets.len() > 1 =>
+            {
+                Cursor {
+                    row: (cursor.row + targets.len() - 1) % targets.len(),
+                    ..cursor
+                }
+            }
             KeyCode::Tab => Cursor {
                 section: sections[(position + 1) % sections.len()],
                 row: 0,
@@ -439,12 +543,28 @@ impl SidePanel {
         let row = self
             .cursor
             .filter(|cursor| cursor.section == section)
-            .map_or(0, |cursor| cursor.row.min(rows - 1));
+            .map_or_else(
+                || {
+                    if section == Section::ModeTabs && self.mode == PanelMode::Browser {
+                        1.min(rows.saturating_sub(1))
+                    } else {
+                        0
+                    }
+                },
+                |cursor| cursor.row.min(rows - 1),
+            );
         Some(Cursor { section, row })
     }
 
     pub(crate) fn activate(&mut self, action: PanelAction) -> OverlayKey {
         match action {
+            PanelAction::SwitchMode(mode) => {
+                self.mode = mode;
+                self.cursor = None;
+                self.scroll.set(0);
+                self.close_peek();
+                OverlayKey::Moved
+            }
             PanelAction::Open(target) => OverlayKey::Open(target),
             PanelAction::Toggle(Disclosure::Process(process_id)) => {
                 if self.peek.as_ref() == Some(&process_id) {
@@ -748,13 +868,7 @@ impl Focus {
     }
 }
 
-/// Draw the panel into `area`. A docked panel uses the raised surface tier with no
-/// divider line (showing a left edge only while dragged); an overlay is boxed so it
-/// reads as lying over the transcript.
-///
-/// The layout leads with live work (pending decision, plan, running subagents and
-/// background processes, queue), hides empty sections, states attention items in
-/// words, and condenses context and inventories to single lines.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render(
     frame: &mut Frame<'_>,
@@ -763,6 +877,40 @@ pub(crate) fn render(
     panel: &SidePanel,
     bindings: &Bindings,
     palette: Palette,
+) {
+    render_with_preview(
+        frame,
+        area,
+        state,
+        panel,
+        bindings,
+        palette,
+        None,
+        CellSize::default(),
+        None,
+        false,
+    );
+}
+
+/// Draw the panel into `area`. A docked panel uses the raised surface tier with no
+/// divider line (showing a left edge only while dragged); an overlay is boxed so it
+/// reads as lying over the transcript.
+///
+/// The layout leads with live work (pending decision, plan, running subagents and
+/// background processes, queue), hides empty sections, states attention items in
+/// words, and condenses context and inventories to single lines.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_with_preview(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &UiState,
+    panel: &SidePanel,
+    bindings: &Bindings,
+    palette: Palette,
+    preview: Option<&ImagePreviewMeta>,
+    cell_size: CellSize,
+    painted_images: Option<&mut Vec<PaintedImage>>,
+    ignore_overlay_rect: bool,
 ) {
     let overlay = !panel.docked();
     let surface = if palette.shows_bands() {
@@ -795,8 +943,83 @@ pub(crate) fn render(
         return;
     }
 
+    let show_tabs = state.browser_viewport.is_some() || panel.mode == PanelMode::Browser;
+    if panel.mode == PanelMode::Browser {
+        let mut rows = PanelRows::default();
+        browser::push_mode_tabs(&mut rows, panel.mode, width, palette);
+        let footer_height = usize::from(panel.overlay_open());
+        let body = Rect {
+            height: inner.height.saturating_sub(footer_height as u16),
+            ..inner
+        };
+        panel.scroll.set(0);
+        *panel.painted.borrow_mut() = Painted {
+            surface: area,
+            area: body,
+            total: rows.lines.len(),
+            actions: rows.actions,
+        };
+        if let Some(cursor) = panel.overlay_open().then(|| panel.focused(state)).flatten() {
+            if let Some(hit) = panel
+                .painted
+                .borrow()
+                .actions
+                .iter()
+                .filter(|hit| hit.section == cursor.section)
+                .nth(cursor.row)
+                .cloned()
+            {
+                mark_focus(&mut rows.lines, &hit, width, palette);
+            }
+        }
+        let tab_rect = Rect {
+            height: body.height.min(1),
+            ..body
+        };
+        frame.render_widget(Paragraph::new(rows.lines), tab_rect);
+        let tab_rows = if body.height > 2 {
+            2
+        } else {
+            1.min(body.height)
+        };
+        let browser_body = Rect {
+            y: body.y + tab_rows,
+            height: body.height.saturating_sub(tab_rows),
+            ..body
+        };
+        browser::render_browser_body(
+            frame,
+            browser_body,
+            state,
+            surface,
+            palette,
+            preview,
+            cell_size,
+            painted_images,
+            ignore_overlay_rect,
+        );
+        if footer_height > 0 {
+            let footer = Rect {
+                y: body.bottom(),
+                height: footer_height as u16,
+                ..inner
+            };
+            frame.render_widget(
+                Paragraph::new(ui::keycap_hints(
+                    "Esc close · Tab tabs · b work · Enter",
+                    palette,
+                )),
+                footer,
+            );
+        }
+        return;
+    }
+
     let focus = Focus::of(state);
     let mut rows = PanelRows::default();
+    if show_tabs {
+        browser::push_mode_tabs(&mut rows, panel.mode, width, palette);
+    }
     let (header, branch_row) = header_lines(state, bindings, width, palette);
     rows.section(Section::Header, header);
     if let Some(row) = branch_row {
@@ -896,7 +1119,12 @@ pub(crate) fn render(
         ..inner
     };
     let hint = if panel.overlay_open() {
-        ui::keycap_hints("Esc close · Tab sections · Enter", palette).spans
+        let hint_text = if show_tabs {
+            "Esc close · Tab sections · b browser · Enter"
+        } else {
+            "Esc close · Tab sections · Enter"
+        };
+        ui::keycap_hints(hint_text, palette).spans
     } else {
         Vec::new()
     };
@@ -1292,6 +1520,7 @@ fn permission_mode(state: &UiState) -> Option<&'static str> {
         })
 }
 
+mod browser;
 mod peek;
 mod plan;
 mod reading;

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,7 @@ import pytest
 from mcp.client import Client
 from mcp.server.mcpserver import MCPServer
 from mcp.types import (
+    AudioContent,
     CallToolResult,
     ImageContent,
     TextContent,
@@ -20,6 +22,7 @@ from mcp.types import (
 )
 
 from tests.support.paths import TESTS_DIR
+from wisp.images import MAX_IMAGE_BYTES
 from wisp.mcp.config import McpServerConfig
 from wisp.mcp.tool import (
     McpToolDefinitionError,
@@ -376,10 +379,13 @@ def test_empty_remote_error_uses_generic_message() -> None:
         ),
         pytest.param(
             CallToolResult(
-                content=[TextContent(text="safe"), ImageContent(data="secret-data", mimeType="x")]
+                content=[
+                    TextContent(text="safe"),
+                    AudioContent(data="c2VjcmV0", mimeType="audio/wav"),
+                ]
             ),
-            "secret-data",
-            id="image",
+            "c2VjcmV0",
+            id="audio",
         ),
     ],
 )
@@ -396,6 +402,110 @@ def test_non_text_result_is_rejected_without_exposing_payload(
         anyio.run(adapted.run, {}, ToolContext(cwd=_test_cwd()))
 
     assert secret not in str(captured.value)
+
+
+def _sample_png_bytes() -> bytes:
+    return (TESTS_DIR / "fixtures" / "images" / "pixel.png").read_bytes()
+
+
+def test_image_content_with_and_without_text_returns_validated_bytes() -> None:
+    png = _sample_png_bytes()
+    b64 = base64.b64encode(png).decode("ascii")
+    client_with_text = ScriptedMcpClient(
+        CallToolResult(
+            content=[
+                TextContent(text="Screenshot captured"),
+                ImageContent(data=b64, mimeType="image/png"),
+            ]
+        )
+    )
+    adapted = adapt_mcp_tool(
+        server=_server(), tool=_definition(name="screenshot"), client=client_with_text
+    )
+    result = anyio.run(adapted.run, {}, ToolContext(cwd=_test_cwd()))
+
+    assert result.text == "Screenshot captured"
+    assert result.images == (png,)
+
+    # Image-only result with wrapped newlines and structuredContent should also succeed.
+    wrapped = f"{b64[:20]}\n{b64[20:]}"
+    adapted_only = adapt_mcp_tool(
+        server=_server(),
+        tool=_definition(name="screenshot"),
+        client=ScriptedMcpClient(
+            CallToolResult(
+                content=[ImageContent(data=wrapped, mimeType="image/png")],
+                structuredContent={"url": "https://example.test"},
+            )
+        ),
+    )
+    image_only = anyio.run(adapted_only.run, {}, ToolContext(cwd=_test_cwd()))
+
+    assert "image/png" in image_only.text
+    assert "3x2 px" in image_only.text
+    assert image_only.images == (png,)
+    assert image_only.structured == {"url": "https://example.test"}
+
+
+@pytest.mark.parametrize(
+    ("data", "secret"),
+    [
+        ("secret-data", "secret-data"),
+        (base64.b64encode(b"<svg xmlns='http://www.w3.org/2000/svg'/>").decode("ascii"), "<svg"),
+        ("A" * (((MAX_IMAGE_BYTES + 2) // 3) * 4 + 4), "AAAA"),
+        ("A" * (MAX_IMAGE_BYTES * 2 + 4), "AAAA"),
+    ],
+    ids=["invalid-base64", "unsupported-format", "oversized-compact", "oversized-raw"],
+)
+def test_invalid_or_oversized_image_content_is_rejected_safely(data: str, secret: str) -> None:
+    adapted = adapt_mcp_tool(
+        server=_server(),
+        tool=_definition(),
+        client=ScriptedMcpClient(
+            CallToolResult(content=[ImageContent(data=data, mimeType="image/png")])
+        ),
+    )
+
+    with pytest.raises(ToolError, match="invalid image content") as captured:
+        anyio.run(adapted.run, {}, ToolContext(cwd=_test_cwd()))
+
+    assert captured.value.failure_code == "invalid_result"
+    assert secret not in str(captured.value)
+
+
+def test_more_than_six_images_from_mcp_is_rejected() -> None:
+    b64 = base64.b64encode(_sample_png_bytes()).decode("ascii")
+    adapted = adapt_mcp_tool(
+        server=_server(),
+        tool=_definition(),
+        client=ScriptedMcpClient(
+            CallToolResult(content=[ImageContent(data=b64, mimeType="image/png") for _ in range(7)])
+        ),
+    )
+
+    with pytest.raises(ToolError, match="more than 6 images") as captured:
+        anyio.run(adapted.run, {}, ToolContext(cwd=_test_cwd()))
+
+    assert captured.value.failure_code == "invalid_result"
+
+
+def test_is_error_strips_image_content_and_raises_text_error() -> None:
+    adapted = adapt_mcp_tool(
+        server=_server(),
+        tool=_definition(),
+        client=ScriptedMcpClient(
+            CallToolResult(
+                content=[
+                    TextContent(text="navigation timed out"),
+                    ImageContent(data="not-even-valid-base64", mimeType="image/png"),
+                ],
+                isError=True,
+            )
+        ),
+    )
+
+    with pytest.raises(ToolError, match="navigation timed out"):
+        anyio.run(adapted.run, {}, ToolContext(cwd=_test_cwd()))
 
 
 def test_non_utf8_text_result_is_rejected() -> None:
