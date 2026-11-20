@@ -140,6 +140,16 @@ pub(super) fn output_lines(
         .collect()
 }
 
+/// The last non-empty line of `text`, stripped of terminal escape sequences and
+/// carriage-return overwrites.
+pub(super) fn latest_line(text: &str) -> Option<String> {
+    without_escapes(text)
+        .lines()
+        .rev()
+        .map(|line| sanitize_for_terminal(last_overwrite(line)))
+        .find(|line| !line.trim().is_empty())
+}
+
 /// What a terminal leaves of a line rewritten with carriage returns: the last part
 /// printed, or the one before it when the line ends in a return.
 fn last_overwrite(line: &str) -> &str {

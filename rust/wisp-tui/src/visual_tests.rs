@@ -1837,10 +1837,8 @@ fn showcase_capture_docks_panel() {
         "Cap the retries at three and run the client tests.",
         "demo-docs/search_docs",
         "for attempt in range(MAX_RETRIES):",
-        "2/2 connected",
-        "python-testing",
-        "M src/demo_app/client.py",
-        "Recent turns",
+        "context",
+        "2 MCP · 2 skills · 2 changed",
         "Ctrl+T tree",
     ] {
         assert!(text.contains(expected), "{expected}\n{text}");
@@ -1852,7 +1850,7 @@ fn welcome_capture_shows_mascot() {
     let text = screen_text(&draw(&mut fixture("welcome"), 150, 34));
     assert!(text.chars().any(|c| ('\u{2801}'..='\u{28ff}').contains(&c)));
     assert!(text.contains("A coding agent that stays in sync"));
-    assert!(text.contains("No changes"));
+    assert!(!text.contains("No changes"));
 }
 
 #[test]

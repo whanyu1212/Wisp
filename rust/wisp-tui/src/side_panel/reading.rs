@@ -1,24 +1,12 @@
-//! The Reading layout's compact context and named inventories.
+//! Compact live-work summaries for context, items needing attention, and
+//! inventories (`7 MCP · 12 skills · 2 changed`).
 
 use super::*;
-use unicode_segmentation::UnicodeSegmentation;
-use wisp_protocol::events::{McpServerSnapshot, SkillCatalogSnapshot};
+use crate::context_split::compact_tokens_upper;
 
-fn toggle(disclosure: Disclosure) -> Option<PanelAction> {
-    Some(PanelAction::Toggle(disclosure))
-}
-
-fn disclosure_title(title: &str, open: bool, palette: Palette) -> Vec<Span<'static>> {
-    vec![
-        Span::styled(
-            if open { "▾ " } else { "▸ " },
-            Style::default().fg(palette.muted),
-        ),
-        heading(title, palette),
-    ]
-}
-
-pub(super) fn reading_context(
+/// Items that need attention, stated in words (`Disconnected · /mcp`), right-aligned.
+/// Emits nothing when every server, skill catalog, and diff snapshot is healthy.
+pub(super) fn attention_rows(
     rows: &mut PanelRows,
     state: &UiState,
     panel: &SidePanel,
@@ -26,456 +14,212 @@ pub(super) fn reading_context(
     palette: Palette,
 ) {
     let muted = Style::default().fg(palette.muted);
-    let split = Split::of(state);
-    let percent = split.as_ref().and_then(|split| {
-        split
-            .window
-            .map(|window| split.total as f64 / window as f64 * 100.0)
-    });
-    rows.section(
-        Section::Context,
-        vec![spread(
-            vec![heading("Context", palette)],
-            vec![Span::styled(
-                percent.map_or_else(
-                    || {
-                        if state.context.loading() {
-                            "reading…"
-                        } else {
-                            "unknown"
-                        }
-                        .to_owned()
-                    },
-                    |percent| format!("{percent:.0}%"),
+    let mut entries: Vec<(Line<'static>, PanelAction)> = Vec::new();
+
+    if let Some(snapshot) = state.mcp.snapshot.as_ref() {
+        for server in &snapshot.servers {
+            let (label, color) = match server.status {
+                McpServerStatus::Disconnected => ("Disconnected · /mcp", palette.error),
+                McpServerStatus::Unavailable => ("Unavailable · /mcp", palette.error),
+                McpServerStatus::Connecting => ("Connecting · /mcp", palette.muted),
+                McpServerStatus::Connected | McpServerStatus::Disabled => continue,
+            };
+            entries.push((
+                spread(
+                    vec![Span::raw(sanitize_for_terminal(&server.name))],
+                    vec![Span::styled(label, Style::default().fg(color))],
+                    width,
                 ),
-                Style::default().fg(ui::context_fill_color(percent.map(|p| p / 100.0), palette)),
-            )],
-            width,
-        )],
-    );
-    if let Some(split) = &split {
-        if let Some(window) = split.window {
-            // One calm meter; the detailed source split belongs behind Breakdown.
-            let filled = ((split.total as f64 / window as f64) * width as f64)
-                .round()
-                .clamp(0.0, width as f64) as usize;
-            rows.push(
-                Line::from(vec![
-                    Span::styled("━".repeat(filled), Style::default().fg(palette.secondary)),
-                    Span::styled(
-                        "─".repeat(width - filled),
-                        Style::default().fg(palette.rail()),
-                    ),
-                ]),
-                None,
-            );
+                PanelAction::Open(Target::Mcp),
+            ));
         }
-        let prefix = if split.approximate { "~" } else { "" };
-        let usage = format!(
-            "{prefix}{}{}",
-            abbreviated(split.total),
-            split
-                .window
-                .map(|w| format!(" / {}", abbreviated(w)))
-                .unwrap_or_default()
-        );
-        let growth = if state.context.compaction.is_some() {
-            None
-        } else if ui::run_in_status_line(state) {
-            split
-                .running_turn()
-                .map(|(_, n)| format!("+{} so far", abbreviated(n)))
-        } else {
-            split
-                .finished_turn()
-                .map(|(_, n)| format!("+{} last turn", abbreviated(n)))
-        };
-        rows.push(
+    } else if state.mcp.error.is_some() {
+        entries.push((
             spread(
-                vec![Span::styled(usage, muted)],
-                growth
-                    .map(|s| vec![Span::styled(s, muted)])
-                    .unwrap_or_default(),
-                width,
-            ),
-            None,
-        );
-    }
-    rows.push(
-        Line::from(disclosure_title(
-            "Breakdown · /context",
-            panel.context_expanded,
-            palette,
-        )),
-        toggle(Disclosure::Context),
-    );
-    if panel.context_expanded {
-        if let Some(split) = &split {
-            if let Some(breakdown) = split.breakdown {
-                let mut other = 0;
-                for source in &breakdown.sources {
-                    match source.source {
-                        wisp_protocol::events::ContextSource::Messages
-                        | wisp_protocol::events::ContextSource::McpTools => {
-                            rows.push(
-                                spread(
-                                    vec![Span::styled(
-                                        format!(
-                                            "  {}",
-                                            if source.source
-                                                == wisp_protocol::events::ContextSource::Messages
-                                            {
-                                                "Messages"
-                                            } else {
-                                                "MCP tools"
-                                            }
-                                        ),
-                                        muted,
-                                    )],
-                                    vec![Span::styled(
-                                        format!("~{}", abbreviated(source.tokens)),
-                                        muted,
-                                    )],
-                                    width,
-                                ),
-                                None,
-                            );
-                        }
-                        _ => other += source.tokens,
-                    }
-                }
-                rows.push(
-                    spread(
-                        vec![Span::styled("  Other instructions/tools", muted)],
-                        vec![Span::styled(format!("~{}", abbreviated(other)), muted)],
-                        width,
-                    ),
-                    None,
-                );
-            }
-            if split.reserve > 0 {
-                rows.push(
-                    spread(
-                        vec![Span::styled("  Compaction reserve", muted)],
-                        vec![Span::styled(abbreviated(split.reserve), muted)],
-                        width,
-                    ),
-                    None,
-                );
-            }
-            if let Some(percent) = split.threshold().and_then(|n| split.percent(n)) {
-                rows.push(
-                    Line::styled(
-                        format!("  Compacts at {percent:.0}% · estimated split"),
-                        muted,
-                    ),
-                    None,
-                );
-            }
-        }
-        if let Some(cost) = crate::context_view::session_cost(state) {
-            rows.push(Line::styled(format!("  {cost} session"), muted), None);
-        }
-        if let Some(cost) = crate::context_view::turn_cost(state) {
-            rows.push(Line::styled(format!("  {cost} this turn"), muted), None);
-        }
-        rows.push(
-            Line::styled("  Open full context details →", muted),
-            Some(PanelAction::Open(Target::Context)),
-        );
-    }
-}
-
-/// Whether an inventory section is open. It opens by itself while it has something
-/// to show, such as a failed server or a used skill, and folds to its heading while
-/// healthy. A toggle holds until that automatic choice changes, so a new failure
-/// still opens a section the user folded.
-#[derive(Debug, Default)]
-pub(super) struct Fold {
-    /// The automatic choice at the last paint, which a toggle flips from.
-    auto_open: Cell<bool>,
-    /// The user's choice, kept until the automatic choice changes.
-    chosen: Cell<Option<bool>>,
-}
-
-impl Fold {
-    /// Whether the section is open this paint, given whether it would open by itself.
-    fn paint(&self, auto_open: bool) -> bool {
-        if self.auto_open.replace(auto_open) != auto_open {
-            self.chosen.set(None);
-        }
-        self.chosen.get().unwrap_or(auto_open)
-    }
-
-    pub(super) fn toggle(&mut self) {
-        let open = self.chosen.get().unwrap_or(self.auto_open.get());
-        self.chosen.set(Some(!open));
-    }
-}
-
-pub(super) fn inventory_rows(
-    rows: &mut PanelRows,
-    state: &UiState,
-    panel: &SidePanel,
-    width: usize,
-    palette: Palette,
-) {
-    let muted = Style::default().fg(palette.muted);
-    let servers = state
-        .mcp
-        .snapshot
-        .as_ref()
-        .map(|snapshot| snapshot.servers.as_slice());
-    let connecting = servers.is_some_and(|servers| {
-        servers
-            .iter()
-            .any(|server| server.status == McpServerStatus::Connecting)
-    });
-    let status = servers
-        .filter(|_| !connecting)
-        .map(|servers| {
-            format!(
-                "{}/{} connected",
-                servers
-                    .iter()
-                    .filter(|s| s.status == McpServerStatus::Connected)
-                    .count(),
-                servers.len()
-            )
-        })
-        .unwrap_or_else(|| {
-            if connecting {
-                "connecting…"
-            } else if state.mcp.loading() {
-                "reading…"
-            } else {
-                "unavailable"
-            }
-            .to_owned()
-        });
-    let server_failed = match servers {
-        Some(servers) => servers.iter().any(|server| {
-            matches!(
-                server.status,
-                McpServerStatus::Disconnected | McpServerStatus::Unavailable
-            )
-        }),
-        None => !state.mcp.loading(),
-    };
-    let mcp_open = panel.mcp.paint(server_failed);
-    rows.section(
-        Section::Mcp,
-        vec![spread(
-            disclosure_title("MCP servers", mcp_open, palette),
-            vec![Span::styled(status, muted)],
-            width,
-        )],
-    );
-    rows.action(0, PanelAction::Toggle(Disclosure::Mcp));
-    if mcp_open {
-        match servers {
-            Some(servers) => server_rows(rows, servers, panel, width, palette),
-            None => rows.push(
-                Line::styled("  Open /mcp to inspect or retry →", muted),
-                Some(PanelAction::Open(Target::Mcp)),
-            ),
-        }
-    }
-
-    let catalog = state.skills.snapshot.as_ref();
-    let status = catalog
-        .map(|c| format!("{} available", c.entries.len()))
-        .unwrap_or_else(|| {
-            if state.skills.loading() {
-                "reading…"
-            } else {
-                "unavailable"
-            }
-            .to_owned()
-        });
-    let used = state
-        .context
-        .stats
-        .as_ref()
-        .map(|stats| stats.used_skill_names.as_slice())
-        .unwrap_or_default();
-    let skills_to_show = match catalog {
-        Some(catalog) => !used.is_empty() || !catalog.diagnostics.is_empty(),
-        None => !state.skills.loading(),
-    };
-    let skills_open = panel.skills.paint(skills_to_show);
-    rows.section(
-        Section::Skills,
-        vec![spread(
-            disclosure_title("Skills", skills_open, palette),
-            vec![Span::styled(status, muted)],
-            width,
-        )],
-    );
-    rows.action(0, PanelAction::Toggle(Disclosure::Skills));
-    if skills_open {
-        match catalog {
-            Some(catalog) => skill_rows(rows, catalog, used, panel, width, palette),
-            None => rows.push(
-                Line::styled("  Open /skills to inspect or retry →", muted),
-                Some(PanelAction::Open(Target::Skills)),
-            ),
-        }
-    }
-}
-
-fn server_rows(
-    rows: &mut PanelRows,
-    servers: &[McpServerSnapshot],
-    panel: &SidePanel,
-    width: usize,
-    palette: Palette,
-) {
-    let muted = Style::default().fg(palette.muted);
-    if servers.is_empty() {
-        rows.push(
-            Line::styled("  No servers configured · /mcp", muted),
-            Some(PanelAction::Open(Target::Mcp)),
-        );
-    }
-    for server in servers {
-        let expanded = panel.server_details.contains(&server.name);
-        let (marker, color) = match server.status {
-            McpServerStatus::Connected => ("●", palette.success),
-            McpServerStatus::Connecting | McpServerStatus::Disabled => ("○", palette.muted),
-            McpServerStatus::Disconnected | McpServerStatus::Unavailable => ("●", palette.error),
-        };
-        let status = if server.status == McpServerStatus::Connected {
-            if expanded { "▾" } else { "▸" }
-        } else {
-            server.status.as_str()
-        };
-        rows.push(
-            spread(
-                vec![
-                    Span::styled(format!("{marker} "), Style::default().fg(color)),
-                    Span::raw(sanitize_for_terminal(&server.name)),
-                ],
-                vec![Span::styled(status, muted)],
-                width,
-            ),
-            toggle(Disclosure::Server(server.name.clone())),
-        );
-        if expanded {
-            rows.push(
-                Line::styled(
-                    format!(
-                        "  {} · {} tools",
-                        server.status.as_str(),
-                        server.tool_names.len()
-                    ),
-                    muted,
-                ),
-                None,
-            );
-            if let Some(error) = &server.error {
-                detail(rows, error, width, palette);
-            }
-            rows.push(
-                Line::styled("  Manage server · /mcp →", muted),
-                Some(PanelAction::Open(Target::Mcp)),
-            );
-        }
-    }
-}
-
-fn skill_rows(
-    rows: &mut PanelRows,
-    catalog: &SkillCatalogSnapshot,
-    used: &[String],
-    panel: &SidePanel,
-    width: usize,
-    palette: Palette,
-) {
-    let muted = Style::default().fg(palette.muted);
-    if catalog.entries.is_empty() {
-        rows.push(
-            Line::styled("  No skills available · /skills", muted),
-            Some(PanelAction::Open(Target::Skills)),
-        );
-    }
-    for skill in &catalog.entries {
-        let is_used = used.contains(&skill.name);
-        rows.push(
-            spread(
-                vec![
-                    Span::styled(
-                        if is_used { "◆ " } else { "◇ " },
-                        Style::default().fg(if is_used {
-                            palette.primary
-                        } else {
-                            palette.muted
-                        }),
-                    ),
-                    Span::raw(sanitize_for_terminal(&skill.name)),
-                ],
+                vec![Span::raw("MCP")],
                 vec![Span::styled(
-                    if is_used { "used" } else { "available" },
-                    muted,
+                    "Unavailable · /mcp",
+                    Style::default().fg(palette.error),
                 )],
                 width,
             ),
-            toggle(Disclosure::Skill(skill.name.clone())),
-        );
-        if panel.skill_details.contains(&skill.name) {
-            rows.push(
-                Line::styled(
-                    if is_used {
-                        "  Used on this session branch"
-                    } else {
-                        "  Available to invoke"
-                    },
-                    muted,
+            PanelAction::Open(Target::Mcp),
+        ));
+    }
+
+    if let Some(catalog) = state.skills.snapshot.as_ref() {
+        if !catalog.diagnostics.is_empty() {
+            let count = catalog.diagnostics.len();
+            let word = if count == 1 {
+                "diagnostic"
+            } else {
+                "diagnostics"
+            };
+            entries.push((
+                spread(
+                    vec![Span::raw("Skills")],
+                    vec![Span::styled(
+                        format!("{count} {word} · /skills"),
+                        Style::default().fg(palette.warning),
+                    )],
+                    width,
                 ),
-                None,
-            );
-            detail(rows, &skill.description, width, palette);
-            rows.push(
-                Line::styled(format!("  {} · /skills →", skill.source.as_str()), muted),
-                Some(PanelAction::Open(Target::Skills)),
-            );
+                PanelAction::Open(Target::Skills),
+            ));
+        } else if !catalog.project_trusted {
+            entries.push((
+                spread(
+                    vec![Span::raw("Project skills")],
+                    vec![Span::styled("Awaiting trust · /skills", muted)],
+                    width,
+                ),
+                PanelAction::Open(Target::Skills),
+            ));
         }
-    }
-    if !catalog.project_trusted {
-        rows.push(Line::styled("  Project skills await trust", muted), None);
-    }
-    if !catalog.diagnostics.is_empty() {
-        rows.push(
-            Line::styled(
-                format!("  {} diagnostics · /skills →", catalog.diagnostics.len()),
-                muted,
+    } else if state.skills.error.is_some() {
+        entries.push((
+            spread(
+                vec![Span::raw("Skills")],
+                vec![Span::styled(
+                    "Unavailable · /skills",
+                    Style::default().fg(palette.error),
+                )],
+                width,
             ),
-            Some(PanelAction::Open(Target::Skills)),
-        );
+            PanelAction::Open(Target::Skills),
+        ));
+    }
+
+    if panel.files.is_none() && state.git_diff.error.is_some() {
+        entries.push((
+            spread(
+                vec![Span::raw("Changed files")],
+                vec![Span::styled(
+                    "Unavailable · /diff",
+                    Style::default().fg(palette.warning),
+                )],
+                width,
+            ),
+            PanelAction::Open(Target::Diff(None)),
+        ));
+    }
+
+    if entries.is_empty() {
+        return;
+    }
+
+    rows.section(
+        Section::Attention,
+        vec![Line::from(heading("Attention", palette))],
+    );
+    for (line, action) in entries {
+        rows.push(line, Some(action));
     }
 }
 
-fn detail(rows: &mut PanelRows, text: &str, width: usize, palette: Palette) {
-    let safe = sanitize_for_terminal(text).replace('\n', " ");
-    let mut lines = vec![String::new()];
-    for grapheme in safe.graphemes(true) {
-        if lines.last().unwrap().width() + grapheme.width() > width.saturating_sub(2).max(1) {
-            if lines.len() == 4 {
-                let last = lines.last_mut().unwrap();
-                *last = ui::clip_columns(
-                    &format!("{last}{grapheme}…"),
-                    width.saturating_sub(2).max(1),
-                );
+/// Context as one compact text line (`55.5K · 14% context`) that turns amber, then
+/// red, as it fills. Hidden until context stats are known.
+pub(super) fn context_line(rows: &mut PanelRows, state: &UiState, width: usize, palette: Palette) {
+    let Some(split) = Split::of(state) else {
+        return;
+    };
+    let percent = split
+        .window
+        .map(|window| split.total as f64 / window as f64 * 100.0);
+    let prefix = if split.approximate { "~" } else { "" };
+    let tokens = compact_tokens_upper(split.total);
+    let summary = match percent {
+        Some(pct) => format!("{prefix}{tokens} · {pct:.0}% context"),
+        None => format!("{prefix}{tokens} context"),
+    };
+    let color = ui::context_fill_color(percent.map(|p| p / 100.0), palette);
+    let muted = Style::default().fg(palette.muted);
+    let right = match crate::context_view::session_cost(state) {
+        Some(cost) => format!("{cost} · /context"),
+        None => "/context".to_owned(),
+    };
+    rows.section(
+        Section::Context,
+        vec![spread(
+            vec![Span::styled(summary, Style::default().fg(color))],
+            vec![Span::styled(right, muted)],
+            width,
+        )],
+    );
+    rows.action(0, PanelAction::Open(Target::Context));
+}
+
+/// Inventories condensed onto one summary line (`7 MCP · 12 skills · 2 changed`),
+/// where each part opens its dialog (`/mcp`, `/skills`, `/diff`). Empty or unloaded
+/// inventories are omitted; if none have items, the line disappears.
+pub(super) fn inventory_summary(
+    rows: &mut PanelRows,
+    state: &UiState,
+    panel: &SidePanel,
+    width: usize,
+    palette: Palette,
+) {
+    let mut parts: Vec<(String, Target)> = Vec::new();
+    if let Some(snapshot) = state.mcp.snapshot.as_ref() {
+        let count = snapshot.servers.len();
+        if count > 0 {
+            parts.push((format!("{count} MCP"), Target::Mcp));
+        }
+    }
+    if let Some(catalog) = state.skills.snapshot.as_ref() {
+        let count = catalog.entries.len();
+        if count > 0 {
+            let word = if count == 1 { "skill" } else { "skills" };
+            parts.push((format!("{count} {word}"), Target::Skills));
+        }
+    }
+    if let Some(summary) = &panel.files {
+        let count = summary.snapshot.files.len();
+        let partial = summary.snapshot.truncated;
+        if count > 0 || partial {
+            let plus = if partial { "+" } else { "" };
+            parts.push((format!("{count}{plus} changed"), Target::Diff(None)));
+        }
+    }
+    if parts.is_empty() {
+        return;
+    }
+
+    let muted = Style::default().fg(palette.muted);
+    let sep = " · ";
+    let mut spans = Vec::new();
+    let mut hits: Vec<(u16, u16, PanelAction)> = Vec::new();
+    let mut col = 0usize;
+
+    for (index, (label, target)) in parts.into_iter().enumerate() {
+        if index > 0 {
+            if col + sep.width() >= width {
                 break;
             }
-            lines.push(String::new());
+            spans.push(Span::styled(sep, muted));
+            col += sep.width();
         }
-        lines.last_mut().unwrap().push_str(grapheme);
+        let room = width.saturating_sub(col);
+        if room == 0 {
+            break;
+        }
+        let clipped = ui::clip_columns(&label, room);
+        let span_width = clipped.width();
+        if span_width == 0 {
+            break;
+        }
+        let start = u16::try_from(col).unwrap_or(u16::MAX);
+        let end = u16::try_from(col + span_width).unwrap_or(u16::MAX);
+        spans.push(Span::styled(clipped, muted));
+        hits.push((start, end, PanelAction::Open(target)));
+        col += span_width;
     }
-    for line in lines {
-        rows.push(
-            Line::styled(format!("  {line}"), Style::default().fg(palette.muted)),
-            None,
-        );
+
+    if spans.is_empty() {
+        return;
+    }
+    rows.section(Section::Inventory, vec![Line::from(spans)]);
+    for (start, end, action) in hits {
+        rows.action_range(0, start, end, action);
     }
 }

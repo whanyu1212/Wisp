@@ -8,6 +8,7 @@ use crate::reducer::UiState;
 use crate::side_panel::{clip_spans, spread};
 use crate::theme::Palette;
 use crate::ui::{clip_columns, sanitize_for_terminal};
+#[cfg(test)]
 use crate::web_search::CostTotal;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -39,6 +40,7 @@ pub(crate) fn session_cost(state: &UiState) -> Option<String> {
 /// until a reply in it is priced. A reply that searched the web, or one with text that
 /// could not be priced, makes the total a floor (`≥$0.31`); an unpriced reply that
 /// only called tools carries no cost and is not counted.
+#[cfg(test)]
 pub(crate) fn turn_cost(state: &UiState) -> Option<String> {
     // `/compact` runs no turn of its own, so the finished run's total stays shown.
     let running = state

@@ -4306,6 +4306,15 @@ impl LiveUi {
                 self.reveal_card(entry);
                 Ok(LoopControl::Continue)
             }
+            side_panel::Target::Subagent(call_id) => {
+                self.render_pending = true;
+                let Some(entry) = self.state.transcript.tool_entry_for_call(&call_id) else {
+                    self.notice = Some("That subagent's card is not in the transcript.".into());
+                    return Ok(LoopControl::Continue);
+                };
+                self.reveal_card(entry);
+                Ok(LoopControl::Continue)
+            }
             side_panel::Target::Tree => {
                 self.dispatch_session_action_with(
                     UiAction::LoadSessionTree {
@@ -11278,6 +11287,40 @@ mod tests {
             .complete_message(1, "previous reply".into());
         ui.state.transcript.append_prompt("working turn".into());
         ui.state.transcript.start_message(2);
+        ui.state.context.stats = Some(Box::new(wisp_protocol::events::SessionStats {
+            session_id: Some("active".into()),
+            active_message_count: 2,
+            compaction_count: 0,
+            usage: wisp_protocol::events::SessionTokenUsage {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+                cache_read_input_tokens: None,
+                cache_write_input_tokens: None,
+            },
+            context: wisp_protocol::events::ContextBudget {
+                estimate: wisp_protocol::events::ContextEstimate { total_tokens: 0 },
+                observed_tokens: None,
+                observed_is_current: false,
+                effective_tokens: None,
+                accounting_method: wisp_protocol::events::ContextAccountingMethod::ProviderObserved,
+                context_window: None,
+                reserve_tokens: 0,
+            },
+            compaction: None,
+            cost: wisp_protocol::events::SessionCostSummary {
+                known_usd: "0".into(),
+                complete: true,
+                priced_record_count: 0,
+                unpriced_record_count: 0,
+            },
+            context_breakdown: None,
+            branch: wisp_protocol::events::SessionBranchSummary {
+                branches: 2,
+                ..Default::default()
+            },
+            used_skill_names: Vec::new(),
+        }));
         ui.state.current_command = Some(ActiveCommand {
             id: "prompt-1".into(),
             command_type: ActiveCommandType::Prompt,
@@ -11301,9 +11344,9 @@ mod tests {
                 (0..buffer.area.width)
                     .map(|column| buffer[(column, *row)].symbol())
                     .collect::<String>()
-                    .contains("Recent turns")
+                    .contains("root · 2 branches")
             })
-            .expect("recent turns row");
+            .expect("branch row");
         let panel = ui.side_panel.split(buffer.area).1;
         let click = MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
