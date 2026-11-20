@@ -474,15 +474,28 @@ def test_terminated_launcher_stops_the_editor(tmp_path: Path) -> None:
         tui.wait_ready()
         _open_editor(tui, b"typed draft")
         tui.wait_until(
-            lambda _output: pid_file.exists() and pid_file.read_text().strip() != "",
+            lambda _output: pid_file.exists() and pid_file.read_text().endswith("\n"),
             failure="the editor did not start",
         )
-        editor_pid = int(pid_file.read_text())
+        editor_pid = int(pid_file.read_text().strip())
+
+        def editor_is_foreground(_output: bytes) -> bool:
+            try:
+                return os.tcgetpgrp(tui.fd) == os.getpgid(editor_pid)
+            except OSError:
+                return False
+
+        tui.wait_until(
+            editor_is_foreground,
+            failure="the editor did not take terminal foreground",
+        )
         os.kill(tui.pid, signal.SIGTERM)
         tui.wait_until(
             lambda _output: tui.status is not None,
             failure="the launcher did not exit after SIGTERM",
         )
+        assert tui.status is not None
+        assert os.waitstatus_to_exitcode(tui.status) == 128 + signal.SIGTERM, bytes(tui.output)
         deadline = time.monotonic() + 5
         while _process_alive(editor_pid) and time.monotonic() < deadline:
             time.sleep(0.05)

@@ -333,3 +333,53 @@ def test_foreground_cleanup_bounds_reclaim_wait(monkeypatch: MonkeyPatch) -> Non
     )
 
     assert now == pytest.approx(10.05)
+
+
+def test_foreground_cleanup_survives_zombie_eperm(monkeypatch: MonkeyPatch) -> None:
+    sent: list[tuple[int, int]] = []
+    probe_errors = iter((PermissionError("zombie pgrp"), ProcessLookupError()))
+    groups = iter((555, 555, _RunningProcess.pid))
+    now = 0.0
+
+    def fake_clock() -> float:
+        return now
+
+    def fake_sleep(seconds: float) -> None:
+        nonlocal now
+        now += seconds
+
+    def fake_killpg(pgid: int, signum: int) -> None:
+        sent.append((pgid, signum))
+        if signum == signal.SIGCONT:
+            raise PermissionError("zombie pgrp")
+        if signum == 0:
+            raise next(probe_errors)
+
+    monkeypatch.setattr(rust_launcher.os, "getpgrp", lambda: 99)
+    monkeypatch.setattr(rust_launcher.os, "tcgetpgrp", lambda _fd: next(groups))
+    monkeypatch.setattr(rust_launcher.os, "killpg", fake_killpg)
+    monkeypatch.setattr(rust_launcher.time, "monotonic", fake_clock)
+    monkeypatch.setattr(rust_launcher.time, "sleep", fake_sleep)
+
+    rust_launcher._cleanup_foreground_job(_SNAPSHOT, _RunningProcess())  # type: ignore[arg-type]
+
+    assert sent == [
+        (555, signal.SIGHUP),
+        (555, signal.SIGCONT),
+        (555, 0),
+        (555, 0),
+    ]
+    assert next(groups, None) is None
+
+
+def test_persistent_permission_error_still_fails(monkeypatch: MonkeyPatch) -> None:
+    def always_eperm(_pgid: int, _signum: int) -> None:
+        raise PermissionError("Operation not permitted")
+
+    monkeypatch.setattr(rust_launcher.os, "killpg", always_eperm)
+    monkeypatch.setattr(rust_launcher, "_GRACE_SECONDS", 0.0)
+    monkeypatch.setattr(rust_launcher, "_TERM_SECONDS", 0.0)
+    monkeypatch.setattr(rust_launcher, "_KILL_SECONDS", 0.0)
+
+    with pytest.raises(RustTuiLaunchError, match="did not exit after SIGKILL"):
+        rust_launcher._escalate_until_exit(555, None, name="foreground job")
