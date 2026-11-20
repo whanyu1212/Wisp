@@ -960,12 +960,11 @@ async fn panel_key_follows_width() {
     let mut ui = base();
     let mut terminal = Terminal::new(TestBackend::new(100, 32)).unwrap();
     draw(&mut ui, &mut terminal);
-    assert!(!text(terminal.backend().buffer()).contains("Context"));
+    assert!(!text(terminal.backend().buffer()).contains("Esc close · Tab sections · Enter"));
     ui.handle_input(panel_key(), &writer, 8192).await.unwrap();
     assert_eq!(ui.active_overlay(), Some(OverlayKind::SidePanel));
     draw(&mut ui, &mut terminal);
     let screen = text(terminal.backend().buffer());
-    assert!(screen.contains("Context"), "{screen}");
     assert!(
         screen.contains("Esc close · Tab sections · Enter"),
         "{screen}"
@@ -981,10 +980,11 @@ async fn panel_key_follows_width() {
     let mut ui = base();
     let mut wide = Terminal::new(TestBackend::new(200, 32)).unwrap();
     draw(&mut ui, &mut wide);
+    assert!(ui.side_panel.docked());
     assert!(text(wide.backend().buffer()).contains("Ctrl+P panel"));
     ui.handle_input(panel_key(), &writer, 8192).await.unwrap();
     draw(&mut ui, &mut wide);
-    assert!(!text(wide.backend().buffer()).contains("Context"));
+    assert!(!ui.side_panel.docked());
 
     let mut ui = base();
     draw(&mut ui, &mut terminal);
@@ -1025,14 +1025,7 @@ async fn panel_enter_opens_diff() {
         .await
         .unwrap();
     assert_eq!(ui.active_overlay(), Some(OverlayKind::SidePanel));
-    // Context is first; navigate through the inventories to Changed files.
-    for _ in 0..3 {
-        ui.handle_input(key(KeyCode::Tab), &writer, 8192)
-            .await
-            .unwrap();
-        draw(&mut ui, &mut terminal);
-    }
-    // Enter on the file section opens /diff and keeps the draft.
+    // Once drawn, Enter on the inventory summary's `1 changed` opens /diff and keeps the draft.
     draw(&mut ui, &mut terminal);
     ui.handle_input(key(KeyCode::Enter), &writer, 8192)
         .await
@@ -1159,9 +1152,9 @@ async fn changed_file_click_shows_diff() {
                 (panel.x..panel.right())
                     .map(|column| buffer[(column, *row)].symbol())
                     .collect::<String>()
-                    .contains("src/lib.rs")
+                    .contains("1 changed")
             })
-            .expect("changed file row");
+            .expect("changed summary row");
         ui.handle_mouse(
             MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
@@ -1199,7 +1192,16 @@ async fn changed_file_click_shows_diff() {
                 .unwrap();
         }
         draw(&mut ui, &mut terminal);
-        let shown = text(terminal.backend().buffer());
+        let mut shown = text(terminal.backend().buffer());
+        if !shown.contains("old contents") {
+            // Narrow terminals open /diff on the file list (folder row first);
+            // Down selects the file and Enter opens its diff.
+            for code in [KeyCode::Down, KeyCode::Enter] {
+                ui.handle_input(key(code), &writer, 8192).await.unwrap();
+                draw(&mut ui, &mut terminal);
+            }
+            shown = text(terminal.backend().buffer());
+        }
         assert!(shown.contains("old contents"), "{shown}");
         assert!(shown.contains("new contents"), "{shown}");
     }

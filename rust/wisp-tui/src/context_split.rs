@@ -157,6 +157,7 @@ impl<'a> Split<'a> {
     /// The newest finished turn's number and the tokens it added; none before the
     /// first run. A run that finished before its statistics arrived is that turn,
     /// with what it added since the split.
+    #[cfg(test)]
     pub(crate) fn finished_turn(&self) -> Option<(u64, u64)> {
         if self.growth > 0 {
             return self.running_turn();
@@ -167,6 +168,7 @@ impl<'a> Split<'a> {
 
     /// The run in progress: the turn after the newest finished one (turn 1 in a new
     /// session) and the tokens it has added since the split was reported.
+    #[cfg(test)]
     pub(crate) fn running_turn(&self) -> Option<(u64, u64)> {
         let next = self.breakdown?.turns.last().map_or(1, |last| last.turn + 1);
         Some((next, u64::try_from(self.growth.max(0)).unwrap_or(u64::MAX)))

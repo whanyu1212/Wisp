@@ -1423,13 +1423,20 @@ async fn border_drag_resizes_panel() {
 async fn sidebar_clicks_scroll_and_keyboard_focus_keep_the_draft() {
     let (writer, mut receiver) = mpsc::channel(32);
     let (mut ui, _) = transcript_ui();
+    ui.state.context.budget = Some(wisp_protocol::events::ContextBudget {
+        estimate: wisp_protocol::events::ContextEstimate {
+            total_tokens: 55_500,
+        },
+        observed_tokens: Some(55_500),
+        observed_is_current: true,
+        effective_tokens: None,
+        accounting_method: wisp_protocol::events::ContextAccountingMethod::ProviderObserved,
+        context_window: Some(400_000),
+        reserve_tokens: 1_000,
+    });
     let draft = ui.editor.text().to_owned();
     let screen = draw(&mut ui, 200, 30);
-    let (x, y) = cell_of(&screen, "Breakdown");
-    ui.handle_input(click(x, y), &writer, 8192).await.unwrap();
-    let screen = draw(&mut ui, 200, 30);
-    assert!(screen.content.iter().any(|cell| cell.symbol() == "▾"));
-    let (x, y) = cell_of(&screen, "Open full context details");
+    let (x, y) = cell_of(&screen, "/context");
     ui.handle_input(click(x, y), &writer, 8192).await.unwrap();
     assert_eq!(ui.active_overlay(), Some(OverlayKind::Context));
     assert_eq!(ui.editor.text(), draft);
@@ -1470,16 +1477,22 @@ async fn sidebar_footer_owns_scroll_and_focused_border_still_resizes() {
     ui.state
         .transcript
         .complete_message(2, "a long response\n".repeat(100));
-    let mut skills = crate::commands::tests::skills();
-    let template = skills.entries[0].clone();
-    skills.entries = (0..40)
-        .map(|index| {
-            let mut skill = template.clone();
-            skill.name = format!("skill-{index}");
-            skill
+    // Many disconnected servers in Attention overflow a 30-row sidebar so it scrolls.
+    let servers = (0..40)
+        .map(|index| wisp_protocol::events::McpServerSnapshot {
+            name: format!("server-{index}"),
+            status: wisp_protocol::events::McpServerStatus::Disconnected,
+            tool_names: Vec::new(),
+            read_only_tool_names: Vec::new(),
+            read_only_hint_tool_names: Vec::new(),
+            error: None,
+            launch: None,
+            sign_in: None,
         })
         .collect();
-    ui.state.skills.snapshot = Some(std::sync::Arc::new(skills));
+    ui.state.mcp.snapshot = Some(std::sync::Arc::new(
+        wisp_protocol::events::McpStatusSnapshot { servers },
+    ));
     let screen = draw(&mut ui, 200, 30);
     // The panel's bottom row shows its scroll position.
     let (x, y) = cell_of(&screen, " 1/");
@@ -1516,15 +1529,23 @@ async fn sidebar_footer_owns_scroll_and_focused_border_still_resizes() {
 async fn unpainted_sidebar_has_no_stale_click_targets_after_resize() {
     let (writer, mut receiver) = mpsc::channel(32);
     let (mut ui, _) = transcript_ui();
+    ui.state.context.budget = Some(wisp_protocol::events::ContextBudget {
+        estimate: wisp_protocol::events::ContextEstimate {
+            total_tokens: 55_500,
+        },
+        observed_tokens: Some(55_500),
+        observed_is_current: true,
+        effective_tokens: None,
+        accounting_method: wisp_protocol::events::ContextAccountingMethod::ProviderObserved,
+        context_window: Some(400_000),
+        reserve_tokens: 1_000,
+    });
     draw(&mut ui, 100, 30);
     ui.handle_input(key(KeyCode::F(8)), &writer, 8192)
         .await
         .unwrap();
     let screen = draw(&mut ui, 100, 30);
-    let (x, y) = cell_of(&screen, "Breakdown");
-    ui.handle_input(click(x, y), &writer, 8192).await.unwrap();
-    let screen = draw(&mut ui, 100, 30);
-    let (x, y) = cell_of(&screen, "Open full context details");
+    let (x, y) = cell_of(&screen, "/context");
     draw(&mut ui, 100, 7);
     assert!(ui.rendered_overlay.is_none());
     assert!(!ui.side_panel.contains(x, y));

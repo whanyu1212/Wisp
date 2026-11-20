@@ -321,6 +321,7 @@ impl TranscriptEntry {
             .filter(|_| self.unrevealed.is_empty())
     }
 
+    #[cfg(test)]
     pub(crate) fn run_result(&self) -> Option<RunResult> {
         self.run_result
     }

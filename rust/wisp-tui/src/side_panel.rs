@@ -1,4 +1,5 @@
-//! The side panel: what the session is, what it costs, and what it changed, beside
+//! The side panel: live work (plan, running subagents and background processes,
+//! approvals, queue, attention, context, and a one-line inventory summary), beside
 //! the transcript on a wide terminal or over it as an overlay opened with Ctrl+P.
 //!
 //! The panel only reads state. The reducer keeps its data loaded while it is on
@@ -6,16 +7,15 @@
 //! and draws it.
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::context_split::{Split, abbreviated};
+use crate::context_split::Split;
 use crate::keybindings::{Action as KeyAction, Bindings};
 use crate::reducer::UiState;
-use crate::reducer::git_diff::{GitDiff, GitDiffEdit, GitDiffSnapshot};
+use crate::reducer::git_diff::{GitDiff, GitDiffSnapshot};
 use crate::theme::Palette;
-use crate::transcript::{RunOutcome, TranscriptEntry, TranscriptRole};
+use crate::transcript::TranscriptRole;
 use crate::ui::{self, sanitize_for_terminal};
 use crossterm::event::{KeyCode, MouseEventKind};
 use ratatui::Frame;
@@ -35,7 +35,7 @@ pub(crate) const PANEL_WIDTH: u16 = 44;
 /// the panel becoming a second transcript. Dragging its border can go wider.
 const MAX_PANEL_WIDTH: u16 = 52;
 
-/// Columns from the panel's left edge that start a resize: the border and the gap
+/// Columns from the panel's left edge that start a resize: the edge and the gap
 /// beside it, so the press need not land on a one-column line.
 const BORDER_HIT_WIDTH: u16 = 2;
 
@@ -45,9 +45,6 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 /// What the transcript keeps beside a docked panel: replies wrap at 100 columns,
 /// plus the turn rail and the conversation margins.
 const MIN_TRANSCRIPT_WIDTH: u16 = 104;
-
-/// Changed files listed before the rest are counted on one line.
-const MAX_FILE_ROWS: usize = 8;
 
 /// Whether a terminal this wide docks the panel beside the transcript.
 pub(crate) fn docks(width: u16) -> bool {
@@ -82,11 +79,6 @@ pub(crate) struct SidePanel {
     /// Logical action rows from the last paint, including rows below the viewport.
     painted: RefCell<Painted>,
     scroll: Cell<usize>,
-    context_expanded: bool,
-    mcp: Fold,
-    skills: Fold,
-    server_details: BTreeSet<String>,
-    skill_details: BTreeSet<String>,
     /// The background process whose peek is open under its row, while the panel has
     /// focus; moving off its row closes it.
     peek: Option<String>,
@@ -99,21 +91,24 @@ pub(crate) struct SidePanel {
     processes_wanted: bool,
 }
 
+#[derive(Clone, Debug)]
+struct ActionHit {
+    line: usize,
+    columns: Option<(u16, u16)>,
+    section: Section,
+    action: PanelAction,
+}
+
 #[derive(Debug, Default)]
 struct Painted {
     surface: Rect,
     area: Rect,
     total: usize,
-    actions: Vec<(usize, Section, PanelAction)>,
+    actions: Vec<ActionHit>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Disclosure {
-    Context,
-    Mcp,
-    Skills,
-    Server(String),
-    Skill(String),
     /// The peek of a background process, by its id.
     Process(String),
 }
@@ -135,17 +130,15 @@ struct Resize {
     moved: bool,
 }
 
-/// A section of the overlay that focus can land on. Each opens the view it
-/// summarizes; the turn list has nowhere to go yet, so focus skips it.
+/// A section of the panel that focus can land on.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Section {
+    Header,
     Queue,
-    Background,
+    Running,
+    Attention,
     Context,
-    Mcp,
-    Skills,
-    Files,
-    Turns,
+    Inventory,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -166,6 +159,8 @@ pub(crate) enum Target {
     Tree,
     /// The transcript card of a background process, by its id.
     Process(String),
+    /// The transcript card of a subagent, by its tool call id.
+    Subagent(String),
 }
 
 /// What a key in the overlay asks of the app.
@@ -227,7 +222,7 @@ impl SidePanel {
         self.focus();
         self.rehide = hidden;
         self.cursor = Some(Cursor {
-            section: Section::Background,
+            section: Section::Running,
             row: 0,
         });
         self.processes_wanted = true;
@@ -353,11 +348,11 @@ impl SidePanel {
                 section: sections[(position + sections.len() - 1) % sections.len()],
                 row: 0,
             },
-            KeyCode::Up => Cursor {
+            KeyCode::Up | KeyCode::Left => Cursor {
                 row: cursor.row.saturating_sub(1),
                 ..cursor
             },
-            KeyCode::Down => Cursor {
+            KeyCode::Down | KeyCode::Right => Cursor {
                 row: (cursor.row + 1).min(targets.len() - 1),
                 ..cursor
             },
@@ -379,20 +374,20 @@ impl SidePanel {
                 self.close_peek();
             }
         }
-        if let Some((line, ..)) = self
+        if let Some(hit) = self
             .painted
             .borrow()
             .actions
             .iter()
-            .filter(|(_, section, _)| *section == moved.section)
+            .filter(|hit| hit.section == moved.section)
             .nth(moved.row)
         {
             let height = usize::from(self.painted.borrow().area.height);
-            if *line < self.scroll.get() {
-                self.scroll.set(*line);
-            } else if *line >= self.scroll.get() + height {
+            if hit.line < self.scroll.get() {
+                self.scroll.set(hit.line);
+            } else if hit.line >= self.scroll.get() + height {
                 self.scroll
-                    .set(line.saturating_sub(height.saturating_sub(1)));
+                    .set(hit.line.saturating_sub(height.saturating_sub(1)));
             }
         }
         OverlayKey::Moved
@@ -400,9 +395,9 @@ impl SidePanel {
 
     fn sections(&self, _state: &UiState) -> Vec<Section> {
         let mut sections = Vec::new();
-        for (_, section, _) in &self.painted.borrow().actions {
-            if !sections.contains(section) {
-                sections.push(*section);
+        for hit in &self.painted.borrow().actions {
+            if !sections.contains(&hit.section) {
+                sections.push(hit.section);
             }
         }
         sections
@@ -413,8 +408,8 @@ impl SidePanel {
             .borrow()
             .actions
             .iter()
-            .filter(|(_, kind, _)| *kind == section)
-            .map(|(_, _, action)| action.clone())
+            .filter(|hit| hit.section == section)
+            .map(|hit| hit.action.clone())
             .collect()
     }
 
@@ -424,12 +419,12 @@ impl SidePanel {
         if let Some(process_id) = &self.peek {
             let peeked = PanelAction::Toggle(Disclosure::Process(process_id.clone()));
             if let Some(row) = self
-                .targets(Section::Background, state)
+                .targets(Section::Running, state)
                 .iter()
                 .position(|target| *target == peeked)
             {
                 return Some(Cursor {
-                    section: Section::Background,
+                    section: Section::Running,
                     row,
                 });
             }
@@ -451,25 +446,16 @@ impl SidePanel {
     pub(crate) fn activate(&mut self, action: PanelAction) -> OverlayKey {
         match action {
             PanelAction::Open(target) => OverlayKey::Open(target),
-            PanelAction::Toggle(disclosure) => {
-                match disclosure {
-                    Disclosure::Context => self.context_expanded = !self.context_expanded,
-                    Disclosure::Mcp => self.mcp.toggle(),
-                    Disclosure::Skills => self.skills.toggle(),
-                    Disclosure::Server(name) => toggle_member(&mut self.server_details, name),
-                    Disclosure::Skill(name) => toggle_member(&mut self.skill_details, name),
-                    Disclosure::Process(process_id) => {
-                        if self.peek.as_ref() == Some(&process_id) {
-                            self.close_peek();
-                        } else {
-                            self.peek = Some(process_id);
-                            self.confirm_stop = false;
-                            self.reveal_peek.set(true);
-                            // The peek's keys need focus, which a click on the docked
-                            // panel does not otherwise give it.
-                            self.overlay = true;
-                        }
-                    }
+            PanelAction::Toggle(Disclosure::Process(process_id)) => {
+                if self.peek.as_ref() == Some(&process_id) {
+                    self.close_peek();
+                } else {
+                    self.peek = Some(process_id);
+                    self.confirm_stop = false;
+                    self.reveal_peek.set(true);
+                    // The peek's keys need focus, which a click on the docked
+                    // panel does not otherwise give it.
+                    self.overlay = true;
                 }
                 // The row stays selected; the next paint rebuilds its hit regions.
                 OverlayKey::Moved
@@ -492,17 +478,28 @@ impl SidePanel {
         }
         let hit = {
             let painted = self.painted.borrow();
-            if row < painted.area.y || row >= painted.area.bottom() {
+            if row < painted.area.y
+                || row >= painted.area.bottom()
+                || column < painted.area.x
+                || column >= painted.area.right()
+            {
                 return OverlayKey::Ignored;
             }
             let line = usize::from(row - painted.area.y) + self.scroll.get();
+            let rel_col = column - painted.area.x;
             painted
                 .actions
                 .iter()
-                .find(|(index, ..)| *index == line)
-                .cloned()
+                .enumerate()
+                .find(|(_, hit)| {
+                    hit.line == line
+                        && hit
+                            .columns
+                            .is_none_or(|(start, end)| rel_col >= start && rel_col < end)
+                })
+                .map(|(index, hit)| (index, hit.clone()))
         };
-        let Some((line, section, action)) = hit else {
+        let Some((hit_index, hit)) = hit else {
             return OverlayKey::Ignored;
         };
         let row = self
@@ -510,10 +507,14 @@ impl SidePanel {
             .borrow()
             .actions
             .iter()
-            .filter(|(index, kind, _)| *kind == section && *index < line)
+            .take(hit_index)
+            .filter(|other| other.section == hit.section)
             .count();
-        self.cursor = Some(Cursor { section, row });
-        self.activate(action)
+        self.cursor = Some(Cursor {
+            section: hit.section,
+            row,
+        });
+        self.activate(hit.action)
     }
 
     pub(crate) fn scroll_by(&self, lines: i32) {
@@ -716,80 +717,12 @@ pub(crate) fn border_hit_area(panel: Rect) -> Rect {
 #[derive(Debug)]
 struct FileSummary {
     snapshot: Arc<GitDiffSnapshot>,
-    /// The listed files only: the rest are counted, not diffed, so a large
-    /// working tree cannot stall a frame.
-    rows: Vec<FileRow>,
-    /// How many of all the snapshot's files a Wisp edit in this session changed.
-    by_wisp: usize,
-}
-
-#[derive(Debug)]
-struct FileRow {
-    status: char,
-    /// The path as drawn, made safe for the terminal.
-    path: String,
-    /// The path as Git reported it, which `/diff` looks the file up by.
-    git_path: String,
-    additions: usize,
-    deletions: usize,
-    /// Whether line counts are known: an untracked file, or one Git could not read,
-    /// shows none.
-    counted: bool,
-    /// The session's latest recorded edit or write call on the file, if known.
-    edit: Option<GitDiffEdit>,
 }
 
 impl FileSummary {
     fn new(snapshot: Arc<GitDiffSnapshot>) -> Self {
-        let rows = snapshot
-            .files
-            .iter()
-            .take(MAX_FILE_ROWS)
-            .map(|file| {
-                let status = match file.status.as_str() {
-                    "untracked" => '?',
-                    "added" => 'A',
-                    "deleted" => 'D',
-                    _ => 'M',
-                };
-                let counted = status != '?' && file.notice.is_empty();
-                let (additions, deletions) = if counted {
-                    line_counts(&file.before, &file.after)
-                } else {
-                    (0, 0)
-                };
-                FileRow {
-                    status,
-                    path: sanitize_for_terminal(&file.path),
-                    git_path: file.path.clone(),
-                    additions,
-                    deletions,
-                    counted,
-                    edit: file.latest_edit().cloned(),
-                }
-            })
-            .collect();
-        let by_wisp = snapshot
-            .files
-            .iter()
-            .filter(|file| file.edited_by_wisp())
-            .count();
-        Self {
-            snapshot,
-            rows,
-            by_wisp,
-        }
+        Self { snapshot }
     }
-}
-
-fn line_counts(before: &str, after: &str) -> (usize, usize) {
-    let diff = similar::TextDiff::from_lines(before, after);
-    diff.iter_all_changes()
-        .fold((0, 0), |(added, deleted), change| match change.tag() {
-            similar::ChangeTag::Insert => (added + 1, deleted),
-            similar::ChangeTag::Delete => (added, deleted + 1),
-            similar::ChangeTag::Equal => (added, deleted),
-        })
 }
 
 /// What leads the panel: the session at idle, the run while one is going, or the
@@ -815,12 +748,13 @@ impl Focus {
     }
 }
 
-/// Draw the panel into `area`. A docked panel has a rule on its left; an overlay is
-/// boxed so it reads as lying over the transcript.
+/// Draw the panel into `area`. A docked panel uses the raised surface tier with no
+/// divider line (showing a left edge only while dragged); an overlay is boxed so it
+/// reads as lying over the transcript.
 ///
-/// The Reading layout keeps context compact and folds healthy inventories to their
-/// heading. A pending decision or the run's queue leads.
-/// Overflow scrolls independently, including while sections are expanded.
+/// The layout leads with live work (pending decision, plan, running subagents and
+/// background processes, queue), hides empty sections, states attention items in
+/// words, and condenses context and inventories to single lines.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render(
     frame: &mut Frame<'_>,
@@ -831,26 +765,29 @@ pub(crate) fn render(
     palette: Palette,
 ) {
     let overlay = !panel.docked();
+    let surface = if palette.shows_bands() {
+        palette.base().bg(palette.surface)
+    } else {
+        palette.overlay()
+    };
     let block = if overlay {
         Block::default()
             .borders(Borders::ALL)
             .border_style(palette.border())
             .padding(Padding::horizontal(1))
-    } else {
-        // A drag of the border shows it held: the terminal reports no hover to
-        // highlight it before the press.
-        let border = if panel.resizing() {
-            palette.primary
-        } else {
-            palette.rail()
-        };
+    } else if panel.resizing() {
+        // Highlight the held edge while dragging without shifting the content column.
         Block::default()
             .borders(Borders::LEFT)
-            .border_style(Style::default().fg(border))
+            .border_style(Style::default().fg(palette.primary))
+            .padding(Padding::new(1, 1, 1, 0))
+    } else {
+        Block::default()
+            .borders(Borders::NONE)
             .padding(Padding::new(2, 1, 1, 0))
     };
     let inner = block.inner(area);
-    frame.render_widget(block.style(palette.overlay()), area);
+    frame.render_widget(block.style(surface), area);
     let width = usize::from(inner.width);
     let height = usize::from(inner.height);
     if width == 0 || height == 0 {
@@ -860,15 +797,35 @@ pub(crate) fn render(
 
     let focus = Focus::of(state);
     let mut rows = PanelRows::default();
-    rows.section(
-        Section::Context,
-        header_lines(state, bindings, width, palette),
-    );
-    // What a run is doing shows on the status line above the composer, so a running
-    // panel leads with its queue rather than repeating it.
+    let (header, branch_row) = header_lines(state, bindings, width, palette);
+    rows.section(Section::Header, header);
+    if let Some(row) = branch_row {
+        rows.action(row, PanelAction::Open(Target::Tree));
+    }
     if focus == Focus::Approval {
         if let Some(lines) = approval_lines(state, width, palette) {
             rows.section(Section::Queue, lines);
+        }
+    }
+    if let Some(plan) = plan::plan_lines(state, width, palette) {
+        rows.section(Section::Running, plan);
+    }
+    // With focus, as `/ps` and the background strip open it, every running/finished
+    // item is listed so each can be selected; the docked panel alone shows the first few.
+    let shown = if panel.overlay_open() {
+        usize::MAX
+    } else {
+        running::MAX_RUNNING_ROWS
+    };
+    let mut peek_span = None;
+    if let Some(running) = running::running_lines(state, panel, shown, width, palette) {
+        rows.section(Section::Running, running.lines);
+        let start = rows.current.map_or(0, |(start, _)| start);
+        peek_span = running
+            .peek
+            .map(|(first, last)| (start + first, start + last));
+        for (line, action) in running.actions {
+            rows.action(line, action);
         }
     }
     if focus != Focus::Idle {
@@ -882,58 +839,11 @@ pub(crate) fn render(
             }
         }
     }
-    // With focus, as `/ps` and the background strip open it, every process is listed
-    // so each can be selected; the docked panel alone shows the first few.
-    let shown = if panel.overlay_open() {
-        usize::MAX
-    } else {
-        MAX_BACKGROUND_ROWS
-    };
-    let mut peek_span = None;
-    if let Some(background) = background_lines(state, panel, shown, width, palette) {
-        rows.section(Section::Background, background.lines);
-        let start = rows.current.map_or(0, |(start, _)| start);
-        peek_span = background
-            .peek
-            .map(|(first, last)| (start + first, start + last));
-        for (line, process_id) in background.processes {
-            rows.action(line, PanelAction::Toggle(Disclosure::Process(process_id)));
-        }
-    }
-    reading_context(&mut rows, state, panel, width, palette);
-    inventory_rows(&mut rows, state, panel, width, palette);
-    rows.section(
-        Section::Files,
-        file_lines(state, panel, overlay, width, palette),
-    );
-    rows.action(0, PanelAction::Open(Target::Diff(None)));
-    if let Some(summary) = &panel.files {
-        for (index, file) in summary.rows.iter().enumerate() {
-            rows.action(
-                index + 1,
-                PanelAction::Open(Target::Diff(Some(file.git_path.clone()))),
-            );
-        }
-        if summary.snapshot.files.len() > MAX_FILE_ROWS
-            || (summary.rows.is_empty() && summary.snapshot.truncated)
-        {
-            rows.action(
-                summary.rows.len() + 1,
-                PanelAction::Open(Target::Diff(None)),
-            );
-        }
-    }
-    let turns = if focus == Focus::Idle {
-        turn_lines(state, width, 4, palette)
-    } else {
-        folded_turn_lines(state, focus, width, palette)
-    };
-    if !turns.is_empty() {
-        rows.section(Section::Turns, turns);
-        rows.action(0, PanelAction::Open(Target::Tree));
-    }
+    reading::attention_rows(&mut rows, state, panel, width, palette);
+    reading::context_line(&mut rows, state, width, palette);
+    reading::inventory_summary(&mut rows, state, panel, width, palette);
 
-    // The bottom row stays anchored while the inventory scrolls. A focused panel
+    // The bottom row stays anchored while the panel scrolls. A focused panel
     // names its keys there; otherwise the row appears only to show the scroll
     // position, since the main footer carries the panel's keys.
     let footer_height = usize::from(panel.overlay_open() || rows.lines.len() > height);
@@ -960,15 +870,16 @@ pub(crate) fn render(
         actions: rows.actions,
     };
     if let Some(cursor) = panel.overlay_open().then(|| panel.focused(state)).flatten() {
-        if let Some((line, ..)) = panel
+        if let Some(hit) = panel
             .painted
             .borrow()
             .actions
             .iter()
-            .filter(|(_, section, _)| *section == cursor.section)
+            .filter(|hit| hit.section == cursor.section)
             .nth(cursor.row)
+            .cloned()
         {
-            mark_focus(&mut rows.lines, *line, width, palette);
+            mark_focus(&mut rows.lines, &hit, width, palette);
         }
     }
     let visible: Vec<_> = rows
@@ -1036,13 +947,29 @@ pub(crate) fn clip_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'s
     clipped
 }
 
-/// Highlight the focused row across the panel's `width`.
-fn mark_focus(lines: &mut [Line<'static>], row: usize, width: usize, palette: Palette) {
-    if let Some(line) = lines.get_mut(row) {
+/// Highlight the focused row across the panel's `width`, or a single column range
+/// when a line holds several inline links (such as the inventory summary).
+fn mark_focus(lines: &mut [Line<'static>], hit: &ActionHit, width: usize, palette: Palette) {
+    let Some(line) = lines.get_mut(hit.line) else {
+        return;
+    };
+    let Some((start, end)) = hit.columns else {
         // Pad the row so the highlight spans the panel, as a list selection does.
         let padding = width.saturating_sub(line.width());
         line.spans.push(Span::raw(" ".repeat(padding)));
         *line = palette.selected_line(std::mem::take(line));
+        return;
+    };
+    let start = usize::from(start);
+    let end = usize::from(end);
+    let mut col = 0usize;
+    let selection = palette.selection();
+    for span in &mut line.spans {
+        let span_end = col + span.content.width();
+        if col >= start && span_end <= end {
+            span.style = palette.selected_row(span.style).patch(selection);
+        }
+        col = span_end;
     }
 }
 
@@ -1056,12 +983,13 @@ fn heading(title: &str, palette: Palette) -> Span<'static> {
 }
 
 /// The session's name, or its first prompt before it has one, and where it works.
+/// Returns the header lines and the row index of the branch link when present.
 fn header_lines(
     state: &UiState,
     bindings: &Bindings,
     width: usize,
     palette: Palette,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, Option<usize>) {
     let title = state
         .selected_session
         .as_ref()
@@ -1089,6 +1017,7 @@ fn header_lines(
         ));
     }
     lines.extend(codemode_line(state, width, palette));
+    let mut branch_row = None;
     if let Some(branch) = state
         .context
         .stats
@@ -1099,6 +1028,7 @@ fn header_lines(
             "Unbound" => "/tree".to_owned(),
             key => key.to_owned(),
         };
+        branch_row = Some(lines.len());
         lines.push(spread(
             vec![
                 Span::styled("⑂ ", Style::default().fg(palette.muted)),
@@ -1108,7 +1038,7 @@ fn header_lines(
             width,
         ));
     }
-    lines
+    (lines, branch_row)
 }
 
 /// Whether the next prompt offers codemode, and which setting decides it. The
@@ -1184,136 +1114,6 @@ fn duration(elapsed: Duration) -> String {
 
 /// Queued rows listed before the rest are counted.
 const MAX_QUEUE_ROWS: usize = 5;
-/// Background processes the unfocused panel lists before the rest are counted.
-const MAX_BACKGROUND_ROWS: usize = 5;
-
-/// The `Background` section's lines, for each process row its line and id, and the
-/// first and last line of the open peek with its process row.
-struct BackgroundRows {
-    lines: Vec<Line<'static>>,
-    processes: Vec<(usize, String)>,
-    peek: Option<(usize, usize)>,
-}
-
-/// `Background`: processes the agent started that are still running, numbered as
-/// `/ps` and `/kill` number them, with how long each has run, then those that ended
-/// with their outcome; past `shown` rows the rest are counted. The docked panel
-/// leaves clean exits to that count, so only a process that still runs or went wrong
-/// takes a row; with focus every process is listed. The open peek follows its
-/// process's row. Nothing while none are listed.
-fn background_lines(
-    state: &UiState,
-    panel: &SidePanel,
-    shown: usize,
-    width: usize,
-    palette: Palette,
-) -> Option<BackgroundRows> {
-    let running = state.background_processes.running();
-    let finished = state.background_processes.finished();
-    if running.is_empty() && finished.is_empty() {
-        return None;
-    }
-    let muted = Style::default().fg(palette.muted);
-    let count = match (running.len(), finished.len()) {
-        (running, 0) => running.to_string(),
-        (0, ended) => format!("{ended} ended"),
-        (running, ended) => format!("{running} running · {ended} ended"),
-    };
-    let mut lines = vec![Line::from(vec![
-        heading("Background ", palette),
-        Span::styled(count, muted),
-    ])];
-    let mut process_rows = Vec::new();
-    // The open peek's process row and its last line.
-    let mut peek_span = None;
-    let peek_open =
-        |process_id: &str| panel.overlay_open() && panel.peek.as_deref() == Some(process_id);
-    let peek = |process_id: &str| {
-        state
-            .background_processes
-            .peek()
-            .filter(|peek| peek.process_id == process_id)
-    };
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| {
-            i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
-        });
-    for (index, process) in running.iter().enumerate().take(shown) {
-        let elapsed = process
-            .started_at_ms
-            .and_then(|started| u64::try_from(now_ms.checked_sub(started)?).ok())
-            .map(crate::tool_cards::format_duration)
-            .unwrap_or_default();
-        let lead = format!("{} ● ", index + 1);
-        let room = width.saturating_sub(elapsed.width() + lead.width() + 1);
-        process_rows.push((lines.len(), process.process_id.clone()));
-        lines.push(spread(
-            vec![
-                Span::styled(lead, Style::default().fg(palette.secondary)),
-                Span::raw(ui::clip_columns(&first_line(&process.command), room)),
-            ],
-            vec![Span::styled(elapsed, muted)],
-            width,
-        ));
-        if peek_open(&process.process_id) {
-            let first = lines.len() - 1;
-            lines.extend(peek::peek_lines(
-                peek(&process.process_id),
-                None,
-                panel.confirm_stop,
-                &process.command,
-                width,
-                palette,
-            ));
-            peek_span = Some((first, lines.len() - 1));
-        }
-    }
-    let finished_rows = finished
-        .iter()
-        .filter(|process| panel.overlay_open() || process.state != ProcessDisplayState::Completed)
-        .take(shown.saturating_sub(running.len()));
-    for process in finished_rows {
-        let (mark, color) = match process.state {
-            ProcessDisplayState::Completed => ("✓ ", palette.success),
-            ProcessDisplayState::Cancelled => ("■ ", palette.muted),
-            ProcessDisplayState::TimedOut => ("✗ ", palette.warning),
-            _ => ("✗ ", palette.error),
-        };
-        let outcome = peek::outcome(process);
-        let room = width.saturating_sub(outcome.width() + mark.width() + 1);
-        process_rows.push((lines.len(), process.process_id.clone()));
-        lines.push(spread(
-            vec![
-                Span::styled(mark, Style::default().fg(color)),
-                Span::styled(ui::clip_columns(&first_line(&process.command), room), muted),
-            ],
-            vec![Span::styled(outcome, muted)],
-            width,
-        ));
-        if peek_open(&process.process_id) {
-            let first = lines.len() - 1;
-            lines.extend(peek::peek_lines(
-                peek(&process.process_id),
-                Some(process),
-                false,
-                &process.command,
-                width,
-                palette,
-            ));
-            peek_span = Some((first, lines.len() - 1));
-        }
-    }
-    let unlisted = (running.len() + finished.len()).saturating_sub(process_rows.len());
-    if unlisted > 0 {
-        lines.push(Line::styled(format!("+{unlisted} more · /ps"), muted));
-    }
-    Some(BackgroundRows {
-        lines,
-        processes: process_rows,
-        peek: peek_span,
-    })
-}
 
 /// Messages waiting for the run, in the order it takes them in: steers join at its
 /// next step, follow-ups once it ends. Nothing while the queue is empty.
@@ -1492,220 +1292,15 @@ fn permission_mode(state: &UiState) -> Option<&'static str> {
         })
 }
 
-/// Git's changed files with their line counts; the rest are counted on one row.
-fn file_lines(
-    state: &UiState,
-    panel: &SidePanel,
-    overlay: bool,
-    width: usize,
-    palette: Palette,
-) -> Vec<Line<'static>> {
-    let muted = Style::default().fg(palette.muted);
-    let Some(summary) = &panel.files else {
-        let note = if let Some(error) = &state.git_diff.error {
-            sanitize_for_terminal(error)
-        } else {
-            "reading…".to_owned()
-        };
-        return vec![
-            Line::from(heading("Changed files", palette)),
-            Line::styled(ui::clip_columns(&note, width), muted),
-        ];
-    };
-    let count = summary.snapshot.files.len();
-    // A partial snapshot omits files past Git's limits, so its count is a floor.
-    let partial = summary.snapshot.truncated;
-    let by_wisp = summary.by_wisp;
-    let mut lines = vec![spread(
-        vec![heading("Changed files", palette)],
-        vec![Span::styled(
-            format!("{count}{} · /diff", if partial { "+" } else { "" }),
-            muted,
-        )],
-        width,
-    )];
-    if count == 0 {
-        lines.push(Line::styled(
-            if partial {
-                "Changed files omitted · /diff to review"
-            } else {
-                "No changes"
-            },
-            muted,
-        ));
-        return lines;
-    }
-    for row in &summary.rows {
-        let status_style = Style::default().fg(match row.status {
-            'A' => palette.success,
-            'D' => palette.deletion,
-            '?' => palette.muted,
-            _ => palette.warning,
-        });
-        // The marker identifies a recorded edit; missing records do not establish
-        // who changed a file (for example, a shell command can edit it).
-        let counts = if row.counted {
-            let mut counts = vec![Span::styled(
-                format!("+{}", row.additions),
-                Style::default().fg(palette.addition),
-            )];
-            if row.deletions > 0 {
-                counts.push(Span::styled(
-                    format!(" −{}", row.deletions),
-                    Style::default().fg(palette.deletion),
-                ));
-            }
-            counts
-        } else {
-            Vec::new()
-        };
-        let counts_width: usize = counts.iter().map(|span| span.content.width()).sum();
-        let mark_width = if by_wisp > 0 { 2 } else { 0 };
-        let path_room =
-            width.saturating_sub(mark_width + 2 + counts_width + usize::from(counts_width > 0));
-        let mut path = Vec::new();
-        if by_wisp > 0 {
-            path.push(match row.edit {
-                Some(_) => Span::styled("◆ ", Style::default().fg(palette.primary)),
-                None => Span::raw("  "),
-            });
-        }
-        path.push(Span::styled(format!("{} ", row.status), status_style));
-        path.push(Span::raw(clip_path(&row.path, path_room)));
-        lines.push(spread(path, counts, width));
-    }
-    if count > MAX_FILE_ROWS {
-        lines.push(Line::styled(
-            format!("+{} more · /diff to review", count - MAX_FILE_ROWS),
-            muted,
-        ));
-    }
-    if partial {
-        lines.push(Line::styled("partial: some files omitted", muted));
-    }
-    // Only the overlay takes keys, so only it names Enter.
-    if overlay && by_wisp > 0 {
-        lines.push(spread(
-            vec![Span::styled("Enter opens diff", muted)],
-            vec![Span::styled("/diff", palette.keycap())],
-            width,
-        ));
-    }
-    lines
-}
-
-/// Keep a path's end, where its file name is: `…/providers/codex.py`.
-fn clip_path(path: &str, width: usize) -> String {
-    if path.width() <= width {
-        return path.to_owned();
-    }
-    let mut kept = String::new();
-    for character in path.chars().rev() {
-        if kept.width() + character.to_string().width() + 1 > width {
-            break;
-        }
-        kept.insert(0, character);
-    }
-    format!("…{kept}")
-}
-
-/// The session's prompts, oldest first.
-fn prompts(state: &UiState) -> Vec<&TranscriptEntry> {
-    state
-        .transcript
-        .entries()
-        .iter()
-        .filter(|entry| entry.role == TranscriptRole::User)
-        .collect()
-}
-
-/// The prompts before the latest one, newest last, marked when their run failed or
-/// was cancelled. The latest prompt is left out because the transcript pins it
-/// above its reply, so a session with one turn has no list.
-fn turn_lines(state: &UiState, width: usize, rows: usize, palette: Palette) -> Vec<Line<'static>> {
-    if rows < 2 {
-        return Vec::new();
-    }
-    let muted = Style::default().fg(palette.muted);
-    let prompts = prompts(state);
-    let Some((_, earlier)) = prompts.split_last() else {
-        return Vec::new();
-    };
-    if earlier.is_empty() {
-        return Vec::new();
-    }
-    let shown = earlier.len().min(rows - 1);
-    let first = earlier.len() - shown;
-    let number_width = earlier.len().to_string().len();
-    let mut lines = vec![spread(
-        vec![heading("Recent turns", palette)],
-        vec![Span::styled(format!("{} · /tree", prompts.len()), muted)],
-        width,
-    )];
-    for (index, prompt) in earlier.iter().enumerate().skip(first) {
-        let outcome = match prompt.run_result().map(|result| result.outcome) {
-            Some(RunOutcome::Failed) => vec![Span::styled("✗", Style::default().fg(palette.error))],
-            Some(RunOutcome::Cancelled) => vec![Span::styled("⊘", muted)],
-            _ => Vec::new(),
-        };
-        lines.push(spread(
-            vec![
-                Span::styled(format!("{:>number_width$} ", index + 1), muted),
-                Span::raw(first_line(prompt.display_content())),
-            ],
-            outcome,
-            width,
-        ));
-    }
-    lines
-}
-
-/// The turn list folded to one row while a run or a decision leads the panel. Like
-/// the unfolded list, it needs a turn before the latest.
-fn folded_turn_lines(
-    state: &UiState,
-    focus: Focus,
-    width: usize,
-    palette: Palette,
-) -> Vec<Line<'static>> {
-    let muted = Style::default().fg(palette.muted);
-    let prompts = prompts(state).len();
-    if prompts < 2 {
-        return Vec::new();
-    }
-    vec![spread(
-        vec![
-            Span::styled("▸ ", muted),
-            heading("Recent turns ", palette),
-            Span::styled(prompts.to_string(), muted),
-        ],
-        vec![Span::styled(
-            if focus == Focus::Running {
-                "collapsed while running"
-            } else {
-                ""
-            },
-            muted,
-        )],
-        width,
-    )]
-}
-
 mod peek;
+mod plan;
 mod reading;
-use crate::tool_cards::ProcessDisplayState;
-use reading::{Fold, inventory_rows, reading_context};
-
-fn toggle_member(expanded: &mut BTreeSet<String>, name: String) {
-    if !expanded.remove(&name) {
-        expanded.insert(name);
-    }
-}
+mod running;
 
 #[derive(Default)]
 struct PanelRows {
     lines: Vec<Line<'static>>,
-    actions: Vec<(usize, Section, PanelAction)>,
+    actions: Vec<ActionHit>,
     current: Option<(usize, Section)>,
 }
 
@@ -1721,14 +1316,36 @@ impl PanelRows {
     fn action(&mut self, row: usize, action: PanelAction) {
         let (start, kind) = self.current.expect("section before action");
         if start + row < self.lines.len() {
-            self.actions.push((start + row, kind, action));
+            self.actions.push(ActionHit {
+                line: start + row,
+                columns: None,
+                section: kind,
+                action,
+            });
+        }
+    }
+
+    fn action_range(&mut self, row: usize, start_col: u16, end_col: u16, action: PanelAction) {
+        let (start, kind) = self.current.expect("section before action");
+        if start + row < self.lines.len() {
+            self.actions.push(ActionHit {
+                line: start + row,
+                columns: Some((start_col, end_col)),
+                section: kind,
+                action,
+            });
         }
     }
 
     fn push(&mut self, line: Line<'static>, action: Option<PanelAction>) {
         if let Some(action) = action {
             let (_, kind) = self.current.expect("section before row");
-            self.actions.push((self.lines.len(), kind, action));
+            self.actions.push(ActionHit {
+                line: self.lines.len(),
+                columns: None,
+                section: kind,
+                action,
+            });
         }
         self.lines.push(line);
     }
@@ -1742,7 +1359,7 @@ mod tests {
     use crate::reducer::ViewStatus;
     use crate::reducer::git_diff::GitDiffFile;
     use crate::startup_logo::LogoChoice;
-    use crate::transcript::RunResult;
+    use crate::transcript::{RunOutcome, RunResult};
     use crate::transcript_view::{TranscriptRowCache, TranscriptViewport};
     use crate::ui::{ComposerLayoutCache, ConnectionInfo};
     use crossterm::event::MouseButton;
@@ -1940,21 +1557,24 @@ mod tests {
         for expected in [
             "why does codex time out",
             "/srv/wisp · fix/timeouts",
-            "198.8k / 272.0k",
-            "73%",
-            "2 · /diff",
-            "M src/lib.rs",
-            "+2 −1",
-            "? notes.md",
-            "Recent turns",
-            "1 why does codex time out",
-            "2/2 connected",
+            "198.8K · 73% context",
+            "/context",
+            "2 MCP · 2 changed",
         ] {
             assert!(panel.contains(expected), "{expected}\n{panel}");
         }
-        // The composer names YOLO, the main footer carries the panel's keys, and the
-        // transcript pins the latest prompt.
-        for moved in ["Permissions", "Ctrl+P panel", "add a read timeout setting"] {
+        // Static inventories, turn lists, and composer/footer facts stay out of the panel.
+        for moved in [
+            "Permissions",
+            "Ctrl+P panel",
+            "add a read timeout setting",
+            "MCP servers",
+            "Changed files",
+            "Recent turns",
+            "Breakdown",
+            "No changes",
+            "reading…",
+        ] {
             assert!(!panel.contains(moved), "{moved}\n{panel}");
         }
         assert!(
@@ -2007,70 +1627,104 @@ mod tests {
     }
 
     #[test]
-    fn reading_layout_folds_healthy_inventories() {
-        let state = reading_session();
-        let mut panel = SidePanel::default();
-        let text = panel_text(&screen(&state, &mut panel, 200), 200);
-        let mut previous = 0;
-        for label in [
-            "Context",
-            "Breakdown",
-            "▸ MCP servers",
-            "▾ Skills",
-            "◆ wisp-development",
-            "◇ playwright",
-            "◇ frontend-design",
-            "Changed files",
-            "Recent turns",
-        ] {
-            let row = row_of(&text, label);
-            assert!(row >= previous, "{label}\n{text}");
-            previous = row;
-        }
-        assert!(
-            text.lines()
-                .any(|line| line.contains("wisp-development") && line.contains("used"))
-        );
-        assert!(
-            text.lines()
-                .any(|line| line.contains("playwright") && line.contains("available"))
-        );
-        assert!(!text.contains("● docs"), "{text}");
-        assert!(!text.contains("Instructions for"));
-        assert!(!text.contains("Model"));
-        assert!(!text.contains("Messages"));
-        assert!(!text.contains("cost unknown"));
-        panel.activate(PanelAction::Toggle(Disclosure::Skill(
-            "wisp-development".into(),
-        )));
-        let text = panel_text(&screen(&state, &mut panel, 200), 200);
-        assert!(text.contains("Used on this session branch"), "{text}");
-        assert!(text.contains("Instructions for wisp-development"), "{text}");
-        panel.activate(PanelAction::Toggle(Disclosure::Mcp));
-        let text = panel_text(&screen(&state, &mut panel, 200), 200);
-        for server in ["▾ MCP servers", "● docs", "● linear"] {
-            assert!(text.contains(server), "{server}\n{text}");
+    fn empty_sections_disappear() {
+        let mut lone = UiState::new("openai-codex".into(), None, None);
+        lone.transcript
+            .append_prompt("why does codex time out".into());
+        lone.git_diff.snapshot = Some(changes(Vec::new()));
+        let docked = panel_text(&screen(&lone, &mut SidePanel::default(), 200), 200);
+        let focused = overlay_text(&lone);
+        for text in [&docked, &focused] {
+            assert!(text.contains("why does codex time out"), "{text}");
+            for absent in [
+                "Plan",
+                "Running",
+                "Queue",
+                "Attention",
+                "context",
+                "MCP",
+                "skills",
+                "changed",
+                "No changes",
+                "reading…",
+                "Recent turns",
+            ] {
+                assert!(!text.contains(absent), "{absent}\n{text}");
+            }
         }
     }
 
     #[test]
-    fn unused_skills_fold() {
-        let mut state = reading_session();
-        state
-            .context
-            .stats
-            .as_mut()
-            .unwrap()
-            .used_skill_names
-            .clear();
-        let text = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
-        assert!(text.contains("▸ Skills"), "{text}");
-        assert!(text.contains("3 available"), "{text}");
-        assert!(!text.contains("playwright"), "{text}");
-    }
+    fn running_leads_with_plan_and_running_items() {
+        let mut state = running();
+        state.transcript.complete_message(
+            2,
+            "Plan:\n- [x] Inspect side panel\n- [x] Update layout\n- [ ] Verify tests".into(),
+        );
+        // Active subagent with a nested tool call.
+        let subagent_call = crate::tool_cards::ToolCallInput {
+            call_id: "sub-1".into(),
+            name: "spawn_agent".into(),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+            arguments: serde_json::json!({"task": "audit side panel tests"}),
+        };
+        state.transcript.observe_tool_call(subagent_call);
+        assert!(state.transcript.observe_script_call("sub-1", |script| {
+            script.call_started(
+                "nested-1",
+                "read",
+                serde_json::json!({"path": "side_panel.rs"}),
+            )
+        }));
+        // Running background process with retained output.
+        backend(
+            &mut state,
+            crate::reducer::BackendEvent::from_projection_value(&serde_json::json!({
+                "type": "rpc.state", "command_id": "get_state-1",
+                "timestamp": "2026-11-15T09:00:00Z",
+                "state": {
+                    "provider": "fake", "auto_compaction_enabled": true,
+                    "steering_mode": "one_at_a_time", "follow_up_mode": "one_at_a_time",
+                    "pending_steering_count": 0, "pending_follow_up_count": 0,
+                    "background_processes": [
+                        {"process_id": "server", "command": "cargo watch -x test", "started_at_ms": 0}
+                    ]
+                }
+            }))
+            .unwrap(),
+        );
 
-    fn mcp_open(state: &UiState, panel: &mut SidePanel) -> bool {
-        panel_text(&screen(state, panel, 200), 200).contains("● docs")
+        let docked = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
+        let focused = overlay_text(&state);
+        for panel in [&docked, &focused] {
+            for expected in [
+                "Plan",
+                "2 of 3",
+                "✓ Inspect side panel",
+                "○ Verify tests",
+                "Running",
+                "● audit side panel tests",
+                "read",
+                "1 ● cargo watch -x test",
+            ] {
+                assert!(panel.contains(expected), "{expected}\n{panel}");
+            }
+            assert!(row_of(panel, "Plan") < row_of(panel, "Running"), "{panel}");
+            assert!(
+                row_of(panel, "Running") < row_of(panel, "context"),
+                "{panel}"
+            );
+        }
+
+        // First row in Running is the background process (so focus_background lands on it);
+        // Down moves to the subagent and Enter opens its transcript card.
+        let mut panel = overlay(&state);
+        focus_section(&mut panel, &state, Section::Running);
+        panel.key(KeyCode::Down, &state);
+        assert_eq!(
+            panel.key(KeyCode::Enter, &state),
+            OverlayKey::Open(Target::Subagent("sub-1".into()))
+        );
     }
 
     fn set_linear(state: &mut UiState, status: McpServerStatus) {
@@ -2079,65 +1733,92 @@ mod tests {
     }
 
     #[test]
-    fn connecting_servers_are_not_failures() {
+    fn attention_states_status_in_words() {
         let mut state = reading_session();
-        let mut panel = SidePanel::default();
-        set_linear(&mut state, McpServerStatus::Connecting);
-        let text = panel_text(&screen(&state, &mut panel, 200), 200);
-        assert!(text.contains("connecting…"), "{text}");
-        assert!(!text.contains("connected"), "{text}");
-        // Still connecting is not a failure, so the list stays folded.
-        assert!(!mcp_open(&state, &mut panel));
-        panel.activate(PanelAction::Toggle(Disclosure::Mcp));
-        let text = panel_text(&screen(&state, &mut panel, 200), 200);
-        assert!(text.contains("○ linear"), "{text}");
-    }
+        let healthy = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
+        assert!(!healthy.contains("Attention"), "{healthy}");
+        assert!(!healthy.contains("Disconnected"), "{healthy}");
 
-    #[test]
-    fn mcp_fold_follows_failures() {
-        let mut state = reading_session();
-        let mut panel = SidePanel::default();
-        assert!(!mcp_open(&state, &mut panel));
-        // A toggle holds across paints while the servers stay healthy.
-        panel.activate(PanelAction::Toggle(Disclosure::Mcp));
-        assert!(mcp_open(&state, &mut panel));
-        assert!(mcp_open(&state, &mut panel));
-        panel.activate(PanelAction::Toggle(Disclosure::Mcp));
-        assert!(!mcp_open(&state, &mut panel));
-        // A failure opens the list, and folding it holds until the failure clears.
         set_linear(&mut state, McpServerStatus::Disconnected);
-        assert!(mcp_open(&state, &mut panel));
-        panel.activate(PanelAction::Toggle(Disclosure::Mcp));
-        assert!(!mcp_open(&state, &mut panel));
-        set_linear(&mut state, McpServerStatus::Connected);
-        assert!(!mcp_open(&state, &mut panel));
-        // The next failure opens it again.
-        set_linear(&mut state, McpServerStatus::Unavailable);
-        assert!(mcp_open(&state, &mut panel));
-        // A disabled server is the user's choice, not a failure.
-        let mut panel = SidePanel::default();
+        let disconnected = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
+        assert!(disconnected.contains("Attention"), "{disconnected}");
+        assert!(disconnected.contains("linear"), "{disconnected}");
+        assert!(
+            disconnected.contains("Disconnected · /mcp"),
+            "{disconnected}"
+        );
+
+        set_linear(&mut state, McpServerStatus::Connecting);
+        let connecting = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
+        assert!(connecting.contains("Connecting · /mcp"), "{connecting}");
+
         set_linear(&mut state, McpServerStatus::Disabled);
-        assert!(!mcp_open(&state, &mut panel));
+        let disabled = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
+        assert!(!disabled.contains("Attention"), "{disabled}");
     }
 
     #[test]
-    fn lone_turn_hides_list() {
-        let mut lone = UiState::new("openai-codex".into(), None, None);
-        let prompt = lone
-            .transcript
-            .append_prompt("why does codex time out".into());
-        let text = panel_text(&screen(&lone, &mut SidePanel::default(), 200), 200);
-        assert!(text.contains("Changed files"), "{text}");
-        assert!(!text.contains("Recent turns"), "{text}");
-        lone.run_progress = Some(crate::reducer::RunProgress {
-            prompt,
-            turn: 1,
-            completed_output_tokens: 0,
-            streaming_bytes: 0,
-        });
-        lone.view_status = ViewStatus::Running;
-        let text = panel_text(&screen(&lone, &mut SidePanel::default(), 200), 200);
-        assert!(!text.contains("Recent turns"), "{text}");
+    fn context_line_turns_amber_and_red() {
+        let palette = Palette::default();
+        let color_for = |tokens: u64| {
+            let mut state = session();
+            let budget = state.context.budget.as_mut().unwrap();
+            budget.observed_tokens = Some(tokens);
+            budget.context_window = Some(100_000);
+            let mut panel = SidePanel::default();
+            panel.observe_width(200);
+            let mut terminal = Terminal::new(TestBackend::new(52, 20)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render(
+                        frame,
+                        frame.area(),
+                        &state,
+                        &panel,
+                        &Bindings::default(),
+                        palette,
+                    );
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let y = (0..20)
+                .find(|&y| {
+                    (0..52)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                        .contains("context")
+                })
+                .expect("context line");
+            buffer[(2, y)].fg
+        };
+        assert_eq!(color_for(14_000), palette.muted);
+        assert_eq!(color_for(75_000), palette.warning);
+        assert_eq!(color_for(92_000), palette.error);
+    }
+
+    #[test]
+    fn inventory_summary_links_open_dialogs() {
+        let state = reading_session();
+        let text = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
+        assert!(text.contains("2 MCP · 3 skills · 2 changed"), "{text}");
+
+        // Keyboard navigation reaches each part on the single summary line.
+        let mut panel = overlay(&state);
+        focus_section(&mut panel, &state, Section::Inventory);
+        assert_eq!(
+            panel.key(KeyCode::Enter, &state),
+            OverlayKey::Open(Target::Mcp)
+        );
+        panel.key(KeyCode::Right, &state);
+        assert_eq!(
+            panel.key(KeyCode::Enter, &state),
+            OverlayKey::Open(Target::Skills)
+        );
+        panel.key(KeyCode::Right, &state);
+        assert_eq!(
+            panel.key(KeyCode::Enter, &state),
+            OverlayKey::Open(Target::Diff(None))
+        );
     }
 
     #[test]
@@ -2229,35 +1910,9 @@ mod tests {
     }
 
     #[test]
-    fn long_inventories_scroll_and_do_not_hide_permissions_or_keyboard_targets() {
-        let mut state = reading_session();
-        let catalog = Arc::make_mut(state.skills.snapshot.as_mut().unwrap());
-        let template = catalog.entries[0].clone();
-        catalog.entries = (0..30)
-            .map(|index| {
-                let mut skill = template.clone();
-                skill.name = format!("skill-{index}");
-                skill
-            })
-            .collect();
+    fn small_viewports_render_without_panicking() {
+        let state = reading_session();
         let mut panel = overlay(&state);
-        focus_section(&mut panel, &state, Section::Skills);
-        panel.key(KeyCode::End, &state);
-        let text = row_background(&panel, &state, 140, "skill-29");
-        assert_eq!(text, Palette::default().selection().bg);
-        assert!(panel.scroll.get() > 0);
-        panel.scroll_by(i32::MAX);
-        paint_overlay(&state, &panel);
-        assert_eq!(
-            panel.scroll.get(),
-            panel
-                .painted
-                .borrow()
-                .total
-                .saturating_sub(usize::from(panel.painted.borrow().area.height))
-        );
-        panel.scroll_by(i32::MIN);
-        assert_eq!(panel.scroll.get(), 0);
         for (width, height) in [(1, 1), (24, 8), (80, 24), (148, 40), (200, 48)] {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             panel.observe_width(width);
@@ -2432,7 +2087,7 @@ mod tests {
     #[test]
     fn held_border_highlights() {
         let palette = Palette::default();
-        let border = |panel: &SidePanel| {
+        let edge_cell = |panel: &SidePanel| {
             let mut terminal = Terminal::new(TestBackend::new(200, 20)).unwrap();
             terminal
                 .draw(|frame| {
@@ -2441,55 +2096,29 @@ mod tests {
                     render(frame, area, &session(), panel, &bindings, palette);
                 })
                 .unwrap();
-            terminal.backend().buffer()[(200 - panel.docked_width(200), 5)].fg
+            let cell = &terminal.backend().buffer()[(200 - panel.docked_width(200), 5)];
+            (cell.symbol().to_owned(), cell.fg, cell.bg)
         };
         let mut panel = SidePanel::default();
         panel.observe_width(200);
-        assert_eq!(border(&panel), palette.rail());
+        // At rest the docked panel uses the surface tier with no vertical divider line.
+        let (sym, _, bg) = edge_cell(&panel);
+        assert_eq!(sym, " ");
+        assert_eq!(bg, palette.surface);
+        // While dragging, the left edge highlights in the primary colour.
         panel.press_border(Instant::now(), 0);
-        assert_eq!(border(&panel), palette.primary);
-    }
-
-    #[test]
-    fn wide_panel_fits_paths() {
-        let path = "src/wisp/agent/harness/boundaries/overflow_recovery.rs";
-        let mut state = session();
-        state.git_diff.snapshot = Some(changes(vec![file(path, "added", "", "x\n")]));
-        let narrow = panel_text(&screen(&state, &mut SidePanel::default(), 160), 160);
-        assert!(!narrow.contains(path), "{narrow}");
-        let wide = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
-        assert!(wide.contains("overflow_recovery.rs"), "{wide}");
+        let (sym, fg, _) = edge_cell(&panel);
+        assert_eq!(sym, "│");
+        assert_eq!(fg, palette.primary);
     }
 
     #[test]
     fn undocked_footer_offers_panel() {
         let rows = screen(&session(), &mut SidePanel::default(), 140);
         let footer = rows.last().unwrap();
-        assert!(!rows.iter().any(|row| row.contains("Changed files")));
+        assert!(!rows.iter().any(|row| row.contains("2 MCP · 2 changed")));
         assert!(footer.contains("/srv/wisp · fix/timeouts"), "{footer}");
         assert!(footer.contains("Ctrl+P panel"), "{footer}");
-    }
-
-    #[test]
-    fn long_file_lists_point_to_diff() {
-        let mut state = session();
-        state.git_diff.snapshot = Some(changes(
-            (0..10)
-                .map(|index| {
-                    file(
-                        &format!("src/deeply/nested/module_{index}.rs"),
-                        "added",
-                        "",
-                        "x\n",
-                    )
-                })
-                .collect(),
-        ));
-        let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
-        assert!(panel.contains("10 · /diff"), "{panel}");
-        assert!(panel.contains("A src/deeply/nested/module_7.rs"), "{panel}");
-        assert!(!panel.contains("module_8.rs"), "{panel}");
-        assert!(panel.contains("+2 more · /diff to review"), "{panel}");
     }
 
     #[test]
@@ -2499,15 +2128,14 @@ mod tests {
         Arc::get_mut(&mut snapshot).unwrap().truncated = true;
         state.git_diff.snapshot = Some(snapshot);
         let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
-        assert!(panel.contains("1+ · /diff"), "{panel}");
-        assert!(panel.contains("partial: some files omitted"), "{panel}");
+        assert!(panel.contains("1+ changed"), "{panel}");
 
         let mut empty = changes(Vec::new());
         Arc::get_mut(&mut empty).unwrap().truncated = true;
         state.git_diff.snapshot = Some(empty);
         let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
         assert!(!panel.contains("No changes"), "{panel}");
-        assert!(panel.contains("Changed files omitted"), "{panel}");
+        assert!(panel.contains("0+ changed"), "{panel}");
     }
 
     #[test]
@@ -2554,49 +2182,6 @@ mod tests {
         assert!(
             rows.iter().any(|row| row.contains("Ctrl+T tree")),
             "{rows:#?}"
-        );
-    }
-
-    #[test]
-    fn wisp_edits_get_marks() {
-        let mut state = session();
-        let mut edited = file("src/lib.rs", "modified", "a\n", "b\n");
-        edited.edits = vec![crate::reducer::git_diff::GitDiffEdit {
-            call_id: "edit-1".into(),
-            entry_id: String::new(),
-            tool: "edit".into(),
-        }];
-        state.git_diff.snapshot = Some(changes(vec![
-            edited,
-            file("src/other.rs", "modified", "a\n", "c\n"),
-        ]));
-        let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
-        assert!(panel.contains("2 · /diff"), "{panel}");
-        assert!(panel.contains("◆ M src/lib.rs"), "{panel}");
-        assert!(panel.contains("  M src/other.rs"), "{panel}");
-        let other = panel
-            .lines()
-            .find(|line| line.contains("src/other.rs"))
-            .unwrap();
-        assert!(other.contains("+1 −1"), "{other}");
-        assert!(!panel.contains("not from Wisp"), "{panel}");
-        assert!(
-            !panel.contains("Enter jumps"),
-            "the docked panel takes no keys"
-        );
-        assert!(overlay_text(&state).contains("Enter opens diff"));
-        // Every file opens its diff, including files with recorded edits.
-        let mut panel = overlay(&state);
-        focus_section(&mut panel, &state, Section::Files);
-        panel.key(KeyCode::Down, &state);
-        assert_eq!(
-            panel.key(KeyCode::Enter, &state),
-            OverlayKey::Open(Target::Diff(Some("src/lib.rs".into())))
-        );
-        panel.key(KeyCode::Down, &state);
-        assert_eq!(
-            panel.key(KeyCode::Enter, &state),
-            OverlayKey::Open(Target::Diff(Some("src/other.rs".into())))
         );
     }
 
@@ -2778,96 +2363,6 @@ mod tests {
         assert!(column.last().unwrap().contains("idle"), "{column:#?}");
     }
 
-    #[test]
-    fn idle_context_split_rows() {
-        let state = with_split(session());
-        let mut view = SidePanel::default();
-        let text = panel_text(&screen(&state, &mut view, 200), 200);
-        assert!(text.contains("+38.2k last turn"), "{text}");
-        assert!(!text.contains("Messages"), "{text}");
-        view.activate(PanelAction::Toggle(Disclosure::Context));
-        let text = panel_text(&screen(&state, &mut view, 200), 200);
-        for label in [
-            "Messages",
-            "MCP tools",
-            "Other instructions/tools",
-            "Compaction reserve",
-            "Compacts at 85%",
-        ] {
-            assert!(text.contains(label), "{label}\n{text}");
-        }
-    }
-
-    #[test]
-    fn overlay_context_drops_sparkline() {
-        let text = overlay_text(&with_split(session()));
-        assert!(text.contains("+38.2k last turn"), "{text}");
-        assert!(text.contains("Breakdown · /context"), "{text}");
-        assert!(text.contains("MCP servers"), "{text}");
-        assert!(!text.contains("per turn"), "{text}");
-    }
-
-    #[test]
-    fn running_context_is_compact() {
-        let mut state = with_split(running());
-        let budget = state.context.budget.as_mut().unwrap();
-        budget.observed_tokens = Some(210_000);
-        let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
-        assert!(panel.contains("210.0k / 272.0k"), "{panel}");
-        assert!(panel.contains("+11.2k so far"), "{panel}");
-        assert!(!panel.contains("Messages"), "{panel}");
-    }
-
-    #[test]
-    fn short_panel_compacts_context() {
-        let rows = screen_of_height(&with_split(session()), &mut SidePanel::default(), 200, 30);
-        let panel = panel_text(&rows, 200);
-        // Too short for every source row: the bar and the newest turn keep the
-        // changed files in view.
-        assert!(!panel.contains("■ Messages"), "{panel}");
-        assert!(panel.contains("+38.2k last turn"), "{panel}");
-        assert!(panel.contains("M src/lib.rs"), "{panel}");
-    }
-
-    #[test]
-    fn compaction_drops_stale_split() {
-        let mut state = with_split(running());
-        // A compaction during the run: the next request is far smaller.
-        state.context.budget.as_mut().unwrap().observed_tokens = Some(60_000);
-        let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
-        assert!(panel.contains("60.0k / 272.0k"), "{panel}");
-        assert!(!panel.contains("so far"), "{panel}");
-    }
-
-    #[test]
-    fn finished_run_awaits_stats() {
-        let mut state = with_split(session());
-        state.context.budget.as_mut().unwrap().observed_tokens = Some(210_000);
-        let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
-        assert!(panel.contains("+11.2k last turn"), "{panel}");
-        assert!(!panel.contains("largest"), "{panel}");
-    }
-
-    #[test]
-    fn compaction_is_not_a_turn() {
-        let mut state = with_split(running());
-        state.context.compaction = Some(wisp_protocol::events::CompactionReason::Manual);
-        let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
-        assert!(!panel.contains("so far"));
-    }
-
-    #[test]
-    fn context_without_split() {
-        let mut state = with_split(session());
-        state.context.stats.as_mut().unwrap().context_breakdown = None;
-        let panel = panel_text(&screen(&state, &mut SidePanel::default(), 160), 160);
-        // Older statistics have no split: one run, the reserve after its marker.
-        let bar = panel.lines().nth(row_of(&panel, "Context") + 1).unwrap();
-        let bar = bar.trim_start_matches(['│', ' ']);
-        assert!(bar.starts_with('━') && bar.ends_with('─'), "{panel}");
-        assert!(!panel.contains("Messages"), "{panel}");
-    }
-
     /// Whether the panel has a `Now` section heading.
     fn has_now(panel: &str) -> bool {
         panel.lines().any(|line| line.trim() == "Now")
@@ -2877,9 +2372,6 @@ mod tests {
     fn running_leaves_activity_to_status_line() {
         let rows = screen(&running(), &mut SidePanel::default(), 200);
         let panel = panel_text(&rows, 200);
-        for expected in ["▸ Recent turns 3", "collapsed while running"] {
-            assert!(panel.contains(expected), "{expected}\n{panel}");
-        }
         // The status line above the composer carries live run activity; the panel does not.
         assert!(!has_now(&panel), "{panel}");
         assert!(!panel.contains("Bash git push"), "{panel}");
@@ -2889,8 +2381,7 @@ mod tests {
                 .any(|row| row.contains("⠋ Bash git push -u origin fix/timeouts")),
             "{rows:#?}"
         );
-        // The turn list folds, and an empty queue takes no rows.
-        assert!(!panel.contains("4m 12s ✓"), "{panel}");
+        // An empty queue takes no rows.
         assert!(!panel.contains("Queue"), "{panel}");
     }
 
@@ -2919,7 +2410,7 @@ mod tests {
 
         let panel = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
 
-        assert!(panel.contains("Background 2"), "{panel}");
+        assert!(panel.contains("Running"), "{panel}");
         assert!(panel.contains("1 ● npm run dev"), "{panel}");
         assert!(panel.contains("2 ● gh pr checks 1 --watch"), "{panel}");
         assert!(
@@ -2929,7 +2420,7 @@ mod tests {
 
         // Enter on a row opens its peek.
         let mut panel = overlay(&state);
-        focus_section(&mut panel, &state, Section::Background);
+        focus_section(&mut panel, &state, Section::Running);
         assert_eq!(panel.key(KeyCode::Enter, &state), OverlayKey::Moved);
         assert_eq!(panel.peek.as_deref(), Some("server"));
     }
@@ -2952,14 +2443,16 @@ mod tests {
 
         // Docked, the clean exit is only counted.
         let docked = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
-        assert!(docked.contains("Background 2 ended"), "{docked}");
+        assert!(docked.contains("Running"), "{docked}");
+        assert!(docked.contains("2 ended"), "{docked}");
         assert!(docked.contains("✗ make tests"), "{docked}");
         assert!(!docked.contains("make lint"), "{docked}");
         assert!(docked.contains("+1 more · /ps"), "{docked}");
 
-        // Opened over the conversation, as `/ps` opens it, both are listed.
+        // Opened over the conversation, as `/ps` opens it, both are listed with [done].
         let focused = overlay_text(&state);
         assert!(focused.contains("✓ make lint"), "{focused}");
+        assert!(focused.contains("[done]"), "{focused}");
         assert!(focused.contains("✗ make tests"), "{focused}");
         assert!(!focused.contains("more · /ps"), "{focused}");
     }
@@ -2967,7 +2460,7 @@ mod tests {
     #[test]
     fn idle_panel_has_no_background() {
         let panel = panel_text(&screen(&session(), &mut SidePanel::default(), 200), 200);
-        assert!(!panel.contains("Background"), "{panel}");
+        assert!(!panel.contains("Running"), "{panel}");
     }
 
     #[test]
@@ -2997,7 +2490,7 @@ mod tests {
         );
         assert_eq!(row_of(&panel, "2 ⏎ follow-up then draft"), steer + 1);
         assert!(
-            row_of(&panel, "Queue") < row_of(&panel, "Context"),
+            row_of(&panel, "Queue") < row_of(&panel, "context"),
             "{panel}"
         );
     }
@@ -3014,7 +2507,6 @@ mod tests {
             "Queue 1",
             "held until you answer",
             "1 ⏎ follow-up then open the PR",
-            "▸ Recent turns 3",
         ] {
             assert!(panel.contains(expected), "{expected}\n{panel}");
         }
@@ -3023,12 +2515,11 @@ mod tests {
             "{panel}"
         );
         assert!(
-            row_of(&panel, "Queue") < row_of(&panel, "Context"),
+            row_of(&panel, "Queue") < row_of(&panel, "context"),
             "{panel}"
         );
         // The run is paused, not running, and the mode is stated once.
         assert!(!panel.contains("Now"), "{panel}");
-        assert!(!panel.contains("collapsed while running"), "{panel}");
         assert!(!panel.contains("steers join"), "{panel}");
         assert!(!panel.contains("restore newest"), "{panel}");
         assert_eq!(panel.matches("permissions").count(), 1, "{panel}");
@@ -3064,7 +2555,7 @@ mod tests {
     fn overlay_follows_state() {
         let panel = overlay_text(&running());
         assert!(!has_now(&panel), "{panel}");
-        assert!(panel.contains("Context"), "{panel}");
+        assert!(panel.contains("context"), "{panel}");
         assert!(
             panel.contains("Esc close · Tab sections · Enter"),
             "{panel}"
@@ -3075,7 +2566,7 @@ mod tests {
             "{panel}"
         );
         assert!(
-            row_of(&panel, "Queue") < row_of(&panel, "Context"),
+            row_of(&panel, "Queue") < row_of(&panel, "context"),
             "{panel}"
         );
     }
@@ -3122,19 +2613,21 @@ mod tests {
     #[test]
     fn tab_cycles_sections() {
         let mut state = running();
+        state.context.stats.as_mut().unwrap().branch = SessionBranchSummary {
+            branches: 2,
+            ..Default::default()
+        };
         queue(&mut state, &["steer"], &["later"]);
         let mut panel = overlay(&state);
         assert_eq!(
             panel.key(KeyCode::Enter, &state),
-            OverlayKey::Open(Target::Queue)
+            OverlayKey::Open(Target::Tree)
         );
         for section in [
-            Section::Context,
-            Section::Mcp,
-            Section::Skills,
-            Section::Files,
-            Section::Turns,
             Section::Queue,
+            Section::Context,
+            Section::Inventory,
+            Section::Header,
         ] {
             panel.key(KeyCode::Tab, &state);
             assert_eq!(panel.focused(&state).unwrap().section, section);
@@ -3142,7 +2635,7 @@ mod tests {
         panel.key(KeyCode::BackTab, &state);
         assert_eq!(
             panel.key(KeyCode::Enter, &state),
-            OverlayKey::Open(Target::Tree)
+            OverlayKey::Open(Target::Mcp)
         );
         assert_eq!(panel.key(KeyCode::Char('x'), &state), OverlayKey::Ignored);
         assert_eq!(panel.key(KeyCode::Esc, &state), OverlayKey::Close);
@@ -3210,9 +2703,8 @@ mod tests {
         panel.focus_background();
         paint_overlay(&state, &panel);
 
-        // The queue is listed first, but focus starts on the process.
-        assert_eq!(panel.sections(&state)[0], Section::Queue);
-        assert_eq!(panel.focused(&state).unwrap().section, Section::Background);
+        // Focus starts on the running process.
+        assert_eq!(panel.focused(&state).unwrap().section, Section::Running);
         panel.key(KeyCode::Enter, &state);
         assert_eq!(panel.peek.as_deref(), Some("server"));
     }
@@ -3226,14 +2718,7 @@ mod tests {
         queue(&mut state, &[], &[]);
         paint_overlay(&state, &panel);
         assert_eq!(panel.focused(&state).unwrap().section, Section::Context);
-        state.git_diff.snapshot = Some(changes(
-            (0..10)
-                .map(|index| file(&format!("f{index}.rs"), "added", "", "x\n"))
-                .collect(),
-        ));
-        panel.sync_files(&state.git_diff);
-        paint_overlay(&state, &panel);
-        focus_section(&mut panel, &state, Section::Files);
+        focus_section(&mut panel, &state, Section::Inventory);
         panel.key(KeyCode::End, &state);
         assert_eq!(
             panel.key(KeyCode::Enter, &state),
@@ -3287,11 +2772,6 @@ mod tests {
         let follow_ups: Vec<String> = (1..=6).map(|index| format!("later {index}")).collect();
         let follow_ups: Vec<&str> = follow_ups.iter().map(String::as_str).collect();
         queue(&mut state, &[], &follow_ups);
-        state.git_diff.snapshot = Some(changes(
-            (0..10)
-                .map(|index| file(&format!("f{index}.rs"), "added", "", "x\n"))
-                .collect(),
-        ));
         let mut panel = overlay(&state);
         // The queue's row counting the rest is the last one focus reaches.
         panel.key(KeyCode::End, &state);
@@ -3302,15 +2782,6 @@ mod tests {
         assert_ne!(row_background(&panel, &state, 140, "later 5"), selection);
         panel.key(KeyCode::Up, &state);
         assert_eq!(row_background(&panel, &state, 140, "later 5"), selection);
-        // So is the file list's, even below the viewport.
-        focus_section(&mut panel, &state, Section::Files);
-        panel.key(KeyCode::End, &state);
-        assert_eq!(
-            row_background(&panel, &state, 140, "+2 more · /diff"),
-            selection
-        );
-        // Offscreen sections stay reachable by keyboard and scroll into view.
-        assert!(!panel.targets(Section::Mcp, &state).is_empty());
         focus_section(&mut panel, &state, Section::Queue);
         assert_eq!(
             panel.key(KeyCode::Enter, &state),
@@ -3319,33 +2790,15 @@ mod tests {
     }
 
     #[test]
-    fn diff_gets_git_path() {
-        let mut state = session();
-        state.git_diff.snapshot = Some(changes(vec![file("a\tb.rs", "modified", "a\n", "b\n")]));
-        let mut panel = overlay(&state);
-        focus_section(&mut panel, &state, Section::Files);
-        panel.key(KeyCode::Down, &state);
-        assert_eq!(
-            panel.key(KeyCode::Enter, &state),
-            OverlayKey::Open(Target::Diff(Some("a\tb.rs".into())))
-        );
-    }
-
-    #[test]
     fn overlay_marks_focus() {
         let state = session();
         let selection = Palette::default().selection().bg;
-        let mut panel = overlay(&state);
-        assert_eq!(row_background(&panel, &state, 140, "Breakdown"), selection);
-        focus_section(&mut panel, &state, Section::Mcp);
-        assert_eq!(
-            row_background(&panel, &state, 140, "2/2 connected"),
-            selection
-        );
+        let panel = overlay(&state);
+        assert_eq!(row_background(&panel, &state, 140, "context"), selection);
         let mut docked = SidePanel::default();
         docked.observe_width(200);
         docked.sync_files(&state.git_diff);
-        assert_ne!(row_background(&docked, &state, 200, "Breakdown"), selection);
+        assert_ne!(row_background(&docked, &state, 200, "context"), selection);
     }
 
     #[test]
@@ -3464,15 +2917,6 @@ mod tests {
             .transcript
             .complete_message_with_cost(5, "Searched.".into(), Some(cost(None, false)));
         assert_eq!(turn(&state).as_deref(), Some("≥$0.310"));
-    }
-
-    #[test]
-    fn long_paths_keep_file_name() {
-        assert_eq!(
-            clip_path("src/wisp/providers/codex.py", 14),
-            "…ders/codex.py"
-        );
-        assert_eq!(clip_path("src/lib.rs", 14), "src/lib.rs");
     }
 
     #[test]
