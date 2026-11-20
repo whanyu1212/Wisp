@@ -287,6 +287,14 @@ class BrowserHandoffTracker:
         self._text_entries = 0
         self._navigations = 0
 
+    def select_server(self, server_name: str) -> None:
+        """Select ``server_name`` and discard any cached page ID from another server."""
+
+        if server_name:
+            if self.active_server_name != server_name:
+                self.last_page_id = None
+            self.active_server_name = server_name
+
     def observe_agent_tool(
         self,
         server_name: str,
@@ -296,8 +304,7 @@ class BrowserHandoffTracker:
     ) -> None:
         """Remember the MCP server and page ID observed from an agent browser call."""
 
-        if server_name:
-            self.active_server_name = server_name
+        self.select_server(server_name)
         page_id = _extract_page_id_from_mapping(arguments)
         if page_id is None:
             page_id = _extract_page_id_from_result(output, structured)
@@ -313,8 +320,7 @@ class BrowserHandoffTracker:
     ) -> None:
         """Record one mutating user interaction without retaining typed text or key names."""
 
-        if server_name:
-            self.active_server_name = server_name
+        self.select_server(server_name)
         if metadata.url is not None:
             self.last_url = metadata.url
         if metadata.title is not None:
@@ -464,7 +470,7 @@ class McpBrowserController:
             connected_mcp,
             active_server=tracker.active_server_name,
         )
-        tracker.active_server_name = server_name
+        tracker.select_server(server_name)
         tools_by_remote = {tool.remote_name.strip().lower(): tool for tool in server_tools}
 
         page_id = tracker.last_page_id
@@ -928,8 +934,9 @@ async def _invoke_tool(
         raise BrowserControlError(f"Tool policy denies {tool.name}")
     try:
         return await tool.run(arguments, context)
-    except ToolError as exc:
-        raise BrowserControlError(str(exc) or f"{tool.name} failed") from None
+    except ToolError:
+        # Never forward remote `is_error` text, which may echo typed secrets or scripts.
+        raise BrowserControlError(f"{tool.name} failed") from None
     except Exception as exc:  # noqa: BLE001 - isolate untrusted MCP errors without leaking payloads
         raise BrowserControlError(f"{tool.name} failed: {type(exc).__name__}") from None
 

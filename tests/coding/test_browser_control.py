@@ -467,6 +467,25 @@ def test_controller_policy_server_selection_and_error_redaction(tmp_path: Path) 
             )
         assert "super-secret-value" not in str(exc_info.value)
 
+        # Remote MCP `isError=True` payloads must also be scrubbed from RPC errors.
+        err_client = _ScriptedMcpClient(
+            lambda name, args: CallToolResult(
+                isError=True,
+                content=[TextContent(text="boom: super-secret-value")],
+            )
+        )
+        with pytest.raises(BrowserControlError) as tool_exc_info:
+            await controller.execute(
+                BrowserInteraction(action="type", text="super-secret-value"),
+                tools=_playwright_tools(err_client),
+                context=ToolContext(cwd=tmp_path, protected_paths=()),
+                policy=ToolPolicy.allow_all_tools(),
+                image_store=_image_store(tmp_path),
+                tracker=BrowserHandoffTracker(),
+            )
+        assert "failed" in str(tool_exc_info.value)
+        assert "super-secret-value" not in str(tool_exc_info.value)
+
     anyio.run(scenario)
 
 
@@ -946,6 +965,64 @@ def test_move_into_new_project_clears_browser_state(tmp_path: Path) -> None:
     assert agent.browser_handoff.active_server_name is None
     assert agent.browser_handoff.last_page_id is None
     assert agent.browser_handoff.pending_snapshot() is None
+
+
+def test_switching_browser_servers_clears_cached_page_id(tmp_path: Path) -> None:
+    def make_devtools(client: _ScriptedMcpClient, server_name: str) -> list[Tool]:
+        return [
+            _make_mcp_tool(
+                client, server_name=server_name, remote_name="list_pages", safety="read"
+            ),
+            _make_mcp_tool(
+                client,
+                server_name=server_name,
+                remote_name="type_text",
+                properties={"pageId": {"type": "number"}, "text": {"type": "string"}},
+                required=["pageId", "text"],
+            ),
+            _make_mcp_tool(
+                client,
+                server_name=server_name,
+                remote_name="take_screenshot",
+                properties={"pageId": {"type": "number"}},
+                required=["pageId"],
+                safety="read",
+            ),
+        ]
+
+    client_a = _ScriptedMcpClient(
+        lambda name, args: CallToolResult(content=[TextContent(text="a")])
+    )
+    client_b = _ScriptedMcpClient(
+        lambda name, args: (
+            CallToolResult(content=[TextContent(text="3: https://b.test [selected]")])
+            if name == "list_pages"
+            else CallToolResult(content=[ImageContent(data=PNG_B64, mimeType="image/png")])
+        )
+    )
+    tracker = BrowserHandoffTracker()
+    tracker.observe_agent_tool("devtools-a", {"pageId": 7}, "", None)
+    assert tracker.last_page_id == 7
+
+    # Page-ID-free observation on another server clears devtools-a's cached pageId.
+    tracker.observe_agent_tool("devtools-b", {}, "ok", None)
+    assert tracker.active_server_name == "devtools-b"
+    assert tracker.last_page_id is None
+
+    tools = [*make_devtools(client_a, "devtools-a"), *make_devtools(client_b, "devtools-b")]
+    anyio.run(
+        lambda: McpBrowserController().execute(
+            BrowserInteraction(action="type", text="hi"),
+            tools=tools,
+            context=ToolContext(cwd=tmp_path, protected_paths=()),
+            policy=ToolPolicy.allow_all_tools(),
+            image_store=_image_store(tmp_path),
+            tracker=tracker,
+        )
+    )
+    assert tracker.last_page_id == 3
+    assert client_b.calls[0] == ("list_pages", {})
+    assert client_b.calls[1] == ("type_text", {"pageId": 3, "text": "hi"})
 
 
 async def _drain(gen: Any) -> list[object]:

@@ -14,9 +14,11 @@ from mcp.types import Tool as McpToolDefinition
 from pydantic import ValidationError
 
 from tests.coding.session_support import CapturingProvider
+from wisp.coding.browser_control import BrowserInteractionResult
+from wisp.coding.browser_viewport import BrowserMetadata
 from wisp.coding.session import CodingSession
 from wisp.config.mcp_servers import McpServerConfig
-from wisp.events import BrowserViewportUpdated, RpcCommandFinished, WispEvent
+from wisp.events import BrowserViewportUpdated, ErrorEvent, RpcCommandFinished, WispEvent
 from wisp.mcp.tool import adapt_mcp_tool
 from wisp.rpc.commands import BrowserInteractCommand, ParsedRpcCommand, RpcCommandAdapter
 from wisp.rpc.coordinator import RpcCoordinator, _RpcInputCommand, _RpcSessionState
@@ -258,6 +260,60 @@ def test_handler_runs_without_selected_session_and_records_handoff(tmp_path: Pat
             assert snap is not None
             assert snap.clicks == 1
             assert snap.last_url == "https://fresh.test/"
+        finally:
+            await runtime.aclose()
+
+    anyio.run(scenario)
+
+
+def test_browser_interact_cancellation_reports_failed_completion(tmp_path: Path) -> None:
+    started = anyio.Event()
+
+    class _SlowController:
+        async def execute(self, *args: object, **kwargs: object) -> BrowserInteractionResult:
+            started.set()
+            await anyio.sleep(5)
+            return BrowserInteractionResult(
+                viewport_event=None,
+                server_name="playwright",
+                source_tool="browser_evaluate",
+                metadata=BrowserMetadata(),
+            )
+
+    async def scenario() -> None:
+        runtime = await build_runtime()
+        try:
+            sessions = JsonlSessionStore(tmp_path / "sessions")
+            agent = CodingSession(provider=CapturingProvider(), sessions=sessions)
+            session_state = _RpcSessionState(session=None, history=(), entry_count=0)
+            events: list[WispEvent] = []
+            send, receive = anyio.create_memory_object_stream(4)
+
+            async with anyio.create_task_group() as tg:
+                running = start_rpc_browser_interact_command(
+                    BrowserInteractCommand(id="bi-cancel", action="refresh"),
+                    agent=agent,
+                    runtime=runtime,
+                    sessions=sessions,
+                    session_state=session_state,
+                    mcp_servers=None,
+                    task_group=tg,
+                    send=send,
+                    write_event=events.append,
+                    controller=_SlowController(),  # type: ignore[arg-type]
+                )
+                await started.wait()
+                running.cancel_scope.cancel()
+                completed = await receive.receive()
+                assert completed.ok is False
+            await send.aclose()
+            await receive.aclose()
+
+            error_event = next(e for e in events if isinstance(e, ErrorEvent))
+            finished = next(e for e in events if isinstance(e, RpcCommandFinished))
+            assert "RPC command cancelled: bi-cancel" in error_event.message
+            assert finished.ok is False
+            assert finished.error == "RPC command cancelled: bi-cancel"
         finally:
             await runtime.aclose()
 

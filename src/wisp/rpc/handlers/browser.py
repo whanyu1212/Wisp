@@ -149,6 +149,8 @@ async def _run_browser_interact(
                 server_name=result.server_name,
                 metadata=result.metadata,
             )
+        if cancel_scope.cancelled_caught and error is None:
+            error = f"RPC command cancelled: {lifecycle.command_id}"
     except BrowserControlError as exc:
         error = str(exc) or f"Browser {command.action} failed"
     except anyio.get_cancelled_exc_class():
