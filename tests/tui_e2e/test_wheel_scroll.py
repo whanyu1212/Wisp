@@ -27,6 +27,7 @@ import pytest
 from tests.tui_e2e.support import (
     CONTEXT_STATS_BACKEND,
     complete_logged_commands,
+    context_stats_ready,
     reap,
     rendered_without_spacing,
     welcome_ready,
@@ -179,7 +180,7 @@ def test_wheel_reaches_earlier_turns_idle_during_a_run_and_after_a_resize(
                         raise
             now = time.monotonic()
             painted = rendered_without_spacing(output)
-            if phase == "startup" and b"ctx" in output and b"~" in output:
+            if phase == "startup" and context_stats_ready(output):
                 # Differential output need not repeat the welcome text; a resize
                 # requests a full frame.
                 resize(91)

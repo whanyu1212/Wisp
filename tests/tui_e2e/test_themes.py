@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 from tests.support.paths import REPO_ROOT
-from tests.tui_e2e.support import welcome_ready
+from tests.tui_e2e.support import context_stats_ready, welcome_ready
 
 ROOT = REPO_ROOT
 CATALOG = ROOT / "rust/wisp-tui/src/theme_catalog.json"
@@ -169,7 +169,7 @@ def _run_theme_session(
             backgrounds = {
                 tuple(map(int, match)) for match in re.findall(rb"48;2;(\d+);(\d+);(\d+)", output)
             }
-            if not context_redrawn and b"ctx" in output and b"~" in output:
+            if not context_redrawn and context_stats_ready(output):
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 28, 121, 0, 0))
                 context_redrawn = True
                 output.clear()
