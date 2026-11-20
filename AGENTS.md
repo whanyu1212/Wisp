@@ -114,80 +114,42 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
 
 ### Finding agent code
 
-- Start with `src/wisp/agent/harness/runner.py` for transcript and queue behavior across runs,
-  then `loop/runner.py` for execution within one run. Each package keeps configuration in `config.py`.
-- `harness/boundaries.py` prepares boundary decisions and transcript replacements; `harness/runner.py`
-  applies replacements when the next turn starts. In the loop, `model_response.py` translates
-  provider events, `provider_request.py` opens capability-aware requests, `provider_lifecycle.py`
-  validates them, and `response_projection.py` builds completed messages. `continuation.py` holds
-  the live continuation state and `boundary_transitions.py` applies boundary and overflow decisions
-  to it. `tool_execution.py`, `tool_lifecycle.py`, and `prepared_tools.py` cover tool batches.
-- `src/wisp/events/` is the typed event vocabulary shared by every interface. Import from
-  `wisp.events` (the package root re-exports everything); the lifecycle submodules `run.py`,
-  `usage.py`, `tools.py`, `sessions.py`, `rpc.py`, and `errors.py` only group the models, and
-  `__init__.py` owns the `KnownWispEvent` union whose member order the schema bundle depends on.
-- `src/wisp/messages/` is the provider-neutral message vocabulary, below `wisp.providers` and
-  `wisp.agent`: providers know messages, the agent knows providers. `models.py` defines message and
-  compaction records and projects completion events (import them from `wisp.messages`);
-  `history.py` normalizes provider history. In `wisp.agent`, `transcript_repair.py` orders tool
-  results and repairs interruptions.
-- `tool_contracts.py` defines executor protocols; `request_boundary.py` defines shared request hooks
-  and decisions. `context_budget.py` estimates token budgets; `validation.py` validates runtime limits.
-  `turn_lifecycle.py` tracks the open turn: the loop publishes turns through it, and the harness and
-  session observe events with it and build any terminal they must publish themselves.
-- For the coding runtime, start with `src/wisp/coding/session.py`: `CodingSession` coordinates one
-  run end to end. The boundary and overflow hooks it hands to the harness live in `_RunCompaction`,
-  defined in the same module, which owns the compaction state they share with the run. `compaction.py`
-  holds compaction planning, summarization, budget checks, and transcript comparison helpers;
-  `persistence.py` holds the branch-pinned writer a run uses to append entries;
-  `tool_execution.py`, `costs.py`, and `stats.py` cover the remaining supporting concerns.
-  `subagent.py` runs the subagent of a `spawn_agent` call (the tool itself is
-  `wisp.tools.subagent`): a second harness whose tool calls run as nested calls of that call.
-  In `prompt/`, `builder.py` assembles instructions in order; `instructions.py` holds core
-  instruction text; `project_context.py` assembles the bounded project context and trusted
-  instruction files; `project_root.py` finds the project root that also scopes trust;
-  `repository_status.py` reads the Git status snapshot a session saves and reuses; `git.py` runs
-  Git under one shared deadline;
-  `text_budget.py` applies shared character limits to context and tool guidance.
-- For session persistence, start with `src/wisp/sessions/jsonl.py`: `JsonlSessionStore` and
-  `JsonlSession` own the append/read lifecycle and the public result models. `file_io.py` holds the
-  durable-file boundary (fsync ordering, cross-process locking, private modes, tail recovery);
-  `pagination.py` projects bounded message and tree pages; `summaries.py` scans listing metadata
-  without replaying transcripts. `entries.py`, `replay.py`, and `branching.py` define the records
-  and tree semantics they all share. Tests that patch a helper must target its defining module.
-  `images.py` is the content-addressed image store beside the session files; an image is stored
-  there before any message references it. `src/wisp/images.py` validates image bytes (format,
-  dimensions, limits) from their headers without decoding them; `ImagePart` lives in `wisp.events`.
-- For runtime configuration, start with `src/wisp/config/runtime.py`: `WispConfig` and its
-  defaults. `config/settings.py` resolves layered user and project settings. `wisp.config` (the
-  package root) eagerly re-exports only the SDK-facing runtime surface so
-  `from wisp.config import WispConfig` stays stable for SDK users; internal code imports from the
-  defining submodule, and modules below it in the import graph (`wisp.mcp`, `wisp.retry`,
-  `wisp.validation`) must not import from `wisp.config`.
-- For trust and permissions, start with `src/wisp/trust/records.py` (durable per-project trust
-  decisions and the non-interactive env override), then `trust/flow.py` (the interactive prompt
-  the CLI runs) and `trust/permissions.py` (per-project `PermissionMode` persistence). The package
-  root re-exports nothing. `PermissionMode` itself is RPC vocabulary defined in `wisp.events`;
-  `trust/permissions.py` may reference it only under `TYPE_CHECKING` because `wisp.config` loads
-  that module while `wisp.events` may still be initializing.
-- For the CLI, start with `src/wisp/cli/application.py`: it defines the Typer `app`, the root
-  callback, the `tui` command, and `main`. `cli/__init__.py` only re-exports; subcommands and
-  shared helpers live in sibling modules (`auth.py`, `trust.py`, `skills.py`, `update.py`,
-  `options.py`, `output.py`, `rpc.py`).
-- For the RPC command host, start with `src/wisp/rpc/host.py` (process lifetime and transport
-  bridging), then `coordinator.py` (queuing and session-state synchronization) and `execution.py`
-  (dispatch from `commands.py` models to handlers). Session-scoped handlers and transient session
-  state live in `rpc/session/` (`run.py`, `mutation.py`, `read.py`, `queue.py`, `state.py`,
-  and `process_exits.py`, which publishes background-process exits and holds the model's notices);
-  configuration, connection, control, inspection, project-file, and process (`processes.py`:
-  listing background processes, reading their output, and stopping one for the user) handlers
-  live in `rpc/handlers/`. Both
-  subpackages re-export nothing; import from the defining module.
-  `rpc/handlers/mcp.py` owns every MCP connect and restart. The JSONL-RPC backend builds its
-  runtime without connecting MCP servers; the host connects them beside the command queue, and
-  prompt and compaction runs wait for that connect before they start.
-  `working_directory.py` moves the session between folders and, outside the project root,
-  between projects, using `configuration.py`'s `apply_project` for the project switch.
+- In `src/wisp/agent/`, `harness/runner.py` owns the transcript and queues across runs. It applies
+  replacements prepared by `harness/boundaries.py` at the next turn. Start in `loop/runner.py`
+  for a single run. Both packages keep configuration in `config.py`.
+- In the loop, follow a model response through `provider_request.py`, `provider_lifecycle.py`,
+  `model_response.py`, and `response_projection.py`. For continuation and overflow, see
+  `continuation.py` and `boundary_transitions.py`. For tool batches, start in `tool_execution.py`.
+  The loop publishes turns through `turn_lifecycle.py`, which the harness and session also use
+  when they must publish a terminal event themselves.
+- Import events from `wisp.events`. Its `__init__.py` defines the `KnownWispEvent` union in schema
+  order. Providers depend on `wisp.messages`, and the agent depends on providers. For history
+  normalization see `messages/history.py`, and for interrupted tool calls see `agent/transcript_repair.py`.
+- In `coding/session.py`, `CodingSession` coordinates the run and `_RunCompaction` owns the state
+  shared by boundary and overflow hooks. See `compaction.py` for planning and `persistence.py`
+  for branch-pinned writes. `coding/subagent.py` runs a second harness whose tool calls nest
+  under the original `spawn_agent` call.
+- For prompt order start in `coding/prompt/builder.py`. In that package, `project_context.py`
+  loads bounded context and trusted instructions, `project_root.py` scopes trust, and
+  `repository_status.py` supplies the Git snapshot the session reuses. Git calls share a deadline.
+- In `sessions/`, start in `jsonl.py` for append and replay, and `file_io.py` for fsync ordering,
+  locking, private modes, and tail recovery. Patch helpers in their defining modules. Store images
+  in `sessions/images.py` before a message references them. `src/wisp/images.py` validates image
+  headers without decoding the image. `ImagePart` belongs to `wisp.events`.
+- `config/runtime.py` defines `WispConfig` and `config/settings.py` resolves layered settings.
+  Keep `wisp.config` re-exports limited to the SDK runtime surface. Internal callers import from
+  defining modules. Lower-level `wisp.mcp`, `wisp.retry`, and `wisp.validation` must not import
+  `wisp.config`.
+- `trust/records.py` owns project trust and the non-interactive override, `flow.py` the trust
+  prompt, and `permissions.py` per-project permission modes. The package re-exports nothing.
+  Import `wisp.events.PermissionMode` in `trust/permissions.py` only under `TYPE_CHECKING` to
+  avoid a cycle during config initialization.
+- CLI entry points live in `cli/application.py`. For RPC, follow `rpc/host.py` (transport),
+  `coordinator.py` (queue and synchronization), then `execution.py` (dispatch). Import handlers
+  from defining modules in `rpc/session/` or `rpc/handlers/`. `handlers/mcp.py` owns every MCP
+  connect and restart. The host connects servers alongside the command queue after runtime
+  construction. Prompt and compaction runs wait for connection. Directory changes that cross a
+  project root use `configuration.py`'s `apply_project`.
 - Keep `wisp.agent.harness`, `wisp.agent.loop`, and `wisp.coding.prompt` as their public import
   surfaces; prompt building is coding-layer code, so do not restore `wisp.agent.prompt`.
   Within each package, import from defining modules. Use the current shared module names above;
@@ -203,22 +165,14 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
 
 ### Finding TUI code
 
-- `rust/wisp-tui` is the Rust terminal frontend. Start with `src/lib.rs`: `run_from_env` owns
-  startup and shutdown, and `LiveUi` holds the frontend state and draws each frame. `event_loop.rs`
-  runs the bounded loop over transport events, input, and paints; `transport.rs` admits backend
-  events and writes commands; `terminal.rs` owns raw mode, the alternate screen, the panic hook, and
-  the `FrameBackend` that wraps each frame in a synchronized update. `color_depth.rs` detects the
-  terminal's colour depth and downconverts each rendered frame to it. `attention.rs` turns the run
-  state and terminal focus into the window title and notifications written after each frame.
-  `external_editor.rs` runs the user's editor on the draft or on a card's file; the event loop
-  parks the input task with its `InputGate` and suspends the terminal while it runs.
-  `hyperlink.rs` builds the only URIs a link may carry and paints linked cells as OSC 8.
-- `reducer.rs` and `reducer/` hold the deterministic, terminal-independent state transitions
-  (`UiState`, `UiAction`). `ui.rs` lays out and paints a frame (`render_interactive`).
-  `transcript.rs` holds transcript state and `transcript_view.rs` projects it into styled rows and
-  the scroll viewport. `side_panel.rs` draws the session panel, `prompt_editor.rs` the composer, and
-  `markdown.rs` assistant Markdown. Wire types come from `rust/wisp-protocol`, which validates
-  against `schemas/live-rpc/`.
+- Start in `rust/wisp-tui/src/lib.rs` for startup (`run_from_env`) and frame state (`LiveUi`).
+  `event_loop.rs` coordinates input, transport, and paints. `terminal.rs` owns terminal modes,
+  the panic hook, and synchronized frames. When `external_editor.rs` runs the user's editor,
+  the event loop parks input with `InputGate` and suspends the terminal. `hyperlink.rs` builds
+  the allowed URIs and paints OSC 8 links.
+- `reducer.rs` and `reducer/` handle terminal-independent state transitions. `ui.rs` lays out
+  the frame. `transcript.rs` owns transcript state and `transcript_view.rs` builds visible rows.
+  Wire types come from `rust/wisp-protocol`, which validates against `schemas/live-rpc/`.
 - Rendering is mostly hand-drawn: views build `Line`/`Span` text and paint it with `Paragraph`,
   `Block`, and `List` (in pickers), `Clear` for overlays, and a few direct `Buffer` writes. New
   views should follow the same pattern.
@@ -231,12 +185,9 @@ CLI / JSONL-RPC / SDK adapters -> RPC command host -> CodingSession -> AgentHarn
   reverse video at 16.
 - Rendering tests draw `LiveUi` into ratatui's `TestBackend` and assert on the buffer:
   `visual_tests.rs` for screens and `overlay_tests.rs` for overlays, with more beside each view.
-- For ratatui APIs, read the pinned crate source rather than ratatui.rs, its repository examples,
-  or DeepWiki, which follow `main` and can show unreleased APIs (ratatui.rs publishes no
-  `llms.txt`). The source is under `~/.cargo/registry/src/*/ratatui-<version>/` with the
-  `ratatui-core`, `ratatui-widgets` (which has the examples), and `ratatui-crossterm` crates it
-  re-exports; `Cargo.lock` gives each version. The published crates omit the CHANGELOG and
-  BREAKING-CHANGES, so read those at the matching `ratatui-v<version>` tag on GitHub.
+- For ratatui APIs and examples, use the crate versions in `Cargo.lock` under
+  `~/.cargo/registry/src/*/`. Widget examples live in `ratatui-widgets`. Read CHANGELOG and
+  BREAKING-CHANGES at the matching `ratatui-v<version>` GitHub tag.
 
 ## Implementation conventions
 
