@@ -116,6 +116,13 @@ with `write_constraint`, under the exception below. Tool behavior changes are li
 `bash` runs commands in bash rather than `/bin/sh`, and that the read-only file tools follow
 symbolic links whose targets stay inside the workspace.
 
+## Wisp 0.16.1 compatibility
+
+0.16.1 adds a close button to the Browser pane. The supported Python API, live RPC payloads,
+settings, and session format are unchanged from 0.16.0. Sessions work in either direction
+between these two patch versions. Install matching frontend and backend versions as usual.
+See the [0.16.1 release checklist](../maintainers/releases/0.16.1-release.md).
+
 ## Wisp 0.16 compatibility
 
 0.16.0 reads existing 0.15.0 sessions. Session `schema_version` remains 6 and the event-envelope

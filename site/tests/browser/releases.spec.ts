@@ -61,6 +61,7 @@ for (const [id, heading] of [
   ["0141--unreleased", "0.14.1 — 2026-11-19"],
   ["0142--unreleased", "0.14.2 — 2026-11-20"],
   ["0150--unreleased", "0.15.0 — 2026-11-21"],
+  ["0160--unreleased", "0.16.0 — 2026-11-21"],
 ]) {
   test(`dated changelog heading keeps its old anchor ${id}`, async ({
     page,
