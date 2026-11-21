@@ -254,6 +254,155 @@ _JS_FOCUS_TARGET = """(ref, selector, clear) => {
   return true;
 }"""
 
+_JS_SMOOTH_SCROLL = """(x, y, dx, dy) => {
+  if (typeof document === 'undefined' || typeof WheelEvent === 'undefined') return false;
+  const key = Symbol.for('wisp.liveScroll');
+  const S = (globalThis[key] ||= {
+    rx: 0, ry: 0, cx: 0, cy: 0, x: 0, y: 0, raf: 0,
+    resolveHit(px, py) {
+      let doc = document, win = window, lx = px, ly = py;
+      let el = doc.elementFromPoint(lx, ly);
+      while (el) {
+        while (el && el.shadowRoot && el.shadowRoot.elementFromPoint) {
+          const deeper = el.shadowRoot.elementFromPoint(lx, ly);
+          if (!deeper || deeper === el) break;
+          el = deeper;
+        }
+        if (el && (el.tagName === 'EMBED' || el.tagName === 'OBJECT' || el.tagName === 'FRAME')) {
+          return null;
+        }
+        if (el && el.tagName === 'IFRAME') {
+          let childDoc;
+          try { childDoc = el.contentDocument; } catch { return null; }
+          if (!childDoc || !el.contentWindow) return null;
+          const r = el.getBoundingClientRect();
+          lx -= r.left; ly -= r.top;
+          doc = childDoc; win = el.contentWindow;
+          el = doc.elementFromPoint(lx, ly);
+          continue;
+        }
+        break;
+      }
+      return { doc, win, el: el || doc.documentElement, lx, ly };
+    },
+    scrollChain(info, ddx, ddy) {
+      let remX = ddx, remY = ddy;
+      let win = info.win, doc = info.doc, el = info.el;
+      const isScrollMode = (v) => v === 'auto' || v === 'scroll' || v === 'overlay';
+      const isContained = (v) => v === 'contain' || v === 'none';
+      const takeMoved = (rem, moved) => (
+        Math.abs(moved - rem) < 0.75 ? 0 : rem - Math.round(moved)
+      );
+      while (win) {
+        const scrollingEl = doc.scrollingElement || doc.documentElement;
+        while (el && el !== doc.documentElement && el !== scrollingEl) {
+          const cs = win.getComputedStyle(el);
+          const isYBox = isScrollMode(cs.overflowY) && el.scrollHeight > el.clientHeight + 1;
+          const isXBox = isScrollMode(cs.overflowX) && el.scrollWidth > el.clientWidth + 1;
+          const canY = remY !== 0 && isYBox;
+          const canX = remX !== 0 && isXBox;
+          if (canX || canY) {
+            const prevL = el.scrollLeft, prevT = el.scrollTop;
+            el.scrollBy({ left: canX ? remX : 0, top: canY ? remY : 0, behavior: 'instant' });
+            if (canX) remX = takeMoved(remX, el.scrollLeft - prevL);
+            if (canY) remY = takeMoved(remY, el.scrollTop - prevT);
+            if (remX === 0 && remY === 0) return;
+          }
+          if (remY !== 0 && isYBox && isContained(cs.overscrollBehaviorY)) remY = 0;
+          if (remX !== 0 && isXBox && isContained(cs.overscrollBehaviorX)) remX = 0;
+          if (remX === 0 && remY === 0) return;
+          el = el.parentElement || (el.getRootNode && el.getRootNode().host) || null;
+        }
+        const htmlCs = doc.documentElement ? win.getComputedStyle(doc.documentElement) : null;
+        const bodyCs = doc.body ? win.getComputedStyle(doc.body) : null;
+        const vpOverflowY = htmlCs && htmlCs.overflowY !== 'visible'
+          ? htmlCs.overflowY
+          : (bodyCs ? bodyCs.overflowY : 'visible');
+        const vpOverflowX = htmlCs && htmlCs.overflowX !== 'visible'
+          ? htmlCs.overflowX
+          : (bodyCs ? bodyCs.overflowX : 'visible');
+        const vpLockY = vpOverflowY === 'hidden' || vpOverflowY === 'clip';
+        const vpLockX = vpOverflowX === 'hidden' || vpOverflowX === 'clip';
+        if (win === window) {
+          if ((!vpLockX && remX !== 0) || (!vpLockY && remY !== 0)) {
+            win.scrollBy({
+              left: vpLockX ? 0 : remX,
+              top: vpLockY ? 0 : remY,
+              behavior: 'instant',
+            });
+          }
+          return;
+        }
+        const canY = remY !== 0 && !vpLockY && scrollingEl
+          && scrollingEl.scrollHeight > scrollingEl.clientHeight + 1;
+        const canX = remX !== 0 && !vpLockX && scrollingEl
+          && scrollingEl.scrollWidth > scrollingEl.clientWidth + 1;
+        if (canX || canY) {
+          const prevL = win.scrollX, prevT = win.scrollY;
+          win.scrollBy({ left: canX ? remX : 0, top: canY ? remY : 0, behavior: 'instant' });
+          if (canX) remX = takeMoved(remX, win.scrollX - prevL);
+          if (canY) remY = takeMoved(remY, win.scrollY - prevT);
+          if (remX === 0 && remY === 0) return;
+        }
+        const containY = (htmlCs && isContained(htmlCs.overscrollBehaviorY))
+          || (bodyCs && isContained(bodyCs.overscrollBehaviorY));
+        const containX = (htmlCs && isContained(htmlCs.overscrollBehaviorX))
+          || (bodyCs && isContained(bodyCs.overscrollBehaviorX));
+        if (remY !== 0 && containY) remY = 0;
+        if (remX !== 0 && containX) remX = 0;
+        if (remX === 0 && remY === 0) return;
+        let fe = null;
+        try { fe = win.frameElement; } catch { fe = null; }
+        if (!fe || !win.parent || win.parent === win) return;
+        win = win.parent;
+        doc = win.document;
+        el = fe.parentElement || (fe.getRootNode && fe.getRootNode().host) || null;
+      }
+    },
+    step() {
+      S.raf = 0;
+      const take = (rem, carry) => {
+        if (rem === 0) return [0, 0, 0];
+        if (Math.abs(rem) <= 4) return [rem, 0, 0];
+        const raw = rem * 0.45 + carry;
+        let s = Math.trunc(raw);
+        if (s === 0) s = Math.sign(rem);
+        if (Math.abs(s) > Math.abs(rem)) s = rem;
+        return [s, rem - s, raw - s];
+      };
+      const [sx, nrx, ncx] = take(S.rx, S.cx);
+      const [sy, nry, ncy] = take(S.ry, S.cy);
+      S.rx = nrx; S.cx = ncx; S.ry = nry; S.cy = ncy;
+      if (sx !== 0 || sy !== 0) {
+        const info = S.resolveHit(S.x, S.y);
+        if (info) S.scrollChain(info, sx, sy);
+      }
+      if (S.rx !== 0 || S.ry !== 0) S.raf = requestAnimationFrame(S.step);
+    }
+  });
+  const info = S.resolveHit(x, y);
+  if (!info) return false;
+  const ev = new info.win.WheelEvent('wheel', {
+    clientX: info.lx, clientY: info.ly, deltaX: dx, deltaY: dy, deltaMode: 0,
+    bubbles: true, cancelable: true, composed: true
+  });
+  if (info.el && !info.el.dispatchEvent(ev)) return true;
+  S.x = x; S.y = y;
+  if (S.ry !== 0 && dy !== 0 && Math.sign(S.ry) !== Math.sign(dy)) { S.ry = dy; S.cy = 0; }
+  else { S.ry += dy; }
+  if (S.rx !== 0 && dx !== 0 && Math.sign(S.rx) !== Math.sign(dx)) { S.rx = dx; S.cx = 0; }
+  else { S.rx += dx; }
+  if (!S.raf) S.raf = requestAnimationFrame(S.step);
+  return true;
+}"""
+
+_JS_CANCEL_SMOOTH_SCROLL = """(() => {
+  const S = globalThis[Symbol.for('wisp.liveScroll')];
+  if (!S) return;
+  S.rx = 0; S.ry = 0; S.cx = 0; S.cy = 0;
+  if (S.raf) { cancelAnimationFrame(S.raf); S.raf = 0; }
+})()"""
+
 
 class LiveBrowser:
     """Own a single user-controlled tab for the lifetime of the RPC host."""
@@ -286,6 +435,7 @@ class LiveBrowser:
         self._url: str | None = None
         self._title: str | None = None
         self._window_mode = False
+        self._smooth_scroll_active = False
         # Held while capture state changes (open, resize, a fresh capture after a
         # document change) so a frame reader never takes the frame such a change
         # returns, and pointer input never sees the capture half-built.
@@ -402,6 +552,7 @@ class LiveBrowser:
         await self._navigate(validate_browser_url(url))
 
     async def _navigate(self, url: str) -> None:
+        await self._cancel_smooth_scroll()
         result = await self._command("Page.navigate", {"url": url})
         if result.get("errorText") or result.get("isDownload"):
             raise BrowserControlError("Chromium could not navigate to the requested page")
@@ -418,6 +569,7 @@ class LiveBrowser:
 
     async def move_in_history(self, offset: Literal[-1, 1]) -> None:
         """Traverse one entry in this tab's history, staying put at either end."""
+        await self._cancel_smooth_scroll()
         history = await self._command("Page.getNavigationHistory", {})
         current = history.get("currentIndex")
         entries = history.get("entries")
@@ -430,6 +582,7 @@ class LiveBrowser:
             )
 
     async def _change_document(self, method: str, params: Mapping[str, object]) -> None:
+        await self._cancel_smooth_scroll()
         self._navigation = anyio.Event()
         await self._command(method, params)
         with anyio.move_on_after(_TIMEOUT):
@@ -697,6 +850,7 @@ class LiveBrowser:
             self._frame = self._delivered = self._url = self._loader = self._main_frame = None
             self._title = None
             self._window_mode = False
+            self._smooth_scroll_active = False
             self._viewport = None
             self._screencast_id = 0
             self._capture_loader = None
@@ -742,6 +896,7 @@ class LiveBrowser:
                                 if self._loader != frame["loaderId"]:
                                     self._frame = self._delivered = None
                                     self._title = None
+                                    self._smooth_scroll_active = False
                                     self._first_frame.set()
                                 self._main_frame = frame["id"]
                                 self._loader = frame["loaderId"]
@@ -750,6 +905,18 @@ class LiveBrowser:
                                 self._signal_change()
                         case "Page.navigatedWithinDocument":
                             if params["frameId"] == self._main_frame:
+                                if self._smooth_scroll_active:
+                                    self._smooth_scroll_active = False
+                                    with suppress(BrowserControlError):
+                                        await self._send(
+                                            "Runtime.evaluate",
+                                            {
+                                                "expression": _JS_CANCEL_SMOOTH_SCROLL,
+                                                "returnByValue": False,
+                                                "awaitPromise": False,
+                                            },
+                                            expect_reply=False,
+                                        )
                                 self._url = params["url"]
                                 self._navigation.set()
                                 self._signal_change()
@@ -979,6 +1146,7 @@ class LiveBrowser:
         """Click an element by ref, CSS selector, or viewport coordinates."""
         if not self.is_open:
             raise BrowserControlError(_CLOSED)
+        await self._cancel_smooth_scroll()
         if ref is not None or selector is not None:
             expression = f"({_JS_RESOLVE_TARGET})({json.dumps(ref)}, {json.dumps(selector)})"
             coords = await self._evaluate(expression)
@@ -1151,16 +1319,9 @@ class LiveBrowser:
             raise BrowserControlError("Click or scroll inside the live browser frame")
         params = {"x": x, "y": y}
         if request.action == "scroll":
-            await self._command(
-                "Input.dispatchMouseEvent",
-                {
-                    **params,
-                    "type": "mouseWheel",
-                    "deltaX": request.delta_x or 0,
-                    "deltaY": request.delta_y or 0,
-                },
-            )
+            await self._scroll(x, y, request.delta_x or 0, request.delta_y or 0)
             return
+        await self._cancel_smooth_scroll()
         button = request.button or "left"
         # A person's pointer arrives before it presses. Pages rely on the hover
         # this produces, and a press with no pointer history reads as scripted.
@@ -1188,6 +1349,50 @@ class LiveBrowser:
                     "clickCount": count,
                 },
             )
+
+    async def _cancel_smooth_scroll(self) -> None:
+        if not self._smooth_scroll_active:
+            return
+        self._smooth_scroll_active = False
+        with suppress(BrowserControlError):
+            await self._command(
+                "Runtime.evaluate",
+                {
+                    "expression": _JS_CANCEL_SMOOTH_SCROLL,
+                    "returnByValue": False,
+                    "awaitPromise": False,
+                },
+            )
+
+    async def _scroll(self, x: int, y: int, delta_x: int, delta_y: int) -> None:
+        args = f"{int(x)}, {int(y)}, {int(delta_x)}, {int(delta_y)}"
+        result = await self._command(
+            "Runtime.evaluate",
+            {
+                "expression": f"({_JS_SMOOTH_SCROLL})({args})",
+                "returnByValue": True,
+                "awaitPromise": False,
+            },
+        )
+        remote = result.get("result")
+        if (
+            result.get("exceptionDetails") is None
+            and isinstance(remote, dict)
+            and remote.get("value") is True
+        ):
+            self._smooth_scroll_active = True
+            return
+        await self._send(
+            "Input.dispatchMouseEvent",
+            {
+                "x": x,
+                "y": y,
+                "type": "mouseWheel",
+                "deltaX": delta_x,
+                "deltaY": delta_y,
+            },
+            expect_reply=False,
+        )
 
 
 def _capture_size(viewport: LiveBrowserViewport) -> tuple[int, int]:

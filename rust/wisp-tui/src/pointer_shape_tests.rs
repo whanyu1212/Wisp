@@ -52,24 +52,47 @@ fn docked(ui: &mut LiveUi) -> Rect {
 }
 
 #[tokio::test]
-async fn hover_sets_resize_once() {
+async fn hover_sets_resize_and_highlights_seam() {
     let mut ui = ui(true);
     let border = docked(&mut ui);
+    assert_eq!(border.width, 3);
+    let panel_x = ui.side_panel.painted_left_edge().unwrap();
+    assert_eq!(border.x, panel_x - 1);
+
     send(&mut ui, mouse(MouseEventKind::Moved, border.x, 5)).await;
     assert!(ui.render_pending);
-    draw(&mut ui);
+    let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).unwrap();
+    ui.draw(
+        &mut terminal,
+        &ConnectionInfo {
+            backend_version: "test".into(),
+        },
+    )
+    .unwrap();
     assert_eq!(ui.pointer_shape.sent(), PointerShape::Resize);
+    assert_eq!(terminal.backend().buffer()[(panel_x, 5)].symbol(), "│");
+    assert_eq!(
+        terminal.backend().buffer()[(panel_x, 5)].fg,
+        ui.palette().border().fg.unwrap()
+    );
 
-    // Further motion along the border asks for nothing more.
-    for column in [border.x, border.x + 1, border.x] {
+    // Further motion across all three columns of the border handle asks for nothing more.
+    for column in [border.x, border.x + 1, border.x + 2, border.x] {
         send(&mut ui, mouse(MouseEventKind::Moved, column, 6)).await;
         assert!(!ui.render_pending, "{column}");
     }
 
     send(&mut ui, mouse(MouseEventKind::Moved, border.x - 1, 6)).await;
     assert!(ui.render_pending);
-    draw(&mut ui);
+    ui.draw(
+        &mut terminal,
+        &ConnectionInfo {
+            backend_version: "test".into(),
+        },
+    )
+    .unwrap();
     assert_eq!(ui.pointer_shape.sent(), PointerShape::Default);
+    assert_eq!(terminal.backend().buffer()[(panel_x, 5)].symbol(), " ");
 }
 
 #[tokio::test]
@@ -141,13 +164,23 @@ async fn covered_border_resets() {
 }
 
 #[tokio::test]
-async fn unsupported_sends_nothing() {
+async fn unsupported_sends_nothing_and_still_highlights_hover() {
     let left = MouseButton::Left;
     let mut ui = ui(false);
     let border = docked(&mut ui);
-    // Hovering the border does not even ask for a paint.
+    let panel_x = ui.side_panel.painted_left_edge().unwrap();
     send(&mut ui, mouse(MouseEventKind::Moved, border.x, 5)).await;
-    assert!(!ui.render_pending);
+    assert!(ui.render_pending);
+    let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).unwrap();
+    ui.draw(
+        &mut terminal,
+        &ConnectionInfo {
+            backend_version: "test".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(terminal.backend().buffer()[(panel_x, 5)].symbol(), "│");
+    assert_eq!(ui.pointer_shape.sent(), PointerShape::Default);
     for input in [
         mouse(MouseEventKind::Moved, border.x, 5),
         mouse(MouseEventKind::Down(left), border.x, 5),

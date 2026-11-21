@@ -36,9 +36,10 @@ pub(crate) const PANEL_WIDTH: u16 = 44;
 /// the panel becoming a second transcript. Dragging its border can go wider.
 const MAX_PANEL_WIDTH: u16 = 52;
 
-/// Columns from the panel's left edge that start a resize: the edge and the gap
-/// beside it, so the press need not land on a one-column line.
-const BORDER_HIT_WIDTH: u16 = 2;
+/// Columns straddling the panel's left edge that start a resize: one column left
+/// of the seam, the left edge itself, and one column inside the left margin, so the
+/// pointer finds the handle easily without a hairline target.
+const BORDER_HIT_WIDTH: u16 = 3;
 
 /// Two clicks on the border this close together are a double-click.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
@@ -192,9 +193,10 @@ pub(crate) enum BrowserControl {
 /// A drag of the docked panel's border in progress.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Resize {
-    /// How far right of the border the press landed, kept while dragging so the
-    /// border does not jump to the pointer.
-    grab: u16,
+    /// Signed horizontal offset in columns from the panel's left edge (`panel.x`) where
+    /// the press landed (`-1` when one column left of the seam, `0` on the edge, `+1`
+    /// inside the margin), kept while dragging so the border does not jump.
+    grab: i16,
     /// Whether the pointer has moved since the press: a press and release in place
     /// is a click, which can make a double-click.
     moved: bool,
@@ -414,6 +416,11 @@ impl SidePanel {
     #[cfg(test)]
     pub(crate) fn viewport_image_rect(&self) -> Option<Rect> {
         self.painted.borrow().viewport_image_rect
+    }
+
+    pub(crate) fn painted_left_edge(&self) -> Option<u16> {
+        let surface = self.painted.borrow().surface;
+        (!surface.is_empty()).then_some(surface.x)
     }
 
     pub(crate) fn map_viewport_point(
@@ -958,10 +965,10 @@ impl SidePanel {
         }
     }
 
-    /// A left press on the docked panel's border at `now`, `grab` columns right of the
-    /// border line: start a resize, or, as the second click of a double-click, return
-    /// the panel to [`auto_width`] instead.
-    pub(crate) fn press_border(&mut self, now: Instant, grab: u16) {
+    /// A left press on the docked panel's border at `now`, `grab` columns relative to
+    /// the panel's left edge (`panel.x`): start a resize, or, as the second click of a
+    /// double-click, return the panel to [`auto_width`] instead.
+    pub(crate) fn press_border(&mut self, now: Instant, grab: i16) {
         if self.mode == PanelMode::Browser {
             self.browser_resize_pending = true;
             self.painted.get_mut().browser_content_rect = None;
@@ -1008,10 +1015,13 @@ impl SidePanel {
         // release still ends the resize.
         let docked = self.docked();
         let total = self.width;
-        let held_at = total.saturating_sub(self.docked_width(total)) + resize.grab;
-        let moved = resize.moved || (docked && column != held_at);
+        let border_x = i32::from(total.saturating_sub(self.docked_width(total)));
+        let held_at = border_x + i32::from(resize.grab);
+        let moved = resize.moved || (docked && i32::from(column) != held_at);
         if moved && docked {
-            let width = total.saturating_sub(column.saturating_sub(resize.grab));
+            let new_border_x =
+                (i32::from(column) - i32::from(resize.grab)).clamp(0, i32::from(total)) as u16;
+            let width = total.saturating_sub(new_border_x);
             self.dragged_width = Some(width.min(max_dragged_width(total)).max(PANEL_WIDTH));
         }
         if matches!(kind, MouseEventKind::Up(_)) {
@@ -1090,10 +1100,17 @@ pub(crate) fn auto_width(total: u16) -> u16 {
     (PANEL_WIDTH + spare / 2).min(MAX_PANEL_WIDTH)
 }
 
-/// The cells of a docked panel at `panel` where a left press starts a resize.
+/// The cells straddling a docked panel's left edge (`panel.x - 1..=panel.x + 1`)
+/// where hovering shows the resize handle and a left press starts a resize.
 pub(crate) fn border_hit_area(panel: Rect) -> Rect {
+    let x = panel.x.saturating_sub(1);
+    let right = panel
+        .x
+        .saturating_add(BORDER_HIT_WIDTH.saturating_sub(1))
+        .min(panel.right());
     Rect {
-        width: BORDER_HIT_WIDTH.min(panel.width),
+        x,
+        width: right.saturating_sub(x),
         ..panel
     }
 }
@@ -1153,12 +1170,13 @@ pub(crate) fn render(
         CellSize::default(),
         None,
         false,
+        false,
     );
 }
 
 /// Draw the panel into `area`. A docked panel uses the raised surface tier with no
-/// divider line (showing a left edge only while dragged); an overlay is boxed so it
-/// reads as lying over the transcript.
+/// divider line (showing a subtle left edge on hover and a primary edge while dragged);
+/// an overlay is boxed so it reads as lying over the transcript.
 ///
 /// The layout leads with live work (pending decision, plan, running subagents and
 /// background processes, queue), hides empty sections, states attention items in
@@ -1175,6 +1193,7 @@ pub(crate) fn render_with_preview(
     cell_size: CellSize,
     painted_images: Option<&mut Vec<PaintedImage>>,
     ignore_overlay_rect: bool,
+    border_hovered: bool,
 ) {
     let overlay = !panel.docked() || panel.expanded();
     let surface = if palette.shows_bands() {
@@ -1197,6 +1216,12 @@ pub(crate) fn render_with_preview(
         Block::default()
             .borders(Borders::LEFT)
             .border_style(Style::default().fg(palette.primary))
+            .padding(Padding::new(1, 1, 1, 0))
+    } else if border_hovered {
+        // Show a subtle left edge while the pointer hovers the resize handle.
+        Block::default()
+            .borders(Borders::LEFT)
+            .border_style(palette.border())
             .padding(Padding::new(1, 1, 1, 0))
     } else {
         Block::default()
@@ -2671,6 +2696,23 @@ mod tests {
         assert_eq!(panel.docked_width(200), 76);
         panel.continue_resize(DRAG, 111, now);
         assert_eq!(panel.docked_width(200), 90);
+        panel.continue_resize(RELEASE, 111, now);
+
+        // Pressed one column left of the border (in the handle straddle at column 109):
+        // releasing in place moves nothing and arms double-click, while dragging moves cleanly.
+        panel.press_border(now, -1);
+        panel.continue_resize(DRAG, 109, now);
+        assert_eq!(panel.docked_width(200), 90);
+        panel.continue_resize(DRAG, 99, now);
+        assert_eq!(panel.docked_width(200), 100);
+        panel.continue_resize(RELEASE, 99, now);
+
+        // Press and release in place at -1 left of the border at 100 counts as a click, not a drag.
+        panel.press_border(now, -1);
+        panel.continue_resize(RELEASE, 99, now);
+        panel.press_border(now + Duration::from_millis(100), -1);
+        assert!(!panel.resizing());
+        assert_eq!(panel.docked_width(200), auto_width(200));
     }
 
     #[test]
@@ -2709,6 +2751,33 @@ mod tests {
         let (sym, _, bg) = edge_cell(&panel);
         assert_eq!(sym, " ");
         assert_eq!(bg, palette.surface);
+        // While hovering, the left edge shows in the subtle border style.
+        let hovered_edge_cell = {
+            let mut terminal = Terminal::new(TestBackend::new(200, 20)).unwrap();
+            terminal
+                .draw(|frame| {
+                    let area = panel.split(frame.area()).1;
+                    let bindings = Bindings::default();
+                    render_with_preview(
+                        frame,
+                        area,
+                        &session(),
+                        &panel,
+                        &bindings,
+                        palette,
+                        None,
+                        CellSize::default(),
+                        None,
+                        false,
+                        true,
+                    );
+                })
+                .unwrap();
+            let cell = &terminal.backend().buffer()[(200 - panel.docked_width(200), 5)];
+            (cell.symbol().to_owned(), cell.fg)
+        };
+        assert_eq!(hovered_edge_cell.0, "│");
+        assert_eq!(hovered_edge_cell.1, palette.border().fg.unwrap());
         // While dragging, the left edge highlights in the primary colour.
         panel.press_border(Instant::now(), 0);
         let (sym, fg, _) = edge_cell(&panel);

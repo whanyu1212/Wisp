@@ -2395,10 +2395,10 @@ async fn wheel_during_scroll_is_summed() {
     let (writer, mut commands) = mpsc::channel(32);
     let (mut ui, cell, _frame) = live_page_for_wheel(&dir, &writer, &mut commands).await;
 
-    // Nothing in flight: the first wheel input goes out at once.
+    // Nothing in flight: the first wheel input goes out at once (60 px per notch).
     wheel(&mut ui, &writer, cell, 1).await;
     let first = sent_scrolls(&mut commands);
-    assert_eq!(deltas(&first), [120]);
+    assert_eq!(deltas(&first), [LIVE_SCROLL_PIXELS_PER_NOTCH]);
 
     // Held back while it is in flight, at the latest pointer position.
     let moved = (cell.0 + 1, cell.1 + 1);
@@ -2424,7 +2424,7 @@ async fn wheel_during_scroll_is_summed() {
         .filter(|command| command["action"] == "scroll")
         .collect();
     assert_eq!(sent.len(), 1, "{sent:?}");
-    assert_eq!(sent[0]["delta_y"], 600);
+    assert_eq!(sent[0]["delta_y"], 5 * LIVE_SCROLL_PIXELS_PER_NOTCH);
     let expected = ui
         .side_panel
         .map_viewport_point(&ui.state, moved.0, moved.1)
@@ -2469,14 +2469,14 @@ async fn large_sum_is_split() {
     let (mut ui, cell, _frame) = live_page_for_wheel(&dir, &writer, &mut commands).await;
     wheel(&mut ui, &writer, cell, -1).await;
     let first = sent_scrolls(&mut commands);
-    // Eight full wheel batches: 8 * 12 rows * 120 px upward.
-    for _ in 0..8 {
+    // Sixteen batches of -12 notches: 16 * 12 * 60 = 11,520 px upward.
+    for _ in 0..16 {
         wheel(&mut ui, &writer, cell, -12).await;
     }
 
     finish_browser_command(&mut ui, &first[0].0).await;
     let second = poll_scrolls(&mut ui, &writer, &mut commands).await;
-    assert_eq!(deltas(&second), [-10_000]);
+    assert_eq!(deltas(&second), [-BROWSER_SCROLL_MAX_DELTA]);
     assert!(
         poll_scrolls(&mut ui, &writer, &mut commands)
             .await
@@ -2513,7 +2513,7 @@ async fn failed_scroll_releases_held_wheel() {
     .await;
     assert_eq!(
         deltas(&poll_scrolls(&mut ui, &writer, &mut commands).await),
-        [240]
+        [2 * LIVE_SCROLL_PIXELS_PER_NOTCH]
     );
 }
 
@@ -2541,7 +2541,7 @@ async fn stale_held_wheel_is_dropped() {
         ui.enter_browser_takeover();
         wheel(&mut ui, &writer, cell, 1).await;
         let first = sent_scrolls(&mut commands);
-        assert_eq!(deltas(&first), [120], "{change:?}");
+        assert_eq!(deltas(&first), [LIVE_SCROLL_PIXELS_PER_NOTCH], "{change:?}");
         wheel(&mut ui, &writer, cell, 2).await;
 
         match change {
@@ -2632,7 +2632,7 @@ async fn key_waits_for_held_wheel() {
     assert_eq!(
         sent,
         [
-            ("scroll".into(), 240.into()),
+            ("scroll".into(), (2 * LIVE_SCROLL_PIXELS_PER_NOTCH).into()),
             ("press_key".into(), serde_json::Value::Null)
         ]
     );
@@ -2670,7 +2670,7 @@ async fn navigation_drops_held_wheel() {
     assert!(ui.browser_address_active());
     wheel(&mut ui, &writer, cell, 1).await;
     let first = sent_scrolls(&mut commands);
-    assert_eq!(deltas(&first), [120]);
+    assert_eq!(deltas(&first), [LIVE_SCROLL_PIXELS_PER_NOTCH]);
     wheel(&mut ui, &writer, cell, 2).await;
 
     send_input(&mut ui, Input::Paste("example.net/next".into())).await;
@@ -2700,7 +2700,7 @@ async fn tab_hide_and_reopen_drops_held_wheel() {
     let (mut ui, cell, _frame) = live_page_for_wheel(&dir, &writer, &mut commands).await;
     wheel(&mut ui, &writer, cell, 1).await;
     let first = sent_scrolls(&mut commands);
-    assert_eq!(deltas(&first), [120]);
+    assert_eq!(deltas(&first), [LIVE_SCROLL_PIXELS_PER_NOTCH]);
     wheel(&mut ui, &writer, cell, 2).await;
 
     let tab = ui

@@ -497,11 +497,16 @@ impl ImageCache {
         row_cache.set_image_previews(previews, cell_size);
     }
 
-    /// Decode or retrieve the active browser viewport frame without evicting transcript thumbnails.
+    /// Prepare the active browser viewport frame without evicting transcript thumbnails.
+    ///
+    /// When `decode_rgba` is `false` and the frame is an inline PNG fitting the viewport
+    /// pixel budget, only the PNG header is parsed so Kitty can forward the raw PNG
+    /// bytes without decoding RGBA on the event-loop thread.
     pub(crate) fn prepare_browser_viewport(
         &mut self,
         image: Option<&TranscriptImage>,
         session_images_dir: Option<&Path>,
+        decode_rgba: bool,
     ) -> Option<ImagePreviewMeta> {
         self.sync_images_dir(session_images_dir);
         let Some(image) = image else {
@@ -511,7 +516,7 @@ impl ImageCache {
         };
         let key = ImageCacheKey(Arc::from(format!("viewport:{}", image.cache_key())));
         if let Some((existing_key, thumb)) = &self.viewport_entry {
-            if existing_key == &key {
+            if existing_key == &key && (!decode_rgba || !thumb.rgba.is_empty()) {
                 return Some(ImagePreviewMeta {
                     key,
                     pixel_width: thumb.pixel_width,
@@ -532,12 +537,32 @@ impl ImageCache {
             }
             _ => None,
         };
-        let (max_width, max_height) = png_dimensions
-            .filter(|&(w, h)| {
-                u64::from(w) * u64::from(h)
+        let bounded_png = png_dimensions.filter(|&(w, h)| {
+            w > 0
+                && h > 0
+                && u64::from(w) * u64::from(h)
                     <= u64::from(MAX_VIEWPORT_PX_WIDTH * MAX_VIEWPORT_PX_HEIGHT)
-            })
-            .unwrap_or((MAX_VIEWPORT_PX_WIDTH, MAX_VIEWPORT_PX_HEIGHT));
+        });
+        if !decode_rgba && let Some((w, h)) = bounded_png {
+            self.viewport_png = Some(image.source.clone());
+            self.viewport_entry = Some((
+                key.clone(),
+                Arc::new(DecodedThumbnail {
+                    pixel_width: w,
+                    pixel_height: h,
+                    rgba_width: w,
+                    rgba_height: h,
+                    rgba: Arc::from([]),
+                }),
+            ));
+            return Some(ImagePreviewMeta {
+                key,
+                pixel_width: w,
+                pixel_height: h,
+            });
+        }
+        let (max_width, max_height) =
+            bounded_png.unwrap_or((MAX_VIEWPORT_PX_WIDTH, MAX_VIEWPORT_PX_HEIGHT));
         if let Some(thumb) = load_and_decode(image, session_images_dir, max_width, max_height) {
             let meta = ImagePreviewMeta {
                 key: key.clone(),
@@ -555,6 +580,23 @@ impl ImageCache {
             self.viewport_entry = None;
             self.record_failed(key);
             None
+        }
+    }
+
+    /// Populate RGBA pixel data for a cached PNG-only viewport frame before
+    /// falling back to half-block occlusion painting.
+    pub(crate) fn ensure_viewport_rgba(&mut self) {
+        let Some((key, thumb)) = &self.viewport_entry else {
+            return;
+        };
+        if !thumb.rgba.is_empty() {
+            return;
+        }
+        let Some(TranscriptImageSource::Inline { bytes, .. }) = &self.viewport_png else {
+            return;
+        };
+        if let Some(decoded) = decode_bounded(bytes, thumb.pixel_width, thumb.pixel_height) {
+            self.viewport_entry = Some((key.clone(), Arc::new(decoded)));
         }
     }
 
@@ -729,6 +771,9 @@ pub(crate) fn paint_half_blocks(
     monochrome: bool,
     uncovered: Option<&[bool]>,
 ) {
+    if thumb.rgba.is_empty() {
+        return;
+    }
     let clipped = painted.rect.intersection(buffer.area);
     if clipped.is_empty() {
         return;
@@ -1153,6 +1198,27 @@ enum KittyImage<'a> {
     Png(&'a [u8]),
 }
 
+fn resolve_kitty_image<'a>(
+    cache: &'a ImageCache,
+    item: &NativePlacement,
+) -> Option<KittyImage<'a>> {
+    if let Some(png) = cache.viewport_png(item) {
+        return Some(KittyImage::Png(png));
+    }
+    let thumb = cache.get(&item.image_key)?;
+    let (width, height, data) = crop_visible_rows(
+        thumb,
+        item.first_image_row,
+        item.rect.height,
+        item.total_rows,
+    )?;
+    Some(KittyImage::Rgba {
+        data,
+        width,
+        height,
+    })
+}
+
 /// Transmit one image to Kitty using a virtual or cursor-based placement.
 fn encode_kitty(out: &mut Vec<u8>, id: u32, rect: Rect, image: KittyImage<'_>, unicode: bool) {
     if rect.is_empty() {
@@ -1425,6 +1491,20 @@ impl ActivePlacement {
             && want.total_rows == want.rect.height
     }
 
+    fn can_replace_viewport_in_place(&self, want: &NativePlacement, unicode: bool) -> bool {
+        // Reusing one Kitty image ID across live browser frames overwrites the
+        // image in-place (`a=T,i={id}`) without deleting the old image or
+        // rewriting Unicode placeholder cells.
+        self.kitty_id != 0
+            && self.unicode_placeholder == unicode
+            && self.spec.placement == PlacementKey::BrowserViewport
+            && self.spec.image_key != want.image_key
+            && self.spec.first_image_row == 0
+            && self.spec.total_rows == self.spec.rect.height
+            && want.first_image_row == 0
+            && want.total_rows == want.rect.height
+    }
+
     fn matches_kitty_unicode(&self, want: &NativePlacement, cell_size: CellSize) -> bool {
         self.unicode_placeholder
             && self.kitty_id != 0
@@ -1475,7 +1555,8 @@ impl ImagePlacementState {
     }
 
     /// Resolve or allocate a 24-bit Kitty image ID for a `U=1` Unicode placeholder
-    /// before Ratatui flushes its cell buffer. Keep the ID if its pixels can be reused.
+    /// before Ratatui flushes its cell buffer. Keep the ID when the viewport image
+    /// can be reused or overwritten in place.
     pub(crate) fn prepare_kitty_unicode(
         &mut self,
         spec: &NativePlacement,
@@ -1485,6 +1566,7 @@ impl ImagePlacementState {
             if let Some(existing) = self.active.get(&spec.placement) {
                 if existing.matches_kitty_unicode(spec, cell_size)
                     || existing.can_reuse_viewport(spec, true)
+                    || existing.can_replace_viewport_in_place(spec, true)
                 {
                     return existing.kitty_id;
                 }
@@ -1544,7 +1626,8 @@ impl ImagePlacementState {
                         && want.rect.width <= KITTY_MAX_PLACEHOLDER_DIM
                         && want.rect.height <= KITTY_MAX_PLACEHOLDER_DIM;
                     if matches!(protocol, ImageProtocol::Kitty | ImageProtocol::KittyUnicode)
-                        && existing.can_reuse_viewport(want, unicode)
+                        && (existing.can_reuse_viewport(want, unicode)
+                            || existing.can_replace_viewport_in_place(want, unicode))
                     {
                         return true;
                     }
@@ -1565,21 +1648,36 @@ impl ImagePlacementState {
         // Emit any new or updated placements in stable desired order.
         for item in desired {
             if let Some(existing) = self.active.get_mut(&item.placement) {
-                // A virtual placement follows the placeholder text when it moves.
-                // Other geometry changes require only a placement command.
-                let rect = existing.spec.rect;
-                if existing.kitty_id != 0
-                    && (existing.cell_size != cell_size
-                        || rect.width != item.rect.width
-                        || rect.height != item.rect.height
-                        || (!existing.unicode_placeholder && rect != item.rect))
+                if matches!(protocol, ImageProtocol::Kitty | ImageProtocol::KittyUnicode)
+                    && existing.spec.image_key != item.image_key
                 {
-                    place_kitty_viewport(
+                    let Some(image) = resolve_kitty_image(cache, item) else {
+                        continue;
+                    };
+                    encode_kitty(
                         out,
                         existing.kitty_id,
                         item.rect,
+                        image,
                         existing.unicode_placeholder,
                     );
+                } else {
+                    // A virtual placement follows the placeholder text when it moves.
+                    // Other geometry changes require only a placement command.
+                    let rect = existing.spec.rect;
+                    if existing.kitty_id != 0
+                        && (existing.cell_size != cell_size
+                            || rect.width != item.rect.width
+                            || rect.height != item.rect.height
+                            || (!existing.unicode_placeholder && rect != item.rect))
+                    {
+                        place_kitty_viewport(
+                            out,
+                            existing.kitty_id,
+                            item.rect,
+                            existing.unicode_placeholder,
+                        );
+                    }
                 }
                 existing.spec.clone_from(item);
                 existing.cell_size = cell_size;
@@ -1588,38 +1686,41 @@ impl ImagePlacementState {
             let Some(thumb) = cache.get(&item.image_key) else {
                 continue;
             };
-            let Some((crop_w, crop_h, crop_rgba)) = crop_visible_rows(
-                thumb,
-                item.first_image_row,
-                item.rect.height,
-                item.total_rows,
-            ) else {
-                continue;
-            };
             let (kitty_id, unicode_placeholder) = match protocol {
                 ImageProtocol::Kitty | ImageProtocol::KittyUnicode => {
+                    let Some(image) = resolve_kitty_image(cache, item) else {
+                        continue;
+                    };
                     let unicode = protocol == ImageProtocol::KittyUnicode
                         && item.rect.width <= KITTY_MAX_PLACEHOLDER_DIM
                         && item.rect.height <= KITTY_MAX_PLACEHOLDER_DIM;
                     let id = prepared_unicode
                         .remove(&item.placement)
                         .unwrap_or_else(|| self.alloc_kitty_id());
-                    let image = cache.viewport_png(item).map_or(
-                        KittyImage::Rgba {
-                            data: crop_rgba,
-                            width: crop_w,
-                            height: crop_h,
-                        },
-                        KittyImage::Png,
-                    );
                     encode_kitty(out, id, item.rect, image, unicode);
                     (id, unicode)
                 }
                 ImageProtocol::ITerm2 => {
+                    let Some((crop_w, crop_h, crop_rgba)) = crop_visible_rows(
+                        thumb,
+                        item.first_image_row,
+                        item.rect.height,
+                        item.total_rows,
+                    ) else {
+                        continue;
+                    };
                     encode_iterm2(out, item.rect, crop_rgba, crop_w, crop_h, item.bg);
                     (0, false)
                 }
                 ImageProtocol::Sixel => {
+                    let Some((crop_w, crop_h, crop_rgba)) = crop_visible_rows(
+                        thumb,
+                        item.first_image_row,
+                        item.rect.height,
+                        item.total_rows,
+                    ) else {
+                        continue;
+                    };
                     encode_sixel(
                         out, item.rect, crop_rgba, crop_w, crop_h, cell_size, item.bg,
                     );
@@ -2111,7 +2212,7 @@ mod tests {
             },
         };
         let meta = cache
-            .prepare_browser_viewport(Some(&vp_image), None)
+            .prepare_browser_viewport(Some(&vp_image), None, true)
             .expect("viewport frame should decode");
         assert_eq!((meta.pixel_width, meta.pixel_height), (2304, 720));
         let rgba = cache.get(&meta.key).unwrap();
@@ -2119,7 +2220,7 @@ mod tests {
         assert!(cache.get(&thumb_key).is_some());
 
         // Clearing viewport drops only the viewport slot while preserving transcript LRU entries.
-        assert!(cache.prepare_browser_viewport(None, None).is_none());
+        assert!(cache.prepare_browser_viewport(None, None, true).is_none());
         assert!(cache.get(&meta.key).is_none());
         assert!(cache.get(&thumb_key).is_some());
     }
@@ -2136,10 +2237,61 @@ mod tests {
                 bytes: Arc::from(png),
             },
         };
-        let meta = cache.prepare_browser_viewport(Some(&frame), None).unwrap();
+        let meta = cache
+            .prepare_browser_viewport(Some(&frame), None, true)
+            .unwrap();
         let rgba = cache.get(&meta.key).unwrap();
         assert_eq!((rgba.rgba_width, rgba.rgba_height), (1600, 800));
         assert!(cache.viewport_png.is_none());
+    }
+
+    #[test]
+    fn kitty_viewport_skips_rgba_decode_and_upgrades_on_demand() {
+        let mut cache = ImageCache::default();
+        let png = sample_png_bytes(200, 100);
+        let frame = TranscriptImage {
+            media_type: "image/png",
+            dimensions: Some((200, 100)),
+            source: TranscriptImageSource::Inline {
+                sha256: digest_hex(&Sha256::digest(&png)).into(),
+                bytes: Arc::from(png),
+            },
+        };
+        let meta = cache
+            .prepare_browser_viewport(Some(&frame), None, false)
+            .expect("png header should satisfy Kitty metadata");
+        assert_eq!((meta.pixel_width, meta.pixel_height), (200, 100));
+        let cached = cache.get(&meta.key).unwrap();
+        assert!(cached.rgba.is_empty());
+
+        let mut placements = ImagePlacementState::default();
+        let spec = NativePlacement {
+            placement: PlacementKey::BrowserViewport,
+            image_key: meta.key.clone(),
+            rect: Rect::new(0, 0, 10, 5),
+            total_rows: 5,
+            first_image_row: 0,
+            bg: Color::Black,
+        };
+        let id = placements.prepare_kitty_unicode(&spec, CellSize::default());
+        let mut out = Vec::new();
+        placements.sync(
+            ImageProtocol::KittyUnicode,
+            &[spec],
+            &cache,
+            CellSize::default(),
+            &mut out,
+        );
+        let out_str = String::from_utf8(out).unwrap();
+        assert!(out_str.contains(&format!("\x1b_Ga=T,f=100,c=10,r=5,i={id},p=1,U=1,q=2")));
+
+        // Calling again with decode_rgba = true populates RGBA for occlusion fallback.
+        let meta_decoded = cache
+            .prepare_browser_viewport(Some(&frame), None, true)
+            .expect("rgba decode should upgrade entry");
+        assert_eq!(meta_decoded.key, meta.key);
+        let cached = cache.get(&meta_decoded.key).unwrap();
+        assert_eq!(cached.rgba.len(), 200 * 100 * 4);
     }
 
     #[test]
@@ -2292,5 +2444,70 @@ mod tests {
             &oversized,
             CellSize::default()
         ));
+    }
+
+    #[test]
+    fn kitty_viewport_reuses_id_in_place_across_new_frames() {
+        let mut cache = ImageCache::default();
+        let png1 = sample_png_bytes(32, 32);
+        let png2 = sample_png_bytes(32, 32);
+        let frame1 = TranscriptImage {
+            media_type: "image/png",
+            dimensions: Some((32, 32)),
+            source: TranscriptImageSource::Inline {
+                sha256: Arc::from("viewport-hash-1"),
+                bytes: Arc::from(png1),
+            },
+        };
+        let frame2 = TranscriptImage {
+            media_type: "image/png",
+            dimensions: Some((32, 32)),
+            source: TranscriptImageSource::Inline {
+                sha256: Arc::from("viewport-hash-2"),
+                bytes: Arc::from(png2),
+            },
+        };
+        let meta1 = cache
+            .prepare_browser_viewport(Some(&frame1), None, false)
+            .unwrap();
+        let mut placements = ImagePlacementState::default();
+        let spec1 = NativePlacement {
+            placement: PlacementKey::BrowserViewport,
+            image_key: meta1.key,
+            rect: Rect::new(4, 2, 3, 2),
+            total_rows: 2,
+            first_image_row: 0,
+            bg: Color::Rgb(16, 16, 20),
+        };
+        let id1 = placements.prepare_kitty_unicode(&spec1, CellSize::default());
+        let mut out1 = Vec::new();
+        placements.sync(
+            ImageProtocol::KittyUnicode,
+            &[spec1.clone()],
+            &cache,
+            CellSize::default(),
+            &mut out1,
+        );
+
+        let meta2 = cache
+            .prepare_browser_viewport(Some(&frame2), None, false)
+            .unwrap();
+        let spec2 = NativePlacement {
+            image_key: meta2.key,
+            ..spec1
+        };
+        let id2 = placements.prepare_kitty_unicode(&spec2, CellSize::default());
+        assert_eq!(id2, id1);
+        let mut out2 = Vec::new();
+        placements.sync(
+            ImageProtocol::KittyUnicode,
+            &[spec2],
+            &cache,
+            CellSize::default(),
+            &mut out2,
+        );
+        let out2_str = String::from_utf8(out2).unwrap();
+        assert!(!out2_str.contains("a=d,"), "{out2_str}");
+        assert!(out2_str.contains(&format!("\x1b_Ga=T,f=100,c=3,r=2,i={id1},p=1,U=1,q=2")));
     }
 }

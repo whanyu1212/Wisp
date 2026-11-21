@@ -215,6 +215,8 @@ const BROWSER_TYPE_FLUSH_CHARS: usize = 64;
 const BROWSER_TYPE_MAX_CHARS: usize = 1_024;
 /// The largest wheel distance, in pixels, that one browser scroll command carries.
 const BROWSER_SCROLL_MAX_DELTA: i64 = 10_000;
+/// Pixels per terminal wheel notch for the live browser viewport before smoothing.
+pub(crate) const LIVE_SCROLL_PIXELS_PER_NOTCH: i64 = 60;
 /// How soon a live browser close the backend turned away is tried again.
 const LIVE_BROWSER_CLOSE_RETRY: Duration = Duration::from_millis(33);
 /// How soon a frame read the backend turned away at admission, such as while its
@@ -231,10 +233,8 @@ pub(crate) const BROWSER_DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 /// Wheel input for the live page held back while an earlier scroll is in flight.
 ///
-/// Chromium answers a wheel event only after handling it, so sending every wheel
-/// batch as its own command lets them queue up and the page keeps scrolling after
-/// the wheel stops. Wheel input that arrives while a scroll is in flight is summed
-/// here instead and sent as one scroll when that scroll finishes.
+/// Wheel input that arrives while a scroll is in flight is summed here and sent
+/// as one scroll when that scroll finishes, keeping input coherent without queuing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PendingLiveScroll {
     /// The latest pointer position on the page.
@@ -805,6 +805,8 @@ struct LiveUi {
     pointer: Option<(u16, u16)>,
     /// Whether the last painted frame drew `[stop]` in its hovered state.
     stop_hovered: bool,
+    /// Whether the last painted frame drew the docked side-panel border in its hovered state.
+    border_hovered: bool,
     /// The pointer shape sent to the terminal, which is a resize arrow over the docked
     /// side panel's border and while dragging it.
     pointer_shape: pointer_shape::PointerShapeState,
@@ -912,6 +914,7 @@ impl Default for LiveUi {
             mouse_frame: None,
             pointer: None,
             stop_hovered: false,
+            border_hovered: false,
             pointer_shape: pointer_shape::PointerShapeState::default(),
             transcript_selection: None,
             transcript_viewport: TranscriptViewport::default(),
@@ -2188,14 +2191,29 @@ impl LiveUi {
             &mut self.transcript_row_cache,
         );
         let viewport = self.state.browser_viewport.as_ref();
+        let effective_protocol = self
+            .image_protocol
+            .effective(self.color_depth, self.no_color);
+        let decode_rgba = !matches!(
+            effective_protocol,
+            terminal_images::ImageProtocol::Kitty | terminal_images::ImageProtocol::KittyUnicode
+        ) || self
+            .active_overlay()
+            .is_some_and(|kind| kind != OverlayKind::SidePanel)
+            || self.key_help.is_some()
+            || self.file_picker.is_open();
         // A frame request sent before the border press can still complete mid-drag.
-        // Keep the last painted image so reflow only changes its placement.
+        // Keep the last painted image so reflow only changes its placement, while still
+        // decoding RGBA if an occlusion overlay opens mid-drag.
         if !self.side_panel.resizing() || !viewport.is_some_and(|view| view.live) {
             self.transcript_row_cache.browser_image_preview =
                 self.image_cache.prepare_browser_viewport(
                     viewport.and_then(|view| view.image.as_ref()),
                     session_images_dir.as_deref(),
+                    decode_rgba,
                 );
+        } else if decode_rgba {
+            self.image_cache.ensure_viewport_rgba();
         }
     }
 
@@ -2282,6 +2300,7 @@ impl LiveUi {
         let native_placements = std::cell::RefCell::new(Vec::new());
         let browser_keyboard_focus = self.browser_address_active()
             || (self.live_browser_visible() && self.browser_takeover_active());
+        let docked_border_hover_allowed = self.border_hover_allowed();
         let hyperlinks = self.hyperlinks;
         let no_color = self.no_color;
         let color_depth = self.color_depth;
@@ -2771,6 +2790,12 @@ impl LiveUi {
                     images.retain(|img| {
                         img.placement != terminal_images::PlacementKey::BrowserViewport
                     });
+                    let docked_border_hovered = docked_border_hover_allowed
+                        && self.side_panel.docked()
+                        && !self.side_panel.expanded()
+                        && self.pointer.is_some_and(|(col, row)| {
+                            side_panel::border_hit_area(area).contains((col, row).into())
+                        });
                     side_panel::render_with_preview(
                         frame,
                         area,
@@ -2782,6 +2807,7 @@ impl LiveUi {
                         cell_size,
                         Some(&mut *images),
                         true,
+                        docked_border_hovered,
                     );
                     mouse::Rows::default()
                 }
@@ -2825,6 +2851,7 @@ impl LiveUi {
                 .is_some_and(|area| area.contains((column, row).into()))
         });
         self.mouse_frame = self.mouse_enabled.then_some(painted);
+        self.border_hovered = self.border_hover_allowed() && self.pointer_over_panel_border();
         // After the new mouse frame, so a popup now covering the border, a closed panel,
         // or a resized terminal never leaves the resize arrow behind.
         let wanted_shape = self.wanted_pointer_shape();
@@ -3106,6 +3133,20 @@ impl LiveUi {
             )
     }
 
+    fn border_hover_allowed(&self) -> bool {
+        self.mouse_enabled
+            && !self.attention.focus_lost()
+            && self.key_help.is_none()
+            && !matches!(
+                self.state.view_status,
+                ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
+            )
+            && (self.mouse_layer() == mouse::Layer::Conversation
+                || (self.mouse_layer() == mouse::Layer::Overlay(OverlayKind::SidePanel)
+                    && self.side_panel.docked()
+                    && !self.side_panel.expanded()))
+    }
+
     fn update_pointer_hover(&mut self, column: u16, row: u16) {
         self.pointer = Some((column, row));
         let hovered = self.pointer_hover_allowed()
@@ -3116,7 +3157,8 @@ impl LiveUi {
                         .stop_button
                         .is_some_and(|area| area.contains((column, row).into()))
             });
-        if hovered != self.stop_hovered {
+        let border_hovered = self.border_hover_allowed() && self.pointer_over_panel_border();
+        if hovered != self.stop_hovered || border_hovered != self.border_hovered {
             self.render_pending = true;
         }
     }
@@ -5581,7 +5623,7 @@ impl LiveUi {
                 self.finish_logo_entrance();
                 self.pointer = None;
                 let ended_resize = self.side_panel.cancel_resize();
-                if self.stop_hovered || ended_resize {
+                if self.stop_hovered || self.border_hovered || ended_resize {
                     self.render_pending = true;
                 }
                 self.request_pointer_shape();
@@ -6895,11 +6937,14 @@ impl LiveUi {
             let frame_retry = self
                 .next_live_frame_retry
                 .filter(|_| self.live_frame_wanted());
-            let timer = match (lifecycle, frame_retry) {
+            let mut timer = match (lifecycle, frame_retry) {
                 (Some(lifecycle), Some(retry)) => Some(lifecycle.min(retry)),
                 (lifecycle, retry) => lifecycle.or(retry),
             };
-            return self.browser_typing_buffer.flush_at.or(timer);
+            if let Some(flush_at) = self.browser_typing_buffer.flush_at {
+                timer = Some(timer.map_or(flush_at, |current| current.min(flush_at)));
+            }
+            return timer;
         }
         if !self.browser_takeover_active() {
             return None;

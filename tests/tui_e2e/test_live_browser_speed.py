@@ -39,7 +39,7 @@ _INPUT_CELL = (165, 10)
 _CONTENT_CELL = (165, 34)
 _WINDOW = 3.0
 _WHEEL_RATE = 60
-_WHEEL_DELTA = 120
+_WHEEL_DELTA = 60
 _TYPED = "abcdefghijklmnopqrstuvwxyzabcd"
 
 _PAGE = b"""<!doctype html>
@@ -93,9 +93,37 @@ _PAGE = b"""<!doctype html>
     fetch('/focused');
   });
   field.addEventListener('input', () => fetch('/typed?' + field.value.length));
+  let lastY = 0;
+  let scrollSteps = [];
+  let scrollSampling = false;
+  const recordScrollStep = () => {
+    const curY = scrollY;
+    const delta = curY - lastY;
+    if (Math.abs(delta) > 0.05) {
+      scrollSteps.push(Math.round(delta));
+      lastY = curY;
+    }
+  };
+  const sampleScroll = () => {
+    recordScrollStep();
+    if (scrollSampling) {
+      requestAnimationFrame(sampleScroll);
+    }
+  };
+  addEventListener('scroll', () => {
+    if (!scrollSampling) {
+      scrollSampling = true;
+      requestAnimationFrame(sampleScroll);
+    }
+  }, { passive: true });
   addEventListener('scrollend', () => {
+    scrollSampling = false;
+    recordScrollStep();
     const limit = document.documentElement.scrollHeight - innerHeight;
     fetch('/scrolled?' + Math.round(scrollY) + ',' + limit);
+    if (scrollSteps.length) {
+      fetch('/scrollstats?' + scrollSteps.splice(0).join(','));
+    }
   });
 </script>
 """
@@ -207,16 +235,21 @@ class _LiveTerminal:
             self._current = None
 
 
-def _spread(values: list[float]) -> str:
-    """Format median, 95th percentile (nearest rank), and maximum of millisecond values."""
+def _spread_units(values: list[float], unit: str) -> str:
+    """Format median, 95th percentile (nearest rank), and maximum with ``unit``."""
     if not values:
         return "no samples"
     ordered = sorted(values)
     p95 = ordered[max(0, math.ceil(0.95 * len(ordered)) - 1)]
     return (
-        f"median {statistics.median(ordered):.1f} ms, p95 {p95:.1f} ms, "
-        f"max {ordered[-1]:.1f} ms (n={len(ordered)})"
+        f"median {statistics.median(ordered):.1f} {unit}, p95 {p95:.1f} {unit}, "
+        f"max {ordered[-1]:.1f} {unit} (n={len(ordered)})"
     )
+
+
+def _spread(values: list[float]) -> str:
+    """Format median, 95th percentile (nearest rank), and maximum of millisecond values."""
+    return _spread_units(values, "ms")
 
 
 def _report_rate(label: str, frames: list[_KittyFrame], seconds: float) -> None:
@@ -248,6 +281,7 @@ def test_live_browser_speed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     typed_lengths: list[int] = []
     # (scrollY, maximum scrollY) at each scrollend.
     scroll_ends: list[tuple[int, int]] = []
+    scroll_steps: list[int] = []
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
@@ -263,6 +297,8 @@ def test_live_browser_speed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
             elif url.path == "/scrolled":
                 position, limit = url.query.split(",")
                 scroll_ends.append((int(position), int(limit)))
+            elif url.path == "/scrollstats":
+                scroll_steps.extend(int(step) for step in url.query.split(",") if step)
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
             self.send_header("Content-Length", str(len(body)))
@@ -378,10 +414,15 @@ def test_live_browser_speed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
                     f"Scroll ended at {position}px of {expected}px expected "
                     f"({wheel_count} wheel events, page limit {limit}px); first repaint "
                     f"{(first_repaint.finished - start) * 1000:.0f} ms after the first wheel, "
-                    f"last {(live.frames[-1].finished - end) * 1000:.0f} ms after the last"
+                    f"last {(live.frames[-1].finished - end) * 1000:.0f} ms after the last; "
+                    f"rAF step {_spread_units([float(s) for s in scroll_steps], 'px')}"
                 )
-                # Held-back wheel input is summed, never dropped or sent twice.
+                # Held-back wheel input is summed, never dropped or sent twice, and
+                # per-frame scroll steps remain smooth rather than 120-240 px jumps.
                 assert position == expected
+                assert scroll_steps
+                assert statistics.median(scroll_steps) <= 75
+                assert max(scroll_steps) < 120
 
                 # Ctrl+C leaves the page's input, then the active tab hides the pane.
                 tui.send(b"\x03")

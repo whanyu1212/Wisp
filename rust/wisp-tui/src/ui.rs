@@ -294,6 +294,9 @@ pub fn render_interactive(
     let column = match side_panel.filter(|panel| panel.docked()) {
         Some(panel) => {
             let (column, panel_area) = panel.split(area);
+            let border_hovered = pointer.is_some_and(|(col, row)| {
+                crate::side_panel::border_hit_area(panel_area).contains((col, row).into())
+            });
             side_panel::render_with_preview(
                 frame,
                 panel_area,
@@ -305,6 +308,7 @@ pub fn render_interactive(
                 row_cache.cell_size(),
                 Some(&mut row_cache.painted_images),
                 false,
+                border_hovered,
             );
             column
         }
