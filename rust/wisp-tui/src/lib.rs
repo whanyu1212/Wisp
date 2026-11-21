@@ -1767,7 +1767,13 @@ impl LiveUi {
         // only a live frame is one that waits for paint.
         let is_live_frame = matches!(
             &action,
-            UiAction::BackendEvent(BackendEvent::BrowserViewportUpdated(update)) if update.live
+            UiAction::BackendEvent(BackendEvent::BrowserViewportUpdated(update))
+                if update.live && !update.window_mode
+        );
+        let agent_opened_live_browser = matches!(
+            &action,
+            UiAction::BackendEvent(BackendEvent::BrowserViewportUpdated(update))
+                if update.live && update.source_tool.is_some()
         );
         let finished_call = match &action {
             UiAction::BackendEvent(BackendEvent::ToolResult(result)) => {
@@ -1777,6 +1783,10 @@ impl LiveUi {
         };
         let had_shared_session = self.state.saved_session_attachment.is_some();
         let effects = reducer::reduce(&mut self.state, action, &mut self.ids)?;
+        if agent_opened_live_browser {
+            self.side_panel.show(side_panel::PanelMode::Browser);
+            self.render_pending = true;
+        }
         if had_shared_session && self.state.saved_session_attachment.is_none() {
             self.sync_composer_chips();
         }
@@ -4266,7 +4276,14 @@ impl LiveUi {
             }
             Command::BrowserLive(url) => {
                 self.editor.clear();
-                self.open_live_page(url, writer, limit).await
+                match url {
+                    Some(url) => self.open_live_page(url, writer, limit).await,
+                    None => self.dock_live_browser(writer, limit).await,
+                }
+            }
+            Command::BrowserWindow(url) => {
+                self.editor.clear();
+                self.open_live_window(url, writer, limit).await
             }
             Command::KillProcess(target) => {
                 self.editor.clear();
@@ -6813,7 +6830,7 @@ impl LiveUi {
         self.state
             .browser_viewport
             .as_ref()
-            .is_some_and(|view| view.live)
+            .is_some_and(|view| view.live && !view.window_mode)
             && self.state.view_status == ViewStatus::Idle
             && self.state.current_command.is_none()
             && !self.browser_frame_waiting_for_border()
@@ -6831,6 +6848,14 @@ impl LiveUi {
 
     /// The close or resize the live page needs, if any.
     fn live_browser_lifecycle_request(&self) -> Option<BrowserInteractRequest> {
+        if self
+            .state
+            .browser_viewport
+            .as_ref()
+            .is_some_and(|view| view.window_mode)
+        {
+            return None;
+        }
         if self.side_panel.mode() != side_panel::PanelMode::Browser || !self.side_panel.visible() {
             return Some(BrowserInteractRequest::Nav(BrowserNavAction::LiveClose));
         }

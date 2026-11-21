@@ -96,6 +96,51 @@ impl LiveUi {
         .await
     }
 
+    /// Dock an open live browser back into the terminal Browser pane.
+    pub(super) async fn dock_live_browser(
+        &mut self,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        if self.browser_interaction_blocked() {
+            return Ok(LoopControl::Continue);
+        }
+        self.exit_browser_takeover();
+        self.clear_browser_address();
+        self.side_panel.show(side_panel::PanelMode::Browser);
+        self.notice = None;
+        self.render_pending = true;
+        self.dispatch(
+            UiAction::BrowserInteract(BrowserInteractRequest::LiveDock),
+            writer,
+            limit,
+        )
+        .await
+    }
+
+    /// Open or switch the live browser to a visible Chrome window on Wisp's profile.
+    pub(super) async fn open_live_window(
+        &mut self,
+        url: Option<String>,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        if self.browser_interaction_blocked() {
+            return Ok(LoopControl::Continue);
+        }
+        self.exit_browser_takeover();
+        self.clear_browser_address();
+        self.side_panel.show(side_panel::PanelMode::Browser);
+        self.notice = None;
+        self.render_pending = true;
+        self.dispatch(
+            UiAction::BrowserInteract(BrowserInteractRequest::LiveWindow { url }),
+            writer,
+            limit,
+        )
+        .await
+    }
+
     pub(super) async fn handle_browser_control(
         &mut self,
         control: BrowserControl,

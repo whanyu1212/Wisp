@@ -399,6 +399,11 @@
           ],
           "default": null,
           "title": "BrowserViewportUpdatedViewportWidth"
+        },
+        "window_mode": {
+          "default": false,
+          "title": "BrowserViewportUpdatedWindowMode",
+          "type": "boolean"
         }
       },
       "required": [
@@ -411,6 +416,7 @@
         "viewport_width",
         "viewport_height",
         "live_device_scale",
+        "window_mode",
         "source_tool",
         "call_id"
       ],

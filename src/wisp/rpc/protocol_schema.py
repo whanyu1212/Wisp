@@ -915,10 +915,18 @@ def _add_command_semantic_constraints(schema: JsonObject) -> None:
         [
             {
                 "if": {
-                    "properties": {"action": {"enum": ["live_open", "live_navigate"]}},
+                    "properties": {"action": {"const": "live_navigate"}},
                     "required": ["action"],
                 },
                 "then": {"required": ["url"]},
+            },
+            {
+                "if": {
+                    "properties": {
+                        "action": {"enum": ["live_open", "live_window", "live_navigate"]}
+                    },
+                    "required": ["action"],
+                },
                 "else": _forbid("url"),
             },
             {
@@ -1016,6 +1024,7 @@ def _add_command_semantic_constraints(schema: JsonObject) -> None:
                                 "reload",
                                 "refresh",
                                 "live_open",
+                                "live_window",
                                 "live_frame",
                                 "live_close",
                                 "live_navigate",

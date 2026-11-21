@@ -23,6 +23,7 @@ from wisp.events import BrowserViewportUpdated, ImagePart
 from wisp.images import ImageRejectedError
 from wisp.mcp.discovery import McpCatalogTool
 from wisp.sessions.errors import SessionError
+from wisp.tool_types import DEFAULT_BROWSER_DEFAULT, BrowserDefault
 from wisp.tools.base import Tool, ToolArguments
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy
@@ -333,7 +334,14 @@ class BrowserHandoffTracker:
             self._key_presses += 1
         elif action == "type":
             self._text_entries += 1
-        elif action in {"back", "reload"}:
+        elif action in {
+            "back",
+            "reload",
+            "live_open",
+            "live_window",
+            "live_navigate",
+            "live_forward",
+        }:
             self._navigations += 1
 
     def pending_snapshot(self) -> BrowserHandoffSnapshot | None:
@@ -639,8 +647,10 @@ def browser_prompt_guidance(
     tools: Iterable[Tool],
     *,
     connected: BrowserConnectedCheck | None = None,
+    live_browser_available: bool = False,
+    browser_default: BrowserDefault = DEFAULT_BROWSER_DEFAULT,
 ) -> str:
-    """Return Wisp-specific model guidance when a browser MCP server is connected."""
+    """Return Wisp model guidance when the live browser or a browser MCP server is available."""
 
     tool_list = tuple(tools)
     connected_browser_servers = sorted(
@@ -652,15 +662,48 @@ def browser_prompt_guidance(
             and is_browser_mcp_tool(tool, tool_list)
         }
     )
-    if not connected_browser_servers:
+    if not live_browser_available and not connected_browser_servers:
         return ""
-    servers = ", ".join(connected_browser_servers)
-    return "\n".join(
-        [
+
+    sections: list[str] = []
+    if live_browser_available:
+        live_lines = [
+            "[LIVE BROWSER WORKFLOW]",
+            "Wisp has a built-in live browser in the terminal (browser_navigate, browser_read, "
+            "browser_click, browser_type, browser_screenshot), rendered in the user's /browser "
+            "pane.",
+            "- Prefer browser_read over browser_screenshot to conserve image context budget.",
+            "- For sign-in, 2FA/OTP codes, or CAPTCHAs, pause and ask the user to take over in "
+            "the /browser pane (press i or click the viewport; Esc to exit) rather than asking "
+            "them to paste passwords or secrets into chat.",
+            "- If a site blocks headless Chrome or requires an OS prompt (passkey, Touch ID, "
+            "file picker, camera), suggest switching to window mode (browser_navigate with "
+            "window=true, or /browser window) or a user takeover instead of retrying.",
+            "- After a user takeover handoff note appears, call browser_read before acting "
+            "because page state, focus, URL, or element refs may have changed.",
+        ]
+        if connected_browser_servers and browser_default == "live":
+            live_lines.insert(
+                1,
+                "- Default browser: Wisp's live browser (browser_* tools). Use the user's own "
+                "Chrome (via the connected browser MCP server) when the task needs existing "
+                "sign-ins, extensions, or open tabs, or when the user asks for it.",
+            )
+        elif connected_browser_servers and browser_default == "mcp":
+            live_lines.insert(
+                1,
+                "- Default browser: the user's own Chrome (via the connected browser MCP server). "
+                "Wisp's live browser (browser_* tools) is also available in the terminal.",
+            )
+        sections.append("\n".join(live_lines))
+
+    if connected_browser_servers:
+        servers = ", ".join(connected_browser_servers)
+        mcp_lines = [
             "[BROWSER MCP WORKFLOW]",
             f"Connected browser MCP server(s): {servers}.",
-            "- Prefer accessibility/DOM snapshots (such as browser_snapshot or take_snapshot) to "
-            "inspect page state and target elements by ref instead of guessing selectors.",
+            "- Prefer accessibility/DOM snapshots (such as browser_snapshot or take_snapshot) "
+            "to inspect page state and target elements by ref instead of guessing selectors.",
             "- Use screenshots selectively to conserve image context budget; Wisp automatically "
             "mirrors live browser updates into the user's /browser viewport pane.",
             "- Inspect browser console messages and network requests when diagnosing UI or "
@@ -671,7 +714,8 @@ def browser_prompt_guidance(
             "- After a user takeover handoff note appears, take a fresh snapshot before clicking "
             "or typing because URL, focus, or element refs may have changed.",
         ]
-    )
+        sections.append("\n".join(mcp_lines))
+    return "\n\n".join(sections)
 
 
 def _select_browser_server(

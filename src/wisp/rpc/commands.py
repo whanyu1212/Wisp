@@ -70,6 +70,7 @@ BrowserInteractAction = TypeAliasType(
         "reload",
         "refresh",
         "live_open",
+        "live_window",
         "live_frame",
         "live_navigate",
         "live_forward",
@@ -901,8 +902,8 @@ class BrowserInteractCommand(RpcCommandModel):
         max_length=2048,
         repr=False,
         description=(
-            "For live_open and live_navigate: an address or search text, resolved by the "
-            "backend with the user's browser_search_engine setting."
+            "For live_open, live_window, and live_navigate: an address or search text, resolved by "
+            "the backend with the user's browser_search_engine setting."
         ),
     )
     viewport: LiveBrowserViewport | None = None
@@ -945,10 +946,10 @@ class BrowserInteractCommand(RpcCommandModel):
                 raise ValueError("browser_interact live_resize requires viewport dimensions")
         else:
             self._reject_disallowed_fields("viewport")
-        if self.action in {"live_open", "live_navigate"}:
+        if self.action == "live_navigate":
             if self.url is None:
                 raise ValueError(f"browser_interact {self.action} requires a URL")
-        else:
+        elif self.action not in {"live_open", "live_window"}:
             self._reject_disallowed_fields("url")
         if self.action == "click":
             if self.x is None or self.y is None:

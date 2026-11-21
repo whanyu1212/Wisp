@@ -62,7 +62,7 @@ Some fields are **user-only** and a project file can never set them:
 `auto_compaction_enabled` · `web_search` · `wake_on_process_exit` · `codemode` · `codemode_presentation` · `subagents` ·
 `subagent_model` ·
 `mcp_servers` · `mcp_tool_exposure` · `openai_compatible` · `tui_keybindings` · `tui_images` ·
-`browser_search_engine`
+`browser_search_engine` · `browser_default`
 
 A repository cannot increase your API spending, prolong waits, launch an MCP command, configure a
 credential-receiving provider endpoint, or weaken the secret guard.
@@ -81,6 +81,7 @@ These settings belong in `~/.wisp/settings.json`, not the project file:
 |---|---|
 | `tui_images` | Preferred terminal image protocol: `auto` (default), `kitty-unicode`, `kitty`, `iterm2`, `sixel`, or `halfblock`. Restart Wisp to apply. `WISP_TUI_IMAGES` overrides this setting. |
 | `browser_search_engine` | Where the live browser searches text you type that is not an address: `google` (default), `duckduckgo`, or `bing`. Restart Wisp to apply. |
+| `browser_default` | Which browser the agent prefers when both Wisp's live browser and a browser MCP server are available: `live` (default), `mcp`, or `none`. `WISP_BROWSER_DEFAULT` overrides this setting. |
 | `tui_keybindings` | Object mapping action IDs to arrays of key chords. See [Keybinding preferences](../guide/tui/keybindings.md#keybinding-preferences) for an example, available actions, and restart requirements. |
 | `mcp_servers` | Object keyed by server name, with either a stdio `command` or an HTTP `url` per entry. See [MCP servers](../guide/mcp.md#add-a-server) for complete JSON examples and authentication options. |
 | `codemode_presentation` | User-only model presentation: `"direct_and_codemode"` (default) or `"codemode_only"`. Separate from availability; falls back to direct tools when codemode is not offered. |

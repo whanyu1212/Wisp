@@ -62,6 +62,8 @@ from wisp.coding.browser_control import (
     BrowserHandoffTracker,
     browser_prompt_guidance,
 )
+from wisp.coding.browser_live import LiveBrowser
+from wisp.coding.browser_tools import LIVE_BROWSER_TOOL_NAMES, build_live_browser_tools
 from wisp.coding.command_review import ModelCommandReviewer
 from wisp.coding.compaction import (
     CompactionSummary,
@@ -206,6 +208,7 @@ from wisp.skills.models import SkillCatalog
 from wisp.skills.prompt import build_skill_index
 from wisp.skills.tool import SkillTool
 from wisp.tool_presentation import tool_result_status
+from wisp.tool_types import DEFAULT_BROWSER_DEFAULT, BrowserDefault
 from wisp.tools.approval import ToolApprovalPolicy, confirms_every_call
 from wisp.tools.base import Tool, ToolExecutionMetadata
 from wisp.tools.codemode.calls import CODEMODE, SCRIPT_RESULT_LIMITS, NestedCallResult
@@ -592,6 +595,8 @@ class CodingSession:
         context_reserve_tokens: int = 16_384,
         auto_compaction_enabled: bool = True,
         web_search: bool = False,
+        browser_default: BrowserDefault = DEFAULT_BROWSER_DEFAULT,
+        live_browser: LiveBrowser | None = None,
         mode: AgentMode = DEFAULT_AGENT_MODE,
         mcp_tool_exposure: McpToolExposure = DEFAULT_MCP_TOOL_EXPOSURE,
         mcp_server_connected: Callable[[str], bool] | None = None,
@@ -627,8 +632,10 @@ class CodingSession:
         # Process-local active browser server/page and undelivered human-takeover counts.
         self._browser_handoff = BrowserHandoffTracker()
         self._delivered_browser_handoff: tuple[str | None, BrowserHandoffSnapshot] | None = None
+        self._live_browser: LiveBrowser | None = live_browser
         self.tool_policy = tool_policy or ToolPolicy.allow_all_tools()
         self.tool_approval_policy = tool_approval_policy or ToolApprovalPolicy.require_approval()
+        self._explicit_tools = tools is not None
         self.tools = (
             tuple(tools)
             if tools is not None
@@ -687,6 +694,7 @@ class CodingSession:
                 context_reserve_tokens=context_reserve_tokens,
                 auto_compaction_enabled=auto_compaction_enabled,
                 web_search=web_search,
+                browser_default=browser_default,
             )
         )
         # The folder Wisp started in. A session that records no folder ran here, so
@@ -739,6 +747,7 @@ class CodingSession:
             context_reserve_tokens=configuration.context_reserve_tokens,
             auto_compaction_enabled=configuration.auto_compaction_enabled,
             web_search=configuration.web_search,
+            browser_default=configuration.browser_default,
             mcp_tool_exposure=mcp_tool_exposure,
             mcp_server_connected=mcp_server_connected,
             codemode=codemode,
@@ -769,6 +778,7 @@ class CodingSession:
             context_reserve_tokens=self.context_reserve_tokens,
             auto_compaction_enabled=self.auto_compaction_enabled,
             web_search=self.web_search,
+            browser_default=self.browser_default,
         )
 
     def reconfigure(self, configuration: CodingSessionConfiguration) -> None:
@@ -953,6 +963,16 @@ class CodingSession:
         """Process-local browser MCP target and human-takeover handoff tracker."""
 
         return self._browser_handoff
+
+    def set_live_browser(self, live_browser: LiveBrowser | None) -> None:
+        """Attach or detach the host's live browser for agent tool execution."""
+
+        self._live_browser = live_browser
+
+    def _live_browser_available(self) -> bool:
+        """Return whether the live browser is attached, trusted, and launchable."""
+
+        return self._live_browser is not None and self.trusted and self._live_browser.is_available()
 
     def clear_browser_state(self) -> None:
         """Discard session-local browser MCP and takeover tracking."""
@@ -1265,6 +1285,7 @@ class CodingSession:
         self.context_reserve_tokens = configuration.context_reserve_tokens
         self.auto_compaction_enabled = configuration.auto_compaction_enabled
         self.web_search = configuration.web_search
+        self.browser_default = configuration.browser_default
 
     @property
     def launch_directory(self) -> Path:
@@ -1673,14 +1694,15 @@ class CodingSession:
             user_request=lambda: "" if process_wake else self._command_review_request(user_message),
         )
         self._active_command_reviewer = command_reviewer
-        operation_registry = self._operation_tool_registry()
+        progress_sink = self._progress_sink(live_event_sink, review_sink=emit)
+        operation_registry = self._operation_tool_registry(publish_viewport=progress_sink)
         if saved_session_tool is not None and operation_registry is None:
             operation_registry = ToolRegistry()
         effective_tools, executor = self._run_tools(
             operation_registry,
             operation_tool_names,
             context=operation_context,
-            progress_sink=self._progress_sink(live_event_sink, review_sink=emit),
+            progress_sink=progress_sink,
             image_store=session.store_image,
             session=session,
             command_reviewer=command_reviewer,
@@ -3800,17 +3822,33 @@ class CodingSession:
         callable_names: set[str],
         mcp_catalog: McpCatalog | None,
     ) -> str:
-        """Return browser workflow guidance when connected browser MCP tools are offered."""
+        """Return browser workflow guidance when live or MCP browser tools are offered."""
 
+        live_available = self._live_browser_available() and any(
+            name in callable_names for name in LIVE_BROWSER_TOOL_NAMES
+        )
         if mcp_catalog is not None:
             catalog_tools: tuple[Tool, ...] = tuple(
                 entry.tool for entry in mcp_catalog.entries if entry.connected
             )
-            return browser_prompt_guidance(catalog_tools)
+            return browser_prompt_guidance(
+                catalog_tools,
+                live_browser_available=live_available,
+                browser_default=self.browser_default,
+            )
         if registry is None:
-            return ""
+            return browser_prompt_guidance(
+                (),
+                live_browser_available=live_available,
+                browser_default=self.browser_default,
+            )
         tools = tuple(tool for tool in registry.all() if tool.name in callable_names)
-        return browser_prompt_guidance(tools, connected=self._mcp_server_connected)
+        return browser_prompt_guidance(
+            tools,
+            connected=self._mcp_server_connected,
+            live_browser_available=live_available,
+            browser_default=self.browser_default,
+        )
 
     def _allowed_tool_specs(self, tool_registry: ToolRegistry) -> tuple[ToolSpec, ...]:
         return tuple(
@@ -3848,13 +3886,32 @@ class CodingSession:
         """Return the startup-authorized tools available in the current mode."""
 
         effective_registry = registry if registry is not None else self.tool_registry
-        if self.mode == "build" or effective_registry is None:
-            return self.tools if self.mode == "build" else ()
+        if self.mode == "build":
+            if (
+                effective_registry is None
+                or self._explicit_tools
+                or not self._live_browser_available()
+            ):
+                return self.tools
+            existing = {tool.name for tool in self.tools}
+            extra = tuple(
+                ToolSpec.from_tool(tool)
+                for tool in effective_registry.all()
+                if tool.name in LIVE_BROWSER_TOOL_NAMES
+                and tool.name not in existing
+                and self.tool_policy.allows(tool)
+            )
+            return (*self.tools, *extra) if extra else self.tools
+        if effective_registry is None:
+            return ()
         build_names = {tool.name for tool in self.tools}
+        include_live = not self._explicit_tools and self._live_browser_available()
         return tuple(
             ToolSpec.from_tool(tool)
             for tool in effective_registry.all()
-            if tool.name in build_names and tool.safety == "read" and self.tool_policy.allows(tool)
+            if (tool.name in build_names or (include_live and tool.name in LIVE_BROWSER_TOOL_NAMES))
+            and tool.safety == "read"
+            and self.tool_policy.allows(tool)
         )
 
     def _effective_tool_policy(self, tools: Sequence[ToolSpec]) -> ToolPolicy:
@@ -4042,8 +4099,10 @@ class CodingSession:
             abandon_on_cancel=True,
         )
 
-    def _operation_tool_registry(self) -> ToolRegistry | None:
-        """Bind the selected skill tool to this operation's immutable catalog snapshot."""
+    def _operation_tool_registry(
+        self, *, publish_viewport: LiveEventSink | None = None
+    ) -> ToolRegistry | None:
+        """Bind the selected skill and live-browser tools to this operation's snapshot."""
 
         if self.tool_registry is None:
             return None
@@ -4055,6 +4114,19 @@ class CodingSession:
                 execution=self.tool_registry.execution_metadata_for(tool.name),
                 prompt=self.tool_registry.prompt_metadata_for(tool.name),
             )
+        if self._live_browser_available() and registry.all():
+            assert self._live_browser is not None
+            existing_names = {tool.name for tool in registry.all()}
+            read_only_registry = all(tool.safety == "read" for tool in registry.all())
+            for browser_tool in build_live_browser_tools(
+                self._live_browser,
+                is_trusted=lambda: self.trusted,
+                publish_viewport=publish_viewport,
+            ):
+                if read_only_registry and browser_tool.safety != "read":
+                    continue
+                if browser_tool.name not in existing_names:
+                    registry.register(browser_tool)
         return registry
 
     def _conversation_history(self, history: Sequence[Message]) -> tuple[Message, ...]:

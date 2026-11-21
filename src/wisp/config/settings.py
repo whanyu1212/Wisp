@@ -47,6 +47,7 @@ from typing_extensions import TypeAliasType
 from wisp.mcp.config import MAX_MCP_SERVERS, McpServerConfig, McpToolExposure
 from wisp.openai_compatible import OpenAICompatibleSettings
 from wisp.retry import RetrySettings
+from wisp.tool_types import BrowserDefault as BrowserDefault
 from wisp.validation import redact_validation_error_inputs
 
 if TYPE_CHECKING:
@@ -82,6 +83,7 @@ _USER_ONLY_SETTINGS_FIELDS = frozenset(
         "tui_keybindings",
         "tui_images",
         "browser_search_engine",
+        "browser_default",
     }
 )
 
@@ -165,6 +167,7 @@ class WispSettings(BaseModel):
     tui_images: TuiImageProtocol | None = None
     tui_keybindings: dict[str, list[str]] | None = None
     browser_search_engine: BrowserSearchEngine | None = None
+    browser_default: BrowserDefault | None = None
 
     @field_validator("tui_keybindings", mode="before")
     @classmethod
@@ -268,6 +271,7 @@ class ResolvedSettings(BaseModel):
     tui_images: TuiImageProtocol | None = None
     tui_keybindings: dict[str, list[str]] = Field(default_factory=dict)
     browser_search_engine: BrowserSearchEngine | None = None
+    browser_default: BrowserDefault | None = None
     # Provenance used only while applying higher-precedence provider overrides.
     # Excluded from serialization because these are resolver details, not settings.
     user_provider: str | None = Field(default=None, exclude=True)
@@ -376,6 +380,7 @@ def resolve_settings(
         tui_images=user_settings.tui_images,
         tui_keybindings=user_settings.tui_keybindings or {},
         browser_search_engine=user_settings.browser_search_engine,
+        browser_default=user_settings.browser_default,
         user_provider=user_provider,
         model_from_user=project_model is None and user_model is not None,
     )
