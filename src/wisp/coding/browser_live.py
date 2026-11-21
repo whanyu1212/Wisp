@@ -299,10 +299,8 @@ _JS_SMOOTH_SCROLL = """(x, y, dx, dy) => {
           const cs = win.getComputedStyle(el);
           const isYBox = isScrollMode(cs.overflowY) && el.scrollHeight > el.clientHeight + 1;
           const isXBox = isScrollMode(cs.overflowX) && el.scrollWidth > el.clientWidth + 1;
-          const canY = remY !== 0 && isYBox
-            && (remY > 0 ? el.scrollTop + el.clientHeight < el.scrollHeight - 1 : el.scrollTop > 0);
-          const canX = remX !== 0 && isXBox
-            && (remX > 0 ? el.scrollLeft + el.clientWidth < el.scrollWidth - 1 : el.scrollLeft > 0);
+          const canY = remY !== 0 && isYBox;
+          const canX = remX !== 0 && isXBox;
           if (canX || canY) {
             const prevL = el.scrollLeft, prevT = el.scrollTop;
             el.scrollBy({ left: canX ? remX : 0, top: canY ? remY : 0, behavior: 'instant' });
@@ -336,15 +334,9 @@ _JS_SMOOTH_SCROLL = """(x, y, dx, dy) => {
           return;
         }
         const canY = remY !== 0 && !vpLockY && scrollingEl
-          && scrollingEl.scrollHeight > scrollingEl.clientHeight + 1
-          && (remY > 0
-            ? scrollingEl.scrollTop + scrollingEl.clientHeight < scrollingEl.scrollHeight - 1
-            : scrollingEl.scrollTop > 0);
+          && scrollingEl.scrollHeight > scrollingEl.clientHeight + 1;
         const canX = remX !== 0 && !vpLockX && scrollingEl
-          && scrollingEl.scrollWidth > scrollingEl.clientWidth + 1
-          && (remX > 0
-            ? scrollingEl.scrollLeft + scrollingEl.clientWidth < scrollingEl.scrollWidth - 1
-            : scrollingEl.scrollLeft > 0);
+          && scrollingEl.scrollWidth > scrollingEl.clientWidth + 1;
         if (canX || canY) {
           const prevL = win.scrollX, prevT = win.scrollY;
           win.scrollBy({ left: canX ? remX : 0, top: canY ? remY : 0, behavior: 'instant' });

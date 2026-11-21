@@ -418,6 +418,11 @@ def test_live_browser_smooth_scroll_dom_cases(
         b"style='width:160px;height:90px;border:0'></iframe><div style='height:300px'></div></div>"
         b"<iframe id='xorigin' sandbox='' srcdoc='<body style=height:400px>x</body>' "
         b"style='position:fixed;left:190px;top:110px;width:150px;height:100px;border:0'></iframe>"
+        b"<div id='rev' style='position:fixed;left:0;top:240px;width:120px;height:100px;"
+        b"overflow-y:auto;display:flex;flex-direction:column-reverse'>"
+        b"<div style='flex:0 0 300px'>r</div></div>"
+        b"<div id='rtl' style='position:fixed;left:130px;top:240px;width:120px;height:100px;"
+        b"overflow-x:auto;direction:rtl'><div style='width:300px;height:50px'>rtl</div></div>"
         b"<script>"
         b"document.getElementById('prevent').addEventListener('wheel',e=>e.preventDefault(),{passive:false});"
         b"const sh=document.getElementById('host').attachShadow({mode:'open'});"
@@ -505,6 +510,17 @@ def test_live_browser_smooth_scroll_dom_cases(
             # 5. Cross-origin (sandbox='') iframe falls back to mouseWheel without hanging/error.
             await browser.interact(BrowserInteraction(action="scroll", x=220, y=150, delta_y=60))
             await anyio.sleep(0.1)
+
+            # 5b. Negative scroll ranges (column-reverse vertical & RTL horizontal) scroll from 0.
+            await browser.interact(BrowserInteraction(action="scroll", x=50, y=280, delta_y=-90))
+            await anyio.sleep(0.25)
+            await browser.interact(BrowserInteraction(action="scroll", x=180, y=280, delta_x=-90))
+            await anyio.sleep(0.25)
+            rev_y, rtl_x = await browser._evaluate(
+                "[Math.round(document.getElementById('rev').scrollTop),"
+                " Math.round(document.getElementById('rtl').scrollLeft)]"
+            )  # type: ignore[misc]
+            assert rev_y == -90 and rtl_x == -90
 
             # 6. Direction reversal cancels remaining positive tail immediately.
             await browser._evaluate("window.scrollTo(0, 500)")
