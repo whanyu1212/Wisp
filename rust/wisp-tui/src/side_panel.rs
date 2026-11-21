@@ -1224,6 +1224,13 @@ pub(crate) fn render_with_preview(
         // addresses, or why the live browser cannot open in this project.
         let start_page = state.browser_viewport.is_none();
         let untrusted = start_page && state.live_browser_untrusted();
+        let footer_height = usize::from(
+            panel.overlay_open() || interacting || live.is_some() || (start_page && !untrusted),
+        );
+        let body = Rect {
+            height: inner.height.saturating_sub(footer_height as u16),
+            ..inner
+        };
         let mut rows = PanelRows::default();
         browser::push_controls(&mut rows, interacting, panel.expanded, width, palette);
         let address = panel.browser_address.as_ref();
@@ -1236,6 +1243,7 @@ pub(crate) fn render_with_preview(
                 &mut rows,
                 state.browser_recent_addresses(),
                 panel.browser_recent(),
+                usize::from(body.height),
                 width,
                 palette,
             );
@@ -1244,13 +1252,6 @@ pub(crate) fn render_with_preview(
             live.and_then(|viewport| {
                 browser::push_toolbar(&mut rows, Some(viewport), address, inner.width, palette)
             })
-        };
-        let footer_height = usize::from(
-            panel.overlay_open() || interacting || live.is_some() || (start_page && !untrusted),
-        );
-        let body = Rect {
-            height: inner.height.saturating_sub(footer_height as u16),
-            ..inner
         };
         panel.scroll.set(0);
         *panel.painted.borrow_mut() = Painted {

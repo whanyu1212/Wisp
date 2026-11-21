@@ -202,21 +202,32 @@ fn address_text(
 /// List the recent addresses under the start page's toolbar, newest first, with the
 /// row Up/Down selected marked. Each row opens its address when clicked. Nothing is
 /// drawn while there are none.
+///
+/// The list fills what is left of a body `height` rows tall. When the addresses do
+/// not all fit, it shows a window from the top that slides down just far enough to
+/// keep the selected row in view; only the rows drawn take clicks.
 pub(super) fn push_recents(
     rows: &mut PanelRows,
     addresses: &[String],
     selected: Option<usize>,
+    height: usize,
     width: usize,
     palette: Palette,
 ) {
     if addresses.is_empty() {
         return;
     }
+    // The section's blank separator and its heading come first.
+    let fits = height.saturating_sub(rows.lines.len() + 2).max(1);
+    let first = selected
+        .map_or(0, |index| (index + 1).saturating_sub(fits))
+        .min(addresses.len().saturating_sub(fits));
+    let shown = first..addresses.len().min(first + fits);
     let mut lines = vec![Line::styled(
         ui::clip_columns("Recent", width),
         Style::default().add_modifier(Modifier::BOLD),
     )];
-    for (index, address) in addresses.iter().enumerate() {
+    for (index, address) in shown.clone().zip(&addresses[shown.clone()]) {
         let text = ui::clip_columns(
             &sanitize_for_terminal(shown_address(address)),
             width.saturating_sub(2),
@@ -232,9 +243,9 @@ pub(super) fn push_recents(
         });
     }
     rows.section(Section::BrowserRecents, lines);
-    for index in 0..addresses.len() {
+    for (row, index) in shown.enumerate() {
         rows.action(
-            index + 1,
+            row + 1,
             PanelAction::BrowserControl(BrowserControl::Recent(index)),
         );
     }

@@ -31,9 +31,14 @@ impl LiveUi {
             && !self.state.live_browser_untrusted()
     }
 
-    /// Whether the address field can take focus: on a live page or the start page.
+    /// Whether the address field can take focus: on a live page or the start page,
+    /// while no approval or trust decision is waiting for the keys.
     pub(super) fn browser_address_editable(&self) -> bool {
-        self.live_browser_visible() || self.browser_start_visible()
+        let decision_pending = matches!(
+            self.state.view_status,
+            ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
+        );
+        !decision_pending && (self.live_browser_visible() || self.browser_start_visible())
     }
 
     pub(super) fn browser_address_active(&self) -> bool {
@@ -46,7 +51,8 @@ impl LiveUi {
 
     /// Prepare the start page after its view was opened: focus an empty address field
     /// and ask the backend for its trust and recent addresses. An open page keeps its
-    /// focus, and an untrusted project gets no address field.
+    /// focus, an untrusted project gets no address field, and a pending decision keeps
+    /// the keys.
     pub(super) async fn begin_browser_start(
         &mut self,
         writer: &mpsc::Sender<WriterMessage>,
@@ -58,7 +64,7 @@ impl LiveUi {
         {
             return Ok(LoopControl::Continue);
         }
-        if self.browser_start_visible() && !self.browser_address_active() {
+        if self.browser_address_editable() && !self.browser_address_active() {
             self.side_panel.focus_browser_address("");
         }
         self.render_pending = true;

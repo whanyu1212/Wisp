@@ -1781,14 +1781,19 @@ impl LiveUi {
             .iter()
             .any(|effect| matches!(effect, UiEffect::ReplaceTranscript));
         let page_open = self.state.browser_viewport.is_some();
+        let decision_pending = matches!(
+            self.state.view_status,
+            ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
+        );
         if self.state.view_status != ViewStatus::Idle
             || self.state.current_command.is_some()
             || transcript_replaced
             || !page_open
         {
             self.exit_browser_takeover();
-            // The start page keeps its field through a run; Enter waits for it to end.
-            if page_open {
+            // The start page keeps its field through a run, where Enter waits for the
+            // run to end, but not through a decision, which needs the keys.
+            if page_open || decision_pending {
                 self.clear_browser_address();
             }
         } else if is_browser_viewport_update && self.browser_takeover_active() {

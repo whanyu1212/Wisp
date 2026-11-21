@@ -2,7 +2,7 @@
 //! untrusted-project explanation shown while no live page is open.
 
 use super::*;
-use crate::reducer::BrowserAddresses;
+use crate::reducer::{ActiveCommand, ActiveCommandType, BrowserAddresses};
 use crate::side_panel::PanelMode;
 use crossterm::event::MouseButton;
 use ratatui::{backend::TestBackend, buffer::Buffer};
@@ -33,7 +33,12 @@ fn ui_with(report: Option<(bool, &[&str])>) -> LiveUi {
 }
 
 fn draw(ui: &mut LiveUi) -> (Buffer, Vec<String>) {
-    let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT)).unwrap();
+    draw_rows(ui, HEIGHT)
+}
+
+/// Draw on a terminal `height` rows tall and [`WIDTH`] columns wide.
+fn draw_rows(ui: &mut LiveUi, height: u16) -> (Buffer, Vec<String>) {
+    let mut terminal = Terminal::new(TestBackend::new(WIDTH, height)).unwrap();
     ui.draw(
         &mut terminal,
         &ConnectionInfo {
@@ -42,7 +47,7 @@ fn draw(ui: &mut LiveUi) -> (Buffer, Vec<String>) {
     )
     .unwrap();
     let buffer = terminal.backend().buffer().clone();
-    let rows = (0..HEIGHT)
+    let rows = (0..height)
         .map(|y| (0..WIDTH).map(|x| buffer[(x, y)].symbol()).collect())
         .collect();
     (buffer, rows)
@@ -278,6 +283,107 @@ async fn click_recent_opens_it() {
     assert_eq!(live_open(&commands), [RECENTS[2]]);
 }
 
+/// The most recent addresses the backend reports, `site00.test` first.
+fn full_recents() -> Vec<String> {
+    (0..20)
+        .map(|index| format!("https://site{index:02}.test/page"))
+        .collect()
+}
+
+/// A terminal too short for every recent address under the toolbar.
+const SHORT: u16 = 24;
+const FOOTER: &str = "Enter open · ↑↓ recent · Esc back to prompt";
+
+/// The recent addresses painted under the heading, top to bottom.
+fn shown_recents(rows: &[String]) -> Vec<String> {
+    let (column, heading) = find(rows, "Recent").expect("Recent heading");
+    rows[usize::from(heading) + 1..]
+        .iter()
+        .map(|row| {
+            row.chars()
+                .skip(usize::from(column) + 2)
+                .collect::<String>()
+        })
+        .take_while(|text| text.starts_with("site"))
+        .map(|text| text.split_whitespace().next().unwrap().to_owned())
+        .collect()
+}
+
+#[tokio::test]
+async fn recents_follow_selection() {
+    let recents = full_recents();
+    let addresses: Vec<&str> = recents.iter().map(String::as_str).collect();
+    let mut ui = ui_with(Some((true, &addresses)));
+    open_from_tab(&mut ui).await;
+    let (_, rows) = draw_rows(&mut ui, SHORT);
+    let fits = shown_recents(&rows).len();
+    assert!((1..20).contains(&fits), "{}", rows.join("\n"));
+
+    for _ in 0..20 {
+        send(&mut ui, key(KeyCode::Down)).await;
+    }
+    let (_, rows) = draw_rows(&mut ui, SHORT);
+    let screen = rows.join("\n");
+    assert!(find(&rows, "▸ site19.test/page").is_some(), "{screen}");
+    assert!(find(&rows, "[‹] [›] [↻]").is_some(), "{screen}");
+    assert!(find(&rows, FOOTER).is_some(), "{screen}");
+    let shown = shown_recents(&rows);
+    assert_eq!(shown.len(), fits, "{screen}");
+    assert_eq!(shown.last().map(String::as_str), Some("site19.test/page"));
+
+    for _ in 0..19 {
+        send(&mut ui, key(KeyCode::Up)).await;
+    }
+    let (_, rows) = draw_rows(&mut ui, SHORT);
+    assert!(find(&rows, "▸ site00.test/page").is_some());
+    assert!(find(&rows, "[‹] [›] [↻]").is_some());
+    assert!(find(&rows, FOOTER).is_some());
+
+    for _ in 0..19 {
+        send(&mut ui, key(KeyCode::Down)).await;
+    }
+    let commands = send(&mut ui, key(KeyCode::Enter)).await;
+    assert_eq!(live_open(&commands), [recents[19].as_str()]);
+}
+
+#[tokio::test]
+async fn click_scrolled_recent() {
+    let recents = full_recents();
+    let addresses: Vec<&str> = recents.iter().map(String::as_str).collect();
+    let mut ui = ui_with(Some((true, &addresses)));
+    open_from_tab(&mut ui).await;
+    for _ in 0..20 {
+        send(&mut ui, key(KeyCode::Down)).await;
+    }
+    let (_, rows) = draw_rows(&mut ui, SHORT);
+    let top = shown_recents(&rows)[0].clone();
+    assert_ne!(top, "site00.test/page", "the list did not scroll");
+    let (column, row) = find(&rows, &top).unwrap();
+
+    let commands = send(&mut ui, left_click(column, row)).await;
+
+    assert_eq!(live_open(&commands), [format!("https://{top}")]);
+}
+
+#[tokio::test]
+async fn tall_panel_shows_every_recent() {
+    let recents = full_recents();
+    let addresses: Vec<&str> = recents.iter().map(String::as_str).collect();
+    let mut ui = ui_with(Some((true, &addresses)));
+    open_from_tab(&mut ui).await;
+    let every: Vec<String> = recents
+        .iter()
+        .map(|address| address["https://".len()..].to_owned())
+        .collect();
+
+    for _ in 0..20 {
+        send(&mut ui, key(KeyCode::Down)).await;
+    }
+    let (_, rows) = draw_rows(&mut ui, 60);
+
+    assert_eq!(shown_recents(&rows), every);
+}
+
 #[tokio::test]
 async fn escape_returns_to_composer() {
     for code in [KeyCode::Esc, KeyCode::Char('c')] {
@@ -387,6 +493,164 @@ async fn run_blocks_start_page_enter() {
         Some("Wait for the active run to finish before controlling the browser.")
     );
     assert!(ui.browser_address_active());
+}
+
+/// Apply a backend event shaped as the wire sends it.
+async fn backend_event(ui: &mut LiveUi, payload: serde_json::Value) {
+    let event = BackendEvent::from_projection_value(&payload).unwrap();
+    let (writer, _receiver) = mpsc::channel(8);
+    ui.dispatch(
+        UiAction::BackendEvent(event),
+        &writer,
+        MAX_APPLICATION_FRAME_BYTES,
+    )
+    .await
+    .unwrap();
+}
+
+fn approval_requested() -> serde_json::Value {
+    serde_json::json!({
+        "type": "tool.approval.requested",
+        "timestamp": "2026-11-20T12:35:10Z",
+        "call_id": "call-1",
+        "name": "bash",
+        "arguments": {"command": "ls"},
+        "safety": "command",
+    })
+}
+
+fn trust_requested() -> serde_json::Value {
+    serde_json::json!({
+        "type": "trust.requested",
+        "timestamp": "2026-11-20T12:35:10Z",
+        "request_id": "trust-1",
+        "project_path": "/project",
+    })
+}
+
+/// The start page's field is focused with a draft when a run asks for a decision.
+async fn start_page_awaiting(request: serde_json::Value) -> LiveUi {
+    let mut ui = ui_with(Some((true, &RECENTS)));
+    open_from_tab(&mut ui).await;
+    type_text(&mut ui, "ab").await;
+    backend_event(&mut ui, request).await;
+    // Approving needs the prompt on screen.
+    draw(&mut ui);
+    ui
+}
+
+#[tokio::test]
+async fn decision_keys_answer_decision() {
+    for (request, key_char, kind, field, answer) in [
+        (approval_requested(), 'y', "approval", "approved", true),
+        (approval_requested(), 'n', "approval", "approved", false),
+        (trust_requested(), 'y', "trust", "trusted", true),
+        (trust_requested(), 'n', "trust", "trusted", false),
+    ] {
+        let mut ui = start_page_awaiting(request).await;
+        assert!(!ui.browser_address_active());
+
+        let commands = send(&mut ui, key(KeyCode::Char(key_char))).await;
+
+        assert_eq!(commands.len(), 1, "{kind} {key_char}: {commands:?}");
+        assert_eq!(commands[0]["type"], kind);
+        assert_eq!(commands[0][field], answer);
+        // The field gave up focus and took none of the keys.
+        assert!(!ui.side_panel.browser_address_focused());
+        assert_eq!(ui.editor.text(), "draft for the agent");
+    }
+}
+
+#[tokio::test]
+async fn decision_enter_opens_nothing() {
+    for (request, kind) in [
+        (approval_requested(), "approval"),
+        (trust_requested(), "trust"),
+    ] {
+        let mut ui = start_page_awaiting(request).await;
+        // Down highlights the decision's first choice, not a recent address.
+        send(&mut ui, key(KeyCode::Down)).await;
+        draw(&mut ui);
+
+        let commands = send(&mut ui, key(KeyCode::Enter)).await;
+
+        assert!(live_open(&commands).is_empty(), "{commands:?}");
+        assert_eq!(commands.len(), 1, "{commands:?}");
+        assert_eq!(commands[0]["type"], kind);
+        assert_eq!(ui.side_panel.browser_recent(), None);
+    }
+}
+
+#[tokio::test]
+async fn decision_outranks_focused_field() {
+    // Focus left on the field, as if no event had dismissed it, still yields to the
+    // decision.
+    let mut ui = ui_with(None);
+    open_from_tab(&mut ui).await;
+    ui.state.view_status = ViewStatus::WaitingForTrust;
+    ui.state.pending_trust_request_id = Some("trust-1".into());
+    assert!(ui.side_panel.browser_address_focused());
+    assert!(!ui.browser_address_active());
+
+    let commands = send(&mut ui, key(KeyCode::Char('n'))).await;
+
+    assert_eq!(commands.len(), 1, "{commands:?}");
+    assert_eq!(commands[0]["type"], "trust");
+    assert_eq!(commands[0]["trusted"], false);
+}
+
+#[tokio::test]
+async fn decision_keeps_field_unfocused() {
+    let mut ui = ui_with(None);
+    open_from_tab(&mut ui).await;
+    send(&mut ui, key(KeyCode::Esc)).await;
+    ui.state.view_status = ViewStatus::WaitingForTrust;
+    ui.state.pending_trust_request_id = Some("trust-1".into());
+    let (writer, _receiver) = mpsc::channel(8);
+
+    ui.begin_browser_start(&writer, MAX_APPLICATION_FRAME_BYTES)
+        .await
+        .unwrap();
+    assert!(!ui.side_panel.browser_address_focused());
+
+    // Ctrl+L leaves the field alone too.
+    send(
+        &mut ui,
+        Input::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL)),
+    )
+    .await;
+    assert!(!ui.side_panel.browser_address_focused());
+}
+
+#[tokio::test]
+async fn run_keeps_field_focused() {
+    let mut ui = ui_with(None);
+    open_from_tab(&mut ui).await;
+    type_text(&mut ui, "ab").await;
+    ui.state.view_status = ViewStatus::Running;
+    ui.state.current_command = Some(ActiveCommand {
+        id: "prompt-1".into(),
+        command_type: ActiveCommandType::Prompt,
+    });
+
+    backend_event(
+        &mut ui,
+        serde_json::json!({
+            "type": "tool.call",
+            "call_id": "read-1",
+            "name": "read",
+            "arguments": {"path": "README.md"},
+        }),
+    )
+    .await;
+    draw(&mut ui);
+
+    assert!(ui.browser_address_active());
+    type_text(&mut ui, "c").await;
+    assert_eq!(
+        ui.side_panel.browser_address_editor().unwrap().text(),
+        "abc"
+    );
 }
 
 #[tokio::test]
