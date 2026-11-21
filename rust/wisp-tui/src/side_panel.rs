@@ -173,6 +173,7 @@ pub(crate) enum Disclosure {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PanelAction {
+    CloseBrowser,
     ToggleExpand,
     Toggle(Disclosure),
     Open(Target),
@@ -732,7 +733,7 @@ impl SidePanel {
     fn sections(&self, _state: &UiState) -> Vec<Section> {
         let mut sections = Vec::new();
         for hit in &self.painted.borrow().actions {
-            if matches!(hit.action, PanelAction::ToggleExpand) {
+            if hit.section == Section::Controls {
                 continue;
             }
             if !sections.contains(&hit.section) {
@@ -747,9 +748,7 @@ impl SidePanel {
             .borrow()
             .actions
             .iter()
-            .filter(|hit| {
-                hit.section == section && !matches!(hit.action, PanelAction::ToggleExpand)
-            })
+            .filter(|hit| hit.section == section && section != Section::Controls)
             .map(|hit| hit.action.clone())
             .collect()
     }
@@ -786,6 +785,10 @@ impl SidePanel {
 
     pub(crate) fn activate(&mut self, action: PanelAction) -> OverlayKey {
         match action {
+            PanelAction::CloseBrowser => {
+                self.close();
+                OverlayKey::Close
+            }
             PanelAction::ToggleExpand => {
                 self.toggle_expanded();
                 OverlayKey::Moved
@@ -1257,7 +1260,7 @@ pub(crate) fn render_with_preview(
             ..inner
         };
         let mut rows = PanelRows::default();
-        browser::push_controls(&mut rows, interacting, panel.expanded, width, palette);
+        browser::push_controls(&mut rows, panel, width, palette);
         let address = panel.browser_address.as_ref();
         let chrome_cursor = if untrusted {
             browser::push_untrusted(&mut rows, width, palette);
@@ -1386,7 +1389,7 @@ pub(crate) fn render_with_preview(
     let focus = Focus::of(state);
     let mut rows = PanelRows::default();
     if show_controls {
-        browser::push_controls(&mut rows, false, panel.expanded, width, palette);
+        browser::push_controls(&mut rows, panel, width, palette);
     }
     let (header, branch_row) = header_lines(state, bindings, width, palette);
     rows.section(Section::Header, header);
