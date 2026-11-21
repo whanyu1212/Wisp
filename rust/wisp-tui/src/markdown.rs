@@ -51,6 +51,7 @@ pub enum InlineStyle {
     ToolPath,
     ToolArgument,
     ToolStatus,
+    ApprovalTag,
     /// Words that differ between a deleted diff line and its replacement.
     DiffChange,
     DiffGutter,

@@ -127,12 +127,10 @@ impl ProcessDisplayState {
                 ToolStatus::Running
             }
             Self::Completed => ToolStatus::Done,
-            Self::Cancelled
-            | Self::Gone
-            | Self::PollDenied
-            | Self::CancelDenied
-            | Self::PollInterrupted
-            | Self::CancelInterrupted => ToolStatus::Cancelled,
+            Self::PollDenied | Self::CancelDenied => ToolStatus::Denied,
+            Self::Cancelled | Self::Gone | Self::PollInterrupted | Self::CancelInterrupted => {
+                ToolStatus::Cancelled
+            }
             Self::Failed | Self::TimedOut | Self::PollFailed | Self::CancelFailed => {
                 ToolStatus::Error
             }
@@ -312,6 +310,8 @@ pub struct ToolCardSnapshot {
     pub failure_code: Option<String>,
     /// A bounded explanation from typed result facts, independent of retained output.
     failure_reason: Option<String>,
+    /// A reported nonzero shell exit establishes that the command actually ran.
+    command_exited_nonzero: bool,
     pub retryable: bool,
     pub detail_source: ToolDetailSource,
     pub structured_detail: DetailAvailability,
@@ -409,6 +409,7 @@ impl ToolCardSnapshot {
             backend_truncated: false,
             failure_code: None,
             failure_reason: None,
+            command_exited_nonzero: false,
             retryable: false,
             detail_source: input.detail_source.clone(),
             structured_detail: DetailAvailability::None,
@@ -547,8 +548,10 @@ impl ToolCardSnapshot {
             return false;
         }
         self.status = tool_result_status(input);
-        self.failure_reason = crate::tool_presentation::failure_reason(
-            input.is_error,
+        self.command_exited_nonzero =
+            self.name == "bash" && input.exit_code.is_some_and(|code| code != 0);
+        self.failure_reason = crate::tool_presentation::inline_failure_reason(
+            &self.name,
             input.exit_code,
             input.failure_code.as_deref(),
             input.process_state.as_deref(),
@@ -803,10 +806,20 @@ impl ToolCardSnapshot {
             crate::script_card::CODEMODE => ("Scripting", "Scripted", "Script"),
             crate::script_card::SPAWN_AGENT => ("Delegating", "Delegated", "Delegate"),
             _ if self.mcp_target().is_some() => ("Calling", "Called", "Call"),
-            name => return clip_chars(&one_line(name), TOOL_LABEL_MAX_CHARS),
+            name => {
+                let name = clip_chars(&one_line(name), TOOL_LABEL_MAX_CHARS);
+                return if self.status == ToolStatus::Error {
+                    format!("{name} failed:")
+                } else {
+                    name
+                };
+            }
         };
         match self.status {
             ToolStatus::Requested | ToolStatus::Running => in_flight,
+            ToolStatus::Error if !self.command_exited_nonzero => {
+                return format!("{never_ran} failed:");
+            }
             ToolStatus::Done | ToolStatus::Error => finished,
             ToolStatus::AwaitingApproval | ToolStatus::Denied | ToolStatus::Cancelled => never_ran,
         }
@@ -1273,7 +1286,7 @@ impl ProcessCardSnapshot {
     pub fn status_note(&self) -> Option<&'static str> {
         match self.display_state {
             ProcessDisplayState::Running => Some("running"),
-            ProcessDisplayState::Completed if self.exit_code == Some(0) => Some("passed"),
+            ProcessDisplayState::Completed if self.exit_code == Some(0) => Some("exit 0"),
             ProcessDisplayState::Completed => Some("completed"),
             ProcessDisplayState::Failed => Some("failed"),
             ProcessDisplayState::PollAwaitingApproval => Some("poll awaiting approval"),
@@ -1584,6 +1597,9 @@ pub fn process_call_identity(name: &str, arguments: &Value) -> Option<ProcessCal
 pub fn tool_result_status(result: &ToolResultInput) -> ToolStatus {
     if result.process_state.as_deref() == Some("cancelled") {
         ToolStatus::Cancelled
+    } else if result.is_error && crate::tool_presentation::is_denial(result.failure_code.as_deref())
+    {
+        ToolStatus::Denied
     } else if result.is_error
         || result.exit_code.is_some_and(|code| code != 0)
         || matches!(
@@ -1613,6 +1629,10 @@ fn process_result_state(
         Some("failed") => ProcessDisplayState::Failed,
         Some("timed_out") => ProcessDisplayState::TimedOut,
         Some("cancelled") => ProcessDisplayState::Cancelled,
+        _ if tool_result_status(result) == ToolStatus::Denied => match operation {
+            ProcessOperation::Poll => ProcessDisplayState::PollDenied,
+            ProcessOperation::Cancel => ProcessDisplayState::CancelDenied,
+        },
         _ if tool_result_status(result) == ToolStatus::Error => match operation {
             ProcessOperation::Poll => ProcessDisplayState::PollFailed,
             ProcessOperation::Cancel => ProcessDisplayState::CancelFailed,
@@ -2881,16 +2901,16 @@ mod tests {
     #[test]
     fn failure_notes_use_typed_facts_even_without_an_output_envelope() {
         for (error, code, exit, state, expected) in [
-            (true, Some("stale_input"), None, None, "Stale input"),
+            (true, Some("stale_input"), None, None, "stale input"),
             (
                 true,
                 Some("invalid_arguments"),
                 None,
                 None,
-                "Invalid arguments",
+                "invalid arguments",
             ),
-            (false, None, Some(101), None, "Command exited 101"),
-            (false, None, Some(124), Some("timed_out"), "Timed out"),
+            (false, None, Some(101), None, "command exited 101"),
+            (false, None, Some(124), Some("timed_out"), "timed out"),
         ] {
             let mut card = ToolCardSnapshot::requested(
                 &ToolCallInput {

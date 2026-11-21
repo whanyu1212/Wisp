@@ -98,19 +98,20 @@ complete, pipe-enclosed rows with the same number of columns renders as a table 
 Single rows, mismatched columns, and pipe syntax inside code remain literal.
 
 Tool calls read as a list of actions. Each is one line: a status mark (`•` done, `✗` failed, `⊘`
-denied or cancelled, `?` awaiting approval, a spinner while it runs), a verb and what it acted on,
+denied or cancelled, a spinner while it runs), a verb and what it acted on,
 such as `• Ran cargo test 3.2s` or `• Read src/retry.rs`, then how long it took. Shell commands
 are shown as typed, with syntax highlighting. Consecutive reads, searches and listings fold into
 one `Explored` line, successful repeated commands into `Ran N commands`, adjacent background
-processes that exited cleanly into `Background N commands · passed`, and repeated MCP calls
+processes that exited cleanly into `Background N commands · exit 0`, and repeated MCP calls
 into one line with a count; opening a group hangs its calls under it on `└` rows. Exploration and
 MCP groups with non-success states spell out their outcomes, such as `11 succeeded · 1 failed`,
 with denied, cancelled, pending, running and awaiting-approval calls counted separately. A narrow
 row may show `1/12 failed`; that does not claim the other 11 succeeded. A successful retry never
 erases the earlier failed attempt.
 
-Collapsed calls stack with no blank row between them. Failed calls name the classified reason,
-such as `Command exited 101`, `Stale input` or `Invalid arguments`. A failed command also shows
+Collapsed calls stack with no blank row between them. A call waiting for your decision shows an
+`awaiting approval` tag; the tag disappears as soon as the wait ends. A stale edit reads
+`Edit failed: src/main.rs · stale input`. A command that actually ran can say `Ran cargo test · exit 1`. A failed command also shows
 the last line it printed; a rejected invocation shows its first diagnostic line. Opening the card
 retains the output and recovery advice. A failed check remains a failed command even when its
 failure was useful during development. Select a line with `F6` and press `→`, or click it, to show

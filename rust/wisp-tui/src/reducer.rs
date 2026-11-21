@@ -9571,6 +9571,7 @@ mod tests {
                         tool: "read".into(),
                         arguments: serde_json::json!({"path": "file"}),
                         state: child_state,
+                        failure_code: None,
                         auto_approved: false,
                         approval_note: None,
                         error: reason.map(str::to_owned),

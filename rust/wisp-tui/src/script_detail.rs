@@ -584,7 +584,7 @@ fn push_calls(lines: &mut Vec<DetailLine>, card: &ToolCardSnapshot, script: &Scr
             action.push_str(&crate::tool_cards::format_duration(u64::from(duration)));
         }
         let tone = match call.state {
-            ScriptCallState::Failed => Tone::Error,
+            ScriptCallState::Failed | ScriptCallState::Denied => Tone::Error,
             ScriptCallState::Unfinished => Tone::Muted,
             ScriptCallState::Running | ScriptCallState::Done => Tone::Plain,
         };

@@ -76,6 +76,7 @@ pub struct ScriptCall {
     /// backend left them out.
     pub arguments: Value,
     pub state: ScriptCallState,
+    pub failure_code: Option<String>,
     pub auto_approved: bool,
     pub approval_note: Option<String>,
     /// Why it failed, on one line.
@@ -88,6 +89,7 @@ pub enum ScriptCallState {
     Running,
     Done,
     Failed,
+    Denied,
     /// The script ended before the call finished.
     Unfinished,
 }
@@ -226,6 +228,7 @@ impl ScriptCard {
             tool: clip(&one_line(tool), CALL_NAME_MAX_CHARS),
             arguments,
             state: ScriptCallState::Running,
+            failure_code: None,
             auto_approved: false,
             approval_note: None,
             error: None,
@@ -307,6 +310,14 @@ impl ScriptCard {
                 if self.omitted > 0 { "known " } else { "" }
             ));
         }
+        let denied = self
+            .calls
+            .iter()
+            .filter(|call| call.state == ScriptCallState::Denied)
+            .count();
+        if denied > 0 {
+            outcomes.push(format!("{denied} denied"));
+        }
         if unfinished > 0 {
             outcomes.push(format!("{unfinished} unfinished"));
         }
@@ -364,7 +375,11 @@ impl ScriptCall {
             .get("error")
             .and_then(Value::as_str)
             .map(|error| clip(&one_line(error), CALL_TEXT_MAX_CHARS));
+        let failure_code = record.get("failure_code").and_then(Value::as_str);
         let state = match (is_error, error.as_deref()) {
+            (true, _) if crate::tool_presentation::is_denial(failure_code) => {
+                ScriptCallState::Denied
+            }
             (false, _) => ScriptCallState::Done,
             (true, Some(error)) if ENDED_FIRST.contains(&error) => ScriptCallState::Unfinished,
             (true, _) => ScriptCallState::Failed,
@@ -374,12 +389,14 @@ impl ScriptCall {
             tool: clip(&one_line(tool), CALL_NAME_MAX_CHARS),
             arguments: call_arguments(name, target, record.get("arguments")),
             state,
+            failure_code: failure_code.map(|code| clip(code, CALL_NAME_MAX_CHARS)),
             auto_approved: record.get("auto_approved").and_then(Value::as_bool) == Some(true),
             approval_note: record
                 .get("approval_note")
                 .and_then(Value::as_str)
                 .map(|note| clip(&one_line(note), CALL_TEXT_MAX_CHARS)),
-            error: error.filter(|_| state == ScriptCallState::Failed),
+            error: error
+                .filter(|_| matches!(state, ScriptCallState::Failed | ScriptCallState::Denied)),
             duration_ms: record
                 .get("duration_ms")
                 .and_then(Value::as_u64)
@@ -465,6 +482,7 @@ mod tests {
             tool: tool.into(),
             arguments: Value::Null,
             state,
+            failure_code: None,
             auto_approved: false,
             approval_note: None,
             error: None,
