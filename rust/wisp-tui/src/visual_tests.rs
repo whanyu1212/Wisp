@@ -3176,3 +3176,71 @@ fn browse_selection_highlights_code_block_and_message_rows_with_selection_band()
     assert_eq!(message_selected[(4, first_code_y)].bg, band);
     assert_eq!(message_selected[(4, second_code_y)].bg, band);
 }
+
+#[test]
+fn turn_change_summary_styles_diff_counts_and_compacts_on_narrow_width() {
+    let mut ui = LiveUi::default();
+    ui.state.transcript.append_exchange("patch file".into());
+    let BackendEvent::ToolCall(call) = BackendEvent::from_projection_value(&json!({
+        "type": "tool.call",
+        "call_id": "edit-vis",
+        "name": "edit",
+        "arguments": {
+            "path": "src/app.rs",
+            "edits": [{"oldText": "old\n", "newText": "new1\nnew2\n"}]
+        }
+    }))
+    .unwrap() else {
+        panic!("tool call expected");
+    };
+    ui.state.transcript.observe_tool_call(call);
+    let BackendEvent::ToolResult(result) = BackendEvent::from_projection_value(&json!({
+        "type": "tool.result",
+        "message_entry_id": null,
+        "call_id": "edit-vis",
+        "name": "edit",
+        "output": "Applied 1 edit",
+        "is_error": false
+    }))
+    .unwrap() else {
+        panic!("tool result expected");
+    };
+    ui.state.transcript.observe_tool_result(*result);
+    ui.state.transcript.start_message(1);
+    ui.state.transcript.append_message_delta(1, "Done.");
+    ui.state.transcript.complete_message(1, "Done.".into());
+    assert!(
+        ui.state
+            .transcript
+            .attach_run_summary(transcript::RunTotals {
+                outcome: "completed".into(),
+                duration_ms: Some(41_000),
+                tool_calls: 3,
+                output_tokens: Some(310),
+                model_ms: Some(10_000),
+                mode: Some("build".into()),
+                model: Some("claude-opus-5-5".into()),
+                effort: Some("high".into()),
+            })
+    );
+
+    let palette = ui.palette();
+    let wide = draw(&mut ui, 110, 20);
+    let y = row_containing(&wide, "+2 −1 in 1 file");
+    let row = buffer_row(&wide, y);
+    assert!(row.contains("╰"), "{row}");
+    assert!(row.contains("+2 −1 in 1 file"), "{row}");
+    let plus_x = row.find("+2").unwrap() as u16;
+    // Account for multi-byte chars (`╰`, `·`) before `+2` by converting byte offset to display col.
+    let plus_col = unicode_width::UnicodeWidthStr::width(&row[..plus_x as usize]) as u16;
+    assert_eq!(wide[(plus_col, y)].fg, palette.success);
+    let minus_x = row.find("−1").unwrap();
+    let minus_col = unicode_width::UnicodeWidthStr::width(&row[..minus_x]) as u16;
+    assert_eq!(wide[(minus_col, y)].fg, palette.error);
+
+    // Narrow width drops tok/s and compacts `in 1 file` -> `1f` so `+2 −1` stays visible.
+    let narrow = draw(&mut ui, 64, 20);
+    let ny = row_containing(&narrow, "+2 −1 1f");
+    let nrow = buffer_row(&narrow, ny);
+    assert!(!nrow.contains("tok/s"), "{nrow}");
+}

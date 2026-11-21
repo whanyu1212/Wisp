@@ -2248,7 +2248,10 @@ async fn keyboard_browse_distinguishes_group_header_from_first_member() {
                 "Ran 2 commands"
             }
             BrowseTarget::Entry(_) => "echo one",
-            BrowseTarget::Output(_) | BrowseTarget::Message(_) | BrowseTarget::CodeBlock { .. } => {
+            BrowseTarget::Output(_)
+            | BrowseTarget::Message(_)
+            | BrowseTarget::CodeBlock { .. }
+            | BrowseTarget::RunSummary(_) => {
                 unreachable!("this fixture has only tool cards")
             }
         };

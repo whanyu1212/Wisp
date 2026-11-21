@@ -37,6 +37,8 @@ pub(crate) struct DiffReview {
     reopen_key: Option<u64>,
     /// Whether the last layout set the sides side by side, which needs the width.
     split_shown: bool,
+    /// Land on the file's last hunk once the next layout builds its rows.
+    pending_last_hunk: bool,
 }
 
 #[derive(Debug)]
@@ -79,6 +81,13 @@ impl DiffReview {
         self.top = 0;
         self.signature = None;
         self.rows.clear();
+        self.pending_last_hunk = false;
+    }
+
+    /// Reset for a newly selected file and land on its last hunk once laid out.
+    pub fn reset_to_last_hunk(&mut self) {
+        self.reset();
+        self.pending_last_hunk = true;
     }
 
     pub fn scroll(&mut self, delta: i32) {
@@ -98,7 +107,9 @@ impl DiffReview {
         self.scroll(self.height.saturating_sub(1).max(1) as i32 * if forward { 1 } else { -1 });
     }
 
-    pub fn jump_hunk(&mut self, forward: bool) {
+    /// Move to the next or previous hunk in this file. Returns `false` when already at
+    /// the last (or first) hunk so the caller can step across files.
+    pub fn jump_hunk(&mut self, forward: bool) -> bool {
         let target = if forward {
             self.rows
                 .iter()
@@ -114,6 +125,16 @@ impl DiffReview {
                 .map(|(i, _)| i)
         };
         if let Some(target) = target {
+            self.top = target;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Position the view on the last hunk of the current file once laid out.
+    pub fn jump_last_hunk(&mut self) {
+        if let Some(target) = self.rows.iter().rposition(|row| row.hunk) {
             self.top = target;
         }
     }
@@ -162,19 +183,24 @@ impl DiffReview {
                 self.hunk_bars,
                 palette,
             );
-            self.top = anchor
-                .and_then(|(key, offset)| {
-                    self.rows
-                        .iter()
-                        .rposition(|row| {
-                            (row.key == key && row.offset <= offset)
-                                || row
-                                    .paired
-                                    .is_some_and(|(paired, start)| paired == key && start <= offset)
-                        })
-                        .or_else(|| self.rows.iter().rposition(|row| row.key <= key))
-                })
-                .unwrap_or(0);
+            if self.pending_last_hunk {
+                self.pending_last_hunk = false;
+                self.jump_last_hunk();
+            } else {
+                self.top = anchor
+                    .and_then(|(key, offset)| {
+                        self.rows
+                            .iter()
+                            .rposition(|row| {
+                                (row.key == key && row.offset <= offset)
+                                    || row.paired.is_some_and(|(paired, start)| {
+                                        paired == key && start <= offset
+                                    })
+                            })
+                            .or_else(|| self.rows.iter().rposition(|row| row.key <= key))
+                    })
+                    .unwrap_or(0);
+            }
             self.signature = Some(signature);
         }
         self.height = height.max(1);

@@ -13,10 +13,11 @@ const MAX_CHORD_CHARS: usize = 64;
 const MAX_DIAGNOSTIC_CHARS: usize = 512;
 /// Actions whose defaults were added or changed recently; user overrides take
 /// precedence over these defaults so existing configs never break on upgrade.
-const RECENT_DEFAULTS: [Action; 3] = [
+const RECENT_DEFAULTS: [Action; 4] = [
     Action::TogglePanel,
     Action::BackgroundCommand,
     Action::CopyLastResponse,
+    Action::TurnDiff,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -29,6 +30,7 @@ pub(crate) enum Action {
     ToggleTheme,
     Browse,
     CopyLastResponse,
+    TurnDiff,
     PageUp,
     PageDown,
     Home,
@@ -45,7 +47,7 @@ pub(crate) enum Action {
 }
 
 impl Action {
-    pub(crate) const ALL: [Self; 21] = [
+    pub(crate) const ALL: [Self; 22] = [
         Self::Submit,
         Self::AlternateSubmit,
         Self::Newline,
@@ -54,6 +56,7 @@ impl Action {
         Self::ToggleTheme,
         Self::Browse,
         Self::CopyLastResponse,
+        Self::TurnDiff,
         Self::PageUp,
         Self::PageDown,
         Self::Home,
@@ -86,6 +89,7 @@ impl Action {
             Self::ToggleTheme => "theme.toggle",
             Self::Browse => "transcript.browse",
             Self::CopyLastResponse => "transcript.copy_last_response",
+            Self::TurnDiff => "transcript.turn_diff",
             Self::PageUp => "transcript.page_up",
             Self::PageDown => "transcript.page_down",
             Self::Home => "transcript.home",
@@ -114,6 +118,7 @@ impl Action {
             Self::ToggleTheme => "Toggle the theme",
             Self::Browse => "Browse and copy transcript items",
             Self::CopyLastResponse => "Copy the last assistant response",
+            Self::TurnDiff => "Open /diff filtered to the latest editing turn",
             Self::PageUp => "Scroll transcript up one page",
             Self::PageDown => "Scroll transcript down one page",
             Self::Home => "Go to the start of the transcript",
@@ -287,6 +292,8 @@ impl Default for Bindings {
         chords[Browse.index()] = vec![Chord::exact(KeyCode::F(6), KeyModifiers::NONE, "F6")];
         chords[CopyLastResponse.index()] =
             vec![Chord::exact(KeyCode::Char('y'), KeyModifiers::ALT, "Alt+Y")];
+        chords[TurnDiff.index()] =
+            vec![Chord::exact(KeyCode::Char('g'), KeyModifiers::ALT, "Alt+G")];
         chords[FocusPanel.index()] = vec![Chord::exact(KeyCode::F(8), KeyModifiers::NONE, "F8")];
         chords[TogglePanel.index()] = vec![Chord::exact(
             KeyCode::Char('p'),
@@ -1116,5 +1123,22 @@ mod tests {
             Some(Action::ToggleTheme)
         );
         assert_eq!(overridden.label(Action::CopyLastResponse), "Unbound");
+    }
+
+    #[test]
+    fn turn_diff_defaults_to_alt_g_and_yields_to_user_overrides() {
+        let bindings = Bindings::default();
+        assert_eq!(
+            bindings.action(key(KeyCode::Char('g'), KeyModifiers::ALT)),
+            Some(Action::TurnDiff)
+        );
+        assert_eq!(bindings.label(Action::TurnDiff), "Alt+G");
+
+        let overridden = Bindings::from_json(r#"{"theme.toggle":["Alt+G"]}"#).unwrap();
+        assert_eq!(
+            overridden.action(key(KeyCode::Char('g'), KeyModifiers::ALT)),
+            Some(Action::ToggleTheme)
+        );
+        assert_eq!(overridden.label(Action::TurnDiff), "Unbound");
     }
 }

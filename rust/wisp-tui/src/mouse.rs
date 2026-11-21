@@ -304,6 +304,9 @@ pub(crate) struct FoldRow {
     /// The row is a diff's note on its hidden changes: a click opens the diff's review
     /// instead of folding the card.
     pub opens_review: bool,
+    /// The row is a turn summary with file edits: a click opens `/diff` filtered to this
+    /// 1-based turn number.
+    pub opens_turn_diff: Option<usize>,
 }
 
 /// A painted row of the welcome card's menu, which a click opens.
@@ -898,40 +901,41 @@ impl LiveUi {
     /// diff's note on its hidden changes opens the diff's review. While a response that could not be
     /// sent awaits keyboard recovery, a release only ends the selection: its notice explains
     /// what the next Ctrl+C does and must stay on screen.
-    pub(super) fn continue_transcript_selection(&mut self, event: MouseEvent) {
+    pub(super) fn continue_transcript_selection(&mut self, event: MouseEvent) -> Option<usize> {
         let Some((selection, _)) = &mut self.transcript_selection else {
-            return;
+            return None;
         };
         let changed = selection.extend(event);
         if !matches!(event.kind, MouseEventKind::Up(_)) {
             self.render_pending |= changed;
-            return;
+            return None;
         }
         let (selection, screen) = self.transcript_selection.take().expect("selection above");
         self.render_pending = true;
         if self.unsendable_current_response() {
-            return;
+            return None;
         }
         if selection.is_empty() {
             match selection.fold_target {
+                Some(target) if target.opens_turn_diff.is_some() => {
+                    return target.opens_turn_diff;
+                }
                 Some(target) if target.opens_review => {
                     self.open_diff_review(target.target.entry_id());
                 }
                 Some(target) => self.toggle_clicked_fold(target.target),
                 None => {}
             }
-            return;
+            return None;
         }
-        let Some(text) = screen
+        let text = screen
             .map(|screen| selection.text(&screen))
-            .filter(|text| !text.trim().is_empty())
-        else {
-            return;
-        };
+            .filter(|text| !text.trim().is_empty())?;
         self.notice = Some(match self.clipboard.copy(&text) {
             Ok(()) => format!("Copied {} chars to clipboard.", text.chars().count()),
             Err(error) => format!("Could not copy selection: {error}."),
         });
+        None
     }
 
     fn select_mouse_row(&mut self, kind: OverlayKind, index: usize) -> bool {
