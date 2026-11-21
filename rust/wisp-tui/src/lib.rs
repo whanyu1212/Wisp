@@ -213,11 +213,39 @@ const PEEK_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const BROWSER_TYPE_DEBOUNCE: Duration = Duration::from_millis(80);
 const BROWSER_TYPE_FLUSH_CHARS: usize = 64;
 const BROWSER_TYPE_MAX_CHARS: usize = 1_024;
-const LIVE_BROWSER_FRAME_INTERVAL: Duration = Duration::from_millis(33);
+/// The largest wheel distance, in pixels, that one browser scroll command carries.
+const BROWSER_SCROLL_MAX_DELTA: i64 = 10_000;
+/// How soon a live browser close the backend turned away is tried again.
+const LIVE_BROWSER_CLOSE_RETRY: Duration = Duration::from_millis(33);
+/// How soon a frame read the backend turned away at admission, such as while its
+/// command queue is full, is tried again. The browser itself is still running.
+const LIVE_FRAME_RETRY_INTERVAL: Duration = Duration::from_millis(33);
+/// The shortest gap between paints that a newly arrived live browser frame may
+/// cut the 16 ms paint cadence down to, so the frame shows without waiting
+/// for the next tick while the terminal is never repainted too often.
+const LIVE_FRAME_MIN_PAINT_INTERVAL: Duration = Duration::from_millis(8);
 const LIVE_BROWSER_RESIZE_INTERVAL: Duration = Duration::from_millis(100);
 const LIVE_BROWSER_TYPE_WINDOW: Duration = Duration::from_millis(12);
 const BROWSER_REFRESH_INTERVAL: Duration = Duration::from_millis(1_500);
 pub(crate) const BROWSER_DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
+/// Wheel input for the live page held back while an earlier scroll is in flight.
+///
+/// Chromium answers a wheel event only after handling it, so sending every wheel
+/// batch as its own command lets them queue up and the page keeps scrolling after
+/// the wheel stops. Wheel input that arrives while a scroll is in flight is summed
+/// here instead and sent as one scroll when that scroll finishes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingLiveScroll {
+    /// The latest pointer position on the page.
+    x: u32,
+    y: u32,
+    /// The summed vertical wheel distance in pixels, which may exceed what one
+    /// command carries. Terminal wheel input is vertical only.
+    delta_y: i64,
+    /// The page the wheel input was aimed at; input for another page is dropped.
+    page_revision: u64,
+}
 
 #[derive(Default)]
 struct BrowserTypingBuffer {
@@ -843,7 +871,14 @@ struct LiveUi {
     stream_pacer: stream_reveal::StreamPacer,
     stream_trace: Option<stream_reveal::StreamTrace>,
     browser_typing_buffer: BrowserTypingBuffer,
-    next_live_browser_frame: Option<std::time::Instant>,
+    pending_live_scroll: Option<PendingLiveScroll>,
+    /// When the next live browser close or resize may be sent.
+    next_live_browser_lifecycle: Option<std::time::Instant>,
+    /// A live browser frame was applied and has not been painted yet. The next
+    /// frame is requested only after it is, so frames never queue up behind paint.
+    live_frame_awaiting_paint: bool,
+    /// When a frame read the backend turned away may be sent again.
+    next_live_frame_retry: Option<std::time::Instant>,
     last_browser_click: Option<(u16, u16, std::time::Instant)>,
     next_browser_refresh: Option<std::time::Instant>,
 }
@@ -926,7 +961,10 @@ impl Default for LiveUi {
             stream_pacer: stream_reveal::StreamPacer::default(),
             stream_trace: None,
             browser_typing_buffer: BrowserTypingBuffer::default(),
-            next_live_browser_frame: None,
+            pending_live_scroll: None,
+            next_live_browser_lifecycle: None,
+            live_frame_awaiting_paint: false,
+            next_live_frame_retry: None,
             last_browser_click: None,
             next_browser_refresh: None,
         }
@@ -1725,6 +1763,12 @@ impl LiveUi {
             &action,
             UiAction::BackendEvent(BackendEvent::BrowserViewportUpdated(_))
         );
+        // The reducer ignores an agent tool's update while the live page shows, so
+        // only a live frame is one that waits for paint.
+        let is_live_frame = matches!(
+            &action,
+            UiAction::BackendEvent(BackendEvent::BrowserViewportUpdated(update)) if update.live
+        );
         let finished_call = match &action {
             UiAction::BackendEvent(BackendEvent::ToolResult(result)) => {
                 Some(result.call_id.clone())
@@ -1798,6 +1842,9 @@ impl LiveUi {
             }
         } else if is_browser_viewport_update && self.browser_takeover_active() {
             self.bump_browser_refresh_deadline();
+        }
+        if is_live_frame {
+            self.live_frame_awaiting_paint = true;
         }
         let history_window_direction = effects.iter().find_map(|effect| match effect {
             UiEffect::HistoryWindowChanged { older } => Some(*older),
@@ -2147,6 +2194,7 @@ impl LiveUi {
         terminal: &mut Terminal<B>,
         connection: &ConnectionInfo,
     ) -> Result<(), Error> {
+        self.live_frame_awaiting_paint = false;
         if let Ok(size) = terminal.size() {
             let live_browser = self
                 .state
@@ -5488,6 +5536,20 @@ impl LiveUi {
         writer: &mpsc::Sender<WriterMessage>,
         limit: usize,
     ) -> Result<LoopControl, Error> {
+        let control = self.apply_input(input, writer, limit).await?;
+        // Input can hide the panel or leave the Browser view, by key or by a tab
+        // click. Held wheel input is dropped then, not at the next poll, which may
+        // come only after the pane is shown again.
+        self.discard_stale_live_scroll();
+        Ok(control)
+    }
+
+    async fn apply_input(
+        &mut self,
+        input: Input,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
         // Typing, pasting, or resizing during the entrance shows the logo finished at once.
         // Before the welcome screen first shows, as at a trust prompt, the entrance waits.
         if matches!(input, Input::Key(_) | Input::Paste(_) | Input::Redraw)
@@ -6485,6 +6547,7 @@ impl LiveUi {
 
     fn exit_browser_takeover(&mut self) -> bool {
         self.clear_browser_takeover_buffers();
+        self.pending_live_scroll = None;
         if self.side_panel.exit_browser_interact() {
             self.render_pending = true;
             true
@@ -6499,11 +6562,18 @@ impl LiveUi {
         }
     }
 
+    /// Sends held-back wheel input and then buffered typing, so input that follows
+    /// cannot overtake either.
     async fn flush_browser_typing(
         &mut self,
         writer: &mpsc::Sender<WriterMessage>,
         limit: usize,
     ) -> Result<LoopControl, Error> {
+        while self.pending_live_scroll.is_some() {
+            if self.send_live_scroll(writer, limit).await? == LoopControl::Exit {
+                return Ok(LoopControl::Exit);
+            }
+        }
         let chunks = self.browser_typing_buffer.take_chunks();
         for text in chunks {
             self.bump_browser_refresh_deadline();
@@ -6520,6 +6590,94 @@ impl LiveUi {
             }
         }
         Ok(LoopControl::Continue)
+    }
+
+    /// Scrolls the live page right away, or adds the distance to the held-back
+    /// wheel input while an earlier scroll is still in flight.
+    async fn scroll_live_browser(
+        &mut self,
+        x: u32,
+        y: u32,
+        delta_y: i64,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        // Typing is buffered only after the last wheel input, so it goes first.
+        if !self.browser_typing_buffer.is_empty()
+            && self.flush_browser_typing(writer, limit).await? == LoopControl::Exit
+        {
+            return Ok(LoopControl::Exit);
+        }
+        self.discard_stale_live_scroll();
+        let held = self
+            .pending_live_scroll
+            .map_or(0, |pending| pending.delta_y);
+        self.pending_live_scroll = Some(PendingLiveScroll {
+            x,
+            y,
+            delta_y: held.saturating_add(delta_y),
+            page_revision: self.state.browser_page_revision,
+        });
+        if self.state.browser_scroll_in_flight() {
+            return Ok(LoopControl::Continue);
+        }
+        self.send_live_scroll(writer, limit).await
+    }
+
+    /// Sends the next part of the held-back wheel input, up to what one command
+    /// carries, and keeps the rest. Input that summed to zero sends nothing.
+    async fn send_live_scroll(
+        &mut self,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        self.discard_stale_live_scroll();
+        let Some(pending) = self.pending_live_scroll.as_mut() else {
+            return Ok(LoopControl::Continue);
+        };
+        let delta_y = pending
+            .delta_y
+            .clamp(-BROWSER_SCROLL_MAX_DELTA, BROWSER_SCROLL_MAX_DELTA);
+        pending.delta_y -= delta_y;
+        let (x, y) = (pending.x, pending.y);
+        if pending.delta_y == 0 {
+            self.pending_live_scroll = None;
+        }
+        if delta_y == 0 {
+            return Ok(LoopControl::Continue);
+        }
+        self.dispatch(
+            UiAction::BrowserInteract(BrowserInteractRequest::Scroll {
+                x,
+                y,
+                delta_x: 0,
+                delta_y,
+            }),
+            writer,
+            limit,
+        )
+        .await
+    }
+
+    /// Drops held-back wheel input once it no longer belongs to the page on
+    /// screen: the page closed or changed address, its pane was hidden, or a run
+    /// or a pending decision took over the browser.
+    fn discard_stale_live_scroll(&mut self) {
+        let stale = self.pending_live_scroll.is_some_and(|pending| {
+            pending.page_revision != self.state.browser_page_revision
+                || self.side_panel.mode() != side_panel::PanelMode::Browser
+                || !self.side_panel.visible()
+                || !self
+                    .state
+                    .browser_viewport
+                    .as_ref()
+                    .is_some_and(|view| view.live)
+                || self.state.view_status != ViewStatus::Idle
+                || self.state.current_command.is_some()
+        });
+        if stale {
+            self.pending_live_scroll = None;
+        }
     }
 
     async fn flush_due_browser_typing(
@@ -6542,12 +6700,27 @@ impl LiveUi {
         Ok(LoopControl::Continue)
     }
 
+    /// Sends what the live browser needs next: held-back wheel input once the
+    /// previous scroll finished, a close once its pane is hidden, a resize when the
+    /// pane's size changes, or a read for the next frame.
+    ///
+    /// Closes and resizes wait for other browser commands and are paced. A frame
+    /// read goes out as soon as the previous frame has been painted, whatever input
+    /// is in flight or buffered; the backend answers it when Chromium has a new
+    /// frame, so at most one frame is ever on its way.
     async fn poll_browser_viewport(
         &mut self,
         now: std::time::Instant,
         writer: &mpsc::Sender<WriterMessage>,
         limit: usize,
     ) -> Result<LoopControl, Error> {
+        self.discard_stale_live_scroll();
+        if self.pending_live_scroll.is_some()
+            && !self.state.browser_scroll_in_flight()
+            && self.send_live_scroll(writer, limit).await? == LoopControl::Exit
+        {
+            return Ok(LoopControl::Exit);
+        }
         if self
             .state
             .browser_viewport
@@ -6560,39 +6733,25 @@ impl LiveUi {
             if self.browser_frame_waiting_for_border() {
                 return Ok(LoopControl::Continue);
             }
-            if !self.state.browser_interact_in_flight()
-                && self.browser_typing_buffer.is_empty()
+            if self.live_browser_lifecycle_ready()
                 && self
-                    .next_live_browser_frame
+                    .next_live_browser_lifecycle
                     .is_none_or(|deadline| now >= deadline)
+                && let Some(request) = self.live_browser_lifecycle_request()
             {
-                self.next_live_browser_frame = Some(now + LIVE_BROWSER_FRAME_INTERVAL);
-                let request = if self.side_panel.mode() != side_panel::PanelMode::Browser
-                    || !self.side_panel.visible()
-                {
-                    BrowserInteractRequest::Nav(BrowserNavAction::LiveClose)
-                } else if let Some(viewport) =
-                    self.side_panel.desired_browser_geometry(self.cell_size)
-                    && self.state.browser_requested_geometry != Some(viewport)
-                    && self
-                        .state
-                        .browser_viewport
-                        .as_ref()
-                        .and_then(|view| view.live_geometry())
-                        != Some(viewport)
-                {
-                    self.next_live_browser_frame = Some(now + LIVE_BROWSER_RESIZE_INTERVAL);
-                    BrowserInteractRequest::LiveResize(viewport)
-                } else {
-                    BrowserInteractRequest::Nav(BrowserNavAction::LiveFrame)
+                let pause = match request {
+                    BrowserInteractRequest::LiveResize(_) => LIVE_BROWSER_RESIZE_INTERVAL,
+                    _ => LIVE_BROWSER_CLOSE_RETRY,
                 };
+                self.next_live_browser_lifecycle = Some(now + pause);
                 return self
                     .dispatch(UiAction::BrowserInteract(request), writer, limit)
                     .await;
             }
-            return Ok(LoopControl::Continue);
+            return self.request_live_frame(now, writer, limit).await;
         }
-        self.next_live_browser_frame = None;
+        self.next_live_browser_lifecycle = None;
+        self.next_live_frame_retry = None;
         if !self.browser_takeover_active() {
             self.next_browser_refresh = None;
             return Ok(LoopControl::Continue);
@@ -6617,6 +6776,75 @@ impl LiveUi {
         Ok(LoopControl::Continue)
     }
 
+    /// Asks for the live page's next frame once the last one was painted, while
+    /// none is on its way and no resize, navigation, open, or close, which each
+    /// answer with a frame or end the page, is in flight.
+    ///
+    /// A frame read changes nothing on the page, so the event loop sends it even
+    /// while input is queued; input keeps its order against scroll, resize, and
+    /// close, which `poll_browser_viewport` sends only once input has drained. A
+    /// read the backend turned away is retried after `LIVE_FRAME_RETRY_INTERVAL`.
+    async fn request_live_frame(
+        &mut self,
+        now: std::time::Instant,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        if std::mem::take(&mut self.state.live_frame_refused) {
+            self.next_live_frame_retry = Some(now + LIVE_FRAME_RETRY_INTERVAL);
+        }
+        if !self.live_frame_wanted()
+            || self
+                .next_live_frame_retry
+                .is_some_and(|deadline| now < deadline)
+        {
+            return Ok(LoopControl::Continue);
+        }
+        self.next_live_frame_retry = None;
+        self.dispatch(
+            UiAction::BrowserInteract(BrowserInteractRequest::Nav(BrowserNavAction::LiveFrame)),
+            writer,
+            limit,
+        )
+        .await
+    }
+
+    fn live_frame_wanted(&self) -> bool {
+        self.state
+            .browser_viewport
+            .as_ref()
+            .is_some_and(|view| view.live)
+            && self.state.view_status == ViewStatus::Idle
+            && self.state.current_command.is_none()
+            && !self.browser_frame_waiting_for_border()
+            && self.live_browser_visible()
+            && !self.live_frame_awaiting_paint
+            && !self.state.live_frame_in_flight()
+            && !self.state.browser_page_transition_in_flight()
+    }
+
+    /// Whether a close or resize may be sent: no other browser command or typed
+    /// text is still on its way. A pending frame read does not hold them back.
+    fn live_browser_lifecycle_ready(&self) -> bool {
+        !self.state.browser_interact_in_flight() && self.browser_typing_buffer.is_empty()
+    }
+
+    /// The close or resize the live page needs, if any.
+    fn live_browser_lifecycle_request(&self) -> Option<BrowserInteractRequest> {
+        if self.side_panel.mode() != side_panel::PanelMode::Browser || !self.side_panel.visible() {
+            return Some(BrowserInteractRequest::Nav(BrowserNavAction::LiveClose));
+        }
+        let viewport = self.side_panel.desired_browser_geometry(self.cell_size)?;
+        (self.state.browser_requested_geometry != Some(viewport)
+            && self
+                .state
+                .browser_viewport
+                .as_ref()
+                .and_then(|view| view.live_geometry())
+                != Some(viewport))
+        .then_some(BrowserInteractRequest::LiveResize(viewport))
+    }
+
     fn browser_frame_waiting_for_border(&self) -> bool {
         self.side_panel.visible()
             && self.side_panel.mode() == side_panel::PanelMode::Browser
@@ -6630,14 +6858,23 @@ impl LiveUi {
             .as_ref()
             .is_some_and(|view| view.live)
         {
-            let next_frame = (self.state.view_status == ViewStatus::Idle
+            // A finished read or a paint wakes the loop for the next frame read;
+            // only a retry after the backend turned one away needs a timer.
+            let lifecycle = (self.state.view_status == ViewStatus::Idle
                 && self.state.current_command.is_none()
-                && !self.state.browser_interact_in_flight()
-                && self.browser_typing_buffer.is_empty()
-                && !self.browser_frame_waiting_for_border())
-            .then_some(self.next_live_browser_frame)
+                && self.live_browser_lifecycle_ready()
+                && !self.browser_frame_waiting_for_border()
+                && self.live_browser_lifecycle_request().is_some())
+            .then_some(self.next_live_browser_lifecycle)
             .flatten();
-            return self.browser_typing_buffer.flush_at.or(next_frame);
+            let frame_retry = self
+                .next_live_frame_retry
+                .filter(|_| self.live_frame_wanted());
+            let timer = match (lifecycle, frame_retry) {
+                (Some(lifecycle), Some(retry)) => Some(lifecycle.min(retry)),
+                (lifecycle, retry) => lifecycle.or(retry),
+            };
+            return self.browser_typing_buffer.flush_at.or(timer);
         }
         if !self.browser_takeover_active() {
             return None;

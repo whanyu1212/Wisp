@@ -80,6 +80,7 @@ from wisp.rpc.commands import (
     UnrevertSessionTreeCommand,
 )
 from wisp.rpc.handlers.browser import (
+    LiveFramePublisher,
     handle_rpc_browser_addresses_command,
     start_rpc_browser_interact_command,
 )
@@ -208,8 +209,10 @@ class RpcCommandExecutor:
         settings_reloader: RpcSettingsReloader | None = None,
         live_browser: LiveBrowser | None = None,
         browser_search_engine: BrowserSearchEngine = DEFAULT_BROWSER_SEARCH_ENGINE,
+        publish_live_frame: LiveFramePublisher | None = None,
     ) -> None:
         self.live_browser = live_browser
+        self.publish_live_frame = publish_live_frame
         self.browser_search_engine = browser_search_engine
         self.settings_reloader = settings_reloader
         self.change_directory = change_directory
@@ -989,7 +992,9 @@ class RpcCommandExecutor:
         command: BrowserInteractCommand,
         running_command: _RpcRunningCommand | None,
     ) -> _RpcDispatchResult:
-        if running_command is not None:
+        # A live frame read runs beside the running command; the coordinator tracks
+        # it as auxiliary work instead.
+        if running_command is not None and command.action != "live_frame":
             RpcCommandLifecycle.for_command(command, write_event=self.write_event).fail(
                 "Finish or cancel the active operation before interacting with the browser"
             )
@@ -999,6 +1004,7 @@ class RpcCommandExecutor:
                 command,
                 live_browser=self.live_browser,
                 search_engine=self.browser_search_engine,
+                publish_live_frame=self.publish_live_frame,
                 agent=self.agent,
                 runtime=self.runtime,
                 sessions=self.sessions,

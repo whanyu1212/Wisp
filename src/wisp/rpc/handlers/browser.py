@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -52,6 +52,12 @@ RunningCommandFactory = TypeAliasType("RunningCommandFactory", Callable[..., _Rp
 CommandCompletedFactory = TypeAliasType(
     "CommandCompletedFactory", Callable[..., _RpcCommandCompleted]
 )
+# Writes a frame only if the check, made at the moment of writing, still holds, and
+# says whether it did.
+LiveFramePublisher = TypeAliasType(
+    "LiveFramePublisher",
+    Callable[[BrowserViewportUpdated, Callable[[], bool]], Awaitable[bool]],
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -72,11 +78,14 @@ def start_rpc_browser_interact_command(
     controller: BrowserController | None = None,
     live_browser: LiveBrowser | None = None,
     search_engine: BrowserSearchEngine = DEFAULT_BROWSER_SEARCH_ENGINE,
+    publish_live_frame: LiveFramePublisher | None = None,
 ) -> _RpcRunningCommand:
     """Start one user-initiated browser takeover interaction sequentially on ``task_group``.
 
     ``search_engine`` receives the text of a ``live_open`` or ``live_navigate`` that
-    is not an address.
+    is not an address. ``publish_live_frame`` writes the frame a ``live_frame`` read
+    returns; the host serializes it against session and project changes. Without it
+    the frame goes to ``write_event`` once the same check passes.
     """
 
     lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
@@ -100,6 +109,7 @@ def start_rpc_browser_interact_command(
         controller or McpBrowserController(),
         live_browser,
         search_engine,
+        publish_live_frame or _write_frame_if_current(lifecycle),
     )
     return running_command_factory(
         command_id=command_id,
@@ -119,6 +129,16 @@ def _session_image_store(
         return await anyio.to_thread.run_sync(store.store, data)
 
     return store_image
+
+
+def _write_frame_if_current(lifecycle: RpcCommandLifecycle) -> LiveFramePublisher:
+    async def publish(frame: BrowserViewportUpdated, is_current: Callable[[], bool]) -> bool:
+        if not is_current():
+            return False
+        lifecycle.write_event(frame)
+        return True
+
+    return publish
 
 
 def _to_browser_interaction(command: BrowserInteractCommand) -> BrowserInteraction:
@@ -162,6 +182,7 @@ async def _run_browser_interact(
     controller: BrowserController,
     live_browser: LiveBrowser | None,
     search_engine: BrowserSearchEngine,
+    publish_live_frame: LiveFramePublisher,
 ) -> None:
     error: str | None = None
     entry_count = session_state.entry_count
@@ -169,7 +190,7 @@ async def _run_browser_interact(
         with cancel_scope:
             if command.live or command.action.startswith("live_"):
                 await _run_live_browser_command(
-                    command, agent, lifecycle, live_browser, search_engine
+                    command, agent, lifecycle, live_browser, search_engine, publish_live_frame
                 )
             else:
                 if mcp_servers is not None:
@@ -196,7 +217,10 @@ async def _run_browser_interact(
     except BrowserControlError as exc:
         error = str(exc) or f"Browser {command.action} failed"
     except anyio.get_cancelled_exc_class():
+        # Only cancellation from outside the command reaches here; ``cancel_scope``
+        # absorbs its own. The terminal event is still written, then it propagates.
         error = f"RPC command cancelled: {lifecycle.command_id}"
+        raise
     except Exception as exc:  # noqa: BLE001 - isolate failures without leaking command text
         error = f"Browser interaction failed: {type(exc).__name__}"
     finally:
@@ -223,6 +247,7 @@ async def _run_live_browser_command(
     lifecycle: RpcCommandLifecycle,
     browser: LiveBrowser | None,
     search_engine: BrowserSearchEngine,
+    publish_live_frame: LiveFramePublisher,
 ) -> None:
     if browser is None:
         raise BrowserControlError("This RPC host does not support the live browser")
@@ -251,7 +276,17 @@ async def _run_live_browser_command(
     elif command.action == "live_forward":
         await browser.move_in_history(1)
         frame = await browser.poll_frame()
-    elif command.action in {"live_frame", "refresh"}:
+    elif command.action == "live_frame":
+        # Waits for a frame the client has not seen. The coordinator runs it beside
+        # input commands, and the client sends the next one only after this ends.
+        # The session or project may change during the wait, so the tab and trust
+        # are checked again as the frame is written.
+        lifetime = browser.lifetime
+        frame = await browser.next_frame()
+        if frame is not None:
+            await publish_live_frame(frame, lambda: agent.trusted and browser.is_current(lifetime))
+        return
+    elif command.action == "refresh":
         frame = await browser.poll_frame()
     else:
         await browser.interact(_to_browser_interaction(command))

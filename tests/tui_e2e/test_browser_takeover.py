@@ -128,6 +128,7 @@ def _start_wide_tui(
     width: int = 160,
     height: int = 36,
     environment: dict[str, str] | None = None,
+    cell_pixels: tuple[int, int] = (0, 0),
 ) -> _TuiProcess:
     backend = tmp_path / "backend.py"
     backend.write_text(
@@ -167,7 +168,13 @@ main()
             ],
             child_environment,
         )
-    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", height, width, 0, 0))
+    # The TUI reads the cell size in pixels once at startup; (0, 0) reports none.
+    cell_width, cell_height = cell_pixels
+    fcntl.ioctl(
+        fd,
+        termios.TIOCSWINSZ,
+        struct.pack("HHHH", height, width, width * cell_width, height * cell_height),
+    )
     return _TuiProcess(child, fd, termios.tcgetattr(fd))
 
 

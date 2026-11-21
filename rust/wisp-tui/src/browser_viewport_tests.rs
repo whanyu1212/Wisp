@@ -1653,6 +1653,23 @@ async fn push_live_browser_frame(
     dir: &TempSessionDir,
     geometry: wisp_protocol::commands::LiveBrowserViewport,
 ) {
+    push_live_browser_frame_at(ui, dir, geometry, "https://example.test/").await;
+}
+
+async fn push_live_browser_frame_at(
+    ui: &mut LiveUi,
+    dir: &TempSessionDir,
+    geometry: wisp_protocol::commands::LiveBrowserViewport,
+    url: &str,
+) {
+    push_backend_event(ui, live_frame_payload(dir, geometry, url)).await;
+}
+
+fn live_frame_payload(
+    dir: &TempSessionDir,
+    geometry: wisp_protocol::commands::LiveBrowserViewport,
+    url: &str,
+) -> serde_json::Value {
     use base64::Engine;
     let (sha, _) = write_split_tone_png(
         &dir.images_dir(),
@@ -1660,20 +1677,16 @@ async fn push_live_browser_frame(
         geometry.height * geometry.device_scale_factor,
     );
     let png = std::fs::read(dir.images_dir().join(sha)).unwrap();
-    push_backend_event(
-        ui,
-        serde_json::json!({
-            "type": "browser.viewport.updated",
-            "timestamp": "2026-11-20T12:34:56Z",
-            "live_png": base64::engine::general_purpose::STANDARD.encode(png),
-            "live_device_scale": geometry.device_scale_factor,
-            "viewport_width": geometry.width,
-            "viewport_height": geometry.height,
-            "url": "https://example.test/",
-            "title": "Live Chromium",
-        }),
-    )
-    .await;
+    serde_json::json!({
+        "type": "browser.viewport.updated",
+        "timestamp": "2026-11-20T12:34:56Z",
+        "live_png": base64::engine::general_purpose::STANDARD.encode(png),
+        "live_device_scale": geometry.device_scale_factor,
+        "viewport_width": geometry.width,
+        "viewport_height": geometry.height,
+        "url": url,
+        "title": "Live Chromium",
+    })
 }
 
 #[tokio::test]
@@ -1933,4 +1946,795 @@ async fn lost_page_shows_start_page() {
     assert_eq!(ui.side_panel.mode(), PanelMode::Browser);
     assert!(screen.contains("[Search or enter address"), "{screen}");
     assert!(!screen.contains("example.test"), "{screen}");
+}
+
+/// A docked, painted live page whose first frame read is on its way.
+async fn live_page_reading_frames(
+    dir: &TempSessionDir,
+    writer: &mpsc::Sender<WriterMessage>,
+    commands: &mut mpsc::Receiver<WriterMessage>,
+) -> (LiveUi, String) {
+    let mut ui = ui_with_session(dir);
+    push_live_browser_frame(
+        &mut ui,
+        dir,
+        wisp_protocol::commands::LiveBrowserViewport {
+            width: 320,
+            height: 240,
+            device_scale_factor: 1,
+        },
+    )
+    .await;
+    draw_text(&mut ui, 160, 36);
+    // Show a frame at the pane's own size, so no resize is due.
+    let fitted = ui
+        .side_panel
+        .desired_browser_geometry(ui.cell_size)
+        .unwrap();
+    push_live_browser_frame(&mut ui, dir, fitted).await;
+    draw_text(&mut ui, 160, 36);
+    ui.poll_browser_viewport(
+        std::time::Instant::now(),
+        writer,
+        MAX_APPLICATION_FRAME_BYTES,
+    )
+    .await
+    .unwrap();
+    let sent = drain_sent_commands(commands);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0]["action"], "live_frame");
+    let id = sent[0]["id"].as_str().unwrap().to_owned();
+    (ui, id)
+}
+
+async fn poll_sent(
+    ui: &mut LiveUi,
+    writer: &mpsc::Sender<WriterMessage>,
+    commands: &mut mpsc::Receiver<WriterMessage>,
+) -> Vec<String> {
+    ui.poll_browser_viewport(
+        std::time::Instant::now(),
+        writer,
+        MAX_APPLICATION_FRAME_BYTES,
+    )
+    .await
+    .unwrap();
+    drain_sent_commands(commands)
+        .iter()
+        .map(|command| command["action"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+async fn finish_browser_command(ui: &mut LiveUi, id: &str) {
+    push_backend_event(
+        ui,
+        serde_json::json!({
+            "type": "rpc.command.finished", "timestamp": "2026-11-20T12:34:57Z",
+            "command_type": "browser_interact", "command_id": id, "ok": true,
+        }),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn next_frame_read_follows_paint() {
+    let dir = TempSessionDir::new("frame-after-paint");
+    let (writer, mut commands) = mpsc::channel(8);
+    let (mut ui, first) = live_page_reading_frames(&dir, &writer, &mut commands).await;
+    // One read at a time, with no timer behind it.
+    assert!(poll_sent(&mut ui, &writer, &mut commands).await.is_empty());
+    assert!(!ui.state.browser_interact_in_flight());
+
+    let fitted = ui
+        .side_panel
+        .desired_browser_geometry(ui.cell_size)
+        .unwrap();
+    push_live_browser_frame(&mut ui, &dir, fitted).await;
+    finish_browser_command(&mut ui, &first).await;
+    // The frame is applied but not painted, so the next one would only queue.
+    assert!(poll_sent(&mut ui, &writer, &mut commands).await.is_empty());
+    draw_text(&mut ui, 160, 36);
+    assert_eq!(
+        poll_sent(&mut ui, &writer, &mut commands).await,
+        ["live_frame"]
+    );
+}
+
+#[tokio::test]
+async fn frame_reads_ignore_input_in_flight() {
+    let dir = TempSessionDir::new("frame-during-input");
+    let (writer, mut commands) = mpsc::channel(8);
+    let (mut ui, first) = live_page_reading_frames(&dir, &writer, &mut commands).await;
+    ui.enter_browser_takeover();
+    let sent = send_input_collecting(
+        &mut ui,
+        Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+    )
+    .await;
+    assert_eq!(sent[0]["action"], "press_key");
+    send_input(
+        &mut ui,
+        Input::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+    )
+    .await;
+    assert!(ui.state.browser_interact_in_flight());
+    assert!(!ui.browser_typing_buffer.is_empty());
+
+    finish_browser_command(&mut ui, &first).await;
+    assert_eq!(
+        poll_sent(&mut ui, &writer, &mut commands).await,
+        ["live_frame"]
+    );
+}
+
+#[tokio::test]
+async fn hidden_page_reads_no_frames() {
+    let dir = TempSessionDir::new("frame-hidden");
+    let (writer, mut commands) = mpsc::channel(8);
+    let (mut ui, first) = live_page_reading_frames(&dir, &writer, &mut commands).await;
+    ui.enter_browser_takeover();
+    let input = send_input_collecting(
+        &mut ui,
+        Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+    )
+    .await;
+    let input = input[0]["id"].as_str().unwrap().to_owned();
+
+    // Hidden while input is in flight: the close waits, and no frame is read.
+    ui.side_panel.close();
+    finish_browser_command(&mut ui, &first).await;
+    assert!(poll_sent(&mut ui, &writer, &mut commands).await.is_empty());
+
+    // Shown again before the close went out: frame reads resume.
+    ui.side_panel.show(PanelMode::Browser);
+    draw_text(&mut ui, 160, 36);
+    assert_eq!(
+        poll_sent(&mut ui, &writer, &mut commands).await,
+        ["live_frame"]
+    );
+
+    // Hidden once more with a read outstanding: the close does not wait for it.
+    ui.side_panel.close();
+    finish_browser_command(&mut ui, &input).await;
+    let close = {
+        ui.poll_browser_viewport(
+            std::time::Instant::now() + LIVE_BROWSER_RESIZE_INTERVAL,
+            &writer,
+            MAX_APPLICATION_FRAME_BYTES,
+        )
+        .await
+        .unwrap();
+        drain_sent_commands(&mut commands)
+    };
+    assert_eq!(close.len(), 1, "{close:?}");
+    assert_eq!(close[0]["action"], "live_close");
+    finish_browser_command(&mut ui, close[0]["id"].as_str().unwrap()).await;
+    assert!(ui.state.browser_viewport.is_none());
+    assert!(!ui.state.live_frame_in_flight());
+
+    // The pane comes back on the start page and reads nothing.
+    ui.side_panel.show(PanelMode::Browser);
+    draw_text(&mut ui, 160, 36);
+    assert!(poll_sent(&mut ui, &writer, &mut commands).await.is_empty());
+}
+
+#[tokio::test]
+async fn no_frame_read_during_open_or_close() {
+    for opening in [true, false] {
+        let dir = TempSessionDir::new(&format!("frame-transition-{opening}"));
+        let (writer, mut commands) = mpsc::channel(8);
+        let (mut ui, first) = live_page_reading_frames(&dir, &writer, &mut commands).await;
+        // The read ends with nothing new, so another one would be due.
+        finish_browser_command(&mut ui, &first).await;
+        let transition = if opening {
+            ui.dispatch(
+                UiAction::BrowserInteract(BrowserInteractRequest::LiveOpen {
+                    url: "https://other.test/".into(),
+                }),
+                &writer,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+            drain_sent_commands(&mut commands)
+        } else {
+            ui.side_panel.close();
+            let close = poll_sent(&mut ui, &writer, &mut commands).await;
+            ui.side_panel.show(PanelMode::Browser);
+            draw_text(&mut ui, 160, 36);
+            close
+                .into_iter()
+                .map(|action| serde_json::json!({"action": action}))
+                .collect()
+        };
+        let expected = if opening { "live_open" } else { "live_close" };
+        assert_eq!(transition.len(), 1, "{transition:?}");
+        assert_eq!(transition[0]["action"], expected);
+        // The open or close answers for the page, so no read goes out meanwhile.
+        assert!(
+            poll_sent(&mut ui, &writer, &mut commands).await.is_empty(),
+            "{expected}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn refused_frame_read_is_retried() {
+    for refusal in [
+        "RPC command queue is full while another RPC command is running",
+        "RPC command queue byte limit exceeded while another RPC command is running",
+        "A live browser frame read is already waiting",
+    ] {
+        let dir = TempSessionDir::new("frame-refused");
+        let (writer, mut commands) = mpsc::channel(8);
+        let (mut ui, first) = live_page_reading_frames(&dir, &writer, &mut commands).await;
+        push_backend_event(
+            &mut ui,
+            serde_json::json!({
+                "type": "rpc.command.finished", "timestamp": "2026-11-20T12:34:57Z",
+                "command_type": "browser_interact", "command_id": first, "ok": false,
+                "error": refusal,
+            }),
+        )
+        .await;
+        // Chrome still runs: the page stays, and no notice reports it lost.
+        assert!(ui.state.browser_viewport.is_some(), "{refusal}");
+        assert!(ui.notice.is_none(), "{refusal}");
+        let now = std::time::Instant::now();
+        assert!(poll_sent(&mut ui, &writer, &mut commands).await.is_empty());
+        assert!(ui.next_browser_timer_deadline().is_some());
+        ui.poll_browser_viewport(
+            now + LIVE_FRAME_RETRY_INTERVAL * 2,
+            &writer,
+            MAX_APPLICATION_FRAME_BYTES,
+        )
+        .await
+        .unwrap();
+        let retry = drain_sent_commands(&mut commands);
+        assert_eq!(retry.len(), 1, "{retry:?}");
+        assert_eq!(retry[0]["action"], "live_frame");
+
+        // Hiding the pane still closes the browser.
+        finish_browser_command(&mut ui, retry[0]["id"].as_str().unwrap()).await;
+        ui.side_panel.close();
+        assert_eq!(
+            poll_sent(&mut ui, &writer, &mut commands).await,
+            ["live_close"]
+        );
+    }
+}
+
+#[tokio::test]
+async fn ignored_update_keeps_reads_going() {
+    let dir = TempSessionDir::new("frame-after-ignored");
+    let (writer, mut commands) = mpsc::channel(8);
+    let (mut ui, first) = live_page_reading_frames(&dir, &writer, &mut commands).await;
+    let fitted = ui
+        .side_panel
+        .desired_browser_geometry(ui.cell_size)
+        .unwrap();
+    push_live_browser_frame(&mut ui, &dir, fitted).await;
+    draw_text(&mut ui, 160, 36);
+    // An agent browser tool's update is ignored while the live page shows.
+    push_backend_event(
+        &mut ui,
+        viewport_event(
+            "2026-11-20T12:34:58Z",
+            None,
+            Some("https://agent.test/"),
+            None,
+            Some("browser_navigate"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        ui.state
+            .browser_viewport
+            .as_ref()
+            .and_then(|view| view.url.as_deref()),
+        Some("https://example.test/")
+    );
+    finish_browser_command(&mut ui, &first).await;
+    assert_eq!(
+        poll_sent(&mut ui, &writer, &mut commands).await,
+        ["live_frame"]
+    );
+}
+
+#[tokio::test]
+async fn frame_read_during_queued_input() {
+    use std::sync::Arc;
+    let dir = TempSessionDir::new("frame-queued-input");
+    let (writer, mut commands) = mpsc::channel(32);
+    let (mut ui, first) = live_page_reading_frames(&dir, &writer, &mut commands).await;
+    let fitted = ui
+        .side_panel
+        .desired_browser_geometry(ui.cell_size)
+        .unwrap();
+    let budget = Arc::new(tokio::sync::Semaphore::new(8));
+    let (events_tx, mut events) = mpsc::channel(8);
+    for payload in [
+        live_frame_payload(&dir, fitted, "https://example.test/"),
+        serde_json::json!({
+            "type": "rpc.command.finished", "timestamp": "2026-11-20T12:34:57Z",
+            "command_type": "browser_interact", "command_id": first, "ok": true,
+        }),
+    ] {
+        events_tx
+            .send(QueuedEvent {
+                event: BackendEvent::from_projection_value(&payload).unwrap(),
+                _wire_bytes: budget.clone().acquire_owned().await.unwrap(),
+            })
+            .await
+            .unwrap();
+    }
+    // Sustained typing in the composer: input stays queued until the loop stops.
+    let (input_tx, mut inputs) = mpsc::channel(8);
+    for _ in 0..4 {
+        input_tx
+            .send(Input::Key(KeyEvent::new(
+                KeyCode::Char('a'),
+                KeyModifiers::NONE,
+            )))
+            .await
+            .unwrap();
+    }
+    input_tx
+        .send(Input::Error(std::io::Error::other("test stop")))
+        .await
+        .unwrap();
+    let (_signal_tx, mut signals) = mpsc::channel::<()>(1);
+    let (mut ready_event, mut reader, mut writer_outcome) = (None, None, None);
+    let _ = event_loop::run_with_interrupts(
+        &mut ui,
+        &mut Terminal::new(ratatui::backend::TestBackend::new(160, 36)).unwrap(),
+        &conn(),
+        event_loop::Sources {
+            events: &mut events,
+            ready_event: &mut ready_event,
+            inputs: &mut inputs,
+            reader: &mut reader,
+            writer: &mut writer_outcome,
+        },
+        &writer,
+        MAX_APPLICATION_FRAME_BYTES,
+        &mut signals,
+    )
+    .await;
+    assert_eq!(ui.editor.text(), "aaaa");
+    let actions: Vec<_> = drain_sent_commands(&mut commands)
+        .into_iter()
+        .filter_map(|command| command["action"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(actions, ["live_frame"]);
+}
+
+/// A painted live page that takes mouse input, the pane cell wheel input points
+/// at, and the id of the page's first frame read, which is on its way.
+async fn live_page_for_wheel(
+    dir: &TempSessionDir,
+    writer: &mpsc::Sender<WriterMessage>,
+    commands: &mut mpsc::Receiver<WriterMessage>,
+) -> (LiveUi, (u16, u16), String) {
+    let (mut ui, frame) = live_page_reading_frames(dir, writer, commands).await;
+    ui.mouse_enabled = true;
+    draw_text(&mut ui, 160, 36);
+    let rect = ui.side_panel.viewport_image_rect().unwrap();
+    (
+        ui,
+        (rect.x + rect.width / 2, rect.y + rect.height / 2),
+        frame,
+    )
+}
+
+async fn wheel(
+    ui: &mut LiveUi,
+    writer: &mpsc::Sender<WriterMessage>,
+    (column, row): (u16, u16),
+    lines: i32,
+) {
+    let kind = if lines > 0 {
+        MouseEventKind::ScrollDown
+    } else {
+        MouseEventKind::ScrollUp
+    };
+    ui.handle_input(
+        Input::Scroll(mouse::Scroll {
+            event: MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            },
+            lines,
+        }),
+        writer,
+        MAX_APPLICATION_FRAME_BYTES,
+    )
+    .await
+    .unwrap();
+}
+
+/// The id and vertical distance of each scroll that went out.
+fn sent_scrolls(commands: &mut mpsc::Receiver<WriterMessage>) -> Vec<(String, i64)> {
+    drain_sent_commands(commands)
+        .iter()
+        .filter(|command| command["action"] == "scroll")
+        .map(|command| {
+            (
+                command["id"].as_str().unwrap().to_owned(),
+                command["delta_y"].as_i64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+/// Lets the loop send what is due and returns the scrolls among it.
+async fn poll_scrolls(
+    ui: &mut LiveUi,
+    writer: &mpsc::Sender<WriterMessage>,
+    commands: &mut mpsc::Receiver<WriterMessage>,
+) -> Vec<(String, i64)> {
+    ui.poll_browser_viewport(
+        std::time::Instant::now(),
+        writer,
+        MAX_APPLICATION_FRAME_BYTES,
+    )
+    .await
+    .unwrap();
+    sent_scrolls(commands)
+}
+
+fn deltas(scrolls: &[(String, i64)]) -> Vec<i64> {
+    scrolls.iter().map(|(_, delta)| *delta).collect()
+}
+
+#[tokio::test]
+async fn wheel_during_scroll_is_summed() {
+    let dir = TempSessionDir::new("wheel-summed");
+    let (writer, mut commands) = mpsc::channel(32);
+    let (mut ui, cell, _frame) = live_page_for_wheel(&dir, &writer, &mut commands).await;
+
+    // Nothing in flight: the first wheel input goes out at once.
+    wheel(&mut ui, &writer, cell, 1).await;
+    let first = sent_scrolls(&mut commands);
+    assert_eq!(deltas(&first), [120]);
+
+    // Held back while it is in flight, at the latest pointer position.
+    let moved = (cell.0 + 1, cell.1 + 1);
+    wheel(&mut ui, &writer, cell, 2).await;
+    wheel(&mut ui, &writer, moved, 3).await;
+    assert!(sent_scrolls(&mut commands).is_empty());
+    assert!(
+        poll_scrolls(&mut ui, &writer, &mut commands)
+            .await
+            .is_empty()
+    );
+
+    finish_browser_command(&mut ui, &first[0].0).await;
+    ui.poll_browser_viewport(
+        std::time::Instant::now(),
+        &writer,
+        MAX_APPLICATION_FRAME_BYTES,
+    )
+    .await
+    .unwrap();
+    let sent: Vec<_> = drain_sent_commands(&mut commands)
+        .into_iter()
+        .filter(|command| command["action"] == "scroll")
+        .collect();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0]["delta_y"], 600);
+    let expected = ui
+        .side_panel
+        .map_viewport_point(&ui.state, moved.0, moved.1)
+        .unwrap();
+    assert_eq!(
+        (sent[0]["x"].clone(), sent[0]["y"].clone()),
+        (expected.0.into(), expected.1.into())
+    );
+
+    // Nothing is left over once that scroll finishes.
+    finish_browser_command(&mut ui, sent[0]["id"].as_str().unwrap()).await;
+    assert!(
+        poll_scrolls(&mut ui, &writer, &mut commands)
+            .await
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn opposite_wheel_cancels_out() {
+    let dir = TempSessionDir::new("wheel-cancels");
+    let (writer, mut commands) = mpsc::channel(32);
+    let (mut ui, cell, _frame) = live_page_for_wheel(&dir, &writer, &mut commands).await;
+    wheel(&mut ui, &writer, cell, 1).await;
+    let first = sent_scrolls(&mut commands);
+    wheel(&mut ui, &writer, cell, 2).await;
+    wheel(&mut ui, &writer, cell, -2).await;
+
+    finish_browser_command(&mut ui, &first[0].0).await;
+    assert!(
+        poll_scrolls(&mut ui, &writer, &mut commands)
+            .await
+            .is_empty()
+    );
+    assert!(!ui.state.browser_scroll_in_flight());
+}
+
+#[tokio::test]
+async fn large_sum_is_split() {
+    let dir = TempSessionDir::new("wheel-split");
+    let (writer, mut commands) = mpsc::channel(32);
+    let (mut ui, cell, _frame) = live_page_for_wheel(&dir, &writer, &mut commands).await;
+    wheel(&mut ui, &writer, cell, -1).await;
+    let first = sent_scrolls(&mut commands);
+    // Eight full wheel batches: 8 * 12 rows * 120 px upward.
+    for _ in 0..8 {
+        wheel(&mut ui, &writer, cell, -12).await;
+    }
+
+    finish_browser_command(&mut ui, &first[0].0).await;
+    let second = poll_scrolls(&mut ui, &writer, &mut commands).await;
+    assert_eq!(deltas(&second), [-10_000]);
+    assert!(
+        poll_scrolls(&mut ui, &writer, &mut commands)
+            .await
+            .is_empty()
+    );
+    finish_browser_command(&mut ui, &second[0].0).await;
+    let third = poll_scrolls(&mut ui, &writer, &mut commands).await;
+    assert_eq!(deltas(&third), [-1_520]);
+    finish_browser_command(&mut ui, &third[0].0).await;
+    assert!(
+        poll_scrolls(&mut ui, &writer, &mut commands)
+            .await
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn failed_scroll_releases_held_wheel() {
+    let dir = TempSessionDir::new("wheel-after-failure");
+    let (writer, mut commands) = mpsc::channel(32);
+    let (mut ui, cell, _frame) = live_page_for_wheel(&dir, &writer, &mut commands).await;
+    wheel(&mut ui, &writer, cell, 1).await;
+    let first = sent_scrolls(&mut commands);
+    wheel(&mut ui, &writer, cell, 2).await;
+
+    push_backend_event(
+        &mut ui,
+        serde_json::json!({
+            "type": "rpc.command.finished", "timestamp": "2026-11-20T12:34:57Z",
+            "command_type": "browser_interact", "command_id": first[0].0, "ok": false,
+            "error": "wheel event timed out",
+        }),
+    )
+    .await;
+    assert_eq!(
+        deltas(&poll_scrolls(&mut ui, &writer, &mut commands).await),
+        [240]
+    );
+}
+
+#[derive(Clone, Copy, Debug)]
+enum WheelTargetChange {
+    PaneHidden,
+    PageGone,
+    Navigated,
+    TakeoverExited,
+    DecisionPending,
+}
+
+#[tokio::test]
+async fn stale_held_wheel_is_dropped() {
+    for change in [
+        WheelTargetChange::PaneHidden,
+        WheelTargetChange::PageGone,
+        WheelTargetChange::Navigated,
+        WheelTargetChange::TakeoverExited,
+        WheelTargetChange::DecisionPending,
+    ] {
+        let dir = TempSessionDir::new(&format!("wheel-stale-{change:?}"));
+        let (writer, mut commands) = mpsc::channel(32);
+        let (mut ui, cell, frame) = live_page_for_wheel(&dir, &writer, &mut commands).await;
+        ui.enter_browser_takeover();
+        wheel(&mut ui, &writer, cell, 1).await;
+        let first = sent_scrolls(&mut commands);
+        assert_eq!(deltas(&first), [120], "{change:?}");
+        wheel(&mut ui, &writer, cell, 2).await;
+
+        match change {
+            WheelTargetChange::PaneHidden => {
+                ui.side_panel.close();
+                ui.poll_browser_viewport(
+                    std::time::Instant::now(),
+                    &writer,
+                    MAX_APPLICATION_FRAME_BYTES,
+                )
+                .await
+                .unwrap();
+                ui.side_panel.show(PanelMode::Browser);
+                draw_text(&mut ui, 160, 36);
+            }
+            WheelTargetChange::PageGone => {
+                // A failed frame read means Chrome went away.
+                push_backend_event(
+                    &mut ui,
+                    serde_json::json!({
+                        "type": "rpc.command.finished", "timestamp": "2026-11-20T12:34:57Z",
+                        "command_type": "browser_interact", "command_id": frame, "ok": false,
+                        "error": "browser closed",
+                    }),
+                )
+                .await;
+                assert!(ui.state.browser_viewport.is_none());
+            }
+            WheelTargetChange::Navigated => {
+                let fitted = ui
+                    .side_panel
+                    .desired_browser_geometry(ui.cell_size)
+                    .unwrap();
+                push_live_browser_frame_at(&mut ui, &dir, fitted, "https://other.test/").await;
+                draw_text(&mut ui, 160, 36);
+            }
+            WheelTargetChange::TakeoverExited => {
+                send_input(
+                    &mut ui,
+                    Input::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+                )
+                .await;
+                assert!(!ui.browser_takeover_active());
+            }
+            WheelTargetChange::DecisionPending => {
+                ui.state.view_status = ViewStatus::WaitingForApproval;
+                ui.poll_browser_viewport(
+                    std::time::Instant::now(),
+                    &writer,
+                    MAX_APPLICATION_FRAME_BYTES,
+                )
+                .await
+                .unwrap();
+                ui.state.view_status = ViewStatus::Idle;
+            }
+        }
+        finish_browser_command(&mut ui, &first[0].0).await;
+        assert!(
+            poll_scrolls(&mut ui, &writer, &mut commands)
+                .await
+                .is_empty(),
+            "{change:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn key_waits_for_held_wheel() {
+    let dir = TempSessionDir::new("wheel-then-key");
+    let (writer, mut commands) = mpsc::channel(32);
+    let (mut ui, cell, _frame) = live_page_for_wheel(&dir, &writer, &mut commands).await;
+    ui.enter_browser_takeover();
+    wheel(&mut ui, &writer, cell, 1).await;
+    let first = sent_scrolls(&mut commands);
+    wheel(&mut ui, &writer, cell, 2).await;
+
+    ui.handle_input(
+        Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &writer,
+        MAX_APPLICATION_FRAME_BYTES,
+    )
+    .await
+    .unwrap();
+    let sent: Vec<_> = drain_sent_commands(&mut commands)
+        .iter()
+        .map(|command| (command["action"].clone(), command["delta_y"].clone()))
+        .collect();
+    assert_eq!(
+        sent,
+        [
+            ("scroll".into(), 240.into()),
+            ("press_key".into(), serde_json::Value::Null)
+        ]
+    );
+
+    finish_browser_command(&mut ui, &first[0].0).await;
+    assert!(
+        poll_scrolls(&mut ui, &writer, &mut commands)
+            .await
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn non_live_wheel_sends_each_batch() {
+    let dir = TempSessionDir::new("wheel-not-live");
+    let (mut ui, rect) = setup_live_browser_ui(&dir).await;
+    let (writer, mut commands) = mpsc::channel(32);
+    let cell = (rect.x + rect.width / 2, rect.y + rect.height / 2);
+    wheel(&mut ui, &writer, cell, 1).await;
+    wheel(&mut ui, &writer, cell, 2).await;
+    assert_eq!(deltas(&sent_scrolls(&mut commands)), [120, 240]);
+}
+
+#[tokio::test]
+async fn navigation_drops_held_wheel() {
+    let dir = TempSessionDir::new("wheel-then-navigate");
+    let (writer, mut commands) = mpsc::channel(32);
+    let (mut ui, cell, _frame) = live_page_for_wheel(&dir, &writer, &mut commands).await;
+    ui.enter_browser_takeover();
+    send_input(
+        &mut ui,
+        Input::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL)),
+    )
+    .await;
+    assert!(ui.browser_address_active());
+    wheel(&mut ui, &writer, cell, 1).await;
+    let first = sent_scrolls(&mut commands);
+    assert_eq!(deltas(&first), [120]);
+    wheel(&mut ui, &writer, cell, 2).await;
+
+    send_input(&mut ui, Input::Paste("example.net/next".into())).await;
+    ui.handle_input(
+        Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        &writer,
+        MAX_APPLICATION_FRAME_BYTES,
+    )
+    .await
+    .unwrap();
+    let sent = drain_sent_commands(&mut commands);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0]["action"], "live_navigate");
+    // The scroll finishes before the next page's first frame arrives.
+    finish_browser_command(&mut ui, &first[0].0).await;
+    assert!(
+        poll_scrolls(&mut ui, &writer, &mut commands)
+            .await
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn tab_hide_and_reopen_drops_held_wheel() {
+    let dir = TempSessionDir::new("wheel-tab-reopen");
+    let (writer, mut commands) = mpsc::channel(32);
+    let (mut ui, cell, _frame) = live_page_for_wheel(&dir, &writer, &mut commands).await;
+    wheel(&mut ui, &writer, cell, 1).await;
+    let first = sent_scrolls(&mut commands);
+    assert_eq!(deltas(&first), [120]);
+    wheel(&mut ui, &writer, cell, 2).await;
+
+    let tab = ui
+        .mouse_frame
+        .as_ref()
+        .and_then(|frame| {
+            frame
+                .panel_tabs
+                .iter()
+                .find(|tab| tab.mode == PanelMode::Browser)
+        })
+        .map(|tab| tab.area)
+        .expect("browser tab");
+    // Hidden and shown again with no poll in between.
+    for _ in 0..2 {
+        ui.handle_input(
+            Input::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                column: tab.x,
+                row: tab.y,
+                modifiers: KeyModifiers::NONE,
+            }),
+            &writer,
+            MAX_APPLICATION_FRAME_BYTES,
+        )
+        .await
+        .unwrap();
+    }
+    assert!(ui.side_panel.visible());
+    assert_eq!(ui.side_panel.mode(), PanelMode::Browser);
+    finish_browser_command(&mut ui, &first[0].0).await;
+    assert!(
+        poll_scrolls(&mut ui, &writer, &mut commands)
+            .await
+            .is_empty()
+    );
 }

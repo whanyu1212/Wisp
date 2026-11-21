@@ -26,6 +26,7 @@ from wisp.coding.prompt import resolve_project_context_root
 from wisp.config.runtime import DEFAULT_BROWSER_SEARCH_ENGINE, WispConfig
 from wisp.config.settings import resolve_settings
 from wisp.events import (
+    BrowserViewportUpdated,
     ErrorEvent,
     McpStatusUpdated,
     PermissionMode,
@@ -33,7 +34,6 @@ from wisp.events import (
     RpcCommandFinished,
     RpcGitDiffReported,
     RpcProjectFilesReported,
-    RpcWorkspaceReported,
     SkillCatalogUpdated,
     TrustRequested,
     TrustResolved,
@@ -709,6 +709,8 @@ class RpcHost:
         self._on_shutdown_abandoned = on_shutdown_abandoned
         self._event_render_lock = anyio.Lock()
         self._event_task_group: TaskGroup | None = None
+        # The user's live browser while the host serves a control stream.
+        self._live_browser: LiveBrowser | None = None
         self._pending_published_events = 0
         self._published_events_drained = anyio.Event()
         self._published_events_drained.set()
@@ -891,8 +893,10 @@ class RpcHost:
             await host._render_event_batch(events)
 
         async def end_session_scope() -> None:
-            # Tool grants and background processes belong to the session that was
-            # left: an approval or a dev server is not inherited by another one.
+            assert host is not None
+            # The live page, tool grants, and background processes belong to the
+            # session that was left: none is inherited by another one.
+            host._end_live_browser()
             approval_policy.reset_session_grants()
             failed = await runtime.process_supervisor.cancel_all()
             # Frontends list and read only the new session's processes.
@@ -1028,6 +1032,8 @@ class RpcHost:
         """Serve a bidirectional control stream until it is closed or shut down."""
 
         live_browser = LiveBrowser(task_group)
+        previous_live_browser = self._live_browser
+        self._live_browser = live_browser
 
         async def dispatch(
             command: ParsedRpcCommand,
@@ -1040,25 +1046,6 @@ class RpcHost:
             capturing = True
 
             def write_event(event: WispEvent) -> None:
-                if (
-                    isinstance(event, RpcWorkspaceReported)
-                    and command.command_type == "change_directory"
-                ):
-                    live_browser.request_close()
-                elif (
-                    isinstance(event, RpcCommandFinished)
-                    and event.ok
-                    and event.command_type
-                    in {
-                        "new_session",
-                        "select_session",
-                        "clone_session",
-                        "fork_session",
-                        "navigate_session_tree",
-                        "unrevert_session_tree",
-                    }
-                ):
-                    live_browser.request_close()
                 if capturing:
                     buffered_events.append(event)
                 else:
@@ -1087,6 +1074,7 @@ class RpcHost:
                 change_directory=self._change_directory,
                 settings_reloader=self.settings_reloader,
                 live_browser=live_browser,
+                publish_live_frame=self._publish_live_frame,
                 browser_search_engine=(
                     self.project_configuration.active_config.browser_search_engine
                     if self.project_configuration is not None
@@ -1166,6 +1154,7 @@ class RpcHost:
             if self._process_exits is not None:
                 self._process_exits.set_wake_listener(None)
             await live_browser.close()
+            self._live_browser = previous_live_browser
             await self._wait_for_published_events()
             self._event_task_group = previous_event_task_group
 
@@ -1232,13 +1221,55 @@ class RpcHost:
             )
         )
 
+    def _end_live_browser(self) -> None:
+        """Close the live page, ending its pending frame reads, when the session or folder changes.
+
+        The page belongs to the session and project it was opened in, which may be
+        trusted where the next one is not. Its frames are published only while its
+        tab is current (see ``_publish_live_frame``), so none reaches the next one.
+        """
+
+        if self._live_browser is not None:
+            self._live_browser.request_close()
+
+    async def _publish_live_frame(
+        self, frame: BrowserViewportUpdated, is_current: Callable[[], bool]
+    ) -> bool:
+        """Write a live browser frame if ``is_current`` still holds as it is written.
+
+        The check runs under the publication lock, so a session or folder change,
+        which closes the page before it publishes anything of its own, is either
+        preceded by the frame or prevents it.
+
+        Args:
+            frame (BrowserViewportUpdated): The frame a read returned.
+            is_current (Callable[[], bool]): Whether the frame's tab is still open
+                and its project still trusted.
+
+        Returns:
+            bool: Whether the frame was written.
+        """
+
+        async with self._event_render_lock:
+            if not is_current():
+                return False
+
+            async def events() -> AsyncIterator[WispEvent]:
+                yield frame
+
+            # Once bytes can reach the client, finish the frame even if cancelled.
+            with anyio.CancelScope(shield=True):
+                await self._render_events(events())
+            return True
+
     async def _refresh_working_directory(self, change: Callable[[], Awaitable[T]]) -> T:
         """Run ``change``, which may move the agent's working directory, and re-index.
 
-        The project-file index is built from the working directory, so it is
-        invalidated first, under the publication lock like a trust change, and
-        settled with the agent's tool context afterwards, whether or not the
-        folder changed.
+        The live page is closed first: a page opened in one folder or project is
+        not carried into another. The project-file index is built from the working
+        directory, so it is invalidated next, under the publication lock like a
+        trust change, and settled with the agent's tool context afterwards, whether
+        or not the folder changed.
 
         Args:
             change (Callable[[], Awaitable[T]]): The agent call that moves the folder.
@@ -1247,6 +1278,7 @@ class RpcHost:
             T: What ``change`` returned.
         """
 
+        self._end_live_browser()
         try:
             async with self._event_render_lock:
                 invalidated = self.project_files.begin_policy_transition()
