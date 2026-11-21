@@ -34,6 +34,67 @@ _PREFERENCE_FILE_MAX_BYTES = 16_384
 # even inside quotes so a prefix grant can never approve a compound or dynamic shell command.
 _DISALLOWED_SHELL_CHARS = frozenset("|;&<>`$()\\\n\r#")
 _BIDI_CATEGORIES = frozenset({"RLO", "LRO", "RLE", "LRE", "PDF", "RLI", "LRI", "FSI", "PDI"})
+# POSIX shell reserved words and shell builtins that alter control flow, environment, or
+# command execution rather than running a standalone tool directly.
+_SHELL_RESERVED_WORDS = frozenset(
+    {
+        "!",
+        ":",
+        "[",
+        "[[",
+        "]",
+        "]]",
+        "{",
+        "}",
+        "alias",
+        "bg",
+        "case",
+        "cd",
+        "chdir",
+        "coproc",
+        "declare",
+        "dirs",
+        "disown",
+        "do",
+        "done",
+        "elif",
+        "else",
+        "enable",
+        "esac",
+        "export",
+        "fc",
+        "fg",
+        "fi",
+        "for",
+        "function",
+        "hash",
+        "history",
+        "if",
+        "in",
+        "jobs",
+        "let",
+        "local",
+        "popd",
+        "pushd",
+        "read",
+        "readonly",
+        "return",
+        "select",
+        "set",
+        "shift",
+        "shopt",
+        "then",
+        "trap",
+        "typeset",
+        "ulimit",
+        "umask",
+        "unalias",
+        "unset",
+        "until",
+        "wait",
+        "while",
+    }
+)
 # Shells, privilege/exec wrappers, and destructive/network primitives are never offered as
 # reusable prefix rules.
 _DISALLOWED_EXECUTABLES = frozenset(
@@ -298,11 +359,17 @@ def parse_simple_command(command: str) -> tuple[str, ...] | None:
     if not tokens:
         return None
     executable = tokens[0]
-    # Reject leading env assignments (`FOO=bar pytest`) and relative/absolute path tricks.
+    # Reject leading env assignments (`FOO=bar pytest`), flags, shell reserved words/operators
+    # (`! pytest`, `if ...`), and disallowed wrappers.
     if "=" in executable or executable.startswith("-"):
         return None
     base_name = Path(executable).name.casefold()
-    if base_name in _DISALLOWED_EXECUTABLES:
+    if (
+        not base_name
+        or not (base_name[0].isascii() and base_name[0].isalnum())
+        or base_name in _DISALLOWED_EXECUTABLES
+        or base_name in _SHELL_RESERVED_WORDS
+    ):
         return None
     return tuple(tokens)
 
@@ -344,7 +411,11 @@ def validate_command_prefix(prefix: str) -> tuple[str, ...] | None:
     if "/" in executable or executable.startswith("-"):
         return None
     base_name = executable.casefold()
-    if base_name in _DISALLOWED_EXECUTABLES:
+    if (
+        not (base_name[0].isascii() and base_name[0].isalnum())
+        or base_name in _DISALLOWED_EXECUTABLES
+        or base_name in _SHELL_RESERVED_WORDS
+    ):
         return None
     if base_name in _MODULE_ONLY_INTERPRETERS:
         if len(tokens) < 3 or tokens[1] != "-m" or tokens[2].startswith("-"):

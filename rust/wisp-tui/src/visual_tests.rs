@@ -3295,4 +3295,31 @@ fn approval_dock_renders_inline_edit_diff_and_bash_prefix_choice() {
     let _ = row_containing(&bash_buf, "$ uv run pytest");
     let _ = row_containing(&bash_buf, "2  Always allow `uv run pytest` (saved)");
     let _ = row_containing(&bash_buf, "5  Deny");
+
+    // Write approval shows path-bearing title and numbered syntax-highlighted proposed content.
+    let BackendEvent::ToolApprovalRequested(write_approval) =
+        BackendEvent::from_projection_value(&json!({
+            "type": "tool.approval.requested",
+            "call_id": "write-approval",
+            "name": "write",
+            "arguments": {
+                "path": "src/new.rs",
+                "content": "fn hello() {\n    println!(\"hi\");\n}\n"
+            },
+            "safety": "mutating",
+            "grants_allowed": true,
+            "session_only_yolo": false
+        }))
+        .unwrap()
+    else {
+        panic!("approval expected");
+    };
+    ui.state.pending_approval = Some(write_approval);
+    let write_buf = draw(&mut ui, 90, 24);
+    let _ = row_containing(&write_buf, "Allow write on src/new.rs?");
+    let fn_y = row_containing(&write_buf, "1 │ fn hello() {");
+    let fn_row = buffer_row(&write_buf, fn_y);
+    let fn_byte = fn_row.find("fn").unwrap();
+    let fn_col = unicode_width::UnicodeWidthStr::width(&fn_row[..fn_byte]) as u16;
+    assert_eq!(write_buf[(fn_col, fn_y)].fg, palette.accent);
 }

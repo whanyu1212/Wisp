@@ -4310,48 +4310,59 @@ fn approval_panel(state: &UiState, width: usize, palette: Palette) -> DecisionPa
     }
 }
 
-/// Build an inline syntax-highlighted diff preview for `edit`/`write` approvals or a
-/// syntax-highlighted wrapped command preview for `bash`, falling back to wrapped args.
+/// Build an inline syntax-highlighted diff preview for `edit` approvals, a numbered
+/// syntax-highlighted content preview for `write` approvals (without claiming a known
+/// before-state), or a syntax-highlighted wrapped command preview for `bash`.
 fn approval_preview(
     pending: &crate::reducer::PendingApproval,
     display_name: &str,
     width: usize,
     palette: Palette,
 ) -> (String, DecisionDetail) {
-    let file_path = match &pending.detail_source {
-        crate::tool_detail::ToolDetailSource::Edit(source) => Some(source.path.as_str()),
-        crate::tool_detail::ToolDetailSource::Write(source) => Some(source.path.as_str()),
-        _ => None,
-    };
-    if let Some(path) = file_path {
-        let presentation = crate::tool_detail::build_tool_detail(
-            &pending.detail_source,
-            crate::tool_detail::DetailResult {
-                output: "",
-                before_text: None,
-                edit_locations: &[],
-                created: false,
-                summary: None,
-                truncated: false,
-                projection_cut_mid_line: false,
-                projection_omitted_bytes: 0,
-                projection_omitted_rows: 0,
-            },
-        );
-        if let DetailAvailability::LiveRetained(detail) = presentation {
-            let preview = crate::diff_card::preview(&detail, false);
-            let lines = styled_diff_preview_lines(&preview, width, palette);
-            if !lines.is_empty() {
-                let short_path = tail_row(
-                    path,
-                    width.saturating_sub(display_name.width() + 14).max(12),
-                );
-                return (
-                    format!("Allow {display_name} on {short_path}?"),
-                    DecisionDetail::Rich(lines),
-                );
+    match &pending.detail_source {
+        crate::tool_detail::ToolDetailSource::Edit(source) => {
+            let presentation = crate::tool_detail::build_tool_detail(
+                &pending.detail_source,
+                crate::tool_detail::DetailResult {
+                    output: "",
+                    before_text: None,
+                    edit_locations: &[],
+                    created: false,
+                    summary: None,
+                    truncated: false,
+                    projection_cut_mid_line: false,
+                    projection_omitted_bytes: 0,
+                    projection_omitted_rows: 0,
+                },
+            );
+            if let DetailAvailability::LiveRetained(detail) = presentation {
+                let preview = crate::diff_card::preview(&detail, false);
+                let lines = styled_diff_preview_lines(&preview, width, palette);
+                if !lines.is_empty() {
+                    let short_path = tail_row(
+                        &source.path,
+                        width.saturating_sub(display_name.width() + 14).max(12),
+                    );
+                    return (
+                        format!("Allow {display_name} on {short_path}?"),
+                        DecisionDetail::Rich(lines),
+                    );
+                }
             }
         }
+        crate::tool_detail::ToolDetailSource::Write(source) => {
+            let lines =
+                styled_write_preview_lines(&source.path, &source.after.text, width, palette);
+            let short_path = tail_row(
+                &source.path,
+                width.saturating_sub(display_name.width() + 14).max(12),
+            );
+            return (
+                format!("Allow {display_name} on {short_path}?"),
+                DecisionDetail::Rich(lines),
+            );
+        }
+        _ => {}
     }
     if pending.name == SHELL_TOOL_NAME {
         let text = approval_detail(&pending.name, &pending.arguments);
@@ -4365,6 +4376,95 @@ fn approval_preview(
         format!("Allow {display_name}?"),
         DecisionDetail::Wrapped(approval_detail(&pending.name, &pending.arguments)),
     )
+}
+
+/// Preview proposed `write` content with line numbers and syntax highlighting, without
+/// claiming a known before-state before the tool executes.
+fn styled_write_preview_lines(
+    path: &str,
+    content: &str,
+    width: usize,
+    palette: Palette,
+) -> Vec<Line<'static>> {
+    if content.is_empty() {
+        return vec![Line::styled(
+            decision_row("(empty file)", width),
+            Style::default().fg(palette.muted),
+        )];
+    }
+    let raw_lines: Vec<&str> = content
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .collect();
+    let total = raw_lines.len();
+    let language = crate::syntax::language_for_path(path);
+    let shown_count = total.min(DECISION_PREVIEW_MAX_ROWS);
+    let highlighted = crate::syntax::highlight_lines(&language, &raw_lines[..shown_count]);
+    let base = Style::default().fg(palette.foreground);
+    let gutter_style = Style::default().fg(palette.muted);
+    let num_width = shown_count.to_string().len().max(2);
+    let mut lines = Vec::with_capacity(shown_count + usize::from(total > shown_count));
+    for (index, raw_line) in raw_lines.iter().take(shown_count).enumerate() {
+        let prefix = format!("{:>num_width$} │ ", index + 1);
+        let prefix_w = prefix.width();
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        let mut used = 0_usize;
+        if width > prefix_w + 4 {
+            spans.push(Span::styled(prefix, gutter_style));
+            used = prefix_w;
+        }
+        let safe_line = sanitize_for_terminal(raw_line);
+        let safe_offsets = safe_line == *raw_line;
+        let tokens = highlighted
+            .as_ref()
+            .and_then(|per_line| per_line.get(index))
+            .map_or(&[][..], Vec::as_slice);
+        let mut clipped = false;
+        for (rel, grapheme) in safe_line.grapheme_indices(true) {
+            let gw = grapheme.width();
+            if used + gw > width
+                || (width > 1 && used + gw == width && rel + grapheme.len() < safe_line.len())
+            {
+                clipped = true;
+                break;
+            }
+            let class = if safe_offsets {
+                tokens
+                    .iter()
+                    .find(|token| token.range.contains(&rel))
+                    .map_or(SyntaxClass::Plain, |token| token.class)
+            } else {
+                SyntaxClass::Plain
+            };
+            let mut style = palette.syntax(base, class);
+            if class == SyntaxClass::Comment {
+                style = style.add_modifier(Modifier::ITALIC);
+            } else if class == SyntaxClass::Keyword {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+            if let Some(last) = spans.last_mut().filter(|span| span.style == style) {
+                last.content.to_mut().push_str(grapheme);
+            } else {
+                spans.push(Span::styled(grapheme.to_owned(), style));
+            }
+            used += gw;
+        }
+        if clipped && width > 0 {
+            spans.push(Span::styled("…", base));
+        }
+        lines.push(Line::from(spans));
+    }
+    if total > shown_count {
+        let hidden = total - shown_count;
+        lines.push(Line::styled(
+            decision_row(
+                &format!("▸ {hidden} more line{}", if hidden == 1 { "" } else { "s" }),
+                width,
+            ),
+            gutter_style,
+        ));
+    }
+    lines
 }
 
 fn styled_diff_preview_lines(

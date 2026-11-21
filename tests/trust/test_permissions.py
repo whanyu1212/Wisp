@@ -324,6 +324,12 @@ def test_rpc_reports_saved_permissions_only_after_success(
         ("python -m", None),
         ("python -m --help", None),
         ("git ./foo", None),
+        ("! pytest", None),
+        ("! rm -rf /tmp/example", None),
+        ("if true", None),
+        ("while true", None),
+        ("export FOO=1", None),
+        (": noop", None),
         ("-flag arg", None),
         ("./script.sh", None),
         ("cargo test " + "a" * 4001, None),
@@ -348,6 +354,13 @@ def test_suggest_command_prefix_is_conservative(command: str, expected: str | No
         "/usr/bin/pytest",
         "-x",
         "bash",
+        "!",
+        ":",
+        "{",
+        "[[",
+        "if",
+        "while",
+        "export",
         "python",
         "python -m",
         "python -m -v",
@@ -362,6 +375,7 @@ def test_suggest_command_prefix_is_conservative(command: str, expected: str | No
 def test_validate_command_prefix_rejects_invalid_and_unsafe_rules(invalid_rule: str) -> None:
     assert permissions.validate_command_prefix(invalid_rule) is None
     assert not permissions.command_matches_allow_rule("cargo test", invalid_rule)
+    assert not permissions.command_matches_allow_rule("! rm -rf /tmp/example", invalid_rule)
 
 
 @pytest.mark.parametrize(
