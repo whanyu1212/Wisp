@@ -117,6 +117,7 @@ impl RunTotals {
     ///
     /// Without `with_settings` the mode, model and effort are left out, unless
     /// nothing else would show.
+    #[cfg(test)]
     pub(crate) fn summary_line(&self, with_settings: bool) -> String {
         let mut settings = Vec::new();
         if let Some(mode) = &self.mode {
@@ -168,16 +169,177 @@ impl RunTotals {
     }
 }
 
+/// File edits completed during one turn, summed from its successful `edit` and `write` cards.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TurnChanges {
+    pub files: usize,
+    pub additions: u64,
+    pub deletions: u64,
+}
+
+impl TurnChanges {
+    pub fn is_empty(self) -> bool {
+        self.files == 0
+    }
+
+    /// Plain text summary of this turn's edits, such as `+42 −7 in 2 files` or `2 files edited`.
+    /// When `compact_files` is true, uses `2f` instead of `in 2 files` to fit narrow widths.
+    pub(crate) fn format_text(self, compact_files: bool) -> String {
+        if self.is_empty() {
+            return String::new();
+        }
+        let mut counts = String::new();
+        if self.additions > 0 {
+            counts.push_str(&format!("+{}", self.additions));
+        }
+        if self.deletions > 0 {
+            if !counts.is_empty() {
+                counts.push(' ');
+            }
+            counts.push_str(&format!("−{}", self.deletions));
+        }
+        let files = if compact_files {
+            format!("{}f", self.files)
+        } else if self.files == 1 {
+            "1 file".to_owned()
+        } else {
+            format!("{} files", self.files)
+        };
+        if counts.is_empty() {
+            format!("{files} edited")
+        } else if compact_files {
+            format!("{counts} {files}")
+        } else {
+            format!("{counts} in {files}")
+        }
+    }
+}
+
+fn is_completed_file_edit(card: &ToolCardSnapshot) -> bool {
+    card.status == ToolStatus::Done && matches!(card.name.as_str(), "edit" | "write")
+}
+
+/// Normalize the file identity of a completed `edit` or `write` card so repeated edits to
+/// the same file within one turn count once.
+fn edited_file_key(card: &ToolCardSnapshot) -> Option<(Option<String>, String)> {
+    let raw = match &card.detail_source {
+        ToolDetailSource::Edit(source) => source.path.as_str(),
+        ToolDetailSource::Write(source) => source.path.as_str(),
+        _ => card.action_arguments.as_str(),
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let normalized = trimmed.strip_prefix("./").unwrap_or(trimmed).to_owned();
+    let base = if std::path::Path::new(&normalized).is_absolute() {
+        None
+    } else {
+        card.display_base.as_deref().map(str::to_owned)
+    };
+    Some((base, normalized))
+}
+
+/// Aggregate completed file edits in the turn segment ending at `summary_index`.
+fn turn_changes_ending_at(entries: &[TranscriptEntry], summary_index: usize) -> TurnChanges {
+    let turn_start = entries[..=summary_index]
+        .iter()
+        .rposition(|entry| entry.role == TranscriptRole::User)
+        .map_or(0, |index| index + 1);
+    let mut files = HashSet::new();
+    let mut additions = 0u64;
+    let mut deletions = 0u64;
+    for entry in &entries[turn_start..=summary_index] {
+        let Some(card) = entry
+            .tool_card()
+            .filter(|card| is_completed_file_edit(card))
+        else {
+            continue;
+        };
+        if let Some(key) = edited_file_key(card) {
+            files.insert(key);
+        }
+        if let DetailAvailability::LiveRetained(detail) = &card.structured_detail {
+            additions = additions.saturating_add(detail.additions);
+            deletions = deletions.saturating_add(detail.deletions);
+        }
+    }
+    TurnChanges {
+        files: files.len(),
+        additions,
+        deletions,
+    }
+}
+
+/// The parts that compose one closing `RunSummary` row so the projector can style the
+/// mode and `+N`/`−M` counts separately and shed lower-priority tail fields on narrow widths.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RunSummaryParts {
+    pub settings: Vec<String>,
+    pub changes: TurnChanges,
+    pub telemetry: Vec<String>,
+}
+
 /// The row closing a finished run. It names the run's settings only when they differ
 /// from the previous summary row's, which [`Transcript::refresh_run_summaries`]
 /// decides again whenever entry order changes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RunSummary {
     totals: RunTotals,
+    changes: TurnChanges,
     with_settings: bool,
-    /// `totals.summary_line(with_settings)`, kept so drawing the row does not
-    /// rebuild it.
+    /// Combined plain text, kept so callers and copy do not rebuild it.
     line: String,
+}
+
+impl RunSummary {
+    fn build_line(totals: &RunTotals, changes: TurnChanges, with_settings: bool) -> String {
+        let parts = Self::parts_of(totals, changes, with_settings);
+        let mut segments = parts.settings;
+        if !parts.changes.is_empty() {
+            segments.push(parts.changes.format_text(false));
+        }
+        segments.extend(parts.telemetry);
+        segments.join(" · ")
+    }
+
+    fn parts_of(totals: &RunTotals, changes: TurnChanges, with_settings: bool) -> RunSummaryParts {
+        let mut settings = Vec::new();
+        if let Some(mode) = &totals.mode {
+            settings.push(mode_label(mode).to_owned());
+        }
+        settings.extend(totals.model.iter().cloned());
+        settings.extend(totals.effort.iter().cloned());
+
+        let mut telemetry = Vec::new();
+        if let Some(duration_ms) = totals.duration_ms {
+            telemetry.push(crate::tool_cards::format_duration(duration_ms));
+        }
+        match totals.tool_calls {
+            0 => {}
+            1 => telemetry.push("1 tool".to_owned()),
+            count => telemetry.push(format!("{count} tools")),
+        }
+        if let (Some(tokens), Some(model_ms)) = (
+            totals.output_tokens.filter(|tokens| *tokens > 0),
+            totals.model_ms.filter(|milliseconds| *milliseconds > 0),
+        ) {
+            telemetry.push(format!("{} tok/s", tokens_per_second(tokens, model_ms)));
+        }
+        if totals.outcome != "completed" {
+            telemetry.push(totals.outcome.clone());
+        }
+        let include_settings = with_settings || (changes.is_empty() && telemetry.is_empty());
+        RunSummaryParts {
+            settings: if include_settings {
+                settings
+            } else {
+                Vec::new()
+            },
+            changes,
+            telemetry,
+        }
+    }
 }
 
 /// How a summary row names a mode: `Build` and `Plan` capitalized, others as sent.
@@ -322,6 +484,28 @@ impl TranscriptEntry {
         let summary = self.run_summary.as_ref()?;
         let label = mode_label(summary.totals.mode.as_deref()?);
         summary.line.starts_with(label).then_some(label)
+    }
+
+    /// Structured summary segments for styled rendering of this entry's closing row.
+    pub(crate) fn run_summary_parts(&self) -> Option<RunSummaryParts> {
+        let summary = self
+            .run_summary
+            .as_ref()
+            .filter(|_| self.unrevealed.is_empty())?;
+        Some(RunSummary::parts_of(
+            &summary.totals,
+            summary.changes,
+            summary.with_settings,
+        ))
+    }
+
+    /// Per-turn edit totals attached to this summary row, when the turn edited at least one file.
+    pub(crate) fn run_summary_changes(&self) -> Option<TurnChanges> {
+        self.run_summary
+            .as_ref()
+            .filter(|_| self.unrevealed.is_empty())
+            .map(|summary| summary.changes)
+            .filter(|changes| !changes.is_empty())
     }
 
     /// The folder the session moved to after this entry, once the entry is fully
@@ -709,10 +893,6 @@ impl Transcript {
     /// card, as after a cancelled call. Returns false when the run reported nothing to
     /// total or the turn shows nothing to close.
     pub(crate) fn attach_run_summary(&mut self, totals: RunTotals) -> bool {
-        let line = totals.summary_line(true);
-        if line.is_empty() {
-            return false;
-        }
         let prompt = self.latest_user_entry();
         let last = self
             .entries
@@ -731,9 +911,16 @@ impl Transcript {
         let Some(id) = last else {
             return false;
         };
+        let summary_index = self.entry_index(id).expect("summary entry exists");
+        let changes = turn_changes_ending_at(&self.entries, summary_index);
+        let line = RunSummary::build_line(&totals, changes, true);
+        if line.is_empty() {
+            return false;
+        }
         let entry = self.entry_mut(id);
         entry.run_summary = Some(RunSummary {
             totals,
+            changes,
             with_settings: true,
             line,
         });
@@ -786,13 +973,22 @@ impl Transcript {
         true
     }
 
-    /// Decide again which summary rows name their run's settings: the first does, and
-    /// each later one does when its settings differ from the previous row's. A row
-    /// whose text changes gets a new revision, so its cached layout rebuilds; when an
-    /// older history page arrives, only the first summary row after it can change.
+    /// Decide again which summary rows name their run's settings and recompute each
+    /// turn's edit totals: the first summary names settings, and each later one does
+    /// when its settings differ from the previous row's. A row whose text changes gets
+    /// a new revision, so its cached layout rebuilds; when an older history page arrives,
+    /// affected summary rows update automatically.
     fn refresh_run_summaries(&mut self) {
+        let changes_by_index: Vec<(usize, TurnChanges)> = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.run_summary.is_some())
+            .map(|(index, _)| (index, turn_changes_ending_at(&self.entries, index)))
+            .collect();
         let mut previous: Option<RunTotals> = None;
-        for entry in &mut self.entries {
+        for (index, changes) in changes_by_index {
+            let entry = &mut self.entries[index];
             let Some(summary) = entry.run_summary.as_mut() else {
                 continue;
             };
@@ -800,13 +996,48 @@ impl Transcript {
                 .as_ref()
                 .is_none_or(|previous| !previous.same_settings(&summary.totals));
             previous = Some(summary.totals.clone());
-            if summary.with_settings == with_settings {
+            let line = RunSummary::build_line(&summary.totals, changes, with_settings);
+            if summary.with_settings == with_settings
+                && summary.changes == changes
+                && summary.line == line
+            {
                 continue;
             }
             summary.with_settings = with_settings;
-            summary.line = summary.totals.summary_line(with_settings);
+            summary.changes = changes;
+            summary.line = line;
             Self::bump_revision(entry);
         }
+    }
+
+    /// 1-based turn number of `target`, counting `User` prompts from the start of the
+    /// transcript (matching the side panel's turn list and `/diff` attribution).
+    pub(crate) fn turn_number_of_entry(&self, target: TranscriptEntryId) -> Option<usize> {
+        let mut turn = 0;
+        for entry in &self.entries {
+            if entry.role == TranscriptRole::User {
+                turn += 1;
+            }
+            if entry.id == target {
+                return (turn > 0).then_some(turn);
+            }
+        }
+        None
+    }
+
+    /// The latest 1-based turn in the transcript that completed at least one `edit` or
+    /// `write` tool call.
+    pub(crate) fn latest_editing_turn(&self) -> Option<usize> {
+        let mut turn = 0;
+        let mut latest = None;
+        for entry in &self.entries {
+            if entry.role == TranscriptRole::User {
+                turn += 1;
+            } else if turn > 0 && entry.tool_card().is_some_and(is_completed_file_edit) {
+                latest = Some(turn);
+            }
+        }
+        latest
     }
 
     /// Record how the run that `prompt` started ended. Steers and follow-ups the run

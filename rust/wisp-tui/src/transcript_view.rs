@@ -112,7 +112,7 @@ pub struct RowAnchor {
 }
 
 /// Groups and their first member share an entry ID but have independent controls;
-/// messages and their fenced/indented code blocks are addressed independently too.
+/// messages, their code blocks, and turn change summaries are addressed independently too.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum BrowseTarget {
     Entry(TranscriptEntryId),
@@ -123,6 +123,7 @@ pub enum BrowseTarget {
         entry_id: TranscriptEntryId,
         source_start: usize,
     },
+    RunSummary(TranscriptEntryId),
 }
 
 impl BrowseTarget {
@@ -132,7 +133,8 @@ impl BrowseTarget {
             | Self::Group(id)
             | Self::Output(id)
             | Self::Message(id)
-            | Self::CodeBlock { entry_id: id, .. } => id,
+            | Self::CodeBlock { entry_id: id, .. }
+            | Self::RunSummary(id) => id,
         }
     }
 
@@ -215,6 +217,10 @@ pub enum FoldHint {
     ClickExpand,
     /// `Collapse`, worded for a terminal where a click also folds rows.
     ClickCollapse,
+    /// Enter opens `/diff` filtered to this turn's edits.
+    TurnDiff,
+    /// `TurnDiff`, worded for a terminal where a click also opens the turn's diff.
+    ClickTurnDiff,
 }
 
 impl FoldHint {
@@ -225,6 +231,8 @@ impl FoldHint {
             Self::Collapse => Some(" (← to collapse)"),
             Self::ClickExpand => Some(" (click to expand)"),
             Self::ClickCollapse => Some(" (click to collapse)"),
+            Self::TurnDiff => Some(" (Enter for diff)"),
+            Self::ClickTurnDiff => Some(" (click for diff)"),
         }
     }
 
@@ -1395,27 +1403,36 @@ impl TranscriptRowCache {
                 self.build_image_row(transcript, entry, anchor, index, row, width)?
             }
             RowPosition::RunSummary => {
-                // Model and effort names come from providers: keep terminal controls
-                // inert and the row to one line.
-                let summary = entry
-                    .run_summary()?
-                    .graphemes(true)
-                    .map(|grapheme| sanitize_grapheme(grapheme, 0))
-                    .collect::<String>();
-                let summary = self.clip_to_columns(&summary, width);
-                let mut row = TranscriptRow::plain(
-                    anchor,
-                    entry.role,
-                    TranscriptRowKind::RunSummary,
-                    summary,
+                let parts = entry.run_summary_parts()?;
+                let mode = entry.run_summary_mode().map(str::to_owned);
+                let hint = if parts.changes.is_empty() {
+                    FoldHint::None
+                } else if self.fold.click_hints {
+                    FoldHint::ClickTurnDiff
+                } else {
+                    FoldHint::TurnDiff
+                };
+                let (spans, used_hint) = self.build_run_summary_spans(
+                    &parts,
+                    mode.as_deref(),
                     entry.display_content().len(),
+                    width,
+                    hint,
                 );
-                // The mode opening the row gets its own colour.
-                if let Some(mode) = entry.run_summary_mode()
-                    && let Some(lead) = row.split_lead(mode)
-                {
-                    lead.style.inline = crate::markdown::InlineStyle::RunMode;
-                }
+                let row = TranscriptRow {
+                    anchor,
+                    role: entry.role,
+                    kind: TranscriptRowKind::RunSummary,
+                    tone: TranscriptRowTone::Muted,
+                    spans,
+                    gutter: RowGutter::None,
+                    group_gutter: RowGutter::None,
+                    fold_hint: used_hint,
+                    fold_arrow: None,
+                    trailing: None,
+                    live_timer: false,
+                    image: None,
+                };
                 ProjectedRow {
                     row,
                     next: after_run_summary(&self.fold, &self.image_previews, transcript, entry),
@@ -2434,6 +2451,188 @@ impl TranscriptRowCache {
             preview.push_str(&format!(" +{}", total - shown));
         }
         preview
+    }
+
+    /// Build styled spans for a `RunSummary` row, preserving the mode colour and styling
+    /// `+N` / `−M` counts in diff colours. On narrow screens with edit totals, sheds
+    /// `tok/s` and shortens `in N files` to `Nf` before clipping so change counts survive.
+    fn build_run_summary_spans(
+        &mut self,
+        parts: &crate::transcript::RunSummaryParts,
+        mode: Option<&str>,
+        source_offset: usize,
+        full_width: usize,
+        hint: FoldHint,
+    ) -> (Vec<TranscriptSpan>, FoldHint) {
+        let sanitize = |text: &str| -> String {
+            text.graphemes(true)
+                .map(|grapheme| sanitize_grapheme(grapheme, 0))
+                .collect()
+        };
+        let settings: Vec<String> = parts.settings.iter().map(|s| sanitize(s)).collect();
+        let telemetry: Vec<String> = parts.telemetry.iter().map(|s| sanitize(s)).collect();
+        let has_changes = !parts.changes.is_empty();
+
+        let compose = |telemetry_slice: &[String],
+                       compact_files: bool|
+         -> Vec<(String, TranscriptSpanStyle)> {
+            let mut segments: Vec<(String, TranscriptSpanStyle)> = Vec::new();
+            let sep_style = TranscriptSpanStyle::default();
+            for (index, item) in settings.iter().enumerate() {
+                if !segments.is_empty() {
+                    segments.push((" · ".into(), sep_style));
+                }
+                let mut style = TranscriptSpanStyle::default();
+                if index == 0 && mode.is_some_and(|m| m == item) {
+                    style.inline = crate::markdown::InlineStyle::RunMode;
+                }
+                segments.push((item.clone(), style));
+            }
+            if has_changes {
+                if !segments.is_empty() {
+                    segments.push((" · ".into(), sep_style));
+                }
+                let mut wrote_counts = false;
+                if parts.changes.additions > 0 {
+                    segments.push((
+                        format!("+{}", parts.changes.additions),
+                        TranscriptSpanStyle {
+                            tone: Some(TranscriptRowTone::Success),
+                            ..TranscriptSpanStyle::default()
+                        },
+                    ));
+                    wrote_counts = true;
+                }
+                if parts.changes.deletions > 0 {
+                    if wrote_counts {
+                        segments.push((" ".into(), sep_style));
+                    }
+                    segments.push((
+                        format!("−{}", parts.changes.deletions),
+                        TranscriptSpanStyle {
+                            tone: Some(TranscriptRowTone::Error),
+                            ..TranscriptSpanStyle::default()
+                        },
+                    ));
+                    wrote_counts = true;
+                }
+                let files_text = if compact_files {
+                    format!("{}f", parts.changes.files)
+                } else if parts.changes.files == 1 {
+                    "1 file".to_owned()
+                } else {
+                    format!("{} files", parts.changes.files)
+                };
+                if wrote_counts {
+                    let suffix = if compact_files {
+                        format!(" {files_text}")
+                    } else {
+                        format!(" in {files_text}")
+                    };
+                    segments.push((suffix, sep_style));
+                } else {
+                    segments.push((format!("{files_text} edited"), sep_style));
+                }
+            }
+            for item in telemetry_slice {
+                if !segments.is_empty() {
+                    segments.push((" · ".into(), sep_style));
+                }
+                segments.push((item.clone(), sep_style));
+            }
+            segments
+        };
+
+        let total_width = |segs: &[(String, TranscriptSpanStyle)]| -> usize {
+            segs.iter()
+                .map(|(text, _)| UnicodeWidthStr::width(text.as_str()))
+                .sum()
+        };
+
+        let mut segments = compose(&telemetry, false);
+        if has_changes && total_width(&segments) > full_width {
+            let without_rate: Vec<String> = telemetry
+                .iter()
+                .filter(|item| !item.ends_with(" tok/s"))
+                .cloned()
+                .collect();
+            segments = compose(&without_rate, false);
+            if total_width(&segments) > full_width {
+                segments = compose(&without_rate, true);
+            }
+        }
+
+        // Clip styled spans to `full_width` display columns, ending with `…` if cut.
+        let clip_limit = full_width;
+        let needs_clip = total_width(&segments) > clip_limit;
+        let mut spans = Vec::new();
+        let mut used = 0_usize;
+        let mut offset = source_offset;
+        for (text, style) in segments {
+            if !needs_clip {
+                let end = offset.saturating_add(text.len());
+                used += UnicodeWidthStr::width(text.as_str());
+                spans.push(TranscriptSpan {
+                    link: None,
+                    text,
+                    style,
+                    affinity: SourceAffinity {
+                        source_offset: offset,
+                        source_end: end,
+                        output_offset: 0,
+                    },
+                });
+                offset = end;
+                continue;
+            }
+            let mut piece = String::new();
+            let mut stopped = false;
+            for grapheme in text.graphemes(true) {
+                let w = UnicodeWidthStr::width(grapheme);
+                if used + w + 1 > clip_limit {
+                    stopped = true;
+                    break;
+                }
+                piece.push_str(grapheme);
+                used += w;
+            }
+            if !piece.is_empty() {
+                let end = offset.saturating_add(piece.len());
+                spans.push(TranscriptSpan {
+                    link: None,
+                    text: piece,
+                    style,
+                    affinity: SourceAffinity {
+                        source_offset: offset,
+                        source_end: end,
+                        output_offset: 0,
+                    },
+                });
+                offset = end;
+            }
+            if stopped {
+                if clip_limit > 0 {
+                    spans.push(TranscriptSpan {
+                        link: None,
+                        text: "…".into(),
+                        style: TranscriptSpanStyle::default(),
+                        affinity: SourceAffinity {
+                            source_offset: offset,
+                            source_end: offset,
+                            output_offset: 0,
+                        },
+                    });
+                    used += 1;
+                }
+                break;
+            }
+        }
+        let used_hint = if hint != FoldHint::None && used + hint.width() <= full_width {
+            hint
+        } else {
+            FoldHint::None
+        };
+        (spans, used_hint)
     }
 
     /// Shorten `text` to at most `columns` display columns, ending in `…` when cut.

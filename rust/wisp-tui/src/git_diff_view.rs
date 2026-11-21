@@ -10,7 +10,7 @@ use crate::{
     side_panel::spread,
     theme::Palette,
     tool_detail::{ToolDetailPresentation, git_presentation},
-    transcript::{Transcript, TranscriptEntryId, TranscriptRole},
+    transcript::{Transcript, TranscriptEntryId},
     ui::sanitize_for_terminal,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -53,6 +53,14 @@ impl EditCard {
     }
 }
 
+/// Which files `/diff` shows: the whole working tree or only the files edited in one turn.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum DiffScope {
+    #[default]
+    All,
+    Turn(usize),
+}
+
 pub(crate) struct GitDiffView {
     snapshot: Option<Arc<GitDiffSnapshot>>,
     /// Each file's diff with three lines of context, which the tree counts from.
@@ -68,6 +76,16 @@ pub(crate) struct GitDiffView {
     /// The file to select when a snapshot arrives, until the user moves. Opening
     /// `/diff` reads a fresh snapshot, so the file is found again in that one.
     opened_at: Option<String>,
+    /// Active filter: whole working tree (`All`) or one 1-based transcript turn.
+    scope: DiffScope,
+    /// Last turn filtered to, so pressing `a` toggles back to it from `All`.
+    last_turn: Option<usize>,
+    /// Sorted unique 1-based turns present in the current snapshot's recorded edits.
+    available_turns: Vec<usize>,
+    /// Snapshot indices visible under `scope`.
+    visible_files: Vec<usize>,
+    /// Transcript generation last used to resolve turn attribution.
+    transcript_generation: u64,
 }
 
 impl Default for GitDiffView {
@@ -83,6 +101,11 @@ impl Default for GitDiffView {
             tree_focus: false,
             review: DiffReview::working_tree(),
             opened_at: None,
+            scope: DiffScope::All,
+            last_turn: None,
+            available_turns: Vec::new(),
+            visible_files: Vec::new(),
+            transcript_generation: u64::MAX,
         }
     }
 }
@@ -135,46 +158,204 @@ impl GitDiffView {
         }
     }
 
-    fn sync(&mut self, state: &GitDiff) {
-        let changed = match (&self.snapshot, &state.snapshot) {
+    /// `/diff` pre-filtered to files edited in 1-based transcript `turn`.
+    pub(crate) fn for_turn(turn: usize) -> Self {
+        Self {
+            scope: DiffScope::Turn(turn),
+            last_turn: Some(turn),
+            ..Self::default()
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn scope(&self) -> DiffScope {
+        self.scope
+    }
+
+    fn sync(&mut self, state: &GitDiff, transcript: &Transcript) {
+        let snapshot_changed = match (&self.snapshot, &state.snapshot) {
             (Some(a), Some(b)) => !Arc::ptr_eq(a, b),
             (None, None) => false,
             _ => true,
         };
-        if !changed {
+        let transcript_changed = self.transcript_generation != transcript.generation();
+        if !snapshot_changed && !transcript_changed {
             return;
         }
-        self.snapshot = state.snapshot.clone();
-        self.details = self
-            .snapshot
-            .as_ref()
-            .map(|s| {
-                s.files
+        self.transcript_generation = transcript.generation();
+        if snapshot_changed {
+            self.snapshot = state.snapshot.clone();
+            self.details = self
+                .snapshot
+                .as_ref()
+                .map(|s| {
+                    s.files
+                        .iter()
+                        .map(|f| git_presentation(&f.path, &f.before, &f.after, false))
+                        .collect()
+                })
+                .unwrap_or_default();
+            self.full_context = None;
+            self.active = 0;
+            self.selected = 0;
+            self.tree_focus = true;
+            self.review.reset();
+        }
+        self.recompute_scope(transcript, snapshot_changed);
+        if snapshot_changed {
+            if let Some(path) = &self.opened_at {
+                if let Some(position) = self
+                    .rows
                     .iter()
-                    .map(|f| git_presentation(&f.path, &f.before, &f.after, false))
-                    .collect()
-            })
-            .unwrap_or_default();
-        self.full_context = None;
-        self.active = 0;
-        self.selected = 0;
-        self.tree_focus = true;
-        self.review.reset();
-        self.rebuild();
-        if let Some(path) = &self.opened_at {
-            if let Some(position) = self
-                .rows
-                .iter()
-                .position(|row| row.file.is_some() && row.key == *path)
-            {
-                self.selected = position;
-                self.active = self.rows[position].file.expect("a file row");
-                self.tree_focus = false;
+                    .position(|row| row.file.is_some() && row.key == *path)
+                {
+                    self.selected = position;
+                    self.active = self.rows[position].file.expect("a file row");
+                    self.tree_focus = false;
+                }
+            } else if matches!(self.scope, DiffScope::Turn(_)) {
+                self.select_first_file(true);
             }
         }
     }
 
-    /// Lay the snapshot out as tracked files, then untracked ones, each as a tree.
+    fn recompute_scope(&mut self, transcript: &Transcript, reset_selection: bool) {
+        let mut turns = BTreeSet::new();
+        self.visible_files.clear();
+        if let Some(snapshot) = &self.snapshot {
+            for (index, file) in snapshot.files.iter().enumerate() {
+                let mut matches_turn = false;
+                for edit in &file.edits {
+                    if let Some(turn) = turn_of_edit(transcript, edit) {
+                        turns.insert(turn);
+                        if self.scope == DiffScope::Turn(turn) {
+                            matches_turn = true;
+                        }
+                    }
+                }
+                if self.scope == DiffScope::All || matches_turn {
+                    self.visible_files.push(index);
+                }
+            }
+        }
+        self.available_turns = turns.into_iter().collect();
+        self.rebuild();
+        if reset_selection || !self.visible_files.contains(&self.active) {
+            self.select_first_file(matches!(self.scope, DiffScope::Turn(_)));
+        }
+    }
+
+    fn select_first_file(&mut self, focus_diff: bool) {
+        if let Some(position) = self.rows.iter().position(|row| row.file.is_some()) {
+            self.selected = position;
+            self.active = self.rows[position].file.expect("file row");
+            self.review.reset();
+            if focus_diff {
+                self.tree_focus = false;
+            }
+        } else {
+            self.selected = 0;
+            self.active = 0;
+            self.review.reset();
+        }
+    }
+
+    fn apply_scope(&mut self, scope: DiffScope, transcript: &Transcript) {
+        self.scope = scope;
+        if let DiffScope::Turn(turn) = scope {
+            self.last_turn = Some(turn);
+        }
+        self.opened_at = None;
+        self.full_context = None;
+        self.recompute_scope(transcript, true);
+    }
+
+    fn toggle_turn_scope(&mut self, transcript: &Transcript) {
+        match self.scope {
+            DiffScope::Turn(_) => self.apply_scope(DiffScope::All, transcript),
+            DiffScope::All => {
+                let target = self
+                    .last_turn
+                    .filter(|turn| self.available_turns.contains(turn))
+                    .or_else(|| self.available_turns.last().copied());
+                if let Some(turn) = target {
+                    self.apply_scope(DiffScope::Turn(turn), transcript);
+                }
+            }
+        }
+    }
+
+    fn step_turn(&mut self, forward: bool, transcript: &Transcript) {
+        if self.available_turns.is_empty() {
+            return;
+        }
+        let next = match self.scope {
+            DiffScope::All => {
+                if forward {
+                    self.available_turns.first().copied()
+                } else {
+                    self.available_turns.last().copied()
+                }
+            }
+            DiffScope::Turn(current) => {
+                if forward {
+                    self.available_turns
+                        .iter()
+                        .copied()
+                        .find(|turn| *turn > current)
+                        .or_else(|| self.available_turns.first().copied())
+                } else {
+                    self.available_turns
+                        .iter()
+                        .rev()
+                        .copied()
+                        .find(|turn| *turn < current)
+                        .or_else(|| self.available_turns.last().copied())
+                }
+            }
+        };
+        if let Some(turn) = next {
+            self.apply_scope(DiffScope::Turn(turn), transcript);
+        }
+    }
+
+    /// Move to the next or previous visible file in tree order for cross-file hunk stepping.
+    fn step_file(&mut self, forward: bool, jump_last_hunk: bool) -> bool {
+        let file_rows: Vec<(usize, usize)> = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter_map(|(position, row)| row.file.map(|file| (position, file)))
+            .collect();
+        if file_rows.len() <= 1 {
+            return false;
+        }
+        let Some(current) = file_rows.iter().position(|(_, file)| *file == self.active) else {
+            return false;
+        };
+        let next = if forward {
+            current
+                .checked_add(1)
+                .filter(|index| *index < file_rows.len())
+        } else {
+            current.checked_sub(1)
+        };
+        let Some(next) = next else {
+            return false;
+        };
+        let (position, file_index) = file_rows[next];
+        self.selected = position;
+        self.active = file_index;
+        self.full_context = None;
+        if jump_last_hunk {
+            self.review.reset_to_last_hunk();
+        } else {
+            self.review.reset();
+        }
+        true
+    }
+
+    /// Lay the visible snapshot files out as tracked files, then untracked ones, each as a tree.
     fn rebuild(&mut self) {
         self.rows.clear();
         let Some(snapshot) = self.snapshot.clone() else {
@@ -182,7 +363,8 @@ impl GitDiffView {
         };
         for untracked in [false, true] {
             let mut root = Folder::default();
-            for (index, file) in snapshot.files.iter().enumerate() {
+            for &index in &self.visible_files {
+                let file = &snapshot.files[index];
                 if (file.status == "untracked") == untracked {
                     root.insert(&file.path.split('/').collect::<Vec<_>>(), index);
                 }
@@ -251,7 +433,7 @@ impl GitDiffView {
 
     /// Handle a key. Enter on the diff of a file Wisp edited returns the card of the
     /// latest edit, for the app to jump to; every other key stays in the view.
-    pub fn key(&mut self, key: KeyCode) -> Option<EditCard> {
+    pub fn key(&mut self, key: KeyCode, transcript: &Transcript) -> Option<EditCard> {
         // Only moving in the tree gives up the file `/diff` was opened at; switching
         // focus or changing how the diff reads keeps it for the snapshot on its way.
         if self.tree_focus
@@ -275,8 +457,19 @@ impl GitDiffView {
             KeyCode::Tab | KeyCode::BackTab => self.tree_focus = !self.tree_focus,
             KeyCode::Char('s') => self.review.split = !self.review.split,
             KeyCode::Char('c') => self.toggle_context(),
-            KeyCode::Char(']') => self.review.jump_hunk(true),
-            KeyCode::Char('[') => self.review.jump_hunk(false),
+            KeyCode::Char('a') => self.toggle_turn_scope(transcript),
+            KeyCode::Char('<' | ',') => self.step_turn(false, transcript),
+            KeyCode::Char('>' | '.') => self.step_turn(true, transcript),
+            KeyCode::Char(']') => {
+                if !self.review.jump_hunk(true) {
+                    self.step_file(true, false);
+                }
+            }
+            KeyCode::Char('[') => {
+                if !self.review.jump_hunk(false) {
+                    self.step_file(false, true);
+                }
+            }
             KeyCode::Up if self.tree_focus => self.selected = self.selected.saturating_sub(1),
             KeyCode::Down if self.tree_focus => {
                 self.selected = (self.selected + 1).min(self.rows.len().saturating_sub(1))
@@ -312,6 +505,9 @@ impl GitDiffView {
                 }
             }
             KeyCode::Enter => {
+                if !self.visible_files.contains(&self.active) {
+                    return None;
+                }
                 let file = self.snapshot.as_ref()?.files.get(self.active)?;
                 return file
                     .latest_edit()
@@ -336,13 +532,12 @@ impl GitDiffView {
         None
     }
 
-    /// How many of the snapshot's files a Wisp edit in this session changed.
+    /// How many of the visible files a Wisp edit in this session changed.
     fn edited_by_wisp(&self) -> usize {
         self.snapshot.as_ref().map_or(0, |snapshot| {
-            snapshot
-                .files
+            self.visible_files
                 .iter()
-                .filter(|file| file.edited_by_wisp())
+                .filter(|index| snapshot.files[**index].edited_by_wisp())
                 .count()
         })
     }
@@ -411,7 +606,7 @@ impl GitDiffView {
         transcript: &Transcript,
         palette: Palette,
     ) -> dialog::Controls {
-        self.sync(state);
+        self.sync(state, transcript);
         frame.render_widget(Clear, area);
         frame.render_widget(Paragraph::new("").style(palette.base()), area);
         if area.height < 6 || area.width < 20 {
@@ -488,7 +683,7 @@ impl GitDiffView {
         } else {
             "split"
         };
-        let hints = if hints_area.width >= 110 {
+        let mut hints = if hints_area.width >= 110 {
             vec![
                 Hint {
                     label: "Tab",
@@ -608,6 +803,31 @@ impl GitDiffView {
                 },
             ]
         };
+        if matches!(self.scope, DiffScope::Turn(_)) || !self.available_turns.is_empty() {
+            let scope_desc = match self.scope {
+                DiffScope::Turn(_) => "all",
+                DiffScope::All => "turn",
+            };
+            let insert_at = hints.len().saturating_sub(1);
+            let mut extra = vec![Hint {
+                label: "a",
+                description: scope_desc,
+                key: key(KeyCode::Char('a')),
+            }];
+            if self.available_turns.len() > 1 && hints_area.width >= 96 {
+                extra.push(Hint {
+                    label: "<",
+                    description: "prev turn",
+                    key: key(KeyCode::Char('<')),
+                });
+                extra.push(Hint {
+                    label: ">",
+                    description: "next turn",
+                    key: key(KeyCode::Char('>')),
+                });
+            }
+            hints.splice(insert_at..insert_at, extra);
+        }
         let mut controls = dialog::Controls::default();
         dialog::render_hints(frame, hints_area, &hints, palette, &mut controls);
         let focus_render_w = focus_w.min(footer.width);
@@ -628,16 +848,24 @@ impl GitDiffView {
     fn header_line(&self, state: &GitDiff, width: usize, palette: Palette) -> Line<'static> {
         let muted = Style::default().fg(palette.muted);
         let dim = Style::default().fg(palette.dim());
-        let mut left = vec![
-            Span::styled(
-                "/diff",
-                Style::default()
-                    .fg(palette.primary)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" · ", dim),
-            Span::raw("working tree ↔ HEAD"),
-        ];
+        let mut left = vec![Span::styled(
+            "/diff",
+            Style::default()
+                .fg(palette.primary)
+                .add_modifier(Modifier::BOLD),
+        )];
+        if let DiffScope::Turn(turn) = self.scope {
+            left.extend([
+                Span::styled(" · ", dim),
+                Span::styled(
+                    format!("[Turn {turn}]"),
+                    Style::default()
+                        .fg(palette.primary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]);
+        }
+        left.extend([Span::styled(" · ", dim), Span::raw("working tree ↔ HEAD")]);
         if let Some(snapshot) = &self.snapshot {
             left.push(Span::styled(
                 format!(
@@ -653,24 +881,32 @@ impl GitDiffView {
         } else if let Some(error) = &state.error {
             vec![Span::styled(sanitize_for_terminal(error), muted)]
         } else if let Some(snapshot) = &self.snapshot {
-            let count = snapshot.files.len();
-            let (added, deleted) = self.totals(&(0..count).collect::<Vec<_>>());
-            let mut right = vec![Span::styled(
-                format!(
-                    "{count}{} file{} ",
+            let total = snapshot.files.len();
+            let shown = self.visible_files.len();
+            let (added, deleted) = self.totals(&self.visible_files);
+            let files_label = match self.scope {
+                DiffScope::Turn(_) => format!(
+                    "{shown} of {total}{} file{} ",
                     if snapshot.truncated { "+" } else { "" },
-                    if count == 1 { "" } else { "s" }
+                    if total == 1 { "" } else { "s" }
                 ),
-                muted,
-            )];
+                DiffScope::All => format!(
+                    "{total}{} file{} ",
+                    if snapshot.truncated { "+" } else { "" },
+                    if total == 1 { "" } else { "s" }
+                ),
+            };
+            let mut right = vec![Span::styled(files_label, muted)];
             right.extend(counts(added, deleted, palette));
-            right.push(Span::styled(" · ", dim));
-            match self.edited_by_wisp() {
-                0 => right.push(Span::styled("no recorded edits this session", muted)),
-                edited => right.extend([
-                    Span::styled("◆", Style::default().fg(palette.primary)),
-                    Span::styled(format!(" {edited} edited by Wisp"), muted),
-                ]),
+            if self.scope == DiffScope::All {
+                right.push(Span::styled(" · ", dim));
+                match self.edited_by_wisp() {
+                    0 => right.push(Span::styled("no recorded edits this session", muted)),
+                    edited => right.extend([
+                        Span::styled("◆", Style::default().fg(palette.primary)),
+                        Span::styled(format!(" {edited} edited by Wisp"), muted),
+                    ]),
+                }
             }
             if snapshot.truncated {
                 right.push(Span::styled(" · partial", muted));
@@ -724,20 +960,43 @@ impl GitDiffView {
     fn tree_lines(&self, state: &GitDiff, area: Rect, palette: Palette) -> Vec<Line<'static>> {
         let width = usize::from(area.width);
         let dim = Style::default().fg(palette.dim());
+        let header_style = if self.tree_focus {
+            Style::default()
+                .fg(palette.primary)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(palette.muted)
+        };
+        let tree_title = match self.scope {
+            DiffScope::All => " Files".to_owned(),
+            DiffScope::Turn(turn) => format!(" Files (Turn {turn})"),
+        };
+        let header = Line::styled(tree_title, header_style);
         let by_wisp = self.edited_by_wisp();
-        // The legend takes the tree's last row once anything carries a mark.
-        let rows = usize::from(area.height).saturating_sub(usize::from(by_wisp > 0));
+        // The header takes row 0, and the legend takes the tree's last row once anything carries a mark.
+        let rows = usize::from(area.height)
+            .saturating_sub(1)
+            .saturating_sub(usize::from(by_wisp > 0));
         let Some(snapshot) = &self.snapshot else {
-            return Vec::new();
+            return vec![header];
         };
         if self.rows.is_empty() {
             return if state.loading() || state.error.is_some() {
-                Vec::new()
+                vec![header]
+            } else if let DiffScope::Turn(turn) = self.scope {
+                vec![
+                    header,
+                    Line::styled(format!(" No remaining changes from Turn {turn}"), dim),
+                    Line::styled(" Press a for all changes", dim),
+                ]
             } else {
-                vec![Line::styled(" No visible changes", dim)]
+                vec![header, Line::styled(" No visible changes", dim)]
             };
         }
-        let largest = (0..snapshot.files.len())
+        let largest = self
+            .visible_files
+            .iter()
+            .copied()
             .filter(|index| counted(&snapshot.files[*index]))
             .map(|index| self.details[index].additions + self.details[index].deletions)
             .max()
@@ -773,14 +1032,17 @@ impl GitDiffView {
             .position(|(position, _)| *position == Some(self.selected))
             .unwrap_or(0);
         let start = selected_line.saturating_sub(rows.saturating_sub(2));
-        let mut shown: Vec<Line<'static>> = lines
-            .into_iter()
-            .skip(start)
-            .take(rows)
-            .map(|(_, line)| line)
-            .collect();
+        let mut shown = Vec::with_capacity(usize::from(area.height));
+        shown.push(header);
+        shown.extend(
+            lines
+                .into_iter()
+                .skip(start)
+                .take(rows)
+                .map(|(_, line)| line),
+        );
         if by_wisp > 0 {
-            shown.resize(rows, Line::default());
+            shown.resize(rows + 1, Line::default());
             shown.push(Line::from(vec![
                 Span::styled(" ◆", Style::default().fg(palette.primary)),
                 Span::styled(" recorded edit in this session", dim),
@@ -907,9 +1169,24 @@ impl GitDiffView {
         let Some(file) = self
             .snapshot
             .as_ref()
+            .filter(|_| self.visible_files.contains(&self.active))
             .and_then(|s| s.files.get(self.active))
             .cloned()
         else {
+            if let DiffScope::Turn(turn) = self.scope
+                && self.snapshot.is_some()
+                && pane.height >= 1
+            {
+                frame.render_widget(
+                    Paragraph::new(Line::styled(
+                        format!(
+                            "No remaining working-tree changes from Turn {turn} (press a for all changes)."
+                        ),
+                        Style::default().fg(palette.muted),
+                    )),
+                    Rect::new(pane.x, pane.y, pane.width, 1),
+                );
+            }
             return;
         };
         if pane.height < 2 {
@@ -939,12 +1216,16 @@ impl GitDiffView {
         let detail = &self.details[self.active];
         let muted = Style::default().fg(palette.muted);
         let dim = Style::default().fg(palette.dim());
-        let mut left = vec![Span::styled(
-            sanitize_for_terminal(&file.path),
+        let title_style = if self.tree_focus {
+            Style::default()
+                .fg(palette.foreground)
+                .add_modifier(Modifier::BOLD)
+        } else {
             Style::default()
                 .fg(palette.primary)
-                .add_modifier(Modifier::BOLD),
-        )];
+                .add_modifier(Modifier::BOLD)
+        };
+        let mut left = vec![Span::styled(sanitize_for_terminal(&file.path), title_style)];
         if counted(&file) {
             left.push(Span::raw(" "));
             left.extend(counts(
@@ -1087,16 +1368,7 @@ pub(crate) fn edit_card_entry(
 /// `None` when its card is not in the transcript.
 fn turn_of_edit(transcript: &Transcript, edit: &GitDiffEdit) -> Option<usize> {
     let card = edit_card_entry(transcript, &edit.entry_id, &edit.call_id)?;
-    let mut turn = 0;
-    for entry in transcript.entries() {
-        if entry.id == card {
-            return (turn > 0).then_some(turn);
-        }
-        if entry.role == TranscriptRole::User {
-            turn += 1;
-        }
-    }
-    None
+    transcript.turn_number_of_entry(card)
 }
 
 #[cfg(test)]
@@ -1212,20 +1484,21 @@ mod tests {
             }))
         };
         let mut state = GitDiff::default();
+        let transcript = Transcript::default();
         let mut view = GitDiffView::opened_at(Some("b.rs".into()));
         state.snapshot = snapshot(1);
-        view.sync(&state);
+        view.sync(&state, &transcript);
         assert_eq!(view.rows[view.selected].key, "b.rs");
         assert_eq!(view.active, 1);
         // Opening /diff reads a fresh snapshot; the file stays selected in it.
         state.snapshot = snapshot(2);
-        view.sync(&state);
+        view.sync(&state, &transcript);
         assert_eq!(view.rows[view.selected].key, "b.rs");
         // Changing how the diff reads, or scrolling it, while a snapshot loads keeps
         // the file.
         let mut view = GitDiffView::opened_at(Some("b.rs".into()));
         state.snapshot = None;
-        view.sync(&state);
+        view.sync(&state, &transcript);
         for key in [
             KeyCode::Char('s'),
             KeyCode::Char('c'),
@@ -1233,17 +1506,17 @@ mod tests {
             KeyCode::Down,
             KeyCode::Enter,
         ] {
-            view.key(key);
+            view.key(key, &transcript);
         }
         state.snapshot = snapshot(4);
-        view.sync(&state);
+        view.sync(&state, &transcript);
         assert_eq!(view.rows[view.selected].key, "b.rs");
         // Once the user moves in the tree, a later snapshot no longer pulls the
         // selection back.
-        view.key(KeyCode::Tab);
-        view.key(KeyCode::Down);
+        view.key(KeyCode::Tab, &transcript);
+        view.key(KeyCode::Down, &transcript);
         state.snapshot = snapshot(5);
-        view.sync(&state);
+        view.sync(&state, &transcript);
         assert_eq!(view.selected, 0);
     }
 
@@ -1330,8 +1603,9 @@ mod tests {
         let (before, after) = python();
         let state = state_of(vec![changed("src/transport.py", &before, &after)]);
         let mut view = GitDiffView::default();
-        view.key(KeyCode::Enter);
-        let text = screen(&mut view, &state, &Transcript::default(), 200, 40);
+        let transcript = Transcript::default();
+        view.key(KeyCode::Enter, &transcript);
+        let text = screen(&mut view, &state, &transcript, 200, 40);
         assert!(
             text.contains("src/transport.py +2 −2 · hunk 1 of 2"),
             "{text}"
@@ -1360,9 +1634,9 @@ mod tests {
         let changed_row = bar("return 2");
         assert!(changed_row.contains("return 1"), "{changed_row}");
         // `c` shows every line as one hunk, without folds, at the same source line.
-        view.key(KeyCode::Char(']'));
-        view.key(KeyCode::Char('c'));
-        let text = screen(&mut view, &state, &Transcript::default(), 200, 40);
+        view.key(KeyCode::Char(']'), &transcript);
+        view.key(KeyCode::Char('c'), &transcript);
+        let text = screen(&mut view, &state, &transcript, 200, 40);
         assert!(!text.contains("unchanged lines"), "{text}");
         assert!(text.contains("hunk 1 of 1"), "{text}");
         let top = text.lines().nth(4).unwrap_or_default();
@@ -1402,20 +1676,20 @@ mod tests {
         assert!(text.contains(" ◆ recorded edit in this session"), "{text}");
         // In the diff pane, Enter on a ◆ file names its latest edit's card.
         assert_eq!(
-            view.key(KeyCode::Enter),
+            view.key(KeyCode::Enter, &transcript),
             Some(EditCard {
                 call_id: "edit-2".into(),
                 entry_id: String::new(),
                 path: "src/codex.py".into(),
             })
         );
-        view.key(KeyCode::Tab);
-        view.key(KeyCode::Down);
+        view.key(KeyCode::Tab, &transcript);
+        view.key(KeyCode::Down, &transcript);
         let text = screen(&mut view, &state, &transcript, 200, 24);
         assert!(text.contains("src/retry.py +1 −1 · hunk 1 of 1"), "{text}");
         assert!(!text.contains("Enter jumps"), "{text}");
-        view.key(KeyCode::Tab);
-        assert_eq!(view.key(KeyCode::Enter), None);
+        view.key(KeyCode::Tab, &transcript);
+        assert_eq!(view.key(KeyCode::Enter, &transcript), None);
     }
 
     #[test]
@@ -1424,23 +1698,126 @@ mod tests {
         untracked.status = "untracked".into();
         untracked.notice = "Untracked file; excluded from tracked diff totals".into();
         let state = state_of(vec![changed("src/example.py", "old\n", "new\n"), untracked]);
+        let transcript = Transcript::default();
         let mut view = GitDiffView::default();
         for width in [50, 160] {
-            let text = screen(&mut view, &state, &Transcript::default(), width, 24);
+            let text = screen(&mut view, &state, &transcript, width, 24);
             assert!(text.contains("working tree"), "{text}");
             assert!(text.contains("example.py"), "{text}");
         }
         // Sections are labelled, untracked last, with no counts.
-        let text = screen(&mut view, &state, &Transcript::default(), 160, 24);
+        let text = screen(&mut view, &state, &transcript, 160, 24);
         assert!(text.contains(" untracked"), "{text}");
         assert!(text.contains("? notes.txt"), "{text}");
         view.selected = 0;
-        view.key(KeyCode::Enter);
+        view.key(KeyCode::Enter, &transcript);
         assert!(!view.rows.iter().any(|row| row.file == Some(0)));
-        view.key(KeyCode::Enter);
-        view.key(KeyCode::Down);
-        view.key(KeyCode::Enter);
+        view.key(KeyCode::Enter, &transcript);
+        view.key(KeyCode::Down, &transcript);
+        view.key(KeyCode::Enter, &transcript);
         assert!(!view.tree_focus);
         assert_eq!(view.active, 0);
+    }
+
+    #[test]
+    fn turn_filter_shows_turn_files_toggles_all_and_steps_turns() {
+        let mut t1_file = changed("src/alpha.py", "a\n", "b\nc\n");
+        t1_file.edits = vec![edit("call-t1")];
+        let mut t2_file = changed("src/beta.py", "x\ny\n", "z\n");
+        t2_file.edits = vec![edit("call-t2")];
+        let outside = changed("README.md", "old\n", "new\n");
+        let state = state_of(vec![t1_file, t2_file, outside]);
+
+        let mut transcript = Transcript::default();
+        transcript.append_prompt("first turn".into());
+        transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+            call_id: "call-t1".into(),
+            name: "edit".into(),
+            arguments: serde_json::json!({"path": "src/alpha.py", "edits": []}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+        });
+        transcript.append_prompt("second turn".into());
+        transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+            call_id: "call-t2".into(),
+            name: "edit".into(),
+            arguments: serde_json::json!({"path": "src/beta.py", "edits": []}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+        });
+
+        let mut view = GitDiffView::for_turn(2);
+        let text = screen(&mut view, &state, &transcript, 200, 24);
+        assert!(text.contains("/diff · [Turn 2] · working tree"), "{text}");
+        assert!(text.contains("1 of 3 files +1 −2"), "{text}");
+        assert!(text.contains("Files (Turn 2)"), "{text}");
+        assert!(text.contains("beta.py"), "{text}");
+        assert!(!text.contains("alpha.py"), "{text}");
+        assert!(!text.contains("README.md"), "{text}");
+        assert!(!view.tree_focus);
+
+        // `<` steps to Turn 1.
+        view.key(KeyCode::Char('<'), &transcript);
+        let text = screen(&mut view, &state, &transcript, 200, 24);
+        assert!(text.contains("[Turn 1]"), "{text}");
+        assert!(text.contains("alpha.py"), "{text}");
+        assert!(!text.contains("beta.py"), "{text}");
+
+        // `a` widens to all working-tree changes, and pressing `a` again returns to Turn 1.
+        view.key(KeyCode::Char('a'), &transcript);
+        let text = screen(&mut view, &state, &transcript, 200, 24);
+        assert!(!text.contains("[Turn"), "{text}");
+        assert!(text.contains("README.md"), "{text}");
+        assert!(text.contains("alpha.py"), "{text}");
+        assert!(text.contains("beta.py"), "{text}");
+
+        view.key(KeyCode::Char('a'), &transcript);
+        assert_eq!(view.scope(), DiffScope::Turn(1));
+    }
+
+    #[test]
+    fn turn_filter_reports_empty_when_turn_changes_are_gone() {
+        let state = state_of(vec![changed("README.md", "old\n", "new\n")]);
+        let mut view = GitDiffView::for_turn(3);
+        let text = screen(&mut view, &state, &Transcript::default(), 160, 20);
+        assert!(text.contains("[Turn 3]"), "{text}");
+        assert!(
+            text.contains(
+                "No remaining working-tree changes from Turn 3 (press a for all changes)."
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn hunk_keys_flow_across_files_forward_and_backward() {
+        let (before, after) = python();
+        let state = state_of(vec![
+            changed("src/first.py", &before, &after),
+            changed("src/second.py", "one\n", "two\n"),
+        ]);
+        let transcript = Transcript::default();
+        let mut view = GitDiffView::default();
+        let _ = screen(&mut view, &state, &transcript, 200, 30);
+        // First file is already selected; Enter moves focus into its diff at hunk 1 of 2.
+        view.key(KeyCode::Enter, &transcript);
+        assert_eq!(view.active, 0);
+        let _ = screen(&mut view, &state, &transcript, 200, 30);
+        assert_eq!(view.review.hunk_position(), Some((1, 2)));
+
+        // First `]` moves to hunk 2 of 2 in first.py.
+        view.key(KeyCode::Char(']'), &transcript);
+        assert_eq!(view.active, 0);
+        assert_eq!(view.review.hunk_position(), Some((2, 2)));
+
+        // Next `]` crosses into second.py at hunk 1 of 1.
+        view.key(KeyCode::Char(']'), &transcript);
+        let _ = screen(&mut view, &state, &transcript, 200, 30);
+        assert_eq!(view.active, 1);
+        assert_eq!(view.review.hunk_position(), Some((1, 1)));
+
+        // `[` crosses back into first.py and lands on its last hunk (2 of 2).
+        view.key(KeyCode::Char('['), &transcript);
+        let _ = screen(&mut view, &state, &transcript, 200, 30);
+        assert_eq!(view.active, 0);
+        assert_eq!(view.review.hunk_position(), Some((2, 2)));
     }
 }

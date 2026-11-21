@@ -52,6 +52,7 @@ the entire default keymap; other valid user settings still apply.
 | `session.tree` | Ctrl+T | Open the session tree to switch branches (`/tree`) |
 | `transcript.browse` | F6 | Browse and copy transcript messages, code blocks, and cards |
 | `transcript.copy_last_response` | Alt+Y | Copy the last assistant response (raw source Markdown) |
+| `transcript.turn_diff` | Alt+G | Open `/diff` filtered to the latest editing turn |
 | `transcript.page_up`, `transcript.page_down` | PgUp, PgDn | Scroll one page |
 | `transcript.home`, `transcript.tail` | Ctrl+Home, Ctrl+End | Oldest content / live tail |
 | `transcript.line_up`, `transcript.line_down` | Ctrl+Up, Ctrl+Down | Scroll one line |
@@ -155,6 +156,7 @@ characters per chord.
 | `F8` | Focus the side panel for keyboard navigation (`f` expands/restores; `b` switches Work/Browser; `i` enters browser takeover; `r` refreshes) |
 | `F6` | Browse transcript messages, code blocks, and cards (`Tab`/`↑`/`↓`/`j`/`k` select, `y` copies, `Right` expands, `Left` collapses, `Enter` opens retained detail) |
 | `Alt+Y` | Copy the last assistant response as raw source Markdown (with OSC 52 fallback over SSH) |
+| `Alt+G` | Open `/diff` filtered to the latest turn that edited files (click or press `Enter` on any turn's change summary in Browse for that turn's diff) |
 | `Ctrl+G` | Toggle contextual help for the focused Rust surface |
 | `Ctrl+L` | Edit the address of the visible live Chromium tab, or focus the `Browser` view's address bar when no page is open |
 | `Ctrl+R` | Search prompt history for this TUI run |

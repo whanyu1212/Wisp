@@ -3886,6 +3886,21 @@ impl LiveUi {
                 }
                 continue;
             }
+            if row.kind == TranscriptRowKind::RunSummary {
+                if self
+                    .state
+                    .transcript
+                    .entry(row.anchor.entry_id)
+                    .and_then(|entry| entry.run_summary_changes())
+                    .is_some()
+                {
+                    let target = BrowseTarget::RunSummary(row.anchor.entry_id);
+                    if seen.insert(target) {
+                        entries.push(target);
+                    }
+                }
+                continue;
+            }
             if !matches!(
                 row.kind,
                 TranscriptRowKind::Header | TranscriptRowKind::Content
@@ -3964,6 +3979,9 @@ impl LiveUi {
                     }
                     None => "Browse: Code block · y copy · ↑↓/Tab select · Esc prompt".into(),
                 }
+            }
+            Some(BrowseTarget::RunSummary(_)) => {
+                "Browse: Turn changes · Enter diff · y copy · ↑↓/Tab select · Esc prompt".into()
             }
             _ => {
                 let open = if self.bindings.label(KeyAction::ExternalEditor) == "Unbound" {
@@ -4112,7 +4130,45 @@ impl LiveUi {
                     .collect::<Vec<_>>();
                 (!lines.is_empty()).then(|| ("tool group".into(), lines.join("\n")))
             }
+            BrowseTarget::RunSummary(entry_id) => {
+                let summary = self.state.transcript.entry(entry_id)?.run_summary()?;
+                (!summary.is_empty()).then(|| ("turn summary".into(), summary.to_owned()))
+            }
         }
+    }
+
+    async fn open_turn_diff(
+        &mut self,
+        turn: usize,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        if matches!(
+            self.state.view_status,
+            ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
+        ) {
+            return Ok(LoopControl::Continue);
+        }
+        self.browse_selected = None;
+        self.notice = None;
+        self.git_diff_view = Some(git_diff_view::GitDiffView::for_turn(turn));
+        self.render_pending = true;
+        self.dispatch(UiAction::SetGitDiffOpen(true), writer, limit)
+            .await
+    }
+
+    async fn open_latest_turn_diff(
+        &mut self,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        let Some(turn) = self.state.transcript.latest_editing_turn() else {
+            self.notice =
+                Some("No recorded turn edits yet; use /diff for working-tree changes.".into());
+            self.render_pending = true;
+            return Ok(LoopControl::Continue);
+        };
+        self.open_turn_diff(turn, writer, limit).await
     }
 
     fn selected_closed_group(&self) -> Option<TranscriptEntryId> {
@@ -4139,7 +4195,9 @@ impl LiveUi {
                 self.transcript_row_cache.fold_mut().expand_output(entry);
                 self.transcript_viewport.reveal_output(entry);
             }
-            BrowseTarget::Message(_) | BrowseTarget::CodeBlock { .. } => return,
+            BrowseTarget::Message(_)
+            | BrowseTarget::CodeBlock { .. }
+            | BrowseTarget::RunSummary(_) => return,
         }
         self.notice = Some(self.browse_notice());
         self.render_pending = true;
@@ -4189,7 +4247,7 @@ impl LiveUi {
         };
         if matches!(
             selected,
-            BrowseTarget::Message(_) | BrowseTarget::CodeBlock { .. }
+            BrowseTarget::Message(_) | BrowseTarget::CodeBlock { .. } | BrowseTarget::RunSummary(_)
         ) {
             return;
         }
@@ -4268,7 +4326,8 @@ impl LiveUi {
             BrowseTarget::Entry(_)
             | BrowseTarget::Output(_)
             | BrowseTarget::Message(_)
-            | BrowseTarget::CodeBlock { .. } => target,
+            | BrowseTarget::CodeBlock { .. }
+            | BrowseTarget::RunSummary(_) => target,
         }
     }
 
@@ -5410,8 +5469,12 @@ impl LiveUi {
                 KeyCode::PageDown => self.detail_view.review.page(true),
                 KeyCode::Home => self.detail_view.review.home(),
                 KeyCode::End => self.detail_view.review.end(),
-                KeyCode::Char(']') => self.detail_view.review.jump_hunk(true),
-                KeyCode::Char('[') => self.detail_view.review.jump_hunk(false),
+                KeyCode::Char(']') => {
+                    self.detail_view.review.jump_hunk(true);
+                }
+                KeyCode::Char('[') => {
+                    self.detail_view.review.jump_hunk(false);
+                }
                 KeyCode::Char('s') => {
                     self.detail_view.review.split = !self.detail_view.review.split
                 }
@@ -5487,6 +5550,12 @@ impl LiveUi {
             KeyCode::Right => self.expand_selected_fold(),
             KeyCode::Left => self.collapse_selected_fold(),
             KeyCode::Enter | KeyCode::Char(' ') => {
+                if let Some(BrowseTarget::RunSummary(entry_id)) = self.browse_selected {
+                    if let Some(turn) = self.state.transcript.turn_number_of_entry(entry_id) {
+                        return self.open_turn_diff(turn, writer, limit).await;
+                    }
+                    return Ok(LoopControl::Continue);
+                }
                 if matches!(
                     self.browse_selected,
                     Some(BrowseTarget::Message(_) | BrowseTarget::CodeBlock { .. })
@@ -5902,8 +5971,9 @@ impl LiveUi {
                     std::time::Instant::now(),
                 ) {
                     self.render_pending = true;
-                } else {
-                    self.continue_transcript_selection(*event);
+                } else if let Some(turn) = self.continue_transcript_selection(*event) {
+                    self.request_pointer_shape();
+                    return self.open_turn_diff(turn, writer, limit).await;
                 }
                 self.request_pointer_shape();
                 return Ok(LoopControl::Continue);
@@ -6402,6 +6472,9 @@ impl LiveUi {
                 self.copy_last_response();
                 Ok(Some(LoopControl::Continue))
             }
+            Some(KeyAction::TurnDiff) if self.active_overlay().is_none() && !decision_pending => {
+                self.open_latest_turn_diff(writer, limit).await.map(Some)
+            }
             _ => Ok(None),
         }
     }
@@ -6657,12 +6730,16 @@ impl LiveUi {
                 .await;
         } else if key.code == KeyCode::Char('r') && key.modifiers == KeyModifiers::NONE {
             return self.dispatch(UiAction::RefreshGitDiff, writer, limit).await;
-        } else if key.modifiers == KeyModifiers::NONE || key.code == KeyCode::BackTab {
+        } else if key.modifiers == KeyModifiers::NONE
+            || key.code == KeyCode::BackTab
+            || (key.modifiers == KeyModifiers::SHIFT
+                && matches!(key.code, KeyCode::Char('<' | '>')))
+        {
             let card = self
                 .git_diff_view
                 .as_mut()
                 .expect("open diff")
-                .key(key.code);
+                .key(key.code, &self.state.transcript);
             if let Some(card) = card {
                 return self.jump_to_edit(card, writer, limit).await;
             }
@@ -13855,6 +13932,179 @@ mod tests {
             ui.notice
                 .as_deref()
                 .is_some_and(|notice| notice.starts_with("Could not copy response"))
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_change_summary_renders_totals_and_jumps_to_turn_diff() {
+        let mut ui = LiveUi {
+            state: UiState::new("fake".into(), None, None),
+            mouse_enabled: true,
+            ..LiveUi::default()
+        };
+        let (writer, mut receiver) = mpsc::channel(16);
+
+        // Alt+G before any edits reports a clear notice without opening /diff.
+        ui.handle_input(
+            Input::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::ALT)),
+            &writer,
+            MAX_APPLICATION_FRAME_BYTES,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ui.active_overlay(), None);
+        assert!(
+            ui.notice
+                .as_deref()
+                .is_some_and(|n| n.contains("No recorded turn edits"))
+        );
+
+        // Turn 1: two edits to the same file (counted as 1 file), one edit to a second file,
+        // and one failed edit (must not count).
+        ui.state.transcript.append_exchange("edit two files".into());
+        for (call_id, path, old, new, is_error) in [
+            ("e1", "src/retry.py", "a\n", "b\nc\n", false),
+            ("e2", "src/retry.py", "x\n", "y\n", false),
+            ("e3", "tests/test_retry.py", "old\n", "new1\nnew2\n", false),
+            ("e4", "src/ignored.py", "u\n", "v\n", true),
+        ] {
+            let BackendEvent::ToolCall(call) = BackendEvent::from_projection_value(&json!({
+                "type": "tool.call",
+                "call_id": call_id,
+                "name": "edit",
+                "arguments": {
+                    "path": path,
+                    "edits": [{"oldText": old, "newText": new}]
+                }
+            }))
+            .unwrap() else {
+                panic!("tool call expected");
+            };
+            ui.state.transcript.observe_tool_call(call);
+            let BackendEvent::ToolResult(result) = BackendEvent::from_projection_value(&json!({
+                "type": "tool.result",
+                "message_entry_id": null,
+                "call_id": call_id,
+                "name": "edit",
+                "output": if is_error { "failed" } else { "Applied 1 edit" },
+                "is_error": is_error
+            }))
+            .unwrap() else {
+                panic!("tool result expected");
+            };
+            ui.state.transcript.observe_tool_result(*result);
+        }
+        let reply1 = ui.state.transcript.start_message(1);
+        ui.state
+            .transcript
+            .append_message_delta(1, "Updated retry.");
+        ui.state
+            .transcript
+            .complete_message(1, "Updated retry.".into());
+        assert!(
+            ui.state
+                .transcript
+                .attach_run_summary(transcript::RunTotals {
+                    outcome: "completed".into(),
+                    duration_ms: Some(41_000),
+                    tool_calls: 4,
+                    mode: Some("build".into()),
+                    model: Some("gpt-6".into()),
+                    effort: Some("high".into()),
+                    ..Default::default()
+                })
+        );
+
+        // Turn 2: read-only turn (no change summary segment).
+        ui.state.transcript.append_exchange("explain it".into());
+        let reply2 = ui.state.transcript.start_message(2);
+        ui.state.transcript.append_message_delta(2, "All set.");
+        ui.state.transcript.complete_message(2, "All set.".into());
+        assert!(
+            ui.state
+                .transcript
+                .attach_run_summary(transcript::RunTotals {
+                    outcome: "completed".into(),
+                    duration_ms: Some(5_000),
+                    tool_calls: 0,
+                    mode: Some("build".into()),
+                    model: Some("gpt-6".into()),
+                    effort: Some("high".into()),
+                    ..Default::default()
+                })
+        );
+
+        let changes1 = ui
+            .state
+            .transcript
+            .entry(reply1)
+            .unwrap()
+            .run_summary_changes()
+            .unwrap();
+        assert_eq!(changes1.files, 2);
+        assert_eq!(changes1.additions, 5);
+        assert_eq!(changes1.deletions, 3);
+        assert!(
+            ui.state
+                .transcript
+                .entry(reply1)
+                .unwrap()
+                .run_summary()
+                .unwrap()
+                .contains("+5 −3 in 2 files")
+        );
+        assert!(
+            ui.state
+                .transcript
+                .entry(reply2)
+                .unwrap()
+                .run_summary_changes()
+                .is_none()
+        );
+
+        let connection = ConnectionInfo {
+            backend_version: "test".into(),
+        };
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        ui.draw(&mut terminal, &connection).unwrap();
+
+        // Alt+G opens /diff filtered to Turn 1 (the latest editing turn, skipping read-only Turn 2).
+        ui.handle_input(
+            Input::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::ALT)),
+            &writer,
+            MAX_APPLICATION_FRAME_BYTES,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ui.active_overlay(), Some(OverlayKind::GitDiff));
+        assert_eq!(
+            ui.git_diff_view.as_ref().unwrap().scope(),
+            git_diff_view::DiffScope::Turn(1)
+        );
+        assert!(receiver.try_recv().is_ok());
+
+        // Close /diff, then open Turn 1's diff via Browse Enter on its RunSummary row.
+        ui.handle_input(
+            Input::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            &writer,
+            MAX_APPLICATION_FRAME_BYTES,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ui.active_overlay(), None);
+
+        ui.browse_selected = Some(BrowseTarget::RunSummary(reply1));
+        ui.handle_input(
+            Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &writer,
+            MAX_APPLICATION_FRAME_BYTES,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ui.active_overlay(), Some(OverlayKind::GitDiff));
+        assert_eq!(
+            ui.git_diff_view.as_ref().unwrap().scope(),
+            git_diff_view::DiffScope::Turn(1)
         );
     }
 

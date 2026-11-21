@@ -1070,12 +1070,28 @@ fn render_transcript(
                     y: area.y,
                     target: BrowseTarget::for_row(row),
                     opens_review: false,
+                    opens_turn_diff: None,
                 });
             } else if is_diff_more_row(state, row) {
                 fold_rows.push(mouse::FoldRow {
                     y: area.y,
                     target: BrowseTarget::Entry(row.anchor.entry_id),
                     opens_review: true,
+                    opens_turn_diff: None,
+                });
+            } else if row.kind == TranscriptRowKind::RunSummary
+                && state
+                    .transcript
+                    .entry(row.anchor.entry_id)
+                    .and_then(|entry| entry.run_summary_changes())
+                    .is_some()
+                && let Some(turn) = state.transcript.turn_number_of_entry(row.anchor.entry_id)
+            {
+                fold_rows.push(mouse::FoldRow {
+                    y: area.y,
+                    target: BrowseTarget::RunSummary(row.anchor.entry_id),
+                    opens_review: false,
+                    opens_turn_diff: Some(turn),
                 });
             }
             if offset == 0
@@ -1836,6 +1852,12 @@ fn selected_browse_rows(
     };
     match target {
         BrowseTarget::Message(entry_id) => SelectedRows::Message(entry_id),
+        BrowseTarget::RunSummary(entry_id) => rows
+            .iter()
+            .find(|row| {
+                row.anchor.entry_id == entry_id && row.kind == TranscriptRowKind::RunSummary
+            })
+            .map_or(SelectedRows::None, |row| SelectedRows::Anchor(row.anchor)),
         BrowseTarget::CodeBlock {
             entry_id,
             source_start,

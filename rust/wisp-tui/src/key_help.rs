@@ -87,8 +87,8 @@ impl KeyHelp {
                 "Right expands, Left collapses, Enter opens retained detail. Esc returns to the prompt.",
             ],
             Owner::Overlay(OverlayKind::GitDiff) => &[
-                "Diff: Tab switches focus, Enter expands/opens, [] hunks, s split, c context, r refresh, Esc closes.",
-                "In the diff, Enter on a ◆ file (edited by Wisp this session) jumps to its edit card.",
+                "Diff: Tab switches focus, Enter expands/opens, [] hunks across files, a turn/all filter, <> step turns.",
+                "s split, c context, r refresh, Esc closes. Enter on a ◆ file jumps to its edit card.",
             ],
             Owner::Overlay(OverlayKind::Connection) => &[
                 "Connections: Up/Down select, Enter starts/submits, d disconnects, r refreshes.",
