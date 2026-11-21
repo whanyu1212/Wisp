@@ -164,6 +164,16 @@ TUI controls, authentication, and codemode.
 - If the settings file is already invalid, the commands refuse to change it and name the field to
   fix.
 
+### Browser
+
+```text
+wisp browser clear [--yes|-y]
+```
+
+Clears saved live browser data, including site sign-ins and cookies. Close the live browser
+before clearing it. The command asks for confirmation in a terminal and accepts `--yes` for
+non-interactive use. See [Saved live browser profile](configuration.md#saved-live-browser-profile).
+
 ### Skills
 
 ```text

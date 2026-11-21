@@ -350,11 +350,17 @@ def test_launcher_spawns_without_shell_and_preserves_backend_environment(
     assert os.environ["WISP_LAUNCHER_TEST_SENTINEL"] == "inherited"
 
 
-def test_launcher_forwards_resolved_user_keybindings_as_bounded_json(
+@pytest.mark.parametrize("override", [None, "halfblock"])
+def test_launcher_forwards_user_preferences(
+    override: str | None,
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
     binary = tmp_path / "wisp-tui"
+    if override is None:
+        monkeypatch.delenv("WISP_TUI_IMAGES", raising=False)
+    else:
+        monkeypatch.setenv("WISP_TUI_IMAGES", override)
     environments: list[dict[str, str]] = []
 
     class FakeProcess:
@@ -383,10 +389,11 @@ def test_launcher_forwards_resolved_user_keybindings_as_bounded_json(
         "resolve_settings",
         lambda **kwargs: (
             ResolvedSettings(
+                tui_images="kitty-unicode",
                 tui_keybindings={
                     "prompt.submit": ["ctrl+enter"],
                     "theme.toggle": [],
-                }
+                },
             )
             if kwargs == {"trust_project": False}
             else pytest.fail(f"unexpected settings resolution: {kwargs}")
@@ -398,6 +405,7 @@ def test_launcher_forwards_resolved_user_keybindings_as_bounded_json(
 
     assert rust_launcher.run_rust_tui(_options(tmp_path)) == 0
     assert len(environments) == 1
+    assert environments[0]["WISP_TUI_IMAGES"] == (override or "kitty-unicode")
     assert json.loads(environments[0]["WISP_RUST_TUI_BINDINGS_JSON"]) == {
         "prompt.submit": ["ctrl+enter"],
         "theme.toggle": [],

@@ -1,18 +1,20 @@
-"""Run an isolated Chromium tab and retain its latest CDP screencast frame."""
+"""Run a Chromium tab on Wisp's saved profile and retain its latest CDP screencast frame."""
 
 from __future__ import annotations
 
 import asyncio
 import base64
 import json
+import math
 import os
+import re
 import shutil
+import stat
 import subprocess
 import sys
 from collections.abc import Mapping
 from contextlib import suppress
 from pathlib import Path
-from tempfile import TemporaryDirectory
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -22,6 +24,8 @@ from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import WebSocketException
 
 from wisp.coding.browser_control import BrowserControlError, BrowserInteraction
+from wisp.coding.browser_profile import browser_profile
+from wisp.config.settings import browser_profile_path
 from wisp.events import (
     MAX_BROWSER_URL_CHARS,
     MAX_LIVE_BROWSER_FRAME_CHARS,
@@ -31,10 +35,16 @@ from wisp.events import (
     LiveBrowserViewport,
 )
 
+_MAX_CAPTURE_PIXELS = MAX_LIVE_BROWSER_WIDTH * MAX_LIVE_BROWSER_HEIGHT
 _INITIAL_VIEWPORT = LiveBrowserViewport(width=900, height=600, device_scale_factor=1)
 _STARTUP_TIMEOUT = 20
 _TIMEOUT = 10
 _CHROME_MAC = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+_CHROME_VERSION = re.compile(r"\b(\d+)\.\d+\.\d+\.\d+\b")
+# User-agent reduction froze the platform token and the minor version fields.
+_USER_AGENT_PLATFORM = (
+    "Macintosh; Intel Mac OS X 10_15_7" if sys.platform == "darwin" else "X11; Linux x86_64"
+)
 _MOUSE_BUTTON_MASK = {"left": 1, "right": 2, "middle": 4}
 _MODIFIER_MASK = {"Alt": 1, "Control": 2, "Meta": 4, "Shift": 8}
 _KEY_CODES = {
@@ -90,7 +100,15 @@ def _chrome_binary() -> str:
 class LiveBrowser:
     """Own a single user-controlled tab for the lifetime of the RPC host."""
 
-    def __init__(self, tasks: TaskGroup) -> None:
+    def __init__(self, tasks: TaskGroup, *, profile_dir: Path | None = None) -> None:
+        """Prepare a closed browser.
+
+        Args:
+            tasks: Task group that owns the Chromium process.
+            profile_dir: Saved Chromium profile, by default ``~/.wisp/browser-profile``.
+                Only one browser may use it at a time.
+        """
+        self._profile_dir = profile_dir
         self._tasks = tasks
         self._scope: anyio.CancelScope | None = None
         self._stopped: anyio.Event | None = None
@@ -110,7 +128,7 @@ class LiveBrowser:
         self._url: str | None = None
 
     async def open(self, url: str) -> BrowserViewportUpdated:
-        """Replace the existing tab with one in a fresh Chromium profile.
+        """Replace the existing tab with a new one on the saved Chromium profile.
 
         Args:
             url: HTTP or HTTPS address for the new tab.
@@ -225,6 +243,7 @@ class LiveBrowser:
 
     async def _start_capture(self, viewport: LiveBrowserViewport) -> BrowserViewportUpdated:
         self._viewport = viewport
+        max_width, max_height = _capture_size(viewport)
         # A redirect can commit during capture startup. Retire that generation
         # and retry within the same deadline to bind pixels to the new document.
         with anyio.move_on_after(_TIMEOUT):
@@ -243,15 +262,7 @@ class LiveBrowser:
                 )
                 await self._command(
                     "Page.startScreencast",
-                    {
-                        "format": "png",
-                        "maxWidth": min(
-                            MAX_LIVE_BROWSER_WIDTH, viewport.width * viewport.device_scale_factor
-                        ),
-                        "maxHeight": min(
-                            MAX_LIVE_BROWSER_HEIGHT, viewport.height * viewport.device_scale_factor
-                        ),
-                    },
+                    {"format": "png", "maxWidth": max_width, "maxHeight": max_height},
                 )
                 await self._first_frame.wait()
                 if (frame := self.take_frame()) is not None:
@@ -279,11 +290,21 @@ class LiveBrowser:
         try:
             with (
                 anyio.CancelScope() as scope,
-                TemporaryDirectory(prefix="wisp-browser-") as profile,
+                browser_profile(self._profile_dir or browser_profile_path()) as profile,
             ):
                 self._scope = scope
-                # The disposable macOS profile must not prompt for a login Keychain.
-                keychain_args = ["--use-mock-keychain"] if sys.platform == "darwin" else []
+                env_keys = ["PATH", "HOME", "TMPDIR", "LANG"]
+                if sys.platform.startswith("linux"):
+                    # Let Chromium discover the desktop keyring and its session bus.
+                    env_keys.extend(
+                        (
+                            "XDG_CURRENT_DESKTOP",
+                            "XDG_RUNTIME_DIR",
+                            "DBUS_SESSION_BUS_ADDRESS",
+                            "KDE_SESSION_VERSION",
+                        )
+                    )
+                environment = {key: os.environ[key] for key in env_keys if key in os.environ}
                 process = await anyio.open_process(
                     [
                         executable,
@@ -293,48 +314,36 @@ class LiveBrowser:
                         "--force-device-scale-factor=2",
                         "--no-first-run",
                         "--no-default-browser-check",
-                        *keychain_args,
+                        *await _desktop_identity_args(executable, environment),
                         "--remote-debugging-port=0",
                         "--remote-debugging-address=127.0.0.1",
-                        f"--user-data-dir={profile}",
+                        f"--user-data-dir={profile.path}",
                         "about:blank",
                     ],
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
-                    env={
-                        key: os.environ[key]
-                        for key in ("PATH", "HOME", "TMPDIR", "LANG")
-                        if key in os.environ
-                    },
-                    cwd=profile,
+                    env=environment,
+                    cwd=profile.path,
+                    pass_fds=profile.pass_fds,
                 )
                 try:
                     async with connect(
-                        await _debugger_address(Path(profile), process),
+                        await _debugger_address(profile.path, process),
                         proxy=None,
                         max_size=MAX_LIVE_BROWSER_FRAME_CHARS + 8192,
                         close_timeout=1,
                     ) as socket:
                         self._socket = socket
-                        async with anyio.create_task_group() as reader:
-                            reader.start_soon(self._read, socket)
-                            await self._command("Browser.setDownloadBehavior", {"behavior": "deny"})
-                            created = await self._command(
-                                "Target.createTarget", {"url": "about:blank"}
-                            )
-                            attached = await self._command(
-                                "Target.attachToTarget",
-                                {"targetId": created.get("targetId"), "flatten": True},
-                            )
-                            session_id = attached.get("sessionId")
-                            if not isinstance(session_id, str):
-                                raise BrowserControlError(
-                                    "Chromium did not attach to its browser tab"
-                                )
-                            self._target = session_id
-                            task_status.started()
-                            started = True
+                        try:
+                            async with anyio.create_task_group() as reader:
+                                reader.start_soon(self._read, socket)
+                                self._target = await self._attach_tab()
+                                task_status.started()
+                                started = True
+                        finally:
+                            if process.returncode is None:
+                                await _close_saved_browser(socket, self._next_id + 1, process)
                 finally:
                     with anyio.CancelScope(shield=True):
                         if process.returncode is None:
@@ -346,6 +355,9 @@ class LiveBrowser:
                             with suppress(ProcessLookupError):
                                 process.kill()
                         await process.aclose()
+        except BrowserControlError:
+            if not started:
+                raise
         except Exception:  # noqa: BLE001 - keep the RPC host alive after Chromium exits
             if not started:
                 raise BrowserControlError("Could not start the isolated Chromium browser") from None
@@ -360,6 +372,17 @@ class LiveBrowser:
             self._navigation.set()
             self._first_frame.set()
             stopped.set()
+
+    async def _attach_tab(self) -> str:
+        await self._command("Browser.setDownloadBehavior", {"behavior": "deny"})
+        created = await self._command("Target.createTarget", {"url": "about:blank"})
+        attached = await self._command(
+            "Target.attachToTarget", {"targetId": created.get("targetId"), "flatten": True}
+        )
+        session_id = attached.get("sessionId")
+        if not isinstance(session_id, str):
+            raise BrowserControlError("Chromium did not attach to its browser tab")
+        return session_id
 
     async def _read(self, socket: ClientConnection) -> None:
         try:
@@ -549,6 +572,11 @@ class LiveBrowser:
             )
             return
         button = request.button or "left"
+        # A person's pointer arrives before it presses. Pages rely on the hover
+        # this produces, and a press with no pointer history reads as scripted.
+        await self._command(
+            "Input.dispatchMouseEvent", {**params, "type": "mouseMoved", "buttons": 0}
+        )
         for count in range(1, 3 if request.double_click else 2):
             await self._command(
                 "Input.dispatchMouseEvent",
@@ -572,6 +600,23 @@ class LiveBrowser:
             )
 
 
+def _capture_size(viewport: LiveBrowserViewport) -> tuple[int, int]:
+    """Fit the device raster into the live frame's pixel budget.
+
+    Args:
+        viewport: Requested CSS dimensions and device pixel ratio.
+
+    Returns:
+        Maximum PNG width and height in physical pixels, scaled proportionally.
+    """
+    width = viewport.width * viewport.device_scale_factor
+    height = viewport.height * viewport.device_scale_factor
+    if width * height <= _MAX_CAPTURE_PIXELS:
+        return width, height
+    scale = math.sqrt(_MAX_CAPTURE_PIXELS / (width * height))
+    return int(width * scale), int(height * scale)
+
+
 def _png_matches_viewport(data: str, viewport: LiveBrowserViewport) -> bool:
     # CDP can describe new CSS bounds while encoding the previous surface.
     # Read just the signature and IHDR dimensions (24 bytes / 32 base64 chars).
@@ -583,31 +628,74 @@ def _png_matches_viewport(data: str, viewport: LiveBrowserViewport) -> bool:
         return False
     width = int.from_bytes(header[16:20], "big")
     height = int.from_bytes(header[20:24], "big")
-    scale = min(
-        viewport.device_scale_factor,
-        MAX_LIVE_BROWSER_WIDTH / viewport.width,
-        MAX_LIVE_BROWSER_HEIGHT / viewport.height,
-    )
+    max_width, max_height = _capture_size(viewport)
+    scale = min(max_width / viewport.width, max_height / viewport.height)
     # Chromium may fit twice: round the short edge to a whole pixel, then
-    # fit the long edge to preserve aspect. At 1152×45 CSS, a 1600×62.5 fit
-    # can therefore produce a perfectly valid 1587×62 PNG.
+    # fit the long edge to preserve aspect, yielding slightly fewer pixels.
     expected_short = min(viewport.width, viewport.height) * scale
     aspect_error = abs(width * viewport.height - height * viewport.width)
     return (
-        0 < width <= min(MAX_LIVE_BROWSER_WIDTH, viewport.width * viewport.device_scale_factor)
-        and 0
-        < height
-        <= min(MAX_LIVE_BROWSER_HEIGHT, viewport.height * viewport.device_scale_factor)
+        0 < width <= max_width
+        and 0 < height <= max_height
         and abs(min(width, height) - expected_short) <= 0.501
         and aspect_error <= max(viewport.width, viewport.height)
     )
+
+
+async def _desktop_identity_args(executable: str, environment: Mapping[str, str]) -> list[str]:
+    """Build flags that make the headless tab identify as the person's desktop Chrome.
+
+    Headless Chrome names itself ``HeadlessChrome`` and sets ``navigator.webdriver``.
+    Sites answer either signal with repeated bot challenges, although a person
+    drives this tab. The flags apply to the whole browser, so cross-origin
+    challenge frames see the same identity as the page.
+
+    Args:
+        executable: Chrome or Chromium binary that will be launched.
+        environment: Environment for the version query.
+
+    Returns:
+        Launch flags, without a user-agent override when the build's version
+        cannot be read.
+    """
+    args = ["--disable-blink-features=AutomationControlled"]
+    reported = await anyio.run_process(
+        [executable, "--version"],
+        check=False,
+        stdin=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=environment,
+    )
+    if version := _CHROME_VERSION.search(reported.stdout.decode(errors="replace")):
+        args.append(
+            f"--user-agent=Mozilla/5.0 ({_USER_AGENT_PLATFORM}) AppleWebKit/537.36 "
+            f"(KHTML, like Gecko) Chrome/{version[1]}.0.0.0 Safari/537.36"
+        )
+    return args
+
+
+async def _close_saved_browser(
+    socket: ClientConnection, request_id: int, process: anyio.abc.Process
+) -> None:
+    # The reader may already be cancelled. Ask Chrome directly to flush cookies
+    # and site storage before the socket closes, then fall back to termination.
+    with anyio.move_on_after(3, shield=True), suppress(WebSocketException, OSError):
+        await socket.send(json.dumps({"id": request_id, "method": "Browser.close"}))
+        await process.wait()
 
 
 async def _debugger_address(profile: Path, process: anyio.abc.Process) -> str:
     with anyio.fail_after(_STARTUP_TIMEOUT):
         while process.returncode is None:
             try:
-                port, path = (profile / "DevToolsActivePort").read_text().splitlines()[:2]
+                fd = os.open(
+                    profile / "DevToolsActivePort",
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+                )
+                with os.fdopen(fd, "rb") as stream:
+                    if not stat.S_ISREG(os.fstat(fd).st_mode):
+                        raise BrowserControlError("Invalid Chromium debugging endpoint file")
+                    port, path = stream.read(512).decode("ascii").splitlines()[:2]
                 if port.isascii() and port.isdecimal() and path.startswith("/devtools/browser/"):
                     return f"ws://127.0.0.1:{port}{path}"
             except (FileNotFoundError, ValueError):

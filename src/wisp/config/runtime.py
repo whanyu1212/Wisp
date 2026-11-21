@@ -18,6 +18,7 @@ from pydantic import (
 )
 
 from wisp.config.settings import (
+    BROWSER_PROFILE_SUBPATH,
     DEFAULT_PROTECTED_PATHS,
     ResolvedSettings,
     resolve_settings,
@@ -116,7 +117,7 @@ class WispConfig(BaseModel):
 
     @model_validator(mode="after")
     def _always_protect_sensitive_paths(self) -> WispConfig:
-        """Ensure Wisp's credential and user settings files are always protected.
+        """Ensure Wisp's sensitive local data is always protected.
 
         Enforced as a model invariant — on *every* construction path, not just
         ``from_env`` — so embedding/SDK code that builds ``WispConfig`` directly
@@ -125,12 +126,17 @@ class WispConfig(BaseModel):
         protected even when ``protected_paths`` is otherwise empty.
         """
 
+        # A suffix keeps glob metacharacters in home directory names from becoming
+        # part of the pattern. The browser requires a real .wisp parent directory.
+        browser_pattern = BROWSER_PROFILE_SUBPATH.as_posix()
         required = (
             self.auth_path.expanduser().resolve(strict=False).as_posix(),
             mcp_auth_path().resolve(strict=False).as_posix(),
             user_settings_path().resolve(strict=False).as_posix(),
             permissions_directory().resolve(strict=False).as_posix(),
             f"{permissions_directory().resolve(strict=False).as_posix()}/**",
+            browser_pattern,
+            f"{browser_pattern}/**",
             *(
                 (self.openai_compatible.ca_bundle.as_posix(),)
                 if self.openai_compatible is not None

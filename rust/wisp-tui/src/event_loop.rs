@@ -556,23 +556,13 @@ async fn run_with_interrupts<B: FrameBackend>(
             ui.poll_session_catalog(writer, limit).await?;
         }
         let now = Instant::now();
-        if !eof {
-            if ui
+        if !eof
+            && ui
                 .flush_due_browser_typing(now.into_std(), writer, limit)
                 .await?
                 == LoopControl::Exit
-            {
-                return Ok(Exit::User);
-            }
-            if pending_input.is_none()
-                && sources.inputs.is_empty()
-                && ui
-                    .poll_browser_viewport(now.into_std(), writer, limit)
-                    .await?
-                    == LoopControl::Exit
-            {
-                return Ok(Exit::User);
-            }
+        {
+            return Ok(Exit::User);
         }
         ui.expire_notice(now.into_std());
         if now >= next_activity {
@@ -609,6 +599,18 @@ async fn run_with_interrupts<B: FrameBackend>(
             if !eof {
                 ui.sync_side_panel(writer, limit).await?;
             }
+        }
+        // A released border drag can supply its final Chromium geometry only
+        // after paint. Poll here so it can be sent on the same turn.
+        if !eof
+            && pending_input.is_none()
+            && sources.inputs.is_empty()
+            && ui
+                .poll_browser_viewport(now.into_std(), writer, limit)
+                .await?
+                == LoopControl::Exit
+        {
+            return Ok(Exit::User);
         }
         if eof && sources.ready_event.is_none() && sources.events.is_empty() {
             return Ok(Exit::Eof);

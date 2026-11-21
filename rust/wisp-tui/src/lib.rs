@@ -6,6 +6,8 @@ mod attention;
 #[cfg(test)]
 mod background_strip_tests;
 #[cfg(test)]
+mod browser_drag_tests;
+#[cfg(test)]
 mod browser_viewport_tests;
 mod cli;
 mod clipboard;
@@ -1443,6 +1445,8 @@ impl LiveUi {
     fn apply_editor_outcome(&mut self, outcome: external_editor::EditorOutcome) {
         // The editor may have set its own window title; write Wisp's again.
         self.attention.forget_title();
+        // Mouse capture was disabled while the editor owned the terminal.
+        self.side_panel.cancel_resize();
         self.invalidate_rendered_frame();
         self.render_pending = true;
         match outcome {
@@ -2105,14 +2109,16 @@ impl LiveUi {
             self.cell_size,
             &mut self.transcript_row_cache,
         );
-        self.transcript_row_cache.browser_image_preview =
-            self.image_cache.prepare_browser_viewport(
-                self.state
-                    .browser_viewport
-                    .as_ref()
-                    .and_then(|viewport| viewport.image.as_ref()),
-                session_images_dir.as_deref(),
-            );
+        let viewport = self.state.browser_viewport.as_ref();
+        // A frame request sent before the border press can still complete mid-drag.
+        // Keep the last painted image so reflow only changes its placement.
+        if !self.side_panel.resizing() || !viewport.is_some_and(|view| view.live) {
+            self.transcript_row_cache.browser_image_preview =
+                self.image_cache.prepare_browser_viewport(
+                    viewport.and_then(|view| view.image.as_ref()),
+                    session_images_dir.as_deref(),
+                );
+        }
     }
 
     fn draw<B: FrameBackend>(
@@ -2734,6 +2740,8 @@ impl LiveUi {
         if let Some(name) = rendered_completion {
             self.completion.mark_rendered(name);
         }
+        self.side_panel
+            .complete_browser_resize_paint(self.cell_size);
         self.render_pending = false;
         let rendered_browse_selection = self.browse_selected;
         self.reconcile_browse_selection();
@@ -5448,13 +5456,14 @@ impl LiveUi {
         {
             self.finish_logo_entrance();
         }
-        // Focus only decides whether to notify; it never reaches a view.
+        // The terminal can lose a mouse release while it has no focus.
         if let Input::Focus(focused) = input {
             self.attention.set_focus(focused);
             if !focused {
                 self.finish_logo_entrance();
                 self.pointer = None;
-                if self.stop_hovered {
+                let ended_resize = self.side_panel.cancel_resize();
+                if self.stop_hovered || ended_resize {
                     self.render_pending = true;
                 }
             }
@@ -6495,6 +6504,9 @@ impl LiveUi {
             if self.state.view_status != ViewStatus::Idle || self.state.current_command.is_some() {
                 return Ok(LoopControl::Continue);
             }
+            if self.browser_frame_waiting_for_border() {
+                return Ok(LoopControl::Continue);
+            }
             if !self.state.browser_interact_in_flight()
                 && self.browser_typing_buffer.is_empty()
                 && self
@@ -6508,7 +6520,6 @@ impl LiveUi {
                     BrowserInteractRequest::Nav(BrowserNavAction::LiveClose)
                 } else if let Some(viewport) =
                     self.side_panel.desired_browser_geometry(self.cell_size)
-                    && !self.side_panel.resizing()
                     && self.state.browser_requested_geometry != Some(viewport)
                     && self
                         .state
@@ -6553,6 +6564,12 @@ impl LiveUi {
         Ok(LoopControl::Continue)
     }
 
+    fn browser_frame_waiting_for_border(&self) -> bool {
+        self.side_panel.visible()
+            && self.side_panel.mode() == side_panel::PanelMode::Browser
+            && (self.side_panel.resizing() || self.side_panel.browser_resize_awaiting_paint())
+    }
+
     fn next_browser_timer_deadline(&self) -> Option<std::time::Instant> {
         if self
             .state
@@ -6563,7 +6580,8 @@ impl LiveUi {
             let next_frame = (self.state.view_status == ViewStatus::Idle
                 && self.state.current_command.is_none()
                 && !self.state.browser_interact_in_flight()
-                && self.browser_typing_buffer.is_empty())
+                && self.browser_typing_buffer.is_empty()
+                && !self.browser_frame_waiting_for_border())
             .then_some(self.next_live_browser_frame)
             .flatten();
             return self.browser_typing_buffer.flush_at.or(next_frame);
@@ -7911,21 +7929,23 @@ fn collect_scroll_run(
     Ok((scroll, deferred))
 }
 
-/// Drain consecutive queued pointer-motion events, keeping only the latest coordinates
-/// so rapid movement never floods the input channel or drops a trailing click or key.
+/// Drain queued motion of the same kind without dropping a trailing click or key.
+/// A drag retains one earlier column, so moving out and back still counts as a border drag.
 fn collect_move_run(
     mut latest: MouseEvent,
     mut next: impl FnMut() -> io::Result<Option<Event>>,
-) -> io::Result<(MouseEvent, Option<Event>)> {
+) -> io::Result<(Option<MouseEvent>, MouseEvent, Option<Event>)> {
+    let mut earlier_column = None;
     let mut deferred = None;
     for _ in 0..MOVE_BATCH_MAX_EVENTS {
         let Some(event) = next()? else {
             break;
         };
         match event {
-            Event::Mouse(event)
-                if event.kind == MouseEventKind::Moved && mouse::supported(event) =>
-            {
+            Event::Mouse(event) if event.kind == latest.kind && mouse::supported(event) => {
+                if matches!(event.kind, MouseEventKind::Drag(_)) && event.column != latest.column {
+                    earlier_column = Some(latest);
+                }
                 latest = event;
             }
             event => {
@@ -7934,7 +7954,7 @@ fn collect_move_run(
             }
         }
     }
-    Ok((latest, deferred))
+    Ok((earlier_column, latest, deferred))
 }
 
 fn input_task(
@@ -7993,14 +8013,19 @@ fn input_task(
                     })?;
                     deferred = next;
                     Input::Scroll(scroll)
-                } else if event.kind == MouseEventKind::Moved {
-                    let (moved, next) = collect_move_run(event, || {
+                } else if matches!(event.kind, MouseEventKind::Moved | MouseEventKind::Drag(_)) {
+                    let (earlier_column, moved, next) = collect_move_run(event, || {
                         source
                             .poll(SCROLL_DRAIN_POLL)?
                             .then(|| source.read())
                             .transpose()
                     })?;
                     deferred = next;
+                    if let Some(earlier) = earlier_column
+                        && sender.blocking_send(Input::Mouse(earlier)).is_err()
+                    {
+                        return Ok(());
+                    }
                     Input::Mouse(moved)
                 } else {
                     Input::Mouse(event)

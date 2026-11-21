@@ -593,3 +593,46 @@ fn input_coalesces_pointer_motion_without_dropping_trailing_events() {
     )));
     assert!(received.len() < 10);
 }
+
+#[test]
+fn input_coalesces_returning_drag() {
+    use crossterm::event::MouseButton::Left;
+    let pointer = |kind, column| {
+        Event::Mouse(MouseEvent {
+            kind,
+            column,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        })
+    };
+    let (result, received) = inputs(
+        ScriptedEvents::new([
+            pointer(MouseEventKind::Down(Left), 80),
+            pointer(MouseEventKind::Drag(Left), 90),
+            pointer(MouseEventKind::Drag(Left), 99),
+            pointer(MouseEventKind::Drag(Left), 80),
+            pointer(MouseEventKind::Drag(Left), 80),
+            pointer(MouseEventKind::Up(Left), 81),
+        ]),
+        true,
+    );
+    assert!(result.is_ok(), "{result:?}");
+    let steps: Vec<_> = received
+        .into_iter()
+        .map(|input| {
+            let Input::Mouse(event) = input else {
+                panic!("expected mouse input");
+            };
+            (event.kind, event.column)
+        })
+        .collect();
+    assert_eq!(
+        steps,
+        [
+            (MouseEventKind::Down(Left), 80),
+            (MouseEventKind::Drag(Left), 99),
+            (MouseEventKind::Drag(Left), 80),
+            (MouseEventKind::Up(Left), 81),
+        ]
+    );
+}

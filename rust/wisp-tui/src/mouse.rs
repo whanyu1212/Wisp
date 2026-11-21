@@ -792,6 +792,7 @@ impl LiveUi {
         };
         self.side_panel
             .press_border(Instant::now(), event.column - border.x);
+        self.last_browser_click = None;
         self.render_pending = true;
         true
     }
