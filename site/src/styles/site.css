@@ -717,13 +717,6 @@ svg {
   width: 100%;
   border-bottom: 1px solid var(--rule);
 }
-/* Focus the approval pane without discarding the transcript or original image. */
-.tui-capture-approval img {
-  aspect-ratio: 3 / 2;
-  height: auto;
-  object-fit: cover;
-  object-position: left bottom;
-}
 .tui-capture figcaption {
   padding: 10px 14px;
   font-size: 12.5px;
@@ -735,45 +728,48 @@ svg {
   margin-top: 3px;
   font-size: 11.5px;
 }
+.capture-provenance-only {
+  margin-top: 0;
+}
 
 /* Homepage */
 .page.home {
   display: block;
-  max-width: 1380px;
-  padding: 0 28px 64px;
+  max-width: 1136px;
+  padding: 0 28px 72px;
 }
 .home-intro {
   display: grid;
-  grid-template-columns: 1.1fr 1fr;
-  align-items: end;
-  gap: 48px;
-  padding: 48px 0 32px;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.95fr);
+  align-items: center;
+  gap: 40px;
+  padding: 40px 0 32px;
 }
 .home-intro > * {
   min-width: 0;
 }
 .display-title {
   font:
-    clamp(46px, 5vw, 68px) / 1.03 Georgia,
+    clamp(44px, 4.8vw, 64px) / 1.03 Georgia,
     "Times New Roman",
     serif;
   letter-spacing: -0.045em;
-  margin: 14px 0 18px;
+  margin: 10px 0 16px;
   padding-bottom: 0;
   border-bottom: 0;
 }
 .lede {
-  font-size: 19px;
-  line-height: 1.6;
+  font-size: 18px;
+  line-height: 1.62;
   color: var(--muted);
-  max-width: 50ch;
-  margin: 0 0 20px;
+  max-width: 52ch;
+  margin: 0 0 22px;
 }
 .hero-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 14px;
+  gap: 12px;
 }
 .primary {
   display: inline-flex;
@@ -796,40 +792,162 @@ svg {
   font-weight: 500;
   text-decoration: none;
 }
+.secondary-action:hover {
+  border-color: var(--accent);
+  background: var(--soft);
+}
 .home-install {
-  padding-left: 32px;
-  border-left: 1px solid var(--rule);
+  padding: 20px 22px;
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  background: var(--bg);
+}
+.home-install-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.home-install h2 {
+  font-size: 18px;
+  margin: 0;
+}
+.home-install-head a {
+  font-size: 13px;
+  font-weight: 500;
+  text-decoration: none;
+}
+.home-install-head a:hover {
+  text-decoration: underline;
+}
+.home-install .code-block {
+  margin-block: 0 10px;
+}
+.home-install > pre {
+  margin: 0 0 10px;
+}
+.home-install .code-tools {
+  background: var(--paper);
+}
+.install-note {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--muted);
+  margin: 0;
 }
 .home-showcase {
-  max-width: 1040px;
+  max-width: 880px;
   margin-inline: auto;
 }
 .home-showcase .tui-capture {
   margin: 0;
 }
-.home-intro h2 {
-  font-size: 18px;
-  margin: 0 0 10px;
+.home-story {
+  margin-top: 64px;
+  padding-top: 48px;
+  border-top: 1px solid var(--rule);
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.95fr);
+  align-items: start;
+  gap: 48px;
 }
-.home-install pre {
-  margin: 10px 0;
+.home-story h2 {
+  margin: 10px 0 16px;
 }
-.install-note {
-  font-size: 13px;
+.home-story-body p {
+  max-width: 58ch;
+}
+.home-story-body p:last-child {
+  margin-bottom: 0;
+}
+.home-highlights {
+  margin: 0;
+  padding: 0;
+}
+.home-highlights > div {
+  padding: 16px 0;
+  border-top: 1px solid var(--rule);
+}
+.home-highlights > div:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+.home-highlights > div:last-child {
+  padding-bottom: 0;
+}
+.home-highlights dt {
+  font-size: 15.5px;
+  font-weight: 600;
+  color: var(--ink);
+  margin-bottom: 4px;
+}
+.home-highlights dd {
+  margin: 0;
+  font-size: 14.5px;
+  line-height: 1.55;
   color: var(--muted);
+}
+.home-section-head h2 {
   margin: 8px 0 0;
 }
+.home-workflows {
+  margin-top: 64px;
+  padding-top: 48px;
+  border-top: 1px solid var(--rule);
+}
+.workflow-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 44px;
+  margin-top: 28px;
+}
+.workflow-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.55fr);
+  align-items: center;
+  gap: 36px;
+}
+.workflow-media,
+.workflow-copy {
+  min-width: 0;
+}
+.workflow-media .tui-capture {
+  margin: 0;
+}
+.workflow-copy h3 {
+  font-family: Georgia, "Times New Roman", serif;
+  font-weight: 400;
+  font-size: 24px;
+  letter-spacing: -0.02em;
+  margin: 0 0 12px;
+}
+.workflow-copy p {
+  margin: 0 0 18px;
+  color: var(--muted);
+  line-height: 1.65;
+}
+.workflow-link {
+  display: inline-flex;
+  align-items: center;
+  font-weight: 600;
+  font-size: 14.5px;
+}
 .home-section {
-  margin-top: 52px;
+  margin-top: 64px;
+  padding-top: 48px;
+  border-top: 1px solid var(--rule);
 }
 .starting-points {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 20px;
-  margin-top: 16px;
+  margin-top: 24px;
 }
 .starting-points a {
-  display: block;
+  display: flex;
+  flex-direction: column;
   padding: 22px 24px;
   border: 1px solid var(--rule);
   border-radius: 8px;
@@ -852,57 +970,43 @@ svg {
   line-height: 1.55;
   color: var(--muted);
 }
-.home-workflows {
-  margin-top: 52px;
-}
-.workflow-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 24px;
-  margin-top: 16px;
-}
-.workflow-card {
-  padding: 24px;
-  border: 1px solid var(--rule);
-  border-radius: 8px;
-  background: var(--paper);
-}
-.workflow-card h3 {
-  margin-top: 0;
-}
-.workflow-card .tui-capture {
-  margin: 18px 0;
-}
-.workflow-link {
-  font-weight: 600;
-  font-size: 14.5px;
-}
 .home-content {
-  margin-top: 52px;
+  margin-top: 44px;
   padding: 28px 32px;
   border: 1px solid var(--rule);
-  border-radius: 8px;
+  border-radius: 10px;
   background: var(--bg);
   display: grid;
-  grid-template-columns: 1.5fr 1fr;
+  grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr);
   align-items: center;
   gap: 32px;
 }
 .home-content h2 {
-  margin-top: 0;
+  margin: 0 0 10px;
+  font-size: 24px;
+}
+.home-content p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1.6;
 }
 .secondary-starts {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
 }
 .secondary-starts a {
-  display: block;
-  padding: 14px 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 13px 16px;
   border: 1px solid var(--rule);
   border-radius: 6px;
   background: var(--paper);
   font-weight: 600;
+  font-size: 14.5px;
   text-decoration: none;
 }
 .secondary-starts a:hover {
@@ -1027,7 +1131,16 @@ svg {
     gap: 4px;
   }
   .home-intro {
-    gap: 30px;
+    gap: 28px;
+  }
+}
+@media (max-width: 900px) {
+  .home-intro,
+  .home-story,
+  .workflow-row,
+  .home-content {
+    grid-template-columns: 1fr;
+    gap: 24px;
   }
 }
 @media (max-width: 760px) {
@@ -1103,14 +1216,10 @@ svg {
     padding: 0 20px 48px;
   }
   .home-intro {
-    display: block;
-    padding: 20px 0 28px;
+    padding: 24px 0 24px;
   }
   .home-install {
-    margin-top: 28px;
-    padding: 20px 0 0;
-    border-left: 0;
-    border-top: 1px solid var(--rule);
+    padding: 16px;
   }
   .display-title {
     font-size: 40px;
@@ -1118,17 +1227,28 @@ svg {
   }
   .lede {
     font-size: 16.5px;
-    margin-bottom: 14px;
+    margin-bottom: 16px;
   }
-  .starting-points,
-  .workflow-grid,
-  .home-content {
+  .home-story,
+  .home-workflows,
+  .home-section {
+    margin-top: 44px;
+    padding-top: 32px;
+  }
+  .workflow-rows {
+    gap: 32px;
+    margin-top: 20px;
+  }
+  .starting-points {
     grid-template-columns: 1fr;
     gap: 16px;
   }
   .home-content {
-    margin-top: 36px;
+    margin-top: 32px;
     padding: 20px;
+  }
+  .secondary-starts {
+    grid-template-columns: 1fr;
   }
   h1 {
     font-size: 32px;

@@ -4,12 +4,15 @@ import { tuiCaptures, type TuiCapture } from "../content/tui-captures";
 interface Props {
   capture: TuiCapture;
   eager?: boolean;
+  /** Omit the long description when surrounding copy already explains the frame. */
+  compact?: boolean;
   /** How wide the figure renders, for choosing among the generated widths. */
   sizes?: string;
 }
 const {
   capture,
   eager = false,
+  compact = false,
   sizes = "(max-width: 760px) 100vw, 760px",
 } = Astro.props;
 const entry = tuiCaptures[capture];
@@ -20,12 +23,7 @@ const provenance =
     : "Production TUI renderer · synthetic demo data · static capture.";
 ---
 
-<figure
-  class:list={[
-    "tui-capture",
-    { "tui-capture-approval": capture === "sessionApproval" },
-  ]}
->
+<figure class="tui-capture">
   <a href={image.src} aria-label={`Open full-size capture: ${alt}`}>
     <Image
       src={image}
@@ -38,9 +36,17 @@ const provenance =
     />
   </a>
   <figcaption>
-    {caption}{" "}
-    <span class="capture-provenance">
-      {provenance} Open the image for full size.
-    </span>
+    {compact ? (
+      <span class="capture-provenance capture-provenance-only">
+        {provenance} Open the image for full size.
+      </span>
+    ) : (
+      <>
+        {caption}{" "}
+        <span class="capture-provenance">
+          {provenance} Open the image for full size.
+        </span>
+      </>
+    )}
   </figcaption>
 </figure>

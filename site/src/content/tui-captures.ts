@@ -27,8 +27,7 @@ export const tuiCaptures = {
     alt: "Wisp session awaiting approval for git status --short, with the conversation, side panel, and choices to allow once, allow bash for this session, enable YOLO for this session, or deny.",
     caption:
       "Inspect the proposed command and choose whether to allow it once, allow a broader scope for the session, or deny it.",
-    provenance:
-      "Real session screenshot · zoomed view; full session available in the image link.",
+    provenance: "Real session screenshot · window chrome cropped.",
   },
   showcase: {
     image: showcase,
