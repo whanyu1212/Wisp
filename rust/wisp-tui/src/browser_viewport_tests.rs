@@ -757,9 +757,9 @@ async fn border_resize_updates_geometry_and_corrupt_image_shows_fallback() {
     let f2_bytes = f2
         .iter()
         .find_map(|ev| ev.strip_prefix("bytes:"))
-        .expect("expected delete + re-emit on border resize");
+        .expect("expected a Kitty placement update on border resize");
     assert!(
-        f2_bytes.contains("a=d,d=i,") && f2_bytes.contains("a=T,f=32,"),
+        f2_bytes.contains("a=p,") && !f2_bytes.contains("a=T,"),
         "{f2_bytes}"
     );
 
@@ -1696,6 +1696,57 @@ async fn push_live_browser_frame(
         }),
     )
     .await;
+}
+
+#[tokio::test]
+async fn kitty_drag_reuses_browser_pixels() {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    use terminal_images::ImageProtocol;
+    use wisp_protocol::commands::LiveBrowserViewport;
+
+    for protocol in [ImageProtocol::Kitty, ImageProtocol::KittyUnicode] {
+        let dir = TempSessionDir::new("kitty-drag");
+        let mut ui = ui_with_session(&dir);
+        ui.image_protocol = protocol;
+        push_live_browser_frame(
+            &mut ui,
+            &dir,
+            LiveBrowserViewport {
+                width: 1280,
+                height: 720,
+                device_scale_factor: 1,
+            },
+        )
+        .await;
+        let mut terminal = Terminal::new(RecordingBackend::new(180, 40)).unwrap();
+        ui.draw(&mut terminal, &conn()).unwrap();
+        assert!(
+            terminal
+                .backend_mut()
+                .take_events()
+                .iter()
+                .any(|event| event.contains("a=T,f=100,"))
+        );
+
+        let now = std::time::Instant::now();
+        let border = 180 - ui.side_panel.docked_width(180);
+        let mut image_width = ui.side_panel.viewport_image_rect().unwrap().width;
+        ui.side_panel.press_border(now, 0);
+        for step in [8, 16] {
+            ui.side_panel.continue_resize(
+                MouseEventKind::Drag(MouseButton::Left),
+                border - step,
+                now,
+            );
+            ui.draw(&mut terminal, &conn()).unwrap();
+            let resized = ui.side_panel.viewport_image_rect().unwrap().width;
+            assert!(resized > image_width);
+            image_width = resized;
+            let events = terminal.backend_mut().take_events();
+            assert!(events.iter().any(|event| event.contains("a=p,")));
+            assert!(events.iter().all(|event| !event.contains("a=T,")));
+        }
+    }
 }
 
 #[tokio::test]

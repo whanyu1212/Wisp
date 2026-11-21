@@ -42,6 +42,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from typing_extensions import TypeAliasType
 
 from wisp.mcp.config import MAX_MCP_SERVERS, McpServerConfig, McpToolExposure
 from wisp.openai_compatible import OpenAICompatibleSettings
@@ -52,7 +53,12 @@ if TYPE_CHECKING:
     from wisp.events import CodemodePresentation
 
 
+TuiImageProtocol = TypeAliasType(
+    "TuiImageProtocol", Literal["auto", "kitty-unicode", "kitty", "iterm2", "sixel", "halfblock"]
+)
+
 GLOBAL_SETTINGS_PATH = Path("~/.wisp/settings.json")
+BROWSER_PROFILE_SUBPATH = GLOBAL_SETTINGS_PATH.relative_to("~").with_name("browser-profile")
 PROJECT_SETTINGS_DIRNAME = ".wisp"
 PROJECT_SETTINGS_FILENAME = "settings.json"
 _USER_ONLY_SETTINGS_FIELDS = frozenset(
@@ -73,6 +79,7 @@ _USER_ONLY_SETTINGS_FIELDS = frozenset(
         "mcp_tool_exposure",
         "openai_compatible",
         "tui_keybindings",
+        "tui_images",
     }
 )
 
@@ -153,6 +160,7 @@ class WispSettings(BaseModel):
     )
     mcp_tool_exposure: McpToolExposure | None = None
     openai_compatible: OpenAICompatibleSettings | None = None
+    tui_images: TuiImageProtocol | None = None
     tui_keybindings: dict[str, list[str]] | None = None
 
     @field_validator("tui_keybindings", mode="before")
@@ -254,6 +262,7 @@ class ResolvedSettings(BaseModel):
     mcp_servers: tuple[McpServerConfig, ...] | None = Field(default=None, repr=False)
     mcp_tool_exposure: McpToolExposure | None = None
     openai_compatible: OpenAICompatibleSettings | None = None
+    tui_images: TuiImageProtocol | None = None
     tui_keybindings: dict[str, list[str]] = Field(default_factory=dict)
     # Provenance used only while applying higher-precedence provider overrides.
     # Excluded from serialization because these are resolver details, not settings.
@@ -296,7 +305,7 @@ def resolve_settings(
     home = home_dir if home_dir is not None else Path.home()
     project = project_dir if project_dir is not None else Path.cwd()
 
-    user_file = (home / ".wisp" / PROJECT_SETTINGS_FILENAME).expanduser()
+    user_file = user_settings_path(home_dir=home)
     loader = _load_settings_file_strict if strict else _load_settings_file
     user_settings = loader(user_file, secure_permissions=True)
 
@@ -358,6 +367,7 @@ def resolve_settings(
         mcp_servers=user_settings.mcp_servers,
         mcp_tool_exposure=user_settings.mcp_tool_exposure,
         openai_compatible=user_settings.openai_compatible,
+        tui_images=user_settings.tui_images,
         tui_keybindings=user_settings.tui_keybindings or {},
         user_provider=user_provider,
         model_from_user=project_model is None and user_model is not None,
@@ -369,6 +379,12 @@ def user_settings_path(*, home_dir: Path | None = None) -> Path:
 
     home = home_dir if home_dir is not None else Path.home()
     return (home / ".wisp" / PROJECT_SETTINGS_FILENAME).expanduser()
+
+
+def browser_profile_path() -> Path:
+    """Return Wisp's dedicated browser profile directory in the user's home."""
+
+    return Path.home() / BROWSER_PROFILE_SUBPATH
 
 
 def persist_user_model_selection(

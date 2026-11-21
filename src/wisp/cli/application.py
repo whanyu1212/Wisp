@@ -13,6 +13,7 @@ from rich.console import Console
 
 from wisp import __version__
 from wisp.cli.auth import auth_app
+from wisp.cli.browser import browser_app
 from wisp.cli.deadline import DEADLINE_EXIT_CODE, RunDeadline
 from wisp.cli.mcp import mcp_app
 from wisp.coding import CodingSession, resolve_coding_session_configuration
@@ -95,6 +96,7 @@ app = typer.Typer(
     no_args_is_help=False,
 )
 app.add_typer(auth_app, name="auth")
+app.add_typer(browser_app, name="browser")
 app.add_typer(_cli_trust.trust_app, name="trust")
 app.add_typer(mcp_app, name="mcp")
 app.command("skills")(_cli_skills.skills_command)

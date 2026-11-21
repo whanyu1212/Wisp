@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import fcntl
 import os
 import re
 import struct
@@ -14,6 +15,7 @@ from urllib.parse import urlsplit
 
 import pytest
 
+from tests.support.live_browser import keychain_safe_chrome_path
 from tests.tui_e2e.support import complete_frames, context_stats_ready, screen_rows
 from tests.tui_e2e.test_browser_takeover import _start_wide_tui, _wait_screen
 from tests.tui_e2e.test_readiness import _TuiProcess
@@ -71,6 +73,17 @@ def _has_frame_size(output: bytes, offset: int, size: tuple[int, int]) -> bool:
     return False
 
 
+def _profile_released(home: Path) -> bool:
+    """Whether no live browser holds the saved profile under ``home``."""
+    marker = home / ".wisp" / "browser-profile" / ".wisp-browser-profile"
+    with marker.open("rb") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+    return True
+
+
 def _click_control(tui: _TuiProcess, label: str) -> None:
     for row, text in enumerate(screen_rows(complete_frames(tui.output)), 1):
         if (column := text.find(label)) >= 0:
@@ -85,12 +98,14 @@ def _click_control(tui: _TuiProcess, label: str) -> None:
     reason="set WISP_TEST_LIVE_BROWSER=1 on a host with Chrome or Chromium",
 )
 def test_live_browser_controls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A live page animates, accepts input, navigates, reflows, and closes."""
+    """A live page animates, accepts input, navigates, reflows, closes, and keeps its cookies."""
     monkeypatch.delenv("NO_COLOR", raising=False)
     clicked = threading.Event()
     typed = threading.Event()
     submitted = threading.Event()
     scrolled = threading.Event()
+    marked = threading.Event()
+    remembered = threading.Event()
     sizes: list[tuple[int, int]] = []
     opened_pages: list[str] = []
 
@@ -98,6 +113,8 @@ def test_live_browser_controls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
         def do_GET(self) -> None:
             url = urlsplit(self.path)
             body = b""
+            if "mark=kept" in self.headers.get("Cookie", ""):
+                (remembered if url.query == "reopened" else marked).set()
             if url.path == "/":
                 self.send_response(302)
                 self.send_header("Location", "/page")
@@ -120,6 +137,8 @@ def test_live_browser_controls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
             self.send_header("Content-Length", str(len(body)))
+            if url.query == "mark":
+                self.send_header("Set-Cookie", "mark=kept; Max-Age=3600")
             self.end_headers()
             self.wfile.write(body)
 
@@ -136,6 +155,7 @@ def test_live_browser_controls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
                 "TERM": "xterm-256color",
                 "COLORTERM": "truecolor",
                 "TMPDIR": str(tmp_path),
+                "PATH": keychain_safe_chrome_path(tmp_path, os.environ["PATH"]),
                 "WISP_TUI_IMAGES": "kitty-unicode",
             },
         )
@@ -205,7 +225,7 @@ def test_live_browser_controls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
                     failure="Enter did not submit Chromium's form",
                 )
                 assert not list((tmp_path / "sessions" / "images").glob("*"))
-                assert list(tmp_path.glob("wisp-browser-*"))
+                assert not _profile_released(home)
 
                 tui.send(b"\x0c")
                 _wait_screen(tui, "Enter go", "Ctrl+L did not focus the address bar")
@@ -238,6 +258,30 @@ def test_live_browser_controls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
                     timeout=5,
                     failure="The resized browser frame did not reach the terminal",
                 )
+                # At 190 columns the dock is 52 columns wide. Hold its left
+                # edge at an intermediate width, then release at a different one.
+                resize_offset = len(sizes)
+                drag_offset = len(tui.output)
+                tui.send(b"\x1b[<0;139;12M\x1b[<32;132;12M\x1b[<32;120;12M")
+                tui.wait_until(
+                    lambda output: any(
+                        row[119:120] == "│"
+                        for row in screen_rows(complete_frames(output[drag_offset:]))
+                    ),
+                    timeout=5,
+                    failure="The dock border did not follow the held pointer",
+                )
+                assert not sizes[resize_offset:]
+                frame_offset = len(tui.output)
+                tui.send(b"\x1b[<0;115;12m")
+                # The PTY reports no physical metrics, so Wisp uses 8px per column.
+                final_size = (resized[0] + (139 - 115) * 8, resized[1])
+                tui.wait_until(
+                    lambda output: _has_frame_size(output, frame_offset, final_size),
+                    timeout=5,
+                    failure="Chromium did not repaint at the released dock width",
+                )
+                assert sizes[resize_offset:] == [final_size]
                 clicked.clear()
                 # The same form still receives a center click at its shifted docked position.
                 tui.send(b"\x1b[<0;166;12M\x1b[<0;166;12m")
@@ -246,9 +290,34 @@ def test_live_browser_controls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
                 )
                 tui.send(b"\x03/browser\r")
                 tui.wait_until(
-                    lambda _: not list(tmp_path.glob("wisp-browser-*")),
+                    lambda _: _profile_released(home),
                     timeout=6,
-                    failure="Hiding the pane did not clean up Chrome's profile",
+                    failure="Hiding the pane did not stop Chrome and release its profile",
+                )
+                # Chromium writes cookies on a timer, so one set moments before the pane
+                # closes reaches the next visit only if Chromium exits cleanly.
+                address = f"http://127.0.0.1:{server.server_port}/page"
+                reopened_offset = len(tui.output)
+                tui.send(f"/browser live {address}?mark\r".encode())
+                # The open command must finish before the composer accepts another.
+                tui.wait_until(
+                    lambda output: (
+                        marked.is_set() and bool(_KITTY_FRAME.search(output, reopened_offset))
+                    ),
+                    timeout=10,
+                    failure="Chromium did not store the cookie and paint the page",
+                )
+                tui.send(b"/browser\r")
+                tui.wait_until(
+                    lambda _: _profile_released(home),
+                    timeout=6,
+                    failure="Hiding the pane a second time did not stop Chrome",
+                )
+                tui.send(f"/browser live {address}?reopened\r".encode())
+                tui.wait_until(
+                    lambda _: remembered.is_set(),
+                    timeout=10,
+                    failure="A reopened live browser did not send the cookie from its last visit",
                 )
                 tui.quit()
             finally:

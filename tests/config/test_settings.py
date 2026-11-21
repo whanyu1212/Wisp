@@ -15,12 +15,14 @@ from wisp.config.runtime import WispConfig
 from wisp.config.settings import (
     DEFAULT_PROTECTED_PATHS,
     WispSettings,
+    browser_profile_path,
     persist_user_model_selection,
     resolve_settings,
     try_persist_user_model_selection,
     user_settings_path,
 )
 from wisp.mcp.credentials import mcp_auth_path
+from wisp.tools.files.paths import matches_protected_pattern
 from wisp.trust.permissions import permissions_directory
 
 
@@ -686,6 +688,20 @@ def test_from_env_user_settings_can_disable_protected_paths(
         settings_pattern,
         permissions_pattern,
         f"{permissions_pattern}/**",
+        ".wisp/browser-profile",
+        ".wisp/browser-profile/**",
+    )
+
+
+def test_browser_protection_matches_literal_home(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    home = tmp_path / "Work [1]"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+
+    config = WispConfig(protected_paths=[])
+
+    assert matches_protected_pattern(browser_profile_path(), config.protected_paths)
+    assert matches_protected_pattern(
+        browser_profile_path() / "Default" / "Network" / "Cookies", config.protected_paths
     )
 
 

@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import struct
+import sys
 from collections.abc import AsyncIterator, Mapping
+from pathlib import Path
 from typing import Any
 
 import anyio
 import pytest
 
 from wisp.coding.browser_control import BrowserControlError, BrowserInteraction
-from wisp.coding.browser_live import LiveBrowser
+from wisp.coding.browser_live import LiveBrowser, _desktop_identity_args
+from wisp.coding.browser_profile import clear_browser_profile
 from wisp.events import LiveBrowserViewport
 
 
@@ -23,10 +27,19 @@ def _png_header(width: int, height: int) -> str:
 
 
 @pytest.mark.parametrize(
-    ("height", "hd_size", "height_cap"), [(603, (1600, 837), 1200), (45, (1587, 62), 90)]
+    ("width", "height", "hd_size", "capture_limit"),
+    [
+        (1152, 360, (2304, 720), (2304, 720)),
+        (360, 1152, (720, 2304), (720, 2304)),
+        (1152, 603, (1914, 1002), (1915, 1002)),
+    ],
 )
 def test_resize_discards_stale_frames(
-    height: int, hd_size: tuple[int, int], height_cap: int, monkeypatch: pytest.MonkeyPatch
+    width: int,
+    height: int,
+    hd_size: tuple[int, int],
+    capture_limit: tuple[int, int],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def scenario() -> None:
         async with anyio.create_task_group() as tasks:
@@ -45,8 +58,8 @@ def test_resize_discards_stale_frames(
                 elif method == "Page.startScreencast":
                     captures.append(params)
                     number = len(captures)
-                    metadata = {"deviceWidth": 1152, "deviceHeight": height}
-                    raster = _png_header(1152, height) if number == 1 else _png_header(*hd_size)
+                    metadata = {"deviceWidth": width, "deviceHeight": height}
+                    raster = _png_header(width, height) if number == 1 else _png_header(*hd_size)
                     if number > 1:
                         # A scale-only change has identical CSS dimensions.
                         browser._accept_frame(
@@ -79,30 +92,39 @@ def test_resize_discards_stale_frames(
 
             monkeypatch.setattr(browser, "_command", command)
             for scale in (1, 2):
-                viewport = LiveBrowserViewport(width=1152, height=height, device_scale_factor=scale)
+                viewport = LiveBrowserViewport(
+                    width=width, height=height, device_scale_factor=scale
+                )
                 event = await browser.resize(viewport)
-                assert (event.viewport_width, event.viewport_height) == (1152, height)
+                assert (event.viewport_width, event.viewport_height) == (width, height)
                 assert event.live_png == (
-                    _png_header(1152, height) if scale == 1 else _png_header(*hd_size)
+                    _png_header(width, height) if scale == 1 else _png_header(*hd_size)
                 )
                 assert event.live_device_scale == scale
                 assert browser.take_frame() is None
             assert captures == [
-                {"format": "png", "maxWidth": 1152, "maxHeight": height},
-                {"format": "png", "maxWidth": 1600, "maxHeight": height_cap},
+                {"format": "png", "maxWidth": width, "maxHeight": height},
+                {"format": "png", "maxWidth": capture_limit[0], "maxHeight": capture_limit[1]},
             ]
             assert metrics == [
-                {"width": 1152, "height": height, "deviceScaleFactor": dpr, "mobile": False}
+                {"width": width, "height": height, "deviceScaleFactor": dpr, "mobile": False}
                 for dpr in (1, 2)
             ]
             await browser.interact(
-                BrowserInteraction(action="scroll", x=1151, y=height - 1, delta_y=1)
+                BrowserInteraction(action="scroll", x=width - 1, y=height - 1, delta_y=1)
             )
             assert mouse == [
-                {"x": 1151, "y": height - 1, "type": "mouseWheel", "deltaX": 0, "deltaY": 1}
+                {"x": width - 1, "y": height - 1, "type": "mouseWheel", "deltaX": 0, "deltaY": 1}
+            ]
+            mouse.clear()
+            await browser.interact(BrowserInteraction(action="click", x=3, y=4))
+            assert [(event["type"], event["x"], event["y"]) for event in mouse] == [
+                ("mouseMoved", 3, 4),
+                ("mousePressed", 3, 4),
+                ("mouseReleased", 3, 4),
             ]
             with pytest.raises(BrowserControlError, match="inside"):
-                await browser.interact(BrowserInteraction(action="click", x=1152, y=height))
+                await browser.interact(BrowserInteraction(action="click", x=width, y=height))
 
     anyio.run(scenario)
 
@@ -253,3 +275,82 @@ def test_navigation_retires_old_pixels(monkeypatch: pytest.MonkeyPatch) -> None:
             assert await browser.poll_frame() is None
 
     anyio.run(scenario)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="remembered profiles require POSIX")
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+def test_launch_failure_releases_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str
+) -> None:
+    profile = tmp_path / "browser-profile"
+    used: list[Path] = []
+
+    desktop = {
+        "XDG_CURRENT_DESKTOP": "KDE",
+        "KDE_SESSION_VERSION": "6",
+        "XDG_RUNTIME_DIR": str(tmp_path),
+        "DBUS_SESSION_BUS_ADDRESS": "unix:path=test",
+    }
+    for key, value in desktop.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("WISP_TEST_UNRELATED", "exclude")
+
+    async def failed_launch(
+        args: list[str], *, cwd: Path, env: dict[str, str], **kwargs: object
+    ) -> None:
+        fds = kwargs["pass_fds"]
+        assert len(fds) == 1
+        assert os.path.samestat(os.fstat(fds[0]), (cwd / ".wisp-browser-profile").stat())
+        assert f"--user-data-dir={cwd}" in args
+        # Saved cookies use the real Keychain, and the tab identifies as desktop Chrome.
+        assert "--use-mock-keychain" not in args
+        assert "--identity-flag" in args
+        assert {key: env[key] for key in desktop if key in env} == (
+            desktop if platform == "linux" else {}
+        )
+        assert "WISP_TEST_UNRELATED" not in env
+        assert cwd.is_dir()
+        used.append(cwd)
+        raise FileNotFoundError("simulated missing executable")
+
+    async def scenario() -> None:
+        async with anyio.create_task_group() as tasks:
+            browser = LiveBrowser(tasks, profile_dir=profile)
+            monkeypatch.setattr("wisp.coding.browser_live._chrome_binary", lambda: "chrome")
+
+            async def identity(executable: str, environment: object) -> list[str]:
+                return ["--identity-flag"]
+
+            monkeypatch.setattr("wisp.coding.browser_live._desktop_identity_args", identity)
+            monkeypatch.setattr("wisp.coding.browser_live.sys.platform", platform)
+            monkeypatch.setattr("wisp.coding.browser_live.anyio.open_process", failed_launch)
+            with pytest.raises(BrowserControlError, match="Could not start"):
+                await browser.open("https://example.org")
+
+    anyio.run(scenario)
+    assert used == [profile] and profile.exists()
+    clear_browser_profile(profile)
+    assert not (profile / "Default").exists()
+
+
+@pytest.mark.parametrize(
+    ("reported", "major"), [("Google Chrome 158.0.8127.36 ", "158"), ("unknown build", None)]
+)
+def test_identity_hides_headless_markers(reported: str, major: str | None, tmp_path: Path) -> None:
+    """The override names the launched build's major version, or is left out."""
+    chrome = tmp_path / "chrome"
+    chrome.write_text(f"#!/bin/sh\necho '{reported}'\n")
+    chrome.chmod(0o755)
+
+    args = anyio.run(_desktop_identity_args, str(chrome), {})
+
+    assert args[0] == "--disable-blink-features=AutomationControlled"
+    user_agents = [arg for arg in args[1:] if arg.startswith("--user-agent=")]
+    assert len(user_agents) == len(args) - 1
+    if major is None:
+        assert user_agents == []
+    else:
+        platform = "Macintosh" if sys.platform == "darwin" else "X11; Linux"
+        assert f" Chrome/{major}.0.0.0 " in user_agents[0]
+        assert platform in user_agents[0]
+        assert "Headless" not in user_agents[0]

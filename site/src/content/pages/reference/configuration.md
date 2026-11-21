@@ -61,7 +61,7 @@ Some fields are **user-only** and a project file can never set them:
 `protected_paths` · `retry` · `codex_read_timeout_seconds` · `effort` · `context_reserve_tokens` ·
 `auto_compaction_enabled` · `web_search` · `wake_on_process_exit` · `codemode` · `codemode_presentation` · `subagents` ·
 `subagent_model` ·
-`mcp_servers` · `mcp_tool_exposure` · `openai_compatible` · `tui_keybindings`
+`mcp_servers` · `mcp_tool_exposure` · `openai_compatible` · `tui_keybindings` · `tui_images`
 
 A repository cannot increase your API spending, prolong waits, launch an MCP command, configure a
 credential-receiving provider endpoint, or weaken the secret guard.
@@ -78,6 +78,7 @@ These settings belong in `~/.wisp/settings.json`, not the project file:
 
 | Field | Format and example |
 |---|---|
+| `tui_images` | Preferred terminal image protocol: `auto` (default), `kitty-unicode`, `kitty`, `iterm2`, `sixel`, or `halfblock`. Restart Wisp to apply. `WISP_TUI_IMAGES` overrides this setting. |
 | `tui_keybindings` | Object mapping action IDs to arrays of key chords. See [Keybinding preferences](../guide/tui/keybindings.md#keybinding-preferences) for an example, available actions, and restart requirements. |
 | `mcp_servers` | Object keyed by server name, with either a stdio `command` or an HTTP `url` per entry. See [MCP servers](../guide/mcp.md#add-a-server) for complete JSON examples and authentication options. |
 | `codemode_presentation` | User-only model presentation: `"direct_and_codemode"` (default) or `"codemode_only"`. Separate from availability; falls back to direct tools when codemode is not offered. |
@@ -94,9 +95,24 @@ For example, this replaces the default protected-path patterns with a custom lis
 ```
 
 Bare patterns match a basename at any depth; patterns containing `/` match a path suffix. Replacing
-this list drops defaults you do not repeat. `[]` disables the configurable patterns, but Wisp's
-credential, settings, and permission files remain protected. These rules apply to file tools, not
-`bash` or MCP tools; they are not a sandbox.
+this list drops defaults you do not repeat. `[]` disables the configurable patterns. Wisp always
+protects its credentials, settings, permissions, and saved browser data. These rules apply to file
+tools, not `bash` or MCP tools; they are not a sandbox.
+
+## Saved live browser profile
+
+Wisp's live browser keeps site sign-ins, cookies, and other browser data across launches in its
+own profile, `~/.wisp/browser-profile`. The profile is separate from your everyday Chrome, so sign
+in inside Wisp's live tab to use a site. Keeping this data also means sites that check for bots
+challenge the live tab less often, and a challenge you solve stays solved.
+
+The profile is shared across your Wisp sessions and projects. Only one Wisp instance can use it at
+a time. On macOS, Chrome may ask for Keychain access to encrypt and restore saved browser data.
+The profile's permissions protect saved data on disk, and Chrome exposes its debugger on the
+loopback network interface while the live tab is open.
+
+To clear the saved data, close the live browser and run `wisp browser clear`. This removes Wisp's
+local copy and does not sign you out on the sites themselves.
 
 ## Remembered preferences
 

@@ -111,7 +111,7 @@ def run_rust_tui(options: TuiOptions) -> int:
 
     binary = resolve_rust_tui_binary()
     anyio.run(_preflight_tui_options, options)
-    tui_keybindings = resolve_settings(trust_project=False).tui_keybindings
+    settings = resolve_settings(trust_project=False)
     terminal = _snapshot_terminal()
     process: subprocess.Popen[bytes] | None = None
     cleanup_error: RustTuiLaunchError | None = None
@@ -126,8 +126,10 @@ def run_rust_tui(options: TuiOptions) -> int:
                 else:
                     environment = _rpc_env(options)
                     environment.pop(_BINARY_ENV, None)
+                    if settings.tui_images is not None:
+                        environment.setdefault("WISP_TUI_IMAGES", settings.tui_images)
                     environment[_BINDINGS_ENV] = json.dumps(
-                        tui_keybindings,
+                        settings.tui_keybindings,
                         ensure_ascii=False,
                         separators=(",", ":"),
                         sort_keys=True,

@@ -105,6 +105,9 @@ pub(crate) struct SidePanel {
     /// terminal that shrank grows back.
     dragged_width: Option<u16>,
     resize: Option<Resize>,
+    /// A border gesture invalidates page hit targets until the final layout and
+    /// Chromium viewport have both been painted at the same size.
+    browser_resize_pending: bool,
     /// When the last click on the border that resized nothing was released.
     last_border_click: Option<Instant>,
     files: Option<FileSummary>,
@@ -329,6 +332,9 @@ impl SidePanel {
     pub(crate) fn painted_browser_target(
         &self,
     ) -> Option<(wisp_protocol::commands::LiveBrowserViewport, u64)> {
+        if self.browser_resize_pending || self.resizing() {
+            return None;
+        }
         let painted = self.painted.borrow();
         Some((
             painted.painted_browser_geometry?,
@@ -355,7 +361,9 @@ impl SidePanel {
         let painted = self.painted.borrow();
         let image_rect = painted.viewport_image_rect?;
         if vp.live
-            && (state.browser_page_transition_in_flight()
+            && (self.browser_resize_pending
+                || self.resizing()
+                || state.browser_page_transition_in_flight()
                 || painted.painted_browser_geometry != vp.live_geometry()
                 || painted.painted_browser_revision != state.browser_page_revision)
         {
@@ -371,6 +379,9 @@ impl SidePanel {
     /// Auto-switch a docked panel to `Browser` on the first frame of a session,
     /// resetting back to `LiveWork` when the session clears its browser viewport.
     pub(crate) fn observe_browser_viewport(&mut self, viewport: Option<&BrowserViewport>) {
+        if !viewport.is_some_and(|view| view.live) {
+            self.browser_resize_pending = false;
+        }
         match viewport {
             None => {
                 self.browser_interacting = false;
@@ -922,10 +933,30 @@ impl SidePanel {
         self.resize.is_some()
     }
 
+    pub(crate) fn browser_resize_awaiting_paint(&self) -> bool {
+        self.browser_resize_pending && self.painted.borrow().browser_content_rect.is_none()
+    }
+
+    pub(crate) fn complete_browser_resize_paint(
+        &mut self,
+        cell_size: crate::terminal_images::CellSize,
+    ) {
+        if self.browser_resize_pending
+            && let Some(desired) = self.desired_browser_geometry(cell_size)
+            && self.painted.borrow().painted_browser_geometry == Some(desired)
+        {
+            self.browser_resize_pending = false;
+        }
+    }
+
     /// A left press on the docked panel's border at `now`, `grab` columns right of the
     /// border line: start a resize, or, as the second click of a double-click, return
     /// the panel to [`auto_width`] instead.
     pub(crate) fn press_border(&mut self, now: Instant, grab: u16) {
+        if self.mode == PanelMode::Browser {
+            self.browser_resize_pending = true;
+            self.painted.get_mut().browser_content_rect = None;
+        }
         let double_click = self
             .last_border_click
             .take()
@@ -1262,7 +1293,9 @@ pub(crate) fn render_with_preview(
             let mut painted = panel.painted.borrow_mut();
             painted.viewport_image_rect = viewport_image_rect;
             if live.is_some() && !browser_body.is_empty() {
-                painted.browser_content_rect = Some(browser_body);
+                if !panel.resizing() {
+                    painted.browser_content_rect = Some(browser_body);
+                }
                 painted.painted_browser_geometry = live.and_then(BrowserViewport::live_geometry);
             }
         }
