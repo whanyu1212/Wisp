@@ -248,6 +248,7 @@
         "reload",
         "refresh",
         "live_open",
+        "live_window",
         "live_frame",
         "live_navigate",
         "live_forward",
@@ -366,7 +367,7 @@
               "type": "string"
             }
           ],
-          "description": "For live_open and live_navigate: an address or search text, resolved by the backend with the user's browser_search_engine setting.",
+          "description": "For live_open, live_window, and live_navigate: an address or search text, resolved by the backend with the user's browser_search_engine setting.",
           "title": "BrowserInteractCommandUrl"
         },
         "viewport": {

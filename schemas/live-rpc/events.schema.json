@@ -396,6 +396,11 @@
           ],
           "default": null,
           "title": "Viewport Width"
+        },
+        "window_mode": {
+          "default": false,
+          "title": "Window Mode",
+          "type": "boolean"
         }
       },
       "required": [
@@ -408,6 +413,7 @@
         "viewport_width",
         "viewport_height",
         "live_device_scale",
+        "window_mode",
         "source_tool",
         "call_id"
       ],
@@ -9823,7 +9829,8 @@
       "type": "browser.viewport.updated",
       "url": "https://example.test/",
       "viewport_height": 800,
-      "viewport_width": 1280
+      "viewport_width": 1280,
+      "window_mode": false
     },
     "compaction.completed": {
       "compaction_id": null,

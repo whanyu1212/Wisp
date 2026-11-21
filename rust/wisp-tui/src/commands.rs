@@ -58,8 +58,10 @@ pub(crate) enum Command {
     Browser {
         interact: bool,
     },
-    /// `/browser live`: open a live page at an address or a search, as typed.
-    BrowserLive(String),
+    /// `/browser live [address or search]`: open a live page or dock back into the terminal.
+    BrowserLive(Option<String>),
+    /// `/browser window [address or search]`: open or move the live browser into a Chrome window.
+    BrowserWindow(Option<String>),
     /// `/kill`: the process to stop, by `/ps` number or id.
     KillProcess(String),
     Quit,
@@ -105,7 +107,7 @@ fn usage(name: &str) -> Option<&'static str> {
         "unrevert" => "/unrevert",
         "cd" => "/cd <path>",
         "ps" => "/ps",
-        "browser" => "/browser [interact | live <address or search>]",
+        "browser" => "/browser [interact | live [address or search] | window [address or search]]",
         "kill" => "/kill <number|process-id>",
         _ => return None,
     })
@@ -227,6 +229,10 @@ fn parse_browser(tail: &str, syntax: &str) -> Command {
         Command::Browser { interact: false }
     } else if trimmed.eq_ignore_ascii_case("interact") {
         Command::Browser { interact: true }
+    } else if trimmed.eq_ignore_ascii_case("live") {
+        Command::BrowserLive(None)
+    } else if trimmed.eq_ignore_ascii_case("window") {
+        Command::BrowserWindow(None)
     } else if let Some(text) = trimmed
         .strip_prefix("live ")
         .map(str::trim)
@@ -237,7 +243,19 @@ fn parse_browser(tail: &str, syntax: &str) -> Command {
                 "Browser addresses and searches must be 2,048 characters or fewer.".into(),
             )
         } else {
-            Command::BrowserLive(text.to_owned())
+            Command::BrowserLive(Some(text.to_owned()))
+        }
+    } else if let Some(text) = trimmed
+        .strip_prefix("window ")
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        if text.chars().count() > 2_048 {
+            Command::Invalid(
+                "Browser addresses and searches must be 2,048 characters or fewer.".into(),
+            )
+        } else {
+            Command::BrowserWindow(Some(text.to_owned()))
         }
     } else {
         Command::Invalid(format!("Usage: {syntax}"))
@@ -1685,12 +1703,25 @@ pub(crate) mod tests {
             Some(Command::Browser { interact: true })
         ));
         assert!(matches!(
+            classify("/browser live", None),
+            Some(Command::BrowserLive(None))
+        ));
+        assert!(matches!(
             classify("/browser live  rust ratatui docs ", None),
-            Some(Command::BrowserLive(text)) if text == "rust ratatui docs"
+            Some(Command::BrowserLive(Some(text))) if text == "rust ratatui docs"
+        ));
+        assert!(matches!(
+            classify("/browser window", None),
+            Some(Command::BrowserWindow(None))
+        ));
+        assert!(matches!(
+            classify("/browser window https://example.com", None),
+            Some(Command::BrowserWindow(Some(text))) if text == "https://example.com"
         ));
         assert!(matches!(
             classify("/browser extra", None),
-            Some(Command::Invalid(msg)) if msg == "Usage: /browser [interact | live <address or search>]"
+            Some(Command::Invalid(msg))
+                if msg == "Usage: /browser [interact | live [address or search] | window [address or search]]"
         ));
     }
 
@@ -1700,7 +1731,7 @@ pub(crate) mod tests {
         assert_eq!(url.len(), 2_048);
         assert!(matches!(
             classify(&format!("/browser live {url}"), None),
-            Some(Command::BrowserLive(address)) if address == url
+            Some(Command::BrowserLive(Some(address))) if address == url
         ));
         assert!(matches!(
             classify(&format!("/browser live {url}a"), None),

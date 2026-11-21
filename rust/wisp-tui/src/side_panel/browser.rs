@@ -451,6 +451,29 @@ pub(super) fn render_browser_body(
     }
 
     let Some(_image_ref) = &vp.image else {
+        if vp.window_mode {
+            let mut lines = vec![Line::styled(
+                ui::clip_columns("Live browser open in Chrome window", width),
+                Style::default().add_modifier(Modifier::BOLD),
+            )];
+            if let Some(url) = vp
+                .url
+                .as_deref()
+                .map(sanitize_for_terminal)
+                .filter(|text| !text.is_empty())
+            {
+                lines.push(Line::styled(
+                    ui::clip_columns(&url, width),
+                    Style::default().fg(palette.secondary),
+                ));
+            }
+            lines.push(Line::styled(
+                ui::clip_columns("Run /browser live to dock it back in the terminal.", width),
+                muted,
+            ));
+            frame.render_widget(Paragraph::new(lines), image_area);
+            return None;
+        }
         render_placeholder(
             frame,
             image_area,

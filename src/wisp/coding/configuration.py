@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from wisp.config.runtime import WispConfig
+from wisp.config.runtime import DEFAULT_BROWSER_DEFAULT, WispConfig
+from wisp.config.settings import BrowserDefault
 from wisp.providers.base import Provider
 from wisp.providers.catalog import ModelRegistry, startup_effort
 from wisp.runtime.registry import ProviderRegistry
@@ -32,6 +33,7 @@ class CodingSessionConfiguration:
     auto_compaction_enabled: bool
     skill_catalog: SkillCatalog = field(default_factory=SkillCatalog)
     web_search: bool = False
+    browser_default: BrowserDefault = DEFAULT_BROWSER_DEFAULT
 
 
 def resolve_coding_session_configuration(
@@ -90,4 +92,5 @@ def resolve_coding_session_configuration(
         context_reserve_tokens=config.context_reserve_tokens,
         auto_compaction_enabled=config.auto_compaction_enabled,
         web_search=config.web_search,
+        browser_default=config.browser_default,
     )

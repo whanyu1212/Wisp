@@ -216,6 +216,14 @@
   },
   {
    "event": "browser.viewport.updated",
+   "operation": "remove",
+   "path": [
+    "window_mode"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "browser.viewport.updated",
    "operation": "add_unknown",
    "path": [],
    "accepted": false

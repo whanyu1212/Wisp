@@ -14,6 +14,7 @@ import subprocess
 import sys
 from collections.abc import Mapping
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
@@ -23,10 +24,11 @@ from anyio.abc import TaskGroup
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import WebSocketException
 
-from wisp.coding.browser_control import BrowserControlError, BrowserInteraction
+from wisp.coding.browser_control import BrowserButtonKind, BrowserControlError, BrowserInteraction
 from wisp.coding.browser_profile import browser_profile
 from wisp.config.settings import browser_profile_path
 from wisp.events import (
+    MAX_BROWSER_TITLE_CHARS,
     MAX_BROWSER_URL_CHARS,
     MAX_LIVE_BROWSER_FRAME_CHARS,
     MAX_LIVE_BROWSER_HEIGHT,
@@ -100,6 +102,159 @@ def _chrome_binary() -> str:
     raise BrowserControlError("Install Chrome or put Chromium on PATH to use the live browser")
 
 
+def is_ssh_session() -> bool:
+    """Return whether Wisp is running inside an SSH session."""
+    return any(os.environ.get(var) for var in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"))
+
+
+def live_browser_available() -> bool:
+    """Return whether Wisp can launch its built-in live browser on this host."""
+    if os.name != "posix":
+        return False
+    try:
+        _chrome_binary()
+    except BrowserControlError:
+        return False
+    return True
+
+
+@dataclass(frozen=True, slots=True)
+class LiveBrowserElement:
+    """One visible interactive element discovered in a live browser page snapshot."""
+
+    ref: str
+    role: str
+    name: str
+    tag: str
+    x: int
+    y: int
+    value: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LiveBrowserPageSnapshot:
+    """Bounded text and interactive-element snapshot of the live browser page."""
+
+    url: str | None
+    title: str | None
+    text: str
+    elements: tuple[LiveBrowserElement, ...]
+    window_mode: bool
+    truncated: bool = False
+
+
+_JS_READ_PAGE = """(maxChars, maxElements) => {
+  const prev = document.querySelectorAll('[data-wisp-ref]');
+  for (const el of prev) { el.removeAttribute('data-wisp-ref'); }
+  const selector = [
+    'a[href]', 'button', 'input', 'textarea', 'select',
+    '[role="button"]', '[role="link"]', '[role="textbox"]',
+    '[role="checkbox"]', '[role="radio"]', '[role="tab"]',
+    '[role="menuitem"]', '[contenteditable="true"]'
+  ].join(',');
+  const nodes = document.querySelectorAll(selector);
+  const elements = [];
+  let idx = 0;
+  for (const el of nodes) {
+    if (elements.length >= maxElements) break;
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) continue;
+    const style = getComputedStyle(el);
+    if (style.visibility === 'hidden' || style.display === 'none') continue;
+    idx += 1;
+    const ref = 'e' + idx;
+    el.setAttribute('data-wisp-ref', ref);
+    const tag = el.tagName.toLowerCase();
+    const role = (
+      el.getAttribute('role') || (tag === 'a' ? 'link' : tag === 'button' ? 'button' : tag)
+    );
+    const label = (
+      el.getAttribute('aria-label')
+      || el.getAttribute('placeholder')
+      || el.getAttribute('title')
+      || el.innerText
+      || el.textContent
+      || ''
+    ).replace(/\\s+/g, ' ').trim().slice(0, 120);
+    let value = null;
+    if (el instanceof HTMLInputElement) {
+      value = el.type === 'password' ? '[password]' : (el.value || '').slice(0, 120);
+    } else if (el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
+      value = (el.value || '').slice(0, 120);
+    }
+    elements.push({
+      ref,
+      role,
+      name: label,
+      tag,
+      x: Math.round(rect.left + rect.width / 2),
+      y: Math.round(rect.top + rect.height / 2),
+      value,
+    });
+  }
+  const rawText = (document.body ? (document.body.innerText || '') : '').trim();
+  const truncated = rawText.length > maxChars;
+  return {
+    url: location.href,
+    title: document.title || '',
+    text: truncated ? rawText.slice(0, maxChars) : rawText,
+    truncated,
+    elements,
+  };
+}"""
+
+_JS_RESOLVE_TARGET = """(ref, selector) => {
+  const el = ref
+    ? document.querySelector('[data-wisp-ref=' + JSON.stringify(ref) + ']')
+    : document.querySelector(selector);
+  if (!el) return null;
+  if (typeof el.scrollIntoView === 'function') {
+    try { el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); }
+    catch (_e) { el.scrollIntoView(); }
+  }
+  const rect = el.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return null;
+  return {
+    x: Math.max(0, Math.round(rect.left + rect.width / 2)),
+    y: Math.max(0, Math.round(rect.top + rect.height / 2)),
+  };
+}"""
+
+_JS_FOCUS_TARGET = """(ref, selector, clear) => {
+  const el = ref
+    ? document.querySelector('[data-wisp-ref=' + JSON.stringify(ref) + ']')
+    : selector
+      ? document.querySelector(selector)
+      : document.activeElement;
+  if (!el || el === document.body || el === document.documentElement) return false;
+  if (typeof el.scrollIntoView === 'function') {
+    try { el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); }
+    catch (_e) { el.scrollIntoView(); }
+  }
+  if (typeof el.focus === 'function') {
+    el.focus();
+  }
+  if (clear) {
+    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+      const proto = el instanceof HTMLTextAreaElement
+        ? HTMLTextAreaElement.prototype
+        : HTMLInputElement.prototype;
+      const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+      if (desc && typeof desc.set === 'function') {
+        desc.set.call(el, '');
+      } else {
+        el.value = '';
+      }
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    } else if (el.isContentEditable) {
+      el.textContent = '';
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  }
+  return true;
+}"""
+
+
 class LiveBrowser:
     """Own a single user-controlled tab for the lifetime of the RPC host."""
 
@@ -129,6 +284,8 @@ class LiveBrowser:
         self._frame: str | None = None
         self._delivered: tuple[str, str | None] | None = None
         self._url: str | None = None
+        self._title: str | None = None
+        self._window_mode = False
         # Held while capture state changes (open, resize, a fresh capture after a
         # document change) so a frame reader never takes the frame such a change
         # returns, and pointer input never sees the capture half-built.
@@ -142,35 +299,103 @@ class LiveBrowser:
         """The saved Chromium profile directory this browser opens tabs on."""
         return self._profile_dir or browser_profile_path()
 
-    async def open(self, url: str) -> BrowserViewportUpdated:
+    @property
+    def is_open(self) -> bool:
+        """Whether a live Chromium tab is currently running."""
+        return (
+            self._socket is not None and self._scope is not None and not self._scope.cancel_called
+        )
+
+    @property
+    def window_mode(self) -> bool:
+        """Whether the live browser is currently running in a visible Chrome window."""
+        return self._window_mode
+
+    @property
+    def current_url(self) -> str | None:
+        """The current top-level page URL, or None while closed."""
+        return self._url
+
+    @property
+    def current_title(self) -> str | None:
+        """The last observed page title, or None when unknown."""
+        return self._title
+
+    def is_available(self) -> bool:
+        """Return whether this host can launch the live browser."""
+        return live_browser_available()
+
+    async def open(self, url: str, *, window: bool = False) -> BrowserViewportUpdated:
         """Replace the existing tab with a new one on the saved Chromium profile.
 
         Args:
             url: HTTP or HTTPS address for the new tab.
+            window: When True, launch Chrome as a visible desktop window instead
+                of headless in the terminal pane. Unavailable over SSH.
 
         Returns:
-            The first frame after navigation commits.
+            The first frame after navigation commits, or a window-mode viewport update.
 
         Raises:
             BrowserControlError: The address, Chromium startup, or navigation failed.
             TimeoutError: The first frame did not arrive within the startup deadline.
         """
         url = validate_browser_url(url)
+        if window and is_ssh_session():
+            raise BrowserControlError("Window mode is unavailable over SSH")
         async with self._capture_lock:
-            await self._stop()
-            executable = _chrome_binary()
-            try:
-                with anyio.fail_after(_STARTUP_TIMEOUT):
-                    await self._tasks.start(self._run, executable)
+            return await self._open_locked(url, window=window)
+
+    async def _open_locked(self, url: str, *, window: bool) -> BrowserViewportUpdated:
+        await self._stop()
+        executable = _chrome_binary()
+        try:
+            with anyio.fail_after(_STARTUP_TIMEOUT):
+                await self._tasks.start(self._run, executable, window)
+                self._window_mode = window
+                if not window:
                     await self._set_metrics(_INITIAL_VIEWPORT)
-                    await self._command("Page.enable", {})
-                    await self._command("Inspector.enable", {})
-                    await self._command("Page.bringToFront", {})
-                    await self._navigate(url)
-                    return await self._start_capture(_INITIAL_VIEWPORT)
-            except BaseException:
-                await self._stop()
-                raise
+                await self._command("Page.enable", {})
+                await self._command("Inspector.enable", {})
+                await self._command("Page.bringToFront", {})
+                await self._navigate(url)
+                await self._refresh_title()
+                if window:
+                    return self._window_viewport_event()
+                return await self._start_capture(_INITIAL_VIEWPORT)
+        except BaseException:
+            await self._stop()
+            raise
+
+    async def switch_mode(self, *, window: bool, url: str | None = None) -> BrowserViewportUpdated:
+        """Open or switch the live browser between terminal and window modes.
+
+        Switching modes restarts Chrome on the same profile so cookies and
+        sign-ins carry over, then reopens ``url`` (or the current page URL).
+
+        Args:
+            window: True for a visible Chrome window, False for the TUI pane.
+            url: Optional HTTP/HTTPS URL to navigate to; defaults to the current URL.
+
+        Returns:
+            A viewport update describing the new frame or window-mode state.
+        """
+        validated_url = validate_browser_url(url) if url is not None else None
+        if window and is_ssh_session():
+            raise BrowserControlError("Window mode is unavailable over SSH")
+        async with self._capture_lock:
+            target = validated_url if validated_url is not None else self._url
+            if target is None:
+                raise BrowserControlError("Specify a URL to open the live browser")
+            if self.is_open and self._window_mode == window:
+                if validated_url is not None and target != self._url:
+                    await self._navigate(target)
+                    await self._refresh_title()
+                if window:
+                    return self._window_viewport_event()
+                frame = await self._poll_frame()
+                return frame if frame is not None else self._fallback_terminal_event()
+            return await self._open_locked(target, window=window)
 
     async def navigate(self, url: str) -> None:
         """Navigate the existing tab to a validated HTTP or HTTPS address."""
@@ -218,6 +443,9 @@ class LiveBrowser:
             return await self._poll_frame()
 
     async def _poll_frame(self) -> BrowserViewportUpdated | None:
+        if self._window_mode:
+            await self._refresh_title()
+            return self._window_viewport_event()
         if self._viewport is not None and self._capture_loader != self._loader:
             return await self._restart_capture(self._viewport, resize=False)
         return self.take_frame()
@@ -244,11 +472,13 @@ class LiveBrowser:
         scope = self._scope
         if self._socket is None or scope is None or scope.cancel_called:
             raise BrowserControlError(_CLOSED)
+        if self._window_mode:
+            return None
         while True:
             # Taken before the check, so a change during the check wakes the wait.
             changed = self._changed
             async with self._capture_lock:
-                if scope.cancel_called:
+                if scope.cancel_called or self._window_mode:
                     return None
                 if self._scope is not scope:
                     raise BrowserControlError(_CLOSED)
@@ -283,6 +513,8 @@ class LiveBrowser:
             The first matching frame, including on a static page.
         """
         async with self._capture_lock:
+            if self._window_mode:
+                return self._window_viewport_event()
             return await self._restart_capture(viewport, resize=True)
 
     async def _restart_capture(
@@ -365,7 +597,13 @@ class LiveBrowser:
         if self._scope is not None:
             self._scope.cancel()
 
-    async def _run(self, executable: str, *, task_status: anyio.abc.TaskStatus[None]) -> None:
+    async def _run(
+        self,
+        executable: str,
+        window: bool = False,
+        *,
+        task_status: anyio.abc.TaskStatus[None],
+    ) -> None:
         self._stopped = stopped = anyio.Event()
         started = False
         try:
@@ -385,14 +623,21 @@ class LiveBrowser:
                             "KDE_SESSION_VERSION",
                         )
                     )
+                    if window:
+                        env_keys.extend(("DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY"))
                 environment = {key: os.environ[key] for key in env_keys if key in os.environ}
-                process = await anyio.open_process(
+                launch_args = [executable]
+                if not window:
+                    launch_args.extend(
+                        [
+                            "--headless",
+                            # CDP captures the compositor surface. Emulating DPR alone
+                            # changes page layout but leaves native frames at 1×.
+                            "--force-device-scale-factor=2",
+                        ]
+                    )
+                launch_args.extend(
                     [
-                        executable,
-                        "--headless",
-                        # CDP captures the compositor surface. Emulating DPR alone
-                        # changes page layout but leaves native frames at 1×.
-                        "--force-device-scale-factor=2",
                         "--no-first-run",
                         "--no-default-browser-check",
                         *await _desktop_identity_args(executable, environment),
@@ -400,7 +645,10 @@ class LiveBrowser:
                         "--remote-debugging-address=127.0.0.1",
                         f"--user-data-dir={profile.path}",
                         "about:blank",
-                    ],
+                    ]
+                )
+                process = await anyio.open_process(
+                    launch_args,
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
@@ -447,6 +695,8 @@ class LiveBrowser:
             self._socket = None
             self._target = None
             self._frame = self._delivered = self._url = self._loader = self._main_frame = None
+            self._title = None
+            self._window_mode = False
             self._viewport = None
             self._screencast_id = 0
             self._capture_loader = None
@@ -491,6 +741,7 @@ class LiveBrowser:
                             if "parentId" not in frame:
                                 if self._loader != frame["loaderId"]:
                                     self._frame = self._delivered = None
+                                    self._title = None
                                     self._first_frame.set()
                                 self._main_frame = frame["id"]
                                 self._loader = frame["loaderId"]
@@ -580,6 +831,8 @@ class LiveBrowser:
         """
         if self._socket is None or self._scope is None or self._scope.cancel_called:
             raise BrowserControlError(_CLOSED)
+        if self._window_mode:
+            return None
         viewport = self._viewport
         if viewport is None or self._frame is None or (self._frame, self._url) == self._delivered:
             return None
@@ -587,11 +840,260 @@ class LiveBrowser:
         return BrowserViewportUpdated(
             live_png=self._frame,
             url=self._url[:MAX_BROWSER_URL_CHARS] if self._url else None,
-            title="Live Chromium",
+            title=self._sanitized_title(),
             viewport_width=viewport.width,
             viewport_height=viewport.height,
             live_device_scale=viewport.device_scale_factor,
         )
+
+    def _sanitized_title(self) -> str:
+        title = (self._title or "").strip()
+        return title[:MAX_BROWSER_TITLE_CHARS] if title else "Live Chromium"
+
+    def _window_viewport_event(self) -> BrowserViewportUpdated:
+        return BrowserViewportUpdated(
+            url=self._url[:MAX_BROWSER_URL_CHARS] if self._url else None,
+            title=self._sanitized_title(),
+            window_mode=True,
+        )
+
+    def _fallback_terminal_event(self) -> BrowserViewportUpdated:
+        viewport = self._viewport
+        return BrowserViewportUpdated(
+            live_png=self._frame,
+            url=self._url[:MAX_BROWSER_URL_CHARS] if self._url else None,
+            title=self._sanitized_title(),
+            viewport_width=viewport.width if viewport is not None else None,
+            viewport_height=viewport.height if viewport is not None else None,
+            live_device_scale=viewport.device_scale_factor if viewport is not None else None,
+        )
+
+    async def _evaluate(self, expression: str) -> object:
+        result = await self._command(
+            "Runtime.evaluate",
+            {
+                "expression": expression,
+                "returnByValue": True,
+                "awaitPromise": False,
+            },
+        )
+        if result.get("exceptionDetails") is not None:
+            raise BrowserControlError("Could not inspect or target the page in the live browser")
+        remote = result.get("result")
+        if isinstance(remote, dict):
+            return remote.get("value")
+        return None
+
+    async def _refresh_title(self) -> None:
+        with suppress(BrowserControlError):
+            title = await self._evaluate("document.title || ''")
+            if isinstance(title, str):
+                cleaned = title.strip()
+                self._title = cleaned[:MAX_BROWSER_TITLE_CHARS] if cleaned else None
+
+    async def read_page(
+        self,
+        *,
+        max_chars: int = 12_000,
+        max_elements: int = 60,
+    ) -> LiveBrowserPageSnapshot:
+        """Read the current page's URL, title, visible text, and interactive elements.
+
+        Args:
+            max_chars: Maximum characters of page text to return.
+            max_elements: Maximum visible interactive elements to tag with refs.
+
+        Returns:
+            A bounded snapshot of the current page.
+
+        Raises:
+            BrowserControlError: The browser is closed or evaluation failed.
+        """
+        if not self.is_open:
+            raise BrowserControlError(_CLOSED)
+        expression = f"({_JS_READ_PAGE})({int(max_chars)}, {int(max_elements)})"
+        raw = await self._evaluate(expression)
+        if not isinstance(raw, dict):
+            raise BrowserControlError("Could not read page state from the live browser")
+        url = raw.get("url")
+        if isinstance(url, str) and url:
+            self._url = url
+        title = raw.get("title")
+        if isinstance(title, str):
+            cleaned = title.strip()
+            self._title = cleaned[:MAX_BROWSER_TITLE_CHARS] if cleaned else None
+        raw_text = raw.get("text")
+        text = raw_text if isinstance(raw_text, str) else ""
+        truncated = bool(raw.get("truncated", False))
+        elements: list[LiveBrowserElement] = []
+        raw_elements = raw.get("elements")
+        if isinstance(raw_elements, list):
+            for item in raw_elements:
+                if not isinstance(item, dict):
+                    continue
+                ref = item.get("ref")
+                role = item.get("role")
+                name = item.get("name")
+                tag = item.get("tag")
+                x = item.get("x")
+                y = item.get("y")
+                value = item.get("value")
+                if (
+                    isinstance(ref, str)
+                    and isinstance(role, str)
+                    and isinstance(name, str)
+                    and isinstance(tag, str)
+                    and isinstance(x, int)
+                    and isinstance(y, int)
+                ):
+                    elements.append(
+                        LiveBrowserElement(
+                            ref=ref,
+                            role=role,
+                            name=name,
+                            tag=tag,
+                            x=x,
+                            y=y,
+                            value=value if isinstance(value, str) else None,
+                        )
+                    )
+        return LiveBrowserPageSnapshot(
+            url=self._url,
+            title=self._title,
+            text=text,
+            elements=tuple(elements),
+            window_mode=self._window_mode,
+            truncated=truncated,
+        )
+
+    async def click_element(
+        self,
+        *,
+        ref: str | None = None,
+        selector: str | None = None,
+        x: int | None = None,
+        y: int | None = None,
+        button: BrowserButtonKind = "left",
+        double_click: bool = False,
+    ) -> BrowserViewportUpdated | None:
+        """Click an element by ref, CSS selector, or viewport coordinates."""
+        if not self.is_open:
+            raise BrowserControlError(_CLOSED)
+        if ref is not None or selector is not None:
+            expression = f"({_JS_RESOLVE_TARGET})({json.dumps(ref)}, {json.dumps(selector)})"
+            coords = await self._evaluate(expression)
+            if not isinstance(coords, dict):
+                target_desc = f"ref {ref!r}" if ref is not None else f"selector {selector!r}"
+                raise BrowserControlError(
+                    f"Element not found or not visible for {target_desc}; run browser_read first"
+                )
+            cx = coords.get("x")
+            cy = coords.get("y")
+            if not isinstance(cx, int) or not isinstance(cy, int):
+                raise BrowserControlError("Could not resolve element coordinates")
+            x, y = cx, cy
+        if x is None or y is None or x < 0 or y < 0:
+            raise BrowserControlError("Provide ref, selector, or non-negative x and y coordinates")
+        await self._click_at(x, y, button=button, double_click=double_click)
+        await anyio.sleep(0.05)
+        await self._refresh_title()
+        return await self._agent_viewport_event()
+
+    async def type_text(
+        self,
+        *,
+        text: str,
+        ref: str | None = None,
+        selector: str | None = None,
+        clear: bool = False,
+        press_enter: bool = False,
+    ) -> BrowserViewportUpdated | None:
+        """Type text into a targeted or currently focused element."""
+        if not self.is_open:
+            raise BrowserControlError(_CLOSED)
+        if any((ord(ch) < 32 and ch not in "\t\n\r") or 0x7F <= ord(ch) <= 0x9F for ch in text):
+            raise BrowserControlError("Text contains unsupported control characters")
+        if ref is not None or selector is not None or clear:
+            expression = (
+                f"({_JS_FOCUS_TARGET})"
+                f"({json.dumps(ref)}, {json.dumps(selector)}, {json.dumps(clear)})"
+            )
+            focused = await self._evaluate(expression)
+            if (ref is not None or selector is not None) and focused is not True:
+                target_desc = f"ref {ref!r}" if ref is not None else f"selector {selector!r}"
+                raise BrowserControlError(
+                    f"Element not found for {target_desc}; run browser_read first"
+                )
+        if text:
+            await self._command("Input.insertText", {"text": text})
+        if press_enter:
+            params = {"key": "Enter", "windowsVirtualKeyCode": 13, "modifiers": 0}
+            await self._command(
+                "Input.dispatchKeyEvent",
+                {"type": "keyDown", "text": "\r", "unmodifiedText": "\r", **params},
+            )
+            await self._command("Input.dispatchKeyEvent", {"type": "keyUp", **params})
+        await anyio.sleep(0.05)
+        await self._refresh_title()
+        return await self._agent_viewport_event()
+
+    async def capture_screenshot(self) -> tuple[bytes, str | None, str | None]:
+        """Capture a PNG screenshot of the current live browser viewport."""
+        if not self.is_open:
+            raise BrowserControlError(_CLOSED)
+        result = await self._command(
+            "Page.captureScreenshot",
+            {"format": "png", "captureBeyondViewport": False},
+        )
+        data = result.get("data")
+        if not isinstance(data, str) or not data or len(data) > MAX_LIVE_BROWSER_FRAME_CHARS:
+            raise BrowserControlError("Chromium did not return a valid screenshot")
+        try:
+            raw = base64.b64decode(data, validate=True)
+        except ValueError as exc:
+            raise BrowserControlError("Chromium returned malformed screenshot data") from exc
+        await self._refresh_title()
+        return raw, self._url, self._title
+
+    async def _agent_viewport_event(self) -> BrowserViewportUpdated | None:
+        if self._window_mode:
+            return self._window_viewport_event()
+        frame = await self.poll_frame()
+        return frame if frame is not None else self._fallback_terminal_event()
+
+    async def _click_at(
+        self,
+        x: int,
+        y: int,
+        *,
+        button: BrowserButtonKind = "left",
+        double_click: bool = False,
+    ) -> None:
+        params = {"x": x, "y": y}
+        await self._command(
+            "Input.dispatchMouseEvent", {**params, "type": "mouseMoved", "buttons": 0}
+        )
+        for count in range(1, 3 if double_click else 2):
+            await self._command(
+                "Input.dispatchMouseEvent",
+                {
+                    **params,
+                    "type": "mousePressed",
+                    "button": button,
+                    "buttons": _MOUSE_BUTTON_MASK[button],
+                    "clickCount": count,
+                },
+            )
+            await self._command(
+                "Input.dispatchMouseEvent",
+                {
+                    **params,
+                    "type": "mouseReleased",
+                    "button": button,
+                    "buttons": 0,
+                    "clickCount": count,
+                },
+            )
 
     async def interact(self, request: BrowserInteraction) -> None:
         """Dispatch user input through Chromium's normal page input handling.

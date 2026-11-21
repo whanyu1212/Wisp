@@ -2738,3 +2738,67 @@ async fn tab_hide_and_reopen_drops_held_wheel() {
             .is_empty()
     );
 }
+
+#[tokio::test]
+async fn agent_live_browser_update_opens_browser_panel() {
+    let dir = TempSessionDir::new("agent-live-browser-opens");
+    let mut ui = ui_with_session(&dir);
+    assert!(!ui.side_panel.visible());
+
+    push_backend_event(
+        &mut ui,
+        serde_json::json!({
+            "type": "browser.viewport.updated",
+            "timestamp": "2026-11-21T10:00:00Z",
+            "live_png": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+            "url": "https://app.example.com",
+            "title": "Example App",
+            "viewport_width": 900,
+            "viewport_height": 600,
+            "live_device_scale": 1,
+            "source_tool": "browser_navigate"
+        }),
+    )
+    .await;
+
+    assert!(ui.side_panel.visible());
+    assert_eq!(ui.side_panel.mode(), PanelMode::Browser);
+    let vp = ui.state.browser_viewport.as_ref().expect("viewport");
+    assert!(vp.live);
+    assert!(!vp.window_mode);
+}
+
+#[tokio::test]
+async fn window_mode_renders_notice_and_clears_live_geometry() {
+    let dir = TempSessionDir::new("live-browser-window-mode");
+    let mut ui = ui_with_session(&dir);
+    push_backend_event(
+        &mut ui,
+        serde_json::json!({
+            "type": "browser.viewport.updated",
+            "timestamp": "2026-11-21T10:00:01Z",
+            "url": "https://app.example.com/login",
+            "title": "Sign in",
+            "window_mode": true,
+            "source_tool": "browser_navigate"
+        }),
+    )
+    .await;
+
+    assert!(ui.side_panel.visible());
+    assert_eq!(ui.side_panel.mode(), PanelMode::Browser);
+    let vp = ui.state.browser_viewport.as_ref().expect("viewport");
+    assert!(vp.live);
+    assert!(vp.window_mode);
+    assert!(vp.image.is_none());
+    assert!(vp.live_geometry().is_none());
+
+    let (_, rendered) = draw_text(&mut ui, 160, 36);
+    assert!(rendered.contains("Live browser open in Chrome window"));
+    assert!(rendered.contains("https://app.example.com/login"));
+    assert!(rendered.contains("/browser live"));
+
+    // Window mode must not poll live_frame or send live_resize.
+    let (writer, mut commands) = mpsc::channel(8);
+    assert!(poll_sent(&mut ui, &writer, &mut commands).await.is_empty());
+}

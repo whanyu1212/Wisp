@@ -841,6 +841,7 @@ class BrowserViewportUpdated(WispEvent):
         default=None, ge=1, le=MAX_BROWSER_VIEWPORT_SIDE, strict=True
     )
     live_device_scale: int | None = Field(default=None, ge=1, le=2, strict=True)
+    window_mode: bool = False
     source_tool: str | None = Field(
         default=None, min_length=1, max_length=MAX_BROWSER_SOURCE_TOOL_CHARS
     )

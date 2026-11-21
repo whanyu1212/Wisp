@@ -838,6 +838,7 @@ pub struct BrowserAddresses {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BrowserViewport {
     pub live: bool,
+    pub window_mode: bool,
     pub live_device_scale: Option<u32>,
     pub image: Option<composer_images::TranscriptImage>,
     pub url: Option<String>,
@@ -852,7 +853,7 @@ pub struct BrowserViewport {
 
 impl BrowserViewport {
     pub(crate) fn live_geometry(&self) -> Option<LiveBrowserViewport> {
-        self.live.then_some(LiveBrowserViewport {
+        (self.live && !self.window_mode).then_some(LiveBrowserViewport {
             width: self.viewport_width?,
             height: self.viewport_height?,
             device_scale_factor: self.live_device_scale.unwrap_or(1),
@@ -863,6 +864,7 @@ impl BrowserViewport {
 #[derive(Clone, Debug, PartialEq)]
 pub struct BrowserViewportInput {
     pub live: bool,
+    pub window_mode: bool,
     pub live_device_scale: Option<u32>,
     pub image: Option<composer_images::TranscriptImage>,
     pub url: Option<String>,
@@ -897,6 +899,10 @@ pub enum BrowserInteractRequest {
     Nav(BrowserNavAction),
     LiveOpen {
         url: String,
+    },
+    LiveDock,
+    LiveWindow {
+        url: Option<String>,
     },
     LiveNavigate {
         url: String,
@@ -943,6 +949,8 @@ impl std::fmt::Debug for BrowserInteractRequest {
                 .finish(),
             Self::Nav(action) => f.debug_tuple("Nav").field(action).finish(),
             Self::LiveOpen { .. } => f.write_str("LiveOpen([REDACTED])"),
+            Self::LiveDock => f.write_str("LiveDock"),
+            Self::LiveWindow { .. } => f.write_str("LiveWindow([REDACTED])"),
             Self::LiveNavigate { .. } => f.write_str("LiveNavigate([REDACTED])"),
             Self::LiveResize(viewport) => f.debug_tuple("LiveResize").field(viewport).finish(),
         }
@@ -5876,10 +5884,15 @@ fn handle_backend_event(
             let updated_at_ms = crate::tool_cards::timestamp_ms(&update.timestamp);
             state.browser_viewport = Some(BrowserViewport {
                 live: update.live,
+                window_mode: update.window_mode,
                 live_device_scale: update.live_device_scale,
-                image: update
-                    .image
-                    .or_else(|| previous.as_ref().and_then(|prev| prev.image.clone())),
+                image: if update.window_mode {
+                    None
+                } else {
+                    update
+                        .image
+                        .or_else(|| previous.as_ref().and_then(|prev| prev.image.clone()))
+                },
                 url: update
                     .url
                     .or_else(|| previous.as_ref().and_then(|prev| prev.url.clone())),
@@ -6534,7 +6547,9 @@ fn handle_browser_interact(
     let completion = match request {
         BrowserInteractRequest::Nav(BrowserNavAction::LiveFrame) => BrowserCommandCompletion::Frame,
         BrowserInteractRequest::Nav(BrowserNavAction::LiveClose) => BrowserCommandCompletion::Close,
-        BrowserInteractRequest::LiveOpen { .. } => BrowserCommandCompletion::Open,
+        BrowserInteractRequest::LiveOpen { .. }
+        | BrowserInteractRequest::LiveDock
+        | BrowserInteractRequest::LiveWindow { .. } => BrowserCommandCompletion::Open,
         BrowserInteractRequest::LiveResize(_) => BrowserCommandCompletion::Resize,
         BrowserInteractRequest::LiveNavigate { .. }
         | BrowserInteractRequest::Nav(BrowserNavAction::LiveForward) => {
@@ -6571,6 +6586,14 @@ fn handle_browser_interact(
         BrowserInteractRequest::LiveOpen { url } => {
             state.browser_requested_geometry = None;
             WispTypedClientRpcCommands::browser_live_open(&id, &url)?
+        }
+        BrowserInteractRequest::LiveDock => {
+            state.browser_requested_geometry = None;
+            WispTypedClientRpcCommands::browser_live_dock(&id)?
+        }
+        BrowserInteractRequest::LiveWindow { url } => {
+            state.browser_requested_geometry = None;
+            WispTypedClientRpcCommands::browser_live_window(&id, url.as_deref())?
         }
         BrowserInteractRequest::LiveNavigate { url } => {
             WispTypedClientRpcCommands::browser_live_navigate(&id, &url)?

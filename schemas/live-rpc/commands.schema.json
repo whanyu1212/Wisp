@@ -268,6 +268,7 @@
         "reload",
         "refresh",
         "live_open",
+        "live_window",
         "live_frame",
         "live_navigate",
         "live_forward",
@@ -279,6 +280,23 @@
     "BrowserInteractCommand": {
       "additionalProperties": false,
       "allOf": [
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "const": "live_navigate"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "required": [
+              "url"
+            ]
+          }
+        },
         {
           "else": {
             "not": {
@@ -296,17 +314,13 @@
               "action": {
                 "enum": [
                   "live_open",
+                  "live_window",
                   "live_navigate"
                 ]
               }
             },
             "required": [
               "action"
-            ]
-          },
-          "then": {
-            "required": [
-              "url"
             ]
           }
         },
@@ -661,6 +675,7 @@
                   "reload",
                   "refresh",
                   "live_open",
+                  "live_window",
                   "live_frame",
                   "live_close",
                   "live_navigate",
@@ -833,7 +848,7 @@
               "type": "string"
             }
           ],
-          "description": "For live_open and live_navigate: an address or search text, resolved by the backend with the user's browser_search_engine setting.",
+          "description": "For live_open, live_window, and live_navigate: an address or search text, resolved by the backend with the user's browser_search_engine setting.",
           "title": "Url"
         },
         "viewport": {

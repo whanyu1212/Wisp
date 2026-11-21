@@ -20,6 +20,7 @@ from pydantic import (
 from wisp.config.settings import (
     BROWSER_PROFILE_SUBPATH,
     DEFAULT_PROTECTED_PATHS,
+    BrowserDefault,
     BrowserSearchEngine,
     ResolvedSettings,
     resolve_settings,
@@ -48,6 +49,7 @@ DEFAULT_AUTO_COMPACTION_ENABLED = True
 DEFAULT_WEB_SEARCH_ENABLED = False
 DEFAULT_SUBAGENTS_ENABLED = False
 DEFAULT_BROWSER_SEARCH_ENGINE: BrowserSearchEngine = "google"
+DEFAULT_BROWSER_DEFAULT: BrowserDefault = "live"
 OPENAI_COMPATIBLE_CONFIG_ENV = "WISP_OPENAI_COMPATIBLE_CONFIG"
 _DEFAULT_AUTH_PATH = Path("~/.wisp/auth.json")
 _DEFAULT_SESSION_DIR = Path("~/.wisp/sessions")
@@ -55,6 +57,8 @@ _CODEMODE_ENV = "WISP_CODEMODE"
 _CODEMODE_PRESENTATION_ENV = "WISP_CODEMODE_PRESENTATION"
 _SUBAGENTS_ENV = "WISP_SUBAGENTS"
 _SUBAGENT_MODEL_ENV = "WISP_SUBAGENT_MODEL"
+_BROWSER_DEFAULT_ENV = "WISP_BROWSER_DEFAULT"
+_BROWSER_DEFAULTS: tuple[BrowserDefault, ...] = ("live", "mcp", "none")
 
 
 class WispConfig(BaseModel):
@@ -93,6 +97,8 @@ class WispConfig(BaseModel):
     openai_compatible: OpenAICompatibleSettings | None = None
     # Where the live browser sends address-bar text that is not an address.
     browser_search_engine: BrowserSearchEngine = DEFAULT_BROWSER_SEARCH_ENGINE
+    # Which browser the agent prefers when both the live browser and a browser MCP server exist.
+    browser_default: BrowserDefault = DEFAULT_BROWSER_DEFAULT
 
     @model_validator(mode="wrap")
     @classmethod
@@ -176,6 +182,7 @@ class WispConfig(BaseModel):
         mcp_tool_exposure: McpToolExposure | None = None,
         openai_compatible: OpenAICompatibleSettings | None = None,
         browser_search_engine: BrowserSearchEngine | None = None,
+        browser_default: BrowserDefault | None = None,
         project_dir: Path | None = None,
         trusted: bool = False,
         settings: ResolvedSettings | None = None,
@@ -393,6 +400,13 @@ class WispConfig(BaseModel):
                 or settings.browser_search_engine
                 or DEFAULT_BROWSER_SEARCH_ENGINE
             ),
+            browser_default=(
+                browser_default
+                if browser_default is not None
+                else _resolve_browser_default(
+                    os.environ.get(_BROWSER_DEFAULT_ENV), settings.browser_default
+                )
+            ),
         )
 
 
@@ -475,6 +489,18 @@ def _resolve_mcp_tool_exposure(
         if normalized == exposure:
             return exposure
     raise ValueError(f"WISP_MCP_TOOL_EXPOSURE must be one of: {', '.join(MCP_TOOL_EXPOSURES)}")
+
+
+def _resolve_browser_default(
+    env_value: str | None, saved_value: BrowserDefault | None
+) -> BrowserDefault:
+    if env_value is None or not env_value.strip():
+        return saved_value or DEFAULT_BROWSER_DEFAULT
+    normalized = env_value.strip().casefold()
+    for choice in _BROWSER_DEFAULTS:
+        if normalized == choice:
+            return choice
+    raise ValueError(f"{_BROWSER_DEFAULT_ENV} must be one of: {', '.join(_BROWSER_DEFAULTS)}")
 
 
 def _resolve_bool(

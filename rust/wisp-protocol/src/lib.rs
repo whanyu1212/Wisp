@@ -1597,6 +1597,31 @@ pub mod commands {
             }))
         }
 
+        /// Dock an open live browser back into the terminal pane without changing its URL.
+        pub fn browser_live_dock(id: &str) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({
+                "type": "browser_interact",
+                "id": id,
+                "action": "live_open",
+            }))
+        }
+
+        /// Open or switch the live browser to a visible Chrome window on Wisp's profile.
+        pub fn browser_live_window(
+            id: &str,
+            url: Option<&str>,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            let mut value = serde_json::json!({
+                "type": "browser_interact",
+                "id": id,
+                "action": "live_window",
+            });
+            if let Some(url) = url {
+                value["url"] = serde_json::Value::String(url.to_owned());
+            }
+            deserialize(value)
+        }
+
         pub fn browser_live_navigate(
             id: &str,
             url: &str,
@@ -1897,6 +1922,8 @@ pub mod events {
     pub struct BrowserViewportUpdate {
         pub live_png: Option<String>,
         pub live_device_scale: Option<u32>,
+        #[serde(default)]
+        pub window_mode: bool,
         pub image: Option<BrowserViewportImage>,
         pub url: Option<String>,
         pub title: Option<String>,

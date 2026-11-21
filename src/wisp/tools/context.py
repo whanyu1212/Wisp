@@ -8,7 +8,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from wisp.auth.connections import provider_credential_environment
-from wisp.config.settings import DEFAULT_PROTECTED_PATHS, user_settings_path
+from wisp.config.settings import (
+    BROWSER_PROFILE_SUBPATH,
+    DEFAULT_PROTECTED_PATHS,
+    user_settings_path,
+)
 from wisp.mcp.credentials import mcp_auth_path
 from wisp.tools.seen_files import SeenFiles
 from wisp.trust.permissions import permissions_directory
@@ -173,12 +177,15 @@ class ToolContext:
         """
 
         protected_paths = config.protected_paths
+        browser_pattern = BROWSER_PROFILE_SUBPATH.as_posix()
         required = (
             config.auth_path.expanduser().resolve(strict=False).as_posix(),
             mcp_auth_path().resolve(strict=False).as_posix(),
             user_settings_path().resolve(strict=False).as_posix(),
             permissions_directory().resolve(strict=False).as_posix(),
             f"{permissions_directory().resolve(strict=False).as_posix()}/**",
+            browser_pattern,
+            f"{browser_pattern}/**",
             *(
                 (config.openai_compatible.ca_bundle.expanduser().resolve(strict=False).as_posix(),)
                 if config.openai_compatible is not None

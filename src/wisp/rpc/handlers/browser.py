@@ -27,6 +27,7 @@ from wisp.coding.browser_recents import (
     load_recent_addresses,
     record_recent_address,
 )
+from wisp.coding.browser_viewport import BrowserMetadata
 from wisp.coding.session import CodingSession
 from wisp.config.runtime import DEFAULT_BROWSER_SEARCH_ENGINE
 from wisp.config.settings import BrowserSearchEngine
@@ -146,6 +147,7 @@ def _to_browser_interaction(command: BrowserInteractCommand) -> BrowserInteracti
     match action:
         case (
             "live_open"
+            | "live_window"
             | "live_frame"
             | "live_close"
             | "live_resize"
@@ -257,12 +259,25 @@ async def _run_live_browser_command(
     if not agent.trusted:
         raise BrowserControlError("The live browser requires a trusted project")
     frame: BrowserViewportUpdated | None
+    record_handoff = False
     if command.action == "live_open":
-        assert command.url is not None
-        address = resolve_browser_address(command.url, search_engine)
-        frame = await browser.open(address.url)
-        if not address.is_search:
-            await _remember_address(browser.profile_dir, address.url)
+        if command.url is not None:
+            address = resolve_browser_address(command.url, search_engine)
+            frame = await browser.open(address.url)
+            if not address.is_search:
+                await _remember_address(browser.profile_dir, address.url)
+        else:
+            frame = await browser.switch_mode(window=False)
+        record_handoff = True
+    elif command.action == "live_window":
+        if command.url is not None:
+            address = resolve_browser_address(command.url, search_engine)
+            frame = await browser.switch_mode(window=True, url=address.url)
+            if not address.is_search:
+                await _remember_address(browser.profile_dir, address.url)
+        else:
+            frame = await browser.switch_mode(window=True)
+        record_handoff = True
     elif command.action == "live_resize":
         assert command.viewport is not None
         frame = await browser.resize(command.viewport)
@@ -273,9 +288,11 @@ async def _run_live_browser_command(
         if not address.is_search:
             await _remember_address(browser.profile_dir, address.url)
         frame = await browser.poll_frame()
+        record_handoff = True
     elif command.action == "live_forward":
         await browser.move_in_history(1)
         frame = await browser.poll_frame()
+        record_handoff = True
     elif command.action == "live_frame":
         # Waits for a frame the client has not seen. The coordinator runs it beside
         # input commands, and the client sends the next one only after this ends.
@@ -290,9 +307,28 @@ async def _run_live_browser_command(
         frame = await browser.poll_frame()
     else:
         await browser.interact(_to_browser_interaction(command))
+        agent.browser_handoff.record_user_action(
+            command.action,
+            server_name="live_browser",
+            metadata=BrowserMetadata(
+                url=getattr(browser, "current_url", None),
+                title=getattr(browser, "current_title", None),
+            ),
+        )
         if command.action not in {"back", "reload"}:
             return
         frame = await browser.poll_frame()
+    if record_handoff:
+        agent.browser_handoff.record_user_action(
+            command.action,
+            server_name="live_browser",
+            metadata=BrowserMetadata(
+                url=(frame.url if frame is not None else None)
+                or getattr(browser, "current_url", None),
+                title=(frame.title if frame is not None else None)
+                or getattr(browser, "current_title", None),
+            ),
+        )
     if frame is not None:
         lifecycle.write_event(frame)
 
