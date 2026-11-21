@@ -277,19 +277,21 @@ pub(super) fn push_untrusted(rows: &mut PanelRows, width: usize, palette: Palett
     );
 }
 
-/// Draw the panel's controls row: `INTERACT` while the page takes input, and the
-/// `[Expand]` / `[Restore]` toggle at the right. A row with neither is left out.
+/// Right-align the panel controls, reserving the last button for closing the Browser.
 pub(super) fn push_controls(
     rows: &mut PanelRows,
-    interacting: bool,
-    expanded: bool,
+    panel: &SidePanel,
     width: usize,
     palette: Palette,
 ) {
     let mut spans = Vec::new();
     let mut col = 0usize;
-    if interacting {
-        let label = ui::clip_columns("INTERACT", width);
+    let browser = panel.mode == PanelMode::Browser;
+    let close = "[Close]";
+    let show_close = browser && width >= close.len();
+    let before_close = width - if show_close { close.len() } else { 0 };
+    if browser && panel.browser_interacting() {
+        let label = ui::clip_columns("INTERACT", before_close.saturating_sub(1));
         col = label.width();
         spans.push(Span::styled(
             label,
@@ -298,24 +300,40 @@ pub(super) fn push_controls(
                 .add_modifier(Modifier::BOLD),
         ));
     }
-    let toggle_label = if expanded { "[Restore]" } else { "[Expand]" };
+    let toggle_label = if panel.expanded {
+        "[Restore]"
+    } else {
+        "[Expand]"
+    };
     let toggle_width = toggle_label.width();
-    let toggle = (col + usize::from(col > 0) + toggle_width <= width).then(|| {
-        spans.push(Span::raw(" ".repeat(width - col - toggle_width)));
+    let toggle_end = before_close.saturating_sub(usize::from(show_close));
+    let toggle = (col + usize::from(col > 0) + toggle_width <= toggle_end).then(|| {
+        spans.push(Span::raw(" ".repeat(toggle_end - col - toggle_width)));
         spans.push(Span::styled(
             toggle_label,
             Style::default().fg(palette.muted),
         ));
-        let start = u16::try_from(width - toggle_width).unwrap_or(u16::MAX);
-        let end = u16::try_from(width).unwrap_or(u16::MAX);
-        (start, end)
+        col = toggle_end;
+        ((toggle_end - toggle_width) as u16, toggle_end as u16)
     });
+    if show_close {
+        spans.push(Span::raw(" ".repeat(before_close - col)));
+        spans.push(Span::styled(close, Style::default().fg(palette.muted)));
+    }
     if spans.is_empty() {
         return;
     }
     rows.section(Section::Controls, vec![Line::from(spans)]);
     if let Some((start, end)) = toggle {
         rows.action_range(0, start, end, PanelAction::ToggleExpand);
+    }
+    if show_close {
+        rows.action_range(
+            0,
+            before_close as u16,
+            width as u16,
+            PanelAction::CloseBrowser,
+        );
     }
 }
 

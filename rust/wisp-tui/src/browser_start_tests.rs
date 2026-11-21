@@ -159,6 +159,36 @@ async fn start_page_lists_recents() {
 }
 
 #[tokio::test]
+async fn close_button_hides_browser_without_leaving_interact_first() {
+    for expanded in [false, true] {
+        let mut ui = ui_with(Some((true, &[])));
+        open_from_tab(&mut ui).await;
+        if expanded {
+            ui.side_panel.toggle_expanded();
+        }
+        ui.side_panel.enter_browser_interact();
+        let (_, rows) = draw(&mut ui);
+        let (column, row) = rows
+            .iter()
+            .enumerate()
+            .find_map(|(y, line)| {
+                let (x, _) = find(std::slice::from_ref(line), "[Close]")?;
+                ui.side_panel.contains(x, y as u16).then_some((x, y as u16))
+            })
+            .expect("browser close button inside the panel");
+        assert!(send(&mut ui, left_click(column + 2, row)).await.is_empty());
+        assert!(
+            !ui.side_panel.visible(),
+            "expanded={expanded}, click=({column}, {row}), layer={:?}, rendered={:?}, header={}",
+            ui.mouse_layer(),
+            ui.rendered_overlay,
+            rows[usize::from(row)]
+        );
+        assert!(!ui.side_panel.browser_interacting());
+    }
+}
+
+#[tokio::test]
 async fn no_recents_no_heading() {
     for report in [None, Some((true, &[][..]))] {
         let mut ui = ui_with(report);
