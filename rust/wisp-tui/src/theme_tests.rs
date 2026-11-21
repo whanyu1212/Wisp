@@ -1211,6 +1211,13 @@ fn every_theme_keeps_diff_text_and_changed_words_readable() {
                         "{} {class:?}",
                         theme.name
                     );
+                    let emphasized = palette.diff_change(style);
+                    assert!(
+                        theme::contrast_ratio(emphasized.fg.unwrap(), emphasized.bg.unwrap())
+                            >= 4.5,
+                        "{} emphasized {class:?}",
+                        theme.name
+                    );
                 }
                 assert!(
                     emphasis

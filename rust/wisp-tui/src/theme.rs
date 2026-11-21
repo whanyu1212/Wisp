@@ -249,7 +249,8 @@ impl Palette {
         Style::default().fg(text).bg(fill)
     }
 
-    /// Emphasize only changed words, preserving a non-color cue in monochrome.
+    /// Emphasize only changed words, preserving readable syntax foreground colours when
+    /// they meet 4.5:1 contrast on the emphasized fill and keeping non-color cues.
     pub fn diff_change(self, base: Style) -> Style {
         if self.monochrome || self.depth == ColorDepth::Ansi16 {
             return base.add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
@@ -265,7 +266,13 @@ impl Palette {
             .map(|step| mix(tint, background, 0.24 - f64::from(step) * 0.03))
             .find(|fill| contrast_ratio(self.foreground, *fill) >= 4.5)
             .unwrap_or(background);
-        base.fg(self.foreground)
+        let fg = base
+            .fg
+            .filter(|fg| {
+                *fg != self.addition && *fg != self.deletion && contrast_ratio(*fg, fill) >= 4.5
+            })
+            .unwrap_or(self.foreground);
+        base.fg(fg)
             .bg(fill)
             .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
     }
