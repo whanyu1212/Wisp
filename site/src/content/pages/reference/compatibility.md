@@ -116,6 +116,35 @@ with `write_constraint`, under the exception below. Tool behavior changes are li
 `bash` runs commands in bash rather than `/bin/sh`, and that the read-only file tools follow
 symbolic links whose targets stay inside the workspace.
 
+## Wisp 0.15 compatibility
+
+0.15.0 reads existing 0.14.x sessions, and 0.14.x opens sessions written by 0.15.0. Session
+`schema_version` remains 6, the event-envelope format remains 1, and no new persisted session
+entry fields are introduced (`browser.viewport.updated` and `rpc.browser_addresses` are transient
+live/RPC events).
+
+User-level settings add `tui_images`, `browser_search_engine`, and `browser_default` (all
+user-only, never configurable by projects). `0.14.x` ignores unknown settings fields and falls back
+to defaults. Live browser cookies, sign-ins, and the 20 most recent opened addresses live in
+`~/.wisp/browser-profile`, which Wisp always protects from file and command writes (`wisp browser
+clear` removes them). Credentials and trust formats are unchanged.
+
+Commands and events gain members and fields:
+
+- the `browser_interact` and `get_browser_addresses` commands, plus optional `saved_session_id` on
+  `prompt` and `read_only` on `get_sessions`;
+- the `browser.viewport.updated` and `rpc.browser_addresses` events;
+- `session_images_dir` on `rpc.workspace`.
+
+All of them are listed in the
+[changelog](https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md). The backend and every
+frontend must be the same release, and external RPC clients should use the 0.15.0 schema bundle.
+
+The supported Python API adds optional `saved_session_id` on `RpcController.prompt()` and
+`read_only` on `RpcController.get_sessions()`, plus `auto_command_read_dir`,
+`browser_search_engine`, and `browser_default` on `WispConfig`. See the
+[0.15.0 release checklist](../maintainers/releases/0.15.0-release.md).
+
 ## Wisp 0.14 compatibility
 
 0.14.0 reads existing 0.13.0 sessions. Session `schema_version` remains 6 and the event-envelope
