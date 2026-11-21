@@ -293,7 +293,7 @@ def test_browser_takeover_click_type_key_and_panel_expand_over_pty(tmp_path: Pat
 
         # Click near the center of the docked right-hand browser viewport (SGR left click).
         click_col = 136
-        click_row = 16
+        click_row = 17
         tui.send(f"\x1b[<0;{click_col};{click_row}M\x1b[<0;{click_col};{click_row}m".encode())
         click_entry = _wait_log_tool(tui, log_path, "browser_mouse_click_xy")
         click_args = click_entry["args"]

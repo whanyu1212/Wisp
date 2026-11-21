@@ -161,7 +161,7 @@ folder above it, where YOLO is never saved), or `4` deny. The `y`/`t`/`a`/`n` al
 highlight a choice with `↑`/`↓` and press `Enter`. There is no default choice: `Enter` only confirms
 a highlighted choice that has been drawn, so an `Enter` meant for the composer cannot answer a
 request. `Esc` denies. Project trust uses the same panel with `y` trust and `n` deny. Below 11 rows
-the panel fills the screen so every choice stays visible down to 30×8.
+the panel fills the screen so every choice stays visible down to 30×9.
 
 ## Panels and popups
 
@@ -174,7 +174,7 @@ normal run-cancellation or idle-exit behavior.
 
 Approvals and project-trust requests take precedence over popups. A refreshed selection must be
 drawn before it can be activated. Popups are centered and capped at 100×28, except `/permissions`, `/codemode`, `/subagents`
-and the `/mcp` add, enable, and remove panels, which dock above the composer; at the minimum 30×8
+and the `/mcp` add, enable, and remove panels, which dock above the composer; at the minimum 30×9
 terminal size they can fill the screen. Short decision layouts prioritize readable controls while
 retaining conversation state. Device-login URLs and codes wrap; use arrow/Page keys or Home/End to
 read longer challenges.
@@ -247,7 +247,7 @@ close and reopen to retry.
 
 The file popup is painted over the transcript, capped at 100 columns and 12 rows. In short terminals
 it can cover the header or upper composer rows rather than rearranging the conversation. Approval
-and trust controls take precedence. Below 30×8 no hidden selection can be inserted.
+and trust controls take precedence. Below 30×9 no hidden selection can be inserted.
 
 The prompt editor highlights recognized commands and project paths alongside common Markdown
 structure: headings, list markers, inline code, and fenced code blocks. Highlighting is a bounded,
@@ -267,6 +267,11 @@ local and bounded (32 presentations / 4 MiB each for queued and transcript metad
 historical replay displays raw content. Markers are never written into session history.
 
 ### Side panel {#side-panel}
+
+A one-row top bar shows the session name at its left and the side panel's `Work` and `Browser`
+tabs at its right. The highlighted tab is the view the open panel shows; no tab is highlighted while
+the panel is closed. Click a tab to open the panel on that view, or click the highlighted tab to
+close the panel. The top bar stays in place at every terminal width.
 
 On a terminal at least 148 columns wide, the Reading sidebar shows the session name and status,
 folder and branch, compact context usage, MCP servers, skills, changed files, and up to three
@@ -297,7 +302,9 @@ unavailable inventories are distinguished. Click a member row to expand its deta
 
 The panel starts at 44 columns and grows to at most 52 automatically. Drag its left border to resize
 it while leaving at least 104 columns for the conversation; double-click the border to restore the
-automatic width. The chosen width lasts until Wisp exits. `Ctrl+P` hides or shows it. On narrower
+automatic width. The chosen width lasts until Wisp exits. In kitty, Ghostty, foot, and Rex the
+pointer turns into a resize arrow over the border and keeps that shape while you drag it. Other
+terminals, and any terminal inside tmux, keep the normal pointer. `Ctrl+P` hides or shows it. On narrower
 terminals, `Ctrl+P` opens a 44-column overlay above the composer.
 
 `F8` focuses the sidebar at either width. `Tab` and `Shift+Tab` move between sections, arrow keys

@@ -184,7 +184,7 @@ async fn hidden_or_changed_selection_cannot_restore_and_new_entries_preserve_ide
         .await
         .unwrap();
     assert_eq!(ui.editor.text(), "draft");
-    assert!(draw(&mut ui, 30, 8).contains("Prompt history"));
+    assert!(draw(&mut ui, 30, 9).contains("Prompt history"));
     ui.handle_input(key(KeyCode::Enter), &writer, 8192)
         .await
         .unwrap();

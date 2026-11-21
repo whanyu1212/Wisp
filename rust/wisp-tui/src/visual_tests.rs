@@ -752,8 +752,10 @@ fn draw(ui: &mut LiveUi, width: u16, height: u16) -> ratatui::buffer::Buffer {
     terminal.backend().buffer().clone()
 }
 
+/// The first row beneath the top bar containing `text`; the bar repeats the
+/// session title, which is often the first prompt.
 fn row_containing(buffer: &ratatui::buffer::Buffer, text: &str) -> u16 {
-    (0..buffer.area.height)
+    (1..buffer.area.height)
         .find(|&y| {
             (0..buffer.area.width)
                 .map(|x| buffer[(x, y)].symbol())
@@ -1584,7 +1586,7 @@ fn screen_row(buffer: &ratatui::buffer::Buffer, y: u16) -> String {
 
 #[test]
 fn composer_geometry_tracks_padding_and_keeps_the_cursor_in_the_editor() {
-    for (width, height) in [(100, 30), (80, 24), (40, 16), (30, 8)] {
+    for (width, height) in [(100, 30), (80, 24), (40, 17), (30, 9)] {
         let mut ui = fixture("conversation");
         ui.mouse_enabled = true;
         ui.editor.restore_prompt("ab界\nsecond");
@@ -1686,7 +1688,7 @@ fn composer_wraps_prose_at_word_boundaries_without_changing_the_prompt() {
 
 #[test]
 fn streamed_reply_stops_activity_without_changing_transcript_padding() {
-    for (width, height) in [(100, 30), (80, 24), (40, 16), (30, 8)] {
+    for (width, height) in [(100, 30), (80, 24), (40, 17), (30, 9)] {
         let mut ui = fixture("working");
         ui.mouse_enabled = true;
         let buffer = draw(&mut ui, width, height);
@@ -1711,7 +1713,7 @@ fn streamed_reply_stops_activity_without_changing_transcript_padding() {
         assert!(!(0..width).any(|x| buffer[(x, height - 1)].symbol() == "⠋"));
         if height >= 16 {
             for x in 0..width {
-                assert_eq!(buffer[(x, 0)].symbol(), " ");
+                assert_eq!(buffer[(x, 1)].symbol(), " ");
                 assert_eq!(buffer[(x, status - 1)].symbol(), " ");
                 assert_eq!(buffer[(x, status - 1)].bg, ui.palette().background);
             }
@@ -1732,7 +1734,7 @@ fn streamed_reply_stops_activity_without_changing_transcript_padding() {
 async fn completed_reply_keeps_its_layout_until_command_finishes() {
     use std::fmt::Write as _;
 
-    for (width, height) in [(100, 30), (80, 24), (40, 16), (30, 8)] {
+    for (width, height) in [(100, 30), (80, 24), (40, 17), (30, 9)] {
         let mut ui = fixture("new-turn");
         ui.mouse_enabled = true;
         let (writer, _commands) = mpsc::channel(32);
@@ -1853,7 +1855,7 @@ fn new_turn_hides_previous_reply_until_scrolled_back() {
 #[test]
 fn minimum_terminal_keeps_the_submitted_prompt_before_the_first_token() {
     let mut ui = fixture("new-turn");
-    let text = screen_text(&draw(&mut ui, 30, 8));
+    let text = screen_text(&draw(&mut ui, 30, 9));
     let compact: String = text
         .chars()
         .filter(|c| !c.is_whitespace() && !matches!(c, '│' | '┃' | '▎'))
@@ -1905,7 +1907,7 @@ fn capture_conversation_screens() {
         (100, 30),
         (80, 24),
         (40, 16),
-        (30, 8),
+        (30, 9),
         (100, 64),
         (150, 34),
         (150, 40),

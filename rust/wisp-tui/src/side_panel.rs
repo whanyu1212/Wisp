@@ -73,6 +73,19 @@ pub(crate) enum PanelMode {
     Browser,
 }
 
+impl PanelMode {
+    /// Every view, in the order the top bar lists their tabs.
+    pub(crate) const ALL: [Self; 2] = [Self::LiveWork, Self::Browser];
+
+    /// The view's tab label.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::LiveWork => "Work",
+            Self::Browser => "Browser",
+        }
+    }
+}
+
 /// Where the panel is and whether the reducer knows it is on screen.
 #[derive(Debug, Default)]
 pub(crate) struct SidePanel {
@@ -157,7 +170,6 @@ pub(crate) enum Disclosure {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PanelAction {
-    SwitchMode(PanelMode),
     ToggleExpand,
     Toggle(Disclosure),
     Open(Target),
@@ -187,7 +199,8 @@ struct Resize {
 /// A section of the panel that focus can land on.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Section {
-    ModeTabs,
+    /// The `[Expand]` / `[Restore]` row atop the panel.
+    Controls,
     BrowserControls,
     Header,
     Queue,
@@ -269,8 +282,13 @@ impl SidePanel {
         self.browser_interacting
     }
 
-    pub(crate) fn show_browser(&mut self) {
-        self.mode = PanelMode::Browser;
+    /// Show the panel at `mode`: un-hide a docked panel, or open the overlay on a
+    /// terminal too narrow to dock it. An expanded panel stays expanded.
+    pub(crate) fn show(&mut self, mode: PanelMode) {
+        if mode != PanelMode::Browser {
+            self.browser_interacting = false;
+        }
+        self.mode = mode;
         self.close_peek();
         self.cursor = None;
         self.scroll.set(0);
@@ -285,8 +303,33 @@ impl SidePanel {
         }
     }
 
+    /// Take the panel off screen: hide a docked panel, or close the overlay, which hides
+    /// the panel again when the background strip opened it over a hidden one.
+    pub(crate) fn close(&mut self) {
+        self.close_overlay();
+        if docks(self.width) {
+            self.hidden = true;
+        }
+    }
+
+    /// The view whose top-bar tab is marked active: the current one while the panel is
+    /// on screen, and none while it is closed.
+    pub(crate) fn active_tab(&self) -> Option<PanelMode> {
+        self.visible().then_some(self.mode)
+    }
+
+    /// A click on the top bar's tab for `mode`: the active tab closes the panel, and
+    /// any other opens the panel at its view.
+    pub(crate) fn click_tab(&mut self, mode: PanelMode) {
+        if self.active_tab() == Some(mode) {
+            self.close();
+        } else {
+            self.show(mode);
+        }
+    }
+
     pub(crate) fn enter_browser_interact(&mut self) {
-        self.show_browser();
+        self.show(PanelMode::Browser);
         self.browser_address = None;
         self.browser_interacting = true;
     }
@@ -621,26 +664,6 @@ impl SidePanel {
             .position(|section| *section == cursor.section)
             .unwrap();
         let moved = match key {
-            KeyCode::Tab
-                if sections.len() == 1
-                    && cursor.section == Section::ModeTabs
-                    && targets.len() > 1 =>
-            {
-                Cursor {
-                    row: (cursor.row + 1) % targets.len(),
-                    ..cursor
-                }
-            }
-            KeyCode::BackTab
-                if sections.len() == 1
-                    && cursor.section == Section::ModeTabs
-                    && targets.len() > 1 =>
-            {
-                Cursor {
-                    row: (cursor.row + targets.len() - 1) % targets.len(),
-                    ..cursor
-                }
-            }
             KeyCode::Tab => Cursor {
                 section: sections[(position + 1) % sections.len()],
                 row: 0,
@@ -745,31 +768,12 @@ impl SidePanel {
         let row = self
             .cursor
             .filter(|cursor| cursor.section == section)
-            .map_or_else(
-                || {
-                    if section == Section::ModeTabs && self.mode == PanelMode::Browser {
-                        1.min(rows.saturating_sub(1))
-                    } else {
-                        0
-                    }
-                },
-                |cursor| cursor.row.min(rows - 1),
-            );
+            .map_or(0, |cursor| cursor.row.min(rows - 1));
         Some(Cursor { section, row })
     }
 
     pub(crate) fn activate(&mut self, action: PanelAction) -> OverlayKey {
         match action {
-            PanelAction::SwitchMode(mode) => {
-                if mode != PanelMode::Browser {
-                    self.browser_interacting = false;
-                }
-                self.mode = mode;
-                self.cursor = None;
-                self.scroll.set(0);
-                self.close_peek();
-                OverlayKey::Moved
-            }
             PanelAction::ToggleExpand => {
                 self.toggle_expanded();
                 OverlayKey::Moved
@@ -1203,21 +1207,16 @@ pub(crate) fn render_with_preview(
         return;
     }
 
-    let show_tabs = state.browser_viewport.is_some() || panel.mode == PanelMode::Browser;
+    // The `[Expand]` control leads the panel in the Browser view, and in the Work view
+    // once a browser session exists. The top bar holds the view tabs.
+    let show_controls = state.browser_viewport.is_some() || panel.mode == PanelMode::Browser;
     if panel.mode == PanelMode::Browser {
         let live = state
             .browser_viewport
             .as_ref()
             .filter(|viewport| viewport.live);
         let mut rows = PanelRows::default();
-        browser::push_mode_tabs(
-            &mut rows,
-            panel.mode,
-            interacting,
-            panel.expanded,
-            width,
-            palette,
-        );
+        browser::push_controls(&mut rows, interacting, panel.expanded, width, palette);
         let chrome_cursor = live.and_then(|viewport| {
             browser::push_live_toolbar(
                 &mut rows,
@@ -1258,6 +1257,8 @@ pub(crate) fn render_with_preview(
         }
         let tab_rows = if live.is_some() {
             body.height.min(rows.lines.len() as u16 + 1)
+        } else if rows.lines.is_empty() {
+            0
         } else if body.height > 2 {
             2
         } else {
@@ -1314,9 +1315,9 @@ pub(crate) fn render_with_preview(
             } else if interacting {
                 "Esc exit · Click/Scroll · Type · Alt+← back · Ctrl+R reload"
             } else if panel.expanded {
-                "Esc close · Tab tabs · b work · i interact · f restore · r refresh"
+                "Esc close · b work · i interact · f restore · r refresh"
             } else {
-                "Esc · Tab · b work · i interact · f size · r refresh"
+                "Esc · b work · i interact · f size · r refresh"
             };
             frame.render_widget(Paragraph::new(ui::keycap_hints(hints, palette)), footer);
         }
@@ -1325,8 +1326,8 @@ pub(crate) fn render_with_preview(
 
     let focus = Focus::of(state);
     let mut rows = PanelRows::default();
-    if show_tabs {
-        browser::push_mode_tabs(&mut rows, panel.mode, false, panel.expanded, width, palette);
+    if show_controls {
+        browser::push_controls(&mut rows, false, panel.expanded, width, palette);
     }
     let (header, branch_row) = header_lines(state, bindings, width, palette);
     rows.section(Section::Header, header);
@@ -1430,12 +1431,12 @@ pub(crate) fn render_with_preview(
     };
     let hint = if panel.overlay_open() {
         let hint_text = if panel.expanded {
-            if show_tabs {
+            if show_controls {
                 "Esc close · Tab sections · b browser · f restore · Enter"
             } else {
                 "Esc close · Tab sections · f restore · Enter"
             }
-        } else if show_tabs {
+        } else if show_controls {
             "Esc close · Tab sections · b browser · Enter"
         } else {
             "Esc close · Tab sections · Enter"
@@ -1526,15 +1527,10 @@ fn heading(title: &str, palette: Palette) -> Span<'static> {
     )
 }
 
-/// The session's name, or its first prompt before it has one, and where it works.
-/// Returns the header lines and the row index of the branch link when present.
-fn header_lines(
-    state: &UiState,
-    bindings: &Bindings,
-    width: usize,
-    palette: Palette,
-) -> (Vec<Line<'static>>, Option<usize>) {
-    let title = state
+/// The session's title, sanitized for the terminal: its name, or the first line of
+/// its first prompt before it has one, or `New session`.
+pub(crate) fn session_title(state: &UiState) -> String {
+    state
         .selected_session
         .as_ref()
         .and_then(|session| session.session_name.as_deref())
@@ -1547,7 +1543,18 @@ fn header_lines(
                 .find(|entry| entry.role == TranscriptRole::User)
                 .map(|entry| first_line(entry.display_content()))
         })
-        .unwrap_or_else(|| "New session".to_owned());
+        .unwrap_or_else(|| "New session".to_owned())
+}
+
+/// The session's title and where it works. Returns the header lines and the row index
+/// of the branch link when present.
+fn header_lines(
+    state: &UiState,
+    bindings: &Bindings,
+    width: usize,
+    palette: Palette,
+) -> (Vec<Line<'static>>, Option<usize>) {
+    let title = session_title(state);
     // Run state stays in the footer and status line, which show with or without the panel.
     let mut lines = vec![Line::styled(
         ui::clip_columns(&title, width),
@@ -2047,6 +2054,7 @@ mod tests {
             .draw(|frame| {
                 ui::render_interactive(
                     frame,
+                    frame.area(),
                     state,
                     &mut TranscriptViewport::default(),
                     &mut TranscriptRowCache::default(),

@@ -187,7 +187,8 @@ async fn every_overlay_preserves_background_cells_draft_and_viewport_on_close() 
         open(&mut ui, kind);
         let mut terminal = Terminal::new(TestBackend::new(100, 32)).unwrap();
         // Render the same background independently; opening detail can add a transcript card.
-        let mut baseline = Terminal::new(TestBackend::new(100, 32)).unwrap();
+        // It lays out like the body beneath the top bar, one row shorter than the screen.
+        let mut baseline = Terminal::new(TestBackend::new(100, 31)).unwrap();
         let mut viewport = ui.transcript_viewport.clone();
         let mut cache = TranscriptRowCache::default();
         baseline
@@ -207,7 +208,7 @@ async fn every_overlay_preserves_background_cells_draft_and_viewport_on_close() 
             .unwrap();
         let draft = ui.editor.clone();
         draw(&mut ui, &mut terminal);
-        let screen = terminal.backend().buffer().area;
+        let screen = top_bar::split(terminal.backend().buffer().area).1;
         // The side panel lies at the right of the conversation rather than centred.
         let popup = if kind == OverlayKind::SidePanel {
             ui::docked_popup_area(
@@ -223,12 +224,12 @@ async fn every_overlay_preserves_background_cells_draft_and_viewport_on_close() 
             ui::overlay_area(screen)
         }
         .unwrap();
-        for y in 0..32 {
+        for y in 1..32 {
             for x in 0..100 {
                 if !popup.contains((x, y).into()) {
                     assert_eq!(
                         terminal.backend().buffer()[(x, y)],
-                        baseline.backend().buffer()[(x, y)],
+                        baseline.backend().buffer()[(x, y - 1)],
                         "{kind:?} at {x},{y}"
                     );
                 }
@@ -260,12 +261,24 @@ async fn every_overlay_preserves_background_cells_draft_and_viewport_on_close() 
             })
             .unwrap();
         assert_same_visible_cells(
-            terminal.backend().buffer(),
+            &below_top_bar(terminal.backend().buffer()),
             baseline.backend().buffer(),
             kind,
         );
         assert!(receiver.try_recv().is_err());
     }
+}
+
+/// The rows of `screen` beneath the top bar, as a buffer of their own.
+fn below_top_bar(screen: &Buffer) -> Buffer {
+    let body = top_bar::split(screen.area).1;
+    let mut rows = Buffer::empty(Rect::new(0, 0, body.width, body.height));
+    for y in 0..body.height {
+        for x in 0..body.width {
+            rows[(x, y)] = screen[(x, y + body.y)].clone();
+        }
+    }
+    rows
 }
 
 /// Every cell matches, except the hidden half of a wide glyph: a terminal draws the
@@ -287,7 +300,7 @@ fn assert_same_visible_cells(live: &Buffer, baseline: &Buffer, kind: OverlayKind
 fn session_catalog_renders_across_themes_sizes_and_no_color() {
     for selected in theme::themes() {
         for no_color in [false, true] {
-            for (width, height) in [(30, 8), (80, 24), (160, 40)] {
+            for (width, height) in [(30, 9), (80, 24), (160, 40)] {
                 let mut ui = base();
                 ui.theme.active = selected;
                 ui.no_color = no_color;
@@ -308,7 +321,7 @@ fn session_catalog_renders_across_themes_sizes_and_no_color() {
 fn queue_overlay_renders_across_themes_sizes_and_no_color() {
     for selected in theme::themes() {
         for no_color in [false, true] {
-            for (width, height) in [(30, 8), (80, 24), (160, 40)] {
+            for (width, height) in [(30, 9), (80, 24), (160, 40)] {
                 let mut ui = base();
                 ui.theme.active = selected;
                 ui.no_color = no_color;
@@ -392,8 +405,8 @@ async fn queue_management_frame_and_writer_failures_do_not_commit_local_mutation
 
 #[test]
 fn popup_clear_is_opaque_and_geometry_stays_bounded() {
-    for (width, height) in [(29, 7), (30, 8), (30, 10), (30, 11), (80, 24), (160, 50)] {
-        let area = Rect::new(0, 0, width, height);
+    for (width, height) in [(29, 7), (30, 9), (30, 10), (30, 11), (80, 24), (160, 50)] {
+        let area = top_bar::split(Rect::new(0, 0, width, height)).1;
         let mut ui = base();
         open(&mut ui, OverlayKind::Help);
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -501,7 +514,7 @@ async fn streaming_updates_background_without_changing_scroll_intent_or_eating_i
 async fn decisions_preempt_every_overlay_even_before_the_next_frame() {
     for kind in KINDS {
         for trust in [false, true] {
-            for height in [8, 10, 11, 24] {
+            for height in [9, 11, 12, 25] {
                 let mut ui = base();
                 open(&mut ui, kind);
                 ui.state.current_command = Some(ActiveCommand {
@@ -859,7 +872,7 @@ async fn wide_characters_at_popup_edges_do_not_damage_the_popup_or_restored_tran
         let original = terminal.backend().buffer().clone();
         open(&mut ui, OverlayKind::Help);
         draw(&mut ui, &mut terminal);
-        let popup = ui::overlay_area(terminal.backend().buffer().area).unwrap();
+        let popup = ui::overlay_area(top_bar::split(terminal.backend().buffer().area).1).unwrap();
         let mut isolated = Terminal::new(TestBackend::new(width, 24)).unwrap();
         isolated
             .draw(|frame| {

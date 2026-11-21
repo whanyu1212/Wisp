@@ -264,9 +264,10 @@ Use Kitty or Ghostty graphics in true color for high-resolution page images.
   next launch. The live tab is for manual browsing, and MCP tools continue to use their own
   browser.
 
-When a browser MCP server such as Playwright (`@playwright/mcp`) or Chrome DevTools
-(`chrome-devtools-mcp`) is connected, Wisp adds a `Work · Browser` tab switcher at the top of the
-side panel and updates the viewport whenever the agent captures a page screenshot.
+The top bar always shows the `Work` and `Browser` tabs. Click a tab to open the side panel on
+that view, or click the highlighted tab to close the panel. When a browser MCP server such as
+Playwright (`@playwright/mcp`) or Chrome DevTools (`chrome-devtools-mcp`) is connected, Wisp updates
+the `Browser` view whenever the agent captures a page screenshot.
 
 - `/browser` switches to the `Browser` tab (or opens the side panel as an overlay on narrow
   terminals). Running `/browser` again toggles back to `Work` (or closes the overlay).
@@ -282,8 +283,8 @@ side panel and updates the viewport whenever the agent captures a page screensho
     page before acting.
 - **Side-panel sizing:** Drag the left border of a docked side panel wider (up to 60% of the
   terminal width), or focus the side panel (`F8`) and press `f` (or click `[Expand]` / `[Restore]`
-  on the `Work · Browser` tab row) to expand either `Work` or `Browser` into a large centered
-  overlay on any terminal size.
+  at the top of the panel) to expand either `Work` or `Browser` into a large centered overlay on
+  any terminal size.
 - **Terminal image protocols:** Wisp auto-detects Kitty `U=1` Unicode placeholders (Kitty and
   Ghostty in true-color mode), classic Kitty graphics (WezTerm or 256-color), iTerm2 inline
   images, Sixel, and Unicode half-blocks (`tmux`, `NO_COLOR`, 16-color, or fallback terminals).

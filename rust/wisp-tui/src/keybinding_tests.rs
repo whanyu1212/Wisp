@@ -437,7 +437,7 @@ async fn contextual_help_preserves_theme_preview_and_routes_ctrl_c_to_its_owner(
         .await
         .unwrap();
     assert!(ui.key_help.is_some());
-    for (width, height) in [(30, 8), (80, 24), (160, 40)] {
+    for (width, height) in [(30, 9), (80, 24), (160, 40)] {
         let text = draw(&mut ui, width, height);
         assert!(text.contains("Keys"));
     }
@@ -616,10 +616,10 @@ fn minimum_size_help_scrolls_all_rows_of_long_alias_lists() {
         r#"{"history.open":["ctrl+alt+shift+f1","ctrl+alt+shift+f2","ctrl+alt+shift+f3","ctrl+alt+shift+f4","ctrl+alt+shift+f5","ctrl+alt+shift+f6","ctrl+alt+shift+f7","ctrl+alt+shift+f8"]}"#,
     );
     ui.key_help = Some(key_help::KeyHelp::new(key_help::Owner::Composer));
-    draw(&mut ui, 30, 8);
+    draw(&mut ui, 30, 9);
     let rows = ui.key_help.as_ref().unwrap().rendered_rows;
     assert!(rows > ui.key_help.as_ref().unwrap().rows(&ui.bindings).len());
-    let seen = all_help_text(&mut ui, 30, 8);
+    let seen = all_help_text(&mut ui, 30, 9);
     assert!(seen.contains("Ctrl+Alt+Shift+F8"));
     assert!(seen.contains("Open prompt history"));
     assert!(seen.contains("Backend test"));
@@ -628,7 +628,8 @@ fn minimum_size_help_scrolls_all_rows_of_long_alias_lists() {
 // Read each painted visual row once, excluding borders and right-hand padding.
 fn all_help_text(ui: &mut LiveUi, width: u16, height: u16) -> String {
     draw(ui, width, height);
-    let area = ui::overlay_area(ratatui::layout::Rect::new(0, 0, width, height)).unwrap();
+    let body = top_bar::split(ratatui::layout::Rect::new(0, 0, width, height)).1;
+    let area = ui::overlay_area(body).unwrap();
     let start = usize::from(area.y + 1) * usize::from(width) + usize::from(area.x + 1);
     let rows = ui.key_help.as_ref().unwrap().rendered_rows;
     let mut text = String::new();

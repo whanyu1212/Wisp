@@ -174,6 +174,15 @@ static KITTY_IMAGES_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub(crate) fn set_kitty_images_active(active: bool) {
     KITTY_IMAGES_ACTIVE.store(active, Ordering::SeqCst);
 }
+
+static POINTER_SHAPE_SET: AtomicBool = AtomicBool::new(false);
+
+/// Records whether the TUI has set a pointer shape other than the terminal's own,
+/// so shutdown, panic and suspend paths reset the pointer. Call it after writing.
+pub(crate) fn set_pointer_shape_set(set: bool) {
+    POINTER_SHAPE_SET.store(set, Ordering::SeqCst);
+}
+
 /// The kitty keyboard protocol's first level, which reports keys a legacy terminal
 /// sends alike apart (Shift+Enter from Enter, Esc from an Alt chord) while printable
 /// keys still arrive as text. Terminals without the protocol ignore the request.
@@ -396,6 +405,11 @@ fn leave_input_modes() {
     if KITTY_IMAGES_ACTIVE.swap(false, Ordering::SeqCst) {
         let mut stdout = io::stdout();
         let _ = stdout.write_all(crate::terminal_images::KITTY_DELETE_ALL);
+        let _ = stdout.flush();
+    }
+    if POINTER_SHAPE_SET.swap(false, Ordering::SeqCst) {
+        let mut stdout = io::stdout();
+        let _ = stdout.write_all(crate::pointer_shape::PointerShape::Default.sequence());
         let _ = stdout.flush();
     }
     let _ = MOUSE_CAPTURE.restore(&mut io::stdout());

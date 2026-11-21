@@ -241,7 +241,7 @@ setting or persisted preference.
   terminal's own selection still works with its bypass modifier, such as `Shift`-drag in Ghostty.
 - With no popup open, click in the main composer to position its cursor at a grapheme boundary.
   Tabs, wide/combining characters, and horizontal/vertical editor scrolling retain their source
-  positions. At the minimum 30×8 size, a tall draft keeps one editable row; footer details may be
+  positions. At the minimum 30×9 size, a tall draft keeps one editable row; footer details may be
   omitted. Stale coordinates after resize, text replacement, or catalog refresh cannot select a
   new unseen target.
 

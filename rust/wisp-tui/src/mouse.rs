@@ -1,5 +1,6 @@
 //! Bounded hit regions captured by the paint that users actually saw.
 
+use crate::pointer_shape::PointerShape;
 use crate::reducer::{BrowserInteractRequest, UiAction};
 use crate::{Error, Input, LiveUi, LoopControl, TranscriptViewAction, ViewStatus, WriterMessage};
 use crate::{OverlayKind, prompt_editor::PromptEditor};
@@ -337,6 +338,8 @@ pub(crate) struct Conversation {
 pub(crate) struct Frame {
     pub layer: Layer,
     pub conversation: Conversation,
+    /// The side-panel tabs in the top bar, which a left press activates.
+    pub panel_tabs: Vec<crate::top_bar::Tab>,
     /// Where a press starts resizing the docked side panel, when one is docked.
     pub panel_border: Option<Rect>,
     pub popup: Option<Rect>,
@@ -398,6 +401,11 @@ impl LiveUi {
             )
             || self.unsendable_current_response()
         {
+            return Ok(LoopControl::Continue);
+        }
+        // The top bar's tabs come first, so a press there never starts a transcript
+        // selection or a border drag.
+        if self.press_panel_tab(event) {
             return Ok(LoopControl::Continue);
         }
         // Resizing answers no pending decision, and must precede sidebar clicks
@@ -766,12 +774,71 @@ impl LiveUi {
         Ok(LoopControl::Continue)
     }
 
+    /// Open or close the side panel on a left press over a top-bar tab, and say whether the
+    /// press was there. Like the border, a tab answers only while the conversation or the
+    /// side panel's overlay is on top; a pending decision or another popup keeps the press.
+    fn press_panel_tab(&mut self, event: MouseEvent) -> bool {
+        if !matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
+            || matches!(
+                self.state.view_status,
+                ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
+            )
+        {
+            return false;
+        }
+        let Some(mode) = self
+            .mouse_frame
+            .as_ref()
+            .filter(|frame| {
+                frame.layer == self.mouse_layer()
+                    && matches!(
+                        frame.layer,
+                        Layer::Conversation | Layer::Overlay(OverlayKind::SidePanel)
+                    )
+            })
+            .and_then(|frame| {
+                frame
+                    .panel_tabs
+                    .iter()
+                    .find(|tab| contains(tab.area, event))
+            })
+            .map(|tab| tab.mode)
+        else {
+            return false;
+        };
+        self.side_panel.forget_border_click();
+        self.side_panel.click_tab(mode);
+        if !self.side_panel.browser_interacting() {
+            self.clear_browser_takeover_buffers();
+        }
+        self.rendered_overlay = None;
+        self.render_pending = true;
+        true
+    }
+
     /// Start resizing the docked side panel on a left press over its border, or return it
     /// to its automatic width on a double-click, and say whether the press was there.
     /// The docked panel may own keyboard focus, but a covering popup blocks its border.
     fn press_panel_border(&mut self, event: MouseEvent) -> bool {
-        let border = self
-            .mouse_frame
+        let border = self.pressable_panel_border().filter(|area| {
+            matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) && contains(*area, event)
+        });
+        let Some(border) = border else {
+            self.side_panel.forget_border_click();
+            return false;
+        };
+        self.side_panel
+            .press_border(Instant::now(), event.column - border.x);
+        self.last_browser_click = None;
+        self.render_pending = true;
+        true
+    }
+
+    /// The docked side panel's border in the last painted frame, when a press there
+    /// would start a resize: the docked panel may own keyboard focus, but a covering
+    /// popup or the expanded panel hides its border.
+    fn pressable_panel_border(&self) -> Option<Rect> {
+        self.mouse_frame
             .as_ref()
             .filter(|frame| {
                 frame.layer == self.mouse_layer()
@@ -782,19 +849,22 @@ impl LiveUi {
                             && self.rendered_overlay == Some(OverlayKind::SidePanel)))
             })
             .and_then(|frame| frame.panel_border)
-            .filter(|area| {
-                matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
-                    && contains(*area, event)
+    }
+
+    /// The pointer shape the terminal should show: the resize arrow while the border is
+    /// dragged, wherever the pointer is, or while the pointer rests on a pressable border.
+    /// Key help takes every press while it is open, so it hides the arrow too.
+    pub(super) fn wanted_pointer_shape(&self) -> PointerShape {
+        let over_border = self.key_help.is_none()
+            && self.pointer.is_some_and(|(column, row)| {
+                self.pressable_panel_border()
+                    .is_some_and(|area| area.contains((column, row).into()))
             });
-        let Some(border) = border else {
-            self.side_panel.forget_border_click();
-            return false;
-        };
-        self.side_panel
-            .press_border(Instant::now(), event.column - border.x);
-        self.last_browser_click = None;
-        self.render_pending = true;
-        true
+        if self.side_panel.resizing() || over_border {
+            PointerShape::Resize
+        } else {
+            PointerShape::Default
+        }
     }
 
     /// Extend the transcript selection on a drag, or copy and clear it on release.

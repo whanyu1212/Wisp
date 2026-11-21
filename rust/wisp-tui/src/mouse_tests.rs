@@ -228,7 +228,7 @@ async fn composer_clicks_respect_unicode_tabs_scroll_and_source_revisions() {
         "line\n".repeat(10),
         "x".repeat(100)
     ));
-    draw(&mut ui, 30, 8);
+    draw(&mut ui, 30, 9);
     let mapping = ui
         .mouse_frame
         .as_ref()
