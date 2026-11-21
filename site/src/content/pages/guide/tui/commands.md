@@ -92,8 +92,12 @@ protected-path and stale-write checks still apply. Each automatic grant is recor
 on the tool card. Auto edits checks the operation and destination, not the safety of the content.
 The panel docks above the composer and marks the current mode; choose with
 `1` (Ask), `2` (Auto edits), `3` (Auto commands), or `4` (YOLO), or highlight with `↑`/`↓` and press `Enter` (there is no default highlight, because
-saving a mode also clears temporary grants). Saved defaults apply to subsequent launches in the same canonical
-project directory and live in user-owned `~/.wisp/permissions/` files, outside the repository.
+saving a mode also clears temporary grants). Saved defaults and saved per-project command-prefix allow rules apply to subsequent launches in the
+same canonical project directory and live in user-owned `~/.wisp/permissions/` files, outside the
+repository. When a project has saved command rules, `/permissions` lists them below the four modes
+so you can select one with `↑`/`↓` and revoke it with `d`, `Backspace`, or `Enter`. Command rules
+only match simple single commands inside the workspace (never shell chaining, pipelines, subshells,
+redirections, or broad folders).
 Allow-once and tool-session choices do not persist; temporary session grants expire on `/new` or
 switching to another session. Changing the default clears temporary grants. Startup `--yes` alone
 is not saved. These choices do not change project trust or protected paths. In the home folder or a

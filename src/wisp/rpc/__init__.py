@@ -48,6 +48,7 @@ from wisp.rpc.commands import (
     ReconnectMcpCommand,
     ReloadCommand,
     RemoveMcpServerCommand,
+    RevokeCommandRuleCommand,
     RpcCommand,
     SelectSessionCommand,
     SetCodemodeCommand,
@@ -66,6 +67,7 @@ from wisp.rpc.commands import (
 __all__ = [
     "GetPermissionsCommand",
     "SetPermissionsCommand",
+    "RevokeCommandRuleCommand",
     "GetCodemodeCommand",
     "SetCodemodeCommand",
     "GetSubagentsCommand",

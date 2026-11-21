@@ -473,6 +473,8 @@ class PermissionState(BaseModel):
     # True in broad folders, where elevated modes are session-only. The wire
     # name is retained for existing clients; it applies to both elevated modes.
     session_only_yolo: bool = False
+    # Saved per-project bash command-prefix allow rules, oldest first.
+    command_allow_rules: tuple[str, ...] = ()
 
 
 class RpcPermissionsReported(WispEvent):

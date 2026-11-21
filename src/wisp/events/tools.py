@@ -53,6 +53,9 @@ class ToolApprovalRequested(WispEvent):
     # True in the home folder or a folder above it: choosing YOLO applies for this
     # session and is not saved for the project.
     session_only_yolo: bool = False
+    # Canonical command prefix (such as "uv run pytest") that can be saved as a
+    # per-project allow rule for this bash call; None when not saveable.
+    command_prefix: str | None = None
 
 
 class ToolApprovalResolved(WispEvent):
@@ -66,7 +69,11 @@ class ToolApprovalResolved(WispEvent):
     source: Literal["auto"] | None = None
     rule_id: (
         Literal[
-            "workspace_edit_v1", "command_review_v1", "sandbox_development_v1", "sandbox_process_v1"
+            "workspace_edit_v1",
+            "command_allow_rule_v1",
+            "command_review_v1",
+            "sandbox_development_v1",
+            "sandbox_process_v1",
         ]
         | None
     ) = None

@@ -152,16 +152,21 @@ input was waiting must be selected again; a redraw cannot apply that input to a 
 ## Approvals and trust
 
 A pending tool approval docks a panel above the footer in place of the composer, so the
-conversation that led to it stays visible; your draft is kept. The title names the tool, the safety
-category sits at the top right, and the body shows the built-in `bash` tool's command as
-`$ command`, with any other arguments after it. Every other tool, including MCP tools with a
-`command` argument, shows its complete arguments. It offers four choices: `1` allow once, `2` allow
-that tool for this session, `3` YOLO for this project (YOLO for this session in the home folder or a
-folder above it, where YOLO is never saved), or `4` deny. The `y`/`t`/`a`/`n` aliases also work, or
-highlight a choice with `↑`/`↓` and press `Enter`. There is no default choice: `Enter` only confirms
-a highlighted choice that has been drawn, so an `Enter` meant for the composer cannot answer a
-request. `Esc` denies. Project trust uses the same panel with `y` trust and `n` deny. Below 11 rows
-the panel fills the screen so every choice stays visible down to 30×9.
+conversation that led to it stays visible; your draft is kept. The title names the tool (and target
+path for `edit`/`write`), the safety category sits at the top right, and the body shows an inline
+syntax-highlighted diff preview for `edit`/`write` or a wrapped syntax-highlighted `$ command`
+(with any extra arguments) for `bash`. Every other tool, including MCP tools with a `command`
+argument, shows its complete arguments. It offers `1` allow once, `2` allow that tool for this
+session, `3` YOLO for this project (YOLO for this session in the home folder or a folder above it,
+where YOLO is never saved), or `4` deny; for eligible simple `bash` commands inside a project, an
+extra `2` choice offers **Always allow `<prefix>` (saved)** (shifting tool-session, YOLO, and deny
+to `3`/`4`/`5`, with `p` as the prefix alias). The `y`/`p`/`t`/`a`/`n` aliases also work, or
+highlight a choice with `↑`/`↓` and press `Enter`, or click a painted approval choice directly with
+the mouse (clicks outside painted choices or before the prompt is drawn stay inert). There is no
+default choice: `Enter` only confirms a highlighted choice that has been drawn, so an `Enter` meant
+for the composer cannot answer a request. `Esc` denies. Project trust uses the same panel with `y`
+trust and `n` deny (keyboard-only). Below 11 rows the panel fills the screen so every choice stays
+visible down to 30×9.
 
 ## Panels and popups
 

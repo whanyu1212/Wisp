@@ -65,6 +65,7 @@ from wisp.rpc.commands import (
     ReconnectMcpCommand,
     ReloadCommand,
     RemoveMcpServerCommand,
+    RevokeCommandRuleCommand,
     SelectSessionCommand,
     SetCodemodeCommand,
     SetMcpServerEnabledCommand,
@@ -288,7 +289,9 @@ class RpcCommandExecutor:
         if isinstance(known, GetStateCommand):
             self.coordinator.running_command = running_command
             return self._dispatch_state(known, running_command)
-        if isinstance(known, (GetPermissionsCommand, SetPermissionsCommand)):
+        if isinstance(
+            known, (GetPermissionsCommand, SetPermissionsCommand, RevokeCommandRuleCommand)
+        ):
             return self._dispatch_permissions(known, running_command)
         if isinstance(known, (GetCodemodeCommand, SetCodemodeCommand)):
             return self._dispatch_codemode(known, running_command)
@@ -745,7 +748,7 @@ class RpcCommandExecutor:
 
     def _dispatch_permissions(
         self,
-        command: GetPermissionsCommand | SetPermissionsCommand,
+        command: GetPermissionsCommand | SetPermissionsCommand | RevokeCommandRuleCommand,
         running_command: _RpcRunningCommand | None,
     ) -> _RpcDispatchResult:
         lifecycle = RpcCommandLifecycle.for_command(command, write_event=self.write_event)
@@ -757,6 +760,15 @@ class RpcCommandExecutor:
                 self.approval_policy.set_permissions(command.mode)
             except OSError:
                 lifecycle.fail("Could not save project permissions; the current mode is unchanged")
+                return _RpcDispatchResult(running_command=running_command)
+        elif isinstance(command, RevokeCommandRuleCommand):
+            if running_command is not None:
+                lifecycle.fail("Change permissions after the current operation finishes")
+                return _RpcDispatchResult(running_command=running_command)
+            try:
+                self.approval_policy.revoke_command_allow_rule(command.prefix)
+            except OSError:
+                lifecycle.fail("Could not update project permissions; saved rules are unchanged")
                 return _RpcDispatchResult(running_command=running_command)
         self.write_event(
             RpcPermissionsReported(

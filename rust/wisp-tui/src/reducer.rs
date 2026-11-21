@@ -587,6 +587,8 @@ pub struct PendingApproval {
     /// True in the home folder or a folder above it, where choosing YOLO lasts
     /// for the session and is not saved.
     pub session_only_yolo: bool,
+    /// Canonical bash command prefix that can be saved as a per-project allow rule.
+    pub command_prefix: Option<String>,
 }
 
 /// One queue item retained by the reducer.
@@ -1787,6 +1789,8 @@ pub enum UiAction {
     /// Stop waiting for an MCP sign-in.
     CancelMcpSignIn,
     Permissions(Option<wisp_protocol::commands::PermissionMode>),
+    /// Remove one saved per-project bash command-prefix allow rule.
+    RevokeCommandRule(String),
     /// Read the codemode setting, or apply and save a new one.
     Codemode(Option<wisp_protocol::commands::CodemodeSetting>),
     /// Save the tool presentation without changing availability.
@@ -2023,6 +2027,9 @@ pub fn reduce(
         UiAction::ChangeMcpServers(change) => Ok(discovery::change_mcp(state, change, ids)?),
         UiAction::CancelMcpSignIn => Ok(discovery::cancel_mcp_sign_in(state, ids)?),
         UiAction::Permissions(mode) => Ok(discovery::permissions(state, mode, ids)?),
+        UiAction::RevokeCommandRule(prefix) => {
+            Ok(discovery::revoke_command_rule(state, &prefix, ids)?)
+        }
         UiAction::Codemode(setting) => Ok(discovery::codemode(state, setting, ids)?),
         UiAction::CodemodePresentation(presentation) => {
             Ok(discovery::codemode_presentation(state, presentation, ids)?)
@@ -3393,11 +3400,15 @@ fn answer_approval(
     state.pending_approval = None;
     restore_active_or_idle(state);
     let mut effects = vec![UiEffect::SendCommand(command)];
-    // Allowing every call switches the mode to YOLO; the backend applies the
-    // approval before it answers the read that follows it.
+    // Allowing every call or saving a command allow rule changes project permissions;
+    // the backend applies the approval before it answers the read that follows it.
     if matches!(
         selected_scope,
-        Some(ApprovalScope::AllSession | ApprovalScope::AllProject)
+        Some(
+            ApprovalScope::AllSession
+                | ApprovalScope::AllProject
+                | ApprovalScope::CommandPrefixProject
+        )
     ) {
         effects.extend(discovery::permissions(state, None, ids)?);
     }
@@ -7395,6 +7406,7 @@ mod tests {
                 safety: "read".into(),
                 grants_allowed: true,
                 session_only_yolo: false,
+                command_prefix: None,
             });
             let mut ids = DeterministicIds::default();
             let effects = reduce(
@@ -7436,6 +7448,7 @@ mod tests {
                 safety: "command".into(),
                 grants_allowed: true,
                 session_only_yolo: false,
+                command_prefix: None,
             });
             let effects = reduce(
                 &mut state,
@@ -7892,6 +7905,7 @@ mod tests {
             safety: "command".into(),
             grants_allowed: true,
             session_only_yolo: false,
+            command_prefix: None,
         });
         let mut ids = DeterministicIds::default();
         reduce(&mut state, UiAction::Permissions(None), &mut ids).unwrap();
@@ -8007,6 +8021,7 @@ mod tests {
             safety: "read".into(),
             grants_allowed: true,
             session_only_yolo: false,
+            command_prefix: None,
         });
         state.current_command = Some(ActiveCommand {
             id: "prompt-1".into(),
@@ -8061,6 +8076,7 @@ mod tests {
             safety: "read".into(),
             grants_allowed: true,
             session_only_yolo: false,
+            command_prefix: None,
         });
         let before = state.clone();
         let mut ids = DeterministicIds::default();
@@ -9492,6 +9508,7 @@ mod tests {
                     safety: "read".into(),
                     grants_allowed: true,
                     session_only_yolo: false,
+                    command_prefix: None,
                 })),
                 &mut ids,
             )
@@ -9613,6 +9630,7 @@ mod tests {
                                 safety: "read".into(),
                                 grants_allowed: true,
                                 session_only_yolo: false,
+                                command_prefix: None,
                             },
                         )),
                         &mut ids,
@@ -9675,6 +9693,7 @@ mod tests {
                 safety: "read".into(),
                 grants_allowed: true,
                 session_only_yolo: false,
+                command_prefix: None,
             })),
             &mut ids,
         )
@@ -9719,6 +9738,7 @@ mod tests {
                 safety: "read".into(),
                 grants_allowed: true,
                 session_only_yolo: false,
+                command_prefix: None,
             })),
             &mut ids,
         )
@@ -9932,6 +9952,7 @@ mod tests {
                 safety: "read".into(),
                 grants_allowed: true,
                 session_only_yolo: false,
+                command_prefix: None,
             })),
             &mut ids,
         )
@@ -10147,6 +10168,7 @@ mod tests {
                 safety: "ask".into(),
                 grants_allowed: true,
                 session_only_yolo: false,
+                command_prefix: None,
             })),
             &mut ids,
         )
@@ -10180,6 +10202,7 @@ mod tests {
             safety: "read".into(),
             grants_allowed: true,
             session_only_yolo: false,
+            command_prefix: None,
         });
         let mut ids = DeterministicIds::default();
         let effects = reduce(&mut state, UiAction::Cancel, &mut ids).unwrap();

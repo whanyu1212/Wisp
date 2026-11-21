@@ -41,6 +41,7 @@ class ToolApprovalDecision:
 
     approved: bool
     reason: str | None = None
+    rule_id: str | None = None
 
 
 @dataclass
@@ -55,6 +56,8 @@ class ToolApprovalPolicy:
     # Auto remains edit-only; auto_commands requires separate explicit consent.
     mode: PermissionMode = field(default="ask", kw_only=True)
     auto_command_read_dir: Path | None = field(default=None, kw_only=True)
+    # Per-project saved bash command prefixes allowed without re-prompting.
+    command_allow_rules: tuple[str, ...] = field(default=(), kw_only=True)
     # Revokes an in-flight command assessment when consent or project changes.
     generation: int = field(default=0, init=False, repr=False)
 
@@ -93,10 +96,64 @@ class ToolApprovalPolicy:
 
         return cls(mode="auto_commands")
 
+    def suggested_command_prefix(self, tool: Tool, arguments: Mapping[str, object]) -> str | None:
+        """Return a safe saveable prefix for a pending ``bash`` call, or None."""
+
+        if (
+            self.session_only_yolo
+            or confirms_every_call(tool)
+            or tool.name != "bash"
+            or arguments.get("operation", "run") != "run"
+        ):
+            return None
+        command = arguments.get("command")
+        if not isinstance(command, str):
+            return None
+        from wisp.trust.permissions import suggest_command_prefix
+
+        return suggest_command_prefix(command)
+
+    def _evaluate_command_allow_rule(
+        self, tool: Tool, arguments: Mapping[str, object], context: ToolContext
+    ) -> ToolApprovalDecision | None:
+        if (
+            not self.command_allow_rules
+            or self.session_only_yolo
+            or confirms_every_call(tool)
+            or tool.name != "bash"
+            or arguments.get("operation", "run") != "run"
+        ):
+            return None
+        command = arguments.get("command")
+        if not isinstance(command, str):
+            return None
+        from wisp.tools.shell.working_directory import command_context
+        from wisp.trust.permissions import command_matches_allow_rule
+        from wisp.trust.scope import is_broad_root
+
+        try:
+            boundary = context.boundary()
+            if is_broad_root(boundary):
+                return None
+            resolved_ctx = command_context(arguments, context)
+            cwd = resolved_ctx.cwd.resolve(strict=False)
+            if is_broad_root(cwd) or not cwd.is_relative_to(boundary):
+                return None
+        except (OSError, ValueError, RuntimeError, ToolError):
+            return None
+        for rule in self.command_allow_rules:
+            if command_matches_allow_rule(command, rule):
+                return ToolApprovalDecision(
+                    approved=True,
+                    reason=f"Auto-approved by saved rule: {rule}",
+                    rule_id="command_allow_rule_v1",
+                )
+        return None
+
     async def evaluate_call(
         self, tool: Tool, *, arguments: Mapping[str, object], context: ToolContext
     ) -> ToolApprovalDecision | None:
-        """Evaluate edit-only Auto before opening an interactive approval request.
+        """Evaluate saved command rules and edit-only Auto before prompting.
 
         Args:
             tool (Tool): Resolved tool implementation.
@@ -108,6 +165,9 @@ class ToolApprovalPolicy:
                 when the ordinary approval flow must decide. Never creates grants.
         """
 
+        rule_decision = self._evaluate_command_allow_rule(tool, arguments, context)
+        if rule_decision is not None:
+            return rule_decision
         if self.mode not in ("auto", "auto_commands") or confirms_every_call(tool):
             return None
         # Local import keeps file-tool dependencies out of approval policy startup.
@@ -125,7 +185,11 @@ class ToolApprovalPolicy:
         # An explicit mode change while preflight runs revokes the pending grant.
         if not eligible or self.mode not in ("auto", "auto_commands"):
             return None
-        return ToolApprovalDecision(approved=True, reason="Auto-approved: workspace edit")
+        return ToolApprovalDecision(
+            approved=True,
+            reason="Auto-approved: workspace edit",
+            rule_id="workspace_edit_v1",
+        )
 
     def requires_approval(self, tool: Tool) -> bool:
         """Return whether this tool safety class requires approval."""

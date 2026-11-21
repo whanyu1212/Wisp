@@ -366,6 +366,7 @@ async fn failed_cancellation_warning_is_not_replaced_by_mouse_history_requests()
             safety: "command".into(),
             grants_allowed: true,
             session_only_yolo: false,
+            command_prefix: None,
         })),
         &writer,
         128,
@@ -1090,6 +1091,7 @@ async fn approval_clicks_cannot_approve_deny_or_cancel() {
             safety: "command".into(),
             grants_allowed: true,
             session_only_yolo: false,
+            command_prefix: None,
         })),
         &writer,
         8192,
@@ -1103,6 +1105,63 @@ async fn approval_clicks_cannot_approve_deny_or_cancel() {
     assert!(ui.state.pending_approval.is_some());
     assert_eq!(ui.editor.text(), "draft");
     assert!(receiver.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn approval_click_on_painted_choice_confirms_and_outside_clicks_stay_inert() {
+    let (writer, mut receiver) = mpsc::channel(16);
+    let mut ui = ui("draft");
+    ui.dispatch(
+        UiAction::BackendEvent(BackendEvent::ToolApprovalRequested(PendingApproval {
+            call_id: "approval-prefix".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({"command": "cargo test --workspace"}),
+            detail_source: tool_detail::ToolDetailSource::None,
+            safety: "command".into(),
+            grants_allowed: true,
+            session_only_yolo: false,
+            command_prefix: Some("cargo test".into()),
+        })),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    // Before painting, clicking anywhere never approves.
+    ui.handle_input(click(6, 15), &writer, 8192).await.unwrap();
+    assert!(ui.state.pending_approval.is_some());
+    assert!(receiver.try_recv().is_err());
+
+    draw(&mut ui, 90, 26);
+    // Clicks outside choice rows (transcript top row, panel border) stay inert.
+    ui.handle_input(click(6, 0), &writer, 8192).await.unwrap();
+    assert!(ui.state.pending_approval.is_some());
+    assert!(receiver.try_recv().is_err());
+
+    // Clicking painted choice `2` ("Always allow `cargo test` (saved)") confirms that scope.
+    let prefix_choice = ui
+        .mouse_frame
+        .as_ref()
+        .unwrap()
+        .conversation
+        .decision_choices
+        .iter()
+        .find(|row| row.key == '2')
+        .copied()
+        .expect("choice 2 painted");
+    ui.handle_input(
+        click(prefix_choice.area.x + 2, prefix_choice.area.y),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert!(ui.state.pending_approval.is_none());
+    let sent = command(&mut receiver);
+    assert_eq!(sent["type"], "approval");
+    assert_eq!(sent["call_id"], "approval-prefix");
+    assert_eq!(sent["approved"], true);
+    assert_eq!(sent["scope"], "command_prefix_project");
 }
 
 #[tokio::test]
@@ -1741,6 +1800,7 @@ async fn an_approval_arriving_mid_drag_ends_the_selection_without_copying() {
             safety: "command".into(),
             grants_allowed: true,
             session_only_yolo: false,
+            command_prefix: None,
         })),
         &writer,
         8192,
@@ -1816,6 +1876,7 @@ async fn scrolling_during_a_decision_never_replaces_its_notice() {
             safety: "command".into(),
             grants_allowed: true,
             session_only_yolo: false,
+            command_prefix: None,
         })),
         &writer,
         300,
@@ -1919,6 +1980,7 @@ async fn the_jump_label_is_inert_while_a_decision_is_docked() {
             safety: "command".into(),
             grants_allowed: true,
             session_only_yolo: false,
+            command_prefix: None,
         })),
         &writer,
         8192,
@@ -1967,6 +2029,7 @@ async fn a_release_keeps_the_recovery_notice_of_an_unsendable_response() {
             safety: "command".into(),
             grants_allowed: true,
             session_only_yolo: false,
+            command_prefix: None,
         })),
         &writer,
         128,
