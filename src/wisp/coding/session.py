@@ -4104,25 +4104,27 @@ class CodingSession:
     ) -> ToolRegistry | None:
         """Bind the selected skill and live-browser tools to this operation's snapshot."""
 
-        if self.tool_registry is None and not self._live_browser_available():
+        if self.tool_registry is None:
             return None
         registry = ToolRegistry()
-        if self.tool_registry is not None:
-            for tool in self.tool_registry.all():
-                operation_tool = SkillTool(self.skill_catalog) if type(tool) is SkillTool else tool
-                registry.register(
-                    operation_tool,
-                    execution=self.tool_registry.execution_metadata_for(tool.name),
-                    prompt=self.tool_registry.prompt_metadata_for(tool.name),
-                )
-        if self._live_browser_available():
+        for tool in self.tool_registry.all():
+            operation_tool = SkillTool(self.skill_catalog) if type(tool) is SkillTool else tool
+            registry.register(
+                operation_tool,
+                execution=self.tool_registry.execution_metadata_for(tool.name),
+                prompt=self.tool_registry.prompt_metadata_for(tool.name),
+            )
+        if self._live_browser_available() and registry.all():
             assert self._live_browser is not None
             existing_names = {tool.name for tool in registry.all()}
+            read_only_registry = all(tool.safety == "read" for tool in registry.all())
             for browser_tool in build_live_browser_tools(
                 self._live_browser,
                 is_trusted=lambda: self.trusted,
                 publish_viewport=publish_viewport,
             ):
+                if read_only_registry and browser_tool.safety != "read":
+                    continue
                 if browser_tool.name not in existing_names:
                     registry.register(browser_tool)
         return registry

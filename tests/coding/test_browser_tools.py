@@ -37,6 +37,7 @@ from wisp.runtime.registry import ToolRegistry
 from wisp.sessions.jsonl import JsonlSessionStore
 from wisp.tools.approval import ToolApprovalDecision, ToolApprovalPolicy
 from wisp.tools.context import ToolContext
+from wisp.tools.files.operations import ReadTool, WriteTool
 from wisp.tools.policy import ToolPolicy
 from wisp.tools.result import ToolArgumentError, ToolError
 
@@ -429,6 +430,13 @@ def test_agent_workflow_window_switch_and_user_sign_in_handoff(tmp_path: Path) -
     anyio.run(scenario)
 
 
+def _registry_with_builtins() -> ToolRegistry:
+    registry = ToolRegistry()
+    registry.register(ReadTool())
+    registry.register(WriteTool())
+    return registry
+
+
 def test_session_omits_live_browser_tools_when_untrusted_or_unavailable(tmp_path: Path) -> None:
     fake_available: Any = _FakeLiveBrowser(tmp_path, available=True)
     fake_unavailable: Any = _FakeLiveBrowser(tmp_path, available=False)
@@ -436,7 +444,7 @@ def test_session_omits_live_browser_tools_when_untrusted_or_unavailable(tmp_path
     untrusted = CodingSession(
         provider=_DummyProvider(),
         sessions=JsonlSessionStore(tmp_path / "s1"),
-        tool_registry=ToolRegistry(),
+        tool_registry=_registry_with_builtins(),
         trusted=False,
         live_browser=fake_available,
     )
@@ -447,7 +455,7 @@ def test_session_omits_live_browser_tools_when_untrusted_or_unavailable(tmp_path
     unavailable = CodingSession(
         provider=_DummyProvider(),
         sessions=JsonlSessionStore(tmp_path / "s2"),
-        tool_registry=ToolRegistry(),
+        tool_registry=_registry_with_builtins(),
         trusted=True,
         live_browser=fake_unavailable,
     )
@@ -455,10 +463,22 @@ def test_session_omits_live_browser_tools_when_untrusted_or_unavailable(tmp_path
     assert reg_unavailable is not None
     assert not ({t.name for t in reg_unavailable.all()} & LIVE_BROWSER_TOOL_NAMES)
 
+    # An empty tool registry (no tools enabled) stays tool-less.
+    toolless = CodingSession(
+        provider=_DummyProvider(),
+        sessions=JsonlSessionStore(tmp_path / "s-empty"),
+        tool_registry=ToolRegistry(),
+        trusted=True,
+        live_browser=fake_available,
+    )
+    reg_toolless = toolless._operation_tool_registry()
+    assert reg_toolless is not None
+    assert reg_toolless.all() == ()
+
     trusted = CodingSession(
         provider=_DummyProvider(),
         sessions=JsonlSessionStore(tmp_path / "s3"),
-        tool_registry=ToolRegistry(),
+        tool_registry=_registry_with_builtins(),
         trusted=True,
         live_browser=fake_available,
     )
@@ -495,7 +515,7 @@ def test_session_exposes_live_browser_specs_and_guidance_after_set_live_browser(
     session = CodingSession(
         provider=_DummyProvider(),
         sessions=JsonlSessionStore(tmp_path / "sessions"),
-        tool_registry=ToolRegistry(),
+        tool_registry=_registry_with_builtins(),
         trusted=True,
     )
     # Mirrors WispRpcHost.run_with_streams attaching LiveBrowser after construction.
