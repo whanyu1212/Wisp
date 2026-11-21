@@ -116,6 +116,37 @@ with `write_constraint`, under the exception below. Tool behavior changes are li
 `bash` runs commands in bash rather than `/bin/sh`, and that the read-only file tools follow
 symbolic links whose targets stay inside the workspace.
 
+## Wisp 0.16 compatibility
+
+0.16.0 reads existing 0.15.0 sessions. Session `schema_version` remains 6 and the event-envelope
+format remains 1. Saved per-project command-prefix allow rules add `command_prefix` on
+`tool.approval.requested` and `rule_id: "command_allow_rule_v1"` on `tool.approval.resolved`. Older
+entries omit these fields and remain readable.
+
+**Downgrade limit:** 0.15.0 rejects persisted sessions or wire frames containing
+`tool.approval.requested.command_prefix` or `rule_id: "command_allow_rule_v1"` as unknown fields or
+values. Keep a backup of sessions before upgrading if you may need to return to 0.15.0. Unchanged
+schema stamps do not imply reverse compatibility.
+
+Per-project `~/.wisp/permissions/` records gain an optional `command_allow_rules` list (never saved
+or loaded for broad folders such as `$HOME`). Older `0.15.0` readers ignore unknown fields in
+permission files. Credentials, settings, and trust formats are unchanged.
+
+Commands and events gain members and fields:
+
+- the `revoke_command_rule` command;
+- `"command_prefix_project"` on `ApprovalScope`;
+- `command_prefix` on `tool.approval.requested`, `"command_allow_rule_v1"` on
+  `tool.approval.resolved.rule_id`, and `command_allow_rules` on `PermissionState`.
+
+All of them are listed in the
+[changelog](https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md). The backend and every
+frontend must be the same release, and external RPC clients should use the 0.16.0 schema bundle.
+
+The supported Python API adds `RevokeCommandRuleCommand` in `wisp.rpc` and
+`RpcController.revoke_command_rule()`. See the
+[0.16.0 release checklist](../maintainers/releases/0.16.0-release.md).
+
 ## Wisp 0.15 compatibility
 
 0.15.0 reads existing 0.14.x sessions, and 0.14.x opens sessions written by 0.15.0. Session

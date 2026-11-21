@@ -10,7 +10,78 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.15.0 — Unreleased
+## 0.16.0 — Unreleased
+
+0.16.0 upgrades the Rust TUI's everyday editing, review, and approval workflows and refines Wisp's
+default response style: transcript copy with OSC 52 fallback, per-turn change summaries with
+turn-filtered `/diff`, `delta`-style stateful syntax highlighting in diffs, richer approval prompts
+with inline previews, mouse choice, and saved per-project command-prefix allow rules, and a cleaner
+peer response style with medium Codex verbosity. The backend and every frontend must use the same
+release.
+
+### Terminal UI and diff review
+
+- **Copy responses, messages, and code blocks from the transcript (#1111):** Added
+  `transcript.copy_last_response` (`Alt+Y`, yielding to existing user overrides via
+  `RECENT_DEFAULTS`) to copy the latest assistant response as raw source Markdown, extended Browse
+  mode (`F6`) to select and highlight individual messages and fenced/indented code blocks with `y`
+  copying, and verified OSC 52 stdout fallback when the native clipboard is unavailable.
+- **Per-turn change summary and turn-filtered `/diff` (#1112):** Added inline per-turn edit totals
+  (`+N −M in K files`, colored in diff green/red and compacting on narrow widths) to closing `╰`
+  `RunSummary` rows for turns with completed `edit`/`write` calls. Added `transcript.turn_diff`
+  (`Alt+G`) plus click and Browse `Enter` on any turn's change summary to open `/diff` filtered to
+  that turn's edited files (preserving turn attribution beyond the backend's 16-edit per-file cap),
+  with `a` to toggle turn/all changes, `<`/`>` to step across editing turns, active-pane focus
+  headers, and cross-file `[`/`]` hunk stepping.
+- **`delta`-style stateful syntax highlighting in `/diff` and diff cards (#1113):** Replaced
+  stateless per-line diff highlighting with continuous `syntect` `ParseState` highlighting
+  (`highlight_lines` / `highlight_source_lines`, bounded at 64 KiB / 2,000 lines) over full
+  `before`/`after` file sources in `/diff` and continuous old/new streams in inline diff cards,
+  added `language_for_path` (handling diff status prefixes, `Makefile`/shell dotfiles, and
+  `.ts`/`.tsx`/`.jsx` files), applied bold keywords and italic comments, and preserved readable
+  (`>= 4.5:1` contrast) syntax foreground colors inside word-diff emphasis.
+
+### Approvals, permissions, and response style
+
+- **Richer approvals with inline previews, mouse choice, and saved command rules (#1114):**
+  - Rendered inline syntax-highlighted diff previews for `edit` approvals, numbered
+    syntax-highlighted proposed content previews for `write` approvals (without claiming a known
+    before-state), and wrapped syntax-highlighted `$ command` previews for `bash` approvals inside
+    the docked approval panel.
+  - Added fail-closed simple-command prefix parsing, validation, conservative prefix suggestion,
+    token-based matching, and atomic per-project persistence in user-owned `~/.wisp/permissions/`
+    (rejecting shell metacharacters, chaining, redirections, subshells, escapes, comments,
+    control/bidi characters, env prefixes, POSIX shell reserved words/builtins, disallowed
+    executables, outside-workspace working directories, and broad folders like `$HOME`).
+  - Added `2  Always allow \`<prefix>\` (saved)` (alias `p`) on eligible `bash` approvals,
+    single-click confirmation on painted approval choice rows (guarded by
+    `rendered_approval_matches`; project trust stays keyboard-only), and a scrollable
+    `Saved command rules` section in `/permissions` with `d`/`Backspace`/`Enter` revocation.
+- **Peer response style and Codex medium verbosity (#1115):** Refined `DEFAULT_SYSTEM_PROMPT`'s
+  `Response style:` section for quiet tool execution, contrastive peer cadence, `- **Short label:**`
+  bullets, inline file/symbol retention, and bans on wide prose tables and bold-period bullets, and
+  raised `openai_codex` `text.verbosity` from `"low"` to `"medium"`.
+
+### Compatibility
+
+- Session `schema_version` 6 and event-envelope format 1 remain unchanged; `0.16.0` reads existing
+  `0.15.x` sessions. Sessions recorded by `0.16.0` that contain `tool.approval.requested` with
+  `command_prefix` or `tool.approval.resolved` with `rule_id: "command_allow_rule_v1"` are rejected
+  by `0.15.0`'s strict event decoder (downgrade limit; unchanged schema stamps do not imply reverse
+  compatibility).
+- `schemas/live-rpc/` and `tests/fixtures/event_decoding_conformance.json` add the
+  `revoke_command_rule` command, `"command_prefix_project"` to `ApprovalScope`,
+  `"command_allow_rule_v1"` to `ToolApprovalResolved.rule_id`, optional `command_prefix` on
+  `ToolApprovalRequested`, and `command_allow_rules` on `PermissionState`. Frontends and external
+  RPC clients must match the `0.16.0` release.
+- Supported Python APIs add `RevokeCommandRuleCommand` in `wisp.rpc` and
+  `RpcController.revoke_command_rule()`. Per-project `~/.wisp/permissions/` records gain optional
+  `command_allow_rules`, which `0.15.0` ignores.
+
+<!-- Keeps links to the pre-release "0.15.0 — Unreleased" heading working. -->
+<a id="0150--unreleased"></a>
+
+## 0.15.0 — 2026-11-21
 
 0.15.0 introduces an embedded interactive Chromium live browser with agent awareness in the TUI
 side panel, inline image thumbnails in the transcript, a redesigned live-work side panel with top
