@@ -1,7 +1,7 @@
 //! Presentation-only review of retained changes. No filesystem reads or git policy.
 
 use ratatui::{
-    style::Style,
+    style::{Modifier, Style},
     text::{Line, Span},
 };
 use unicode_segmentation::UnicodeSegmentation;
@@ -168,6 +168,19 @@ impl DiffReview {
         height: usize,
         palette: Palette,
     ) -> Vec<Line<'static>> {
+        self.lines_with_sources(detail, None, width, height, palette)
+    }
+
+    /// Lay out and slice visible lines, optionally highlighting against full `before`/`after`
+    /// file contents so multi-line strings and comments carry accurate syntax state into hunks.
+    pub fn lines_with_sources(
+        &mut self,
+        detail: &ToolDetailPresentation,
+        sources: Option<(&str, &str)>,
+        width: usize,
+        height: usize,
+        palette: Palette,
+    ) -> Vec<Line<'static>> {
         let signature = (width, self.split, self.context, palette);
         if self.signature != Some(signature) {
             let anchor = match self.reopen_key.take() {
@@ -177,6 +190,7 @@ impl DiffReview {
             self.split_shown = self.split && width >= 100;
             self.rows = render_rows(
                 detail,
+                sources,
                 width,
                 self.split_shown,
                 self.context || self.hunk_bars,
@@ -229,6 +243,119 @@ fn chunks(text: &str, width: usize) -> Vec<String> {
     chunks
 }
 
+/// Apply syntax colour plus bold keywords / italic comments matching Markdown code blocks.
+fn syntax_diff_style(palette: Palette, base: Style, class: crate::syntax::SyntaxClass) -> Style {
+    use crate::syntax::SyntaxClass;
+
+    let mut style = palette.syntax(base, class);
+    if class == SyntaxClass::Comment {
+        style = style.add_modifier(Modifier::ITALIC);
+    } else if class == SyntaxClass::Keyword {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    style
+}
+
+/// Precomputed per-line syntax tokens for old (`before`) and new (`after`) sides of a diff.
+struct DiffSyntax {
+    old_by_line: Option<Vec<Vec<crate::syntax::SyntaxToken>>>,
+    new_by_line: Option<Vec<Vec<crate::syntax::SyntaxToken>>>,
+    old_by_row: Vec<Option<usize>>,
+    new_by_row: Vec<Option<usize>>,
+    old_stream: Option<Vec<Vec<crate::syntax::SyntaxToken>>>,
+    new_stream: Option<Vec<Vec<crate::syntax::SyntaxToken>>>,
+}
+
+impl DiffSyntax {
+    fn build(language: &str, rows: &[DetailRow], sources: Option<(&str, &str)>) -> Self {
+        let (old_by_line, new_by_line) = match sources {
+            Some((before, after)) => (
+                crate::syntax::highlight_source_lines(language, before),
+                crate::syntax::highlight_source_lines(language, after),
+            ),
+            None => (None, None),
+        };
+        let mut old_by_row = vec![None; rows.len()];
+        let mut new_by_row = vec![None; rows.len()];
+        let mut old_lines = Vec::new();
+        let mut new_lines = Vec::new();
+        if old_by_line.is_none() || new_by_line.is_none() {
+            for (index, row) in rows.iter().enumerate() {
+                if old_by_line.is_none()
+                    && matches!(row.kind, DetailRowKind::Context | DetailRowKind::Deletion)
+                {
+                    old_by_row[index] = Some(old_lines.len());
+                    old_lines.push(row.text.as_str());
+                }
+                if new_by_line.is_none()
+                    && matches!(row.kind, DetailRowKind::Context | DetailRowKind::Addition)
+                {
+                    new_by_row[index] = Some(new_lines.len());
+                    new_lines.push(row.text.as_str());
+                }
+            }
+        }
+        let old_stream = if old_by_line.is_none() {
+            crate::syntax::highlight_lines(language, &old_lines)
+        } else {
+            None
+        };
+        let new_stream = if new_by_line.is_none() {
+            crate::syntax::highlight_lines(language, &new_lines)
+        } else {
+            None
+        };
+        Self {
+            old_by_line,
+            new_by_line,
+            old_by_row,
+            new_by_row,
+            old_stream,
+            new_stream,
+        }
+    }
+
+    fn tokens_for(
+        &self,
+        row_index: usize,
+        row: &DetailRow,
+        old: bool,
+    ) -> &[crate::syntax::SyntaxToken] {
+        let from_file = if old {
+            self.old_by_line.as_ref().and_then(|lines| {
+                let line_no = usize::try_from(row.old_line?.checked_sub(1)?).ok()?;
+                lines.get(line_no)
+            })
+        } else {
+            self.new_by_line.as_ref().and_then(|lines| {
+                let line_no = usize::try_from(row.new_line?.checked_sub(1)?).ok()?;
+                lines.get(line_no)
+            })
+        };
+        if let Some(tokens) = from_file {
+            return tokens;
+        }
+        let from_stream = if old {
+            self.old_stream.as_ref().and_then(|lines| {
+                self.old_by_row
+                    .get(row_index)
+                    .copied()
+                    .flatten()
+                    .and_then(|i| lines.get(i))
+            })
+        } else {
+            self.new_stream.as_ref().and_then(|lines| {
+                self.new_by_row
+                    .get(row_index)
+                    .copied()
+                    .flatten()
+                    .and_then(|i| lines.get(i))
+            })
+        };
+        from_stream.map_or(&[], Vec::as_slice)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cell(
     row: Option<&DetailRow>,
@@ -236,7 +363,7 @@ fn cell(
     width: usize,
     palette: Palette,
     emphasis: &[std::ops::Range<usize>],
-    language: &str,
+    tokens: &[crate::syntax::SyntaxToken],
     dual: bool,
     hunk_bars: bool,
 ) -> Vec<(Line<'static>, usize)> {
@@ -280,10 +407,8 @@ fn cell(
     let continuation_style =
         palette.syntax(base.fg(palette.dim()), crate::syntax::SyntaxClass::Plain);
     let safe_offsets = sanitize_for_terminal(&row.text) == row.text;
-    let tokens = crate::syntax::highlight_fence(language, &row.text)
-        .map(|highlight| highlight.tokens)
-        .unwrap_or_default();
     let mut offset = 0;
+    let mut token_cursor = 0_usize;
     source
         .into_iter()
         .enumerate()
@@ -308,14 +433,18 @@ fn cell(
             for (position, grapheme) in text.grapheme_indices(true) {
                 let position = offset + position;
                 let class = if safe_offsets {
+                    while token_cursor < tokens.len() && tokens[token_cursor].range.end <= position
+                    {
+                        token_cursor += 1;
+                    }
                     tokens
-                        .iter()
-                        .find(|token| token.range.contains(&position))
+                        .get(token_cursor)
+                        .filter(|token| token.range.contains(&position))
                         .map_or(crate::syntax::SyntaxClass::Plain, |token| token.class)
                 } else {
                     crate::syntax::SyntaxClass::Plain
                 };
-                let mut style = palette.syntax(base, class);
+                let mut style = syntax_diff_style(palette, base, class);
                 if safe_offsets && emphasis.iter().any(|range| range.contains(&position)) {
                     style = palette.diff_change(style);
                 }
@@ -336,6 +465,7 @@ fn cell(
 
 fn render_rows(
     detail: &ToolDetailPresentation,
+    sources: Option<(&str, &str)>,
     width: usize,
     split: bool,
     context: bool,
@@ -343,7 +473,8 @@ fn render_rows(
     palette: Palette,
 ) -> Vec<ReviewLine> {
     let emphasis = crate::diff_card::row_emphasis(&detail.rows);
-    let language = detail.title.rsplit('.').next().unwrap_or("");
+    let language = crate::syntax::language_for_path(&detail.title);
+    let syntax = DiffSyntax::build(&language, &detail.rows, sources);
     let mut output = Vec::new();
     let mut index = 0;
     let hunks: Vec<&DetailRow> = detail
@@ -384,7 +515,7 @@ fn render_rows(
                 offset: 0,
                 paired: None,
                 hunk: true,
-                line: hunk_bar(&row.text, &label, language, width, palette),
+                line: hunk_bar(&row.text, &label, &language, width, palette),
             });
             hunk_index += 1;
             index += 1;
@@ -466,7 +597,7 @@ fn render_rows(
                     half,
                     palette,
                     left.map_or(&[], |i| &emphasis[i]),
-                    language,
+                    left.map_or(&[], |i| syntax.tokens_for(i, &detail.rows[i], true)),
                     false,
                     hunk_bars,
                 );
@@ -476,7 +607,7 @@ fn render_rows(
                     width - half - separator.width(),
                     palette,
                     right.map_or(&[], |i| &emphasis[i]),
-                    language,
+                    right.map_or(&[], |i| syntax.tokens_for(i, &detail.rows[i], false)),
                     false,
                     hunk_bars,
                 );
@@ -507,13 +638,14 @@ fn render_rows(
                 }
             }
         } else {
+            let old = row.kind == DetailRowKind::Deletion;
             for (line, offset) in cell(
                 Some(row),
-                row.kind == DetailRowKind::Deletion,
+                old,
                 width,
                 palette,
                 &emphasis[index],
-                language,
+                syntax.tokens_for(index, row, old),
                 true,
                 hunk_bars,
             ) {
@@ -579,15 +711,15 @@ fn hunk_bar(
     let definition = definition.trim_start();
     if !definition.is_empty() {
         left.push(Span::styled(" ", bar));
-        let tokens = crate::syntax::highlight_fence(language, definition)
-            .map(|highlight| highlight.tokens)
+        let tokens = crate::syntax::highlight_lines(language, &[definition])
+            .and_then(|mut lines| lines.pop())
             .unwrap_or_default();
         for (position, grapheme) in definition.grapheme_indices(true) {
             let class = tokens
                 .iter()
                 .find(|token| token.range.contains(&position))
                 .map_or(crate::syntax::SyntaxClass::Plain, |token| token.class);
-            let style = palette.syntax(bar.fg(palette.foreground), class);
+            let style = syntax_diff_style(palette, bar.fg(palette.foreground), class);
             if let Some(last) = left.last_mut().filter(|span| span.style == style) {
                 last.content.to_mut().push_str(grapheme);
             } else {
@@ -646,7 +778,7 @@ mod tests {
     #[test]
     fn split_pairs_replacements_and_narrow_review_preserves_both_sides() {
         let detail = presentation();
-        let split = render_rows(&detail, 120, true, true, false, Palette::default());
+        let split = render_rows(&detail, None, 120, true, true, false, Palette::default());
         assert!(split.iter().any(|row| {
             let text = row.line.to_string();
             text.contains("wait 30") && text.contains("wait 60")
@@ -720,13 +852,16 @@ mod tests {
             let palette = theme.palette(false).for_depth(ColorDepth::Ansi16);
             for row in &detail.rows[2..4] {
                 let deletion = row.kind == DetailRowKind::Deletion;
+                let tokens = crate::syntax::highlight_lines("rust", &[row.text.as_str()])
+                    .and_then(|mut lines| lines.pop())
+                    .unwrap_or_default();
                 let lines = cell(
                     Some(row),
                     deletion,
                     20,
                     palette,
                     std::slice::from_ref(&(0..4)),
-                    "rust",
+                    &tokens,
                     true,
                     true,
                 )
@@ -761,5 +896,76 @@ mod tests {
                 .iter()
                 .all(|s| !s.contains('\u{1b}'))
         );
+    }
+
+    #[test]
+    fn full_file_sources_carry_multiline_syntax_state_into_mid_file_hunks() {
+        let before = concat!(
+            "fn header() {}\n",
+            "/* block comment opened well before the hunk\n",
+            "   line 3\n",
+            "   line 4\n",
+            "   line 5\n",
+            "   line 6\n",
+            "   old fn inside comment\n",
+            "*/\n",
+            "fn tail() { let x = 1; }\n",
+        );
+        let after = concat!(
+            "fn header() {}\n",
+            "/* block comment opened well before the hunk\n",
+            "   line 3\n",
+            "   line 4\n",
+            "   line 5\n",
+            "   line 6\n",
+            "   new fn inside comment\n",
+            "*/\n",
+            "fn tail() { let x = 2; }\n",
+        );
+        let detail = crate::tool_detail::git_presentation("src/lib.rs", before, after, false);
+        let palette = Palette::default();
+        let mut review = DiffReview::working_tree();
+        review.split = false;
+        let lines = review.lines_with_sources(&detail, Some((before, after)), 100, 30, palette);
+
+        // Inside the block comment, `fn` must be styled as italic Comment, not bold Keyword.
+        let comment_line = lines
+            .iter()
+            .find(|line| line.to_string().contains("new fn inside comment"))
+            .expect("comment addition line");
+        let fn_in_comment = comment_line
+            .spans
+            .iter()
+            .find(|span| span.content.contains("fn"))
+            .expect("fn span in comment");
+        assert!(fn_in_comment.style.add_modifier.contains(Modifier::ITALIC));
+        assert_ne!(fn_in_comment.style.fg, Some(palette.accent));
+
+        // Outside the comment, `fn` is styled as bold Keyword (`palette.accent`), and the
+        // changed numeric literal `2` keeps its syntax colour inside word-diff emphasis.
+        let code_line = lines
+            .iter()
+            .find(|line| line.to_string().contains("let x = 2;"))
+            .expect("code addition line");
+        let fn_keyword = code_line
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref() == "fn")
+            .expect("fn keyword span");
+        assert_eq!(fn_keyword.style.fg, Some(palette.accent));
+        assert!(fn_keyword.style.add_modifier.contains(Modifier::BOLD));
+
+        let changed_num = code_line
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref() == "2")
+            .expect("changed number span");
+        assert!(
+            changed_num
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD | Modifier::UNDERLINED)
+        );
+        assert_eq!(changed_num.style.fg, Some(palette.warning));
     }
 }

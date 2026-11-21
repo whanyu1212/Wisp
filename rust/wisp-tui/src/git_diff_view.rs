@@ -1235,8 +1235,13 @@ impl GitDiffView {
                 Some((_, detail)) if self.review.context => detail,
                 _ => &self.details[self.active],
             };
-            self.review
-                .lines(detail, width, usize::from(content.height), palette)
+            self.review.lines_with_sources(
+                detail,
+                Some((&file.before, &file.after)),
+                width,
+                usize::from(content.height),
+                palette,
+            )
         } else {
             vec![Line::styled(
                 sanitize_for_terminal(&file.notice),

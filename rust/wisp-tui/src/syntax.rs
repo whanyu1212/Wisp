@@ -10,6 +10,8 @@ pub(crate) const MAX_SYNTAX_LINES_PER_FENCE: usize = 512;
 pub(crate) const MAX_SYNTAX_FRAGMENTS_PER_FENCE: usize = 1_024;
 pub(crate) const MAX_SYNTAX_SOURCE_BYTES_PER_BUILD: usize = 64 * 1024;
 pub(crate) const MAX_SYNTAX_FRAGMENTS_PER_BUILD: usize = 2_048;
+const MAX_DIFF_SYNTAX_BYTES: usize = 64 * 1024;
+const MAX_DIFF_SYNTAX_LINES: usize = 2_000;
 const MAX_LANGUAGE_TOKEN_BYTES: usize = 32;
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
@@ -155,6 +157,97 @@ pub(crate) fn highlight_fence(info: &str, source: &str) -> Result<SyntaxHighligh
     }
     work.fragments = tokens.len();
     Ok(SyntaxHighlight { tokens, work })
+}
+
+/// Derive a syntax token from a file path or diff title (such as `"M src/app.tsx"` or
+/// `"Makefile"`). Returns an empty string when no language can be inferred.
+pub(crate) fn language_for_path(path_or_title: &str) -> String {
+    let trimmed = path_or_title.trim();
+    let path = trimmed
+        .strip_prefix("M ")
+        .or_else(|| trimmed.strip_prefix("A "))
+        .or_else(|| trimmed.strip_prefix("D "))
+        .or_else(|| trimmed.strip_prefix("R "))
+        .unwrap_or(trimmed);
+    let file_name = path.rsplit('/').next().unwrap_or(path);
+    match file_name.to_ascii_lowercase().as_str() {
+        "makefile" | "gnumakefile" => return "makefile".into(),
+        ".bashrc" | ".zshrc" | ".profile" | ".bash_profile" => return "bash".into(),
+        _ => {}
+    }
+    let Some((_, ext)) = file_name.rsplit_once('.') else {
+        return String::new();
+    };
+    match ext.to_ascii_lowercase().as_str() {
+        "ts" | "tsx" | "mts" | "cts" | "jsx" => "javascript".into(),
+        "jsonc" => "json".into(),
+        "mdx" => "markdown".into(),
+        "pyi" => "python".into(),
+        other => other.to_owned(),
+    }
+}
+
+/// Highlight a sequence of lines (without trailing newlines) with one continuous
+/// `ParseState`, returning line-local token ranges (`0..line.len()`) per line.
+pub(crate) fn highlight_lines(info: &str, lines: &[&str]) -> Option<Vec<Vec<SyntaxToken>>> {
+    if lines.is_empty() || lines.len() > MAX_DIFF_SYNTAX_LINES {
+        return None;
+    }
+    let total_bytes: usize = lines.iter().map(|line| line.len()).sum();
+    if total_bytes > MAX_DIFF_SYNTAX_BYTES {
+        return None;
+    }
+    let language = normalize_language(info)?;
+    let syntax_set = syntax_set();
+    let syntax = syntax_set.find_syntax_by_token(&language)?;
+    let mut parser = ParseState::new(syntax);
+    let mut stack = ScopeStack::new();
+    let mut per_line = Vec::with_capacity(lines.len());
+    let mut scratch = String::new();
+
+    for line in lines {
+        if line.len() > MAX_SYNTAX_LINE_BYTES {
+            return None;
+        }
+        // `load_defaults_newlines` expects a trailing `\n` so line-scoped constructs
+        // such as `//` or `#` comments terminate cleanly at the end of the line.
+        scratch.clear();
+        scratch.push_str(line);
+        scratch.push('\n');
+        let operations = parser.parse_line(&scratch, syntax_set).ok()?;
+        let mut tokens = Vec::new();
+        let mut offset = 0_usize;
+        let limit = line.len();
+        for (region, operation) in ScopeRegionIterator::new(&operations, &scratch) {
+            stack.apply(operation).ok()?;
+            if region.is_empty() || offset >= limit {
+                continue;
+            }
+            let start = offset;
+            let end = start.saturating_add(region.len()).min(limit);
+            push_token(&mut tokens, start..end, classify_scope(&stack));
+            offset = offset.saturating_add(region.len());
+        }
+        if offset < limit {
+            push_token(&mut tokens, offset..limit, SyntaxClass::Plain);
+        }
+        per_line.push(tokens);
+    }
+    Some(per_line)
+}
+
+/// Highlight a whole source file with one continuous `ParseState`, returning line-local
+/// token ranges indexed by 0-based line number (matching `DetailRow::old_line`/`new_line`).
+pub(crate) fn highlight_source_lines(info: &str, source: &str) -> Option<Vec<Vec<SyntaxToken>>> {
+    if source.is_empty() || source.len() > MAX_DIFF_SYNTAX_BYTES {
+        return None;
+    }
+    let lines: Vec<&str> = source
+        .split_inclusive('\n')
+        .map(|line| line.strip_suffix('\n').unwrap_or(line))
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .collect();
+    highlight_lines(info, &lines)
 }
 
 fn push_token(tokens: &mut Vec<SyntaxToken>, range: Range<usize>, class: SyntaxClass) {
@@ -373,5 +466,40 @@ mod tests {
         assert_eq!(failure.work.source_bytes, dense.len());
         assert!(failure.work.lines > 0);
         assert!(failure.work.fragments > MAX_SYNTAX_FRAGMENTS_PER_FENCE);
+    }
+
+    #[test]
+    fn language_for_path_handles_diff_prefixes_ts_and_extensionless_files() {
+        assert_eq!(language_for_path("M src/app.tsx"), "javascript");
+        assert_eq!(language_for_path("A web/index.ts"), "javascript");
+        assert_eq!(language_for_path("M Makefile"), "makefile");
+        assert_eq!(language_for_path("src/retry.py"), "py");
+        assert_eq!(language_for_path("README"), "");
+        assert!(highlight_lines(&language_for_path("M src/app.tsx"), &["const x = 1;"]).is_some());
+        assert!(highlight_lines(&language_for_path("M Makefile"), &["all:\n\techo hi"]).is_some());
+    }
+
+    #[test]
+    fn highlight_source_lines_preserves_multiline_state_and_closes_line_comments() {
+        let source = "/* open\nstill fn comment\n*/\n// line comment\nfn real() {}\n";
+        let per_line = highlight_source_lines("rust", source).unwrap();
+        assert_eq!(per_line.len(), 5);
+        assert!(
+            per_line[1]
+                .iter()
+                .all(|token| token.class == SyntaxClass::Comment),
+            "{:?}",
+            per_line[1]
+        );
+        assert!(
+            per_line[3]
+                .iter()
+                .all(|token| token.class == SyntaxClass::Comment),
+            "{:?}",
+            per_line[3]
+        );
+        assert!(per_line[4].iter().any(|token| {
+            token.class == SyntaxClass::Keyword && &"fn real() {}"[token.range.clone()] == "fn"
+        }));
     }
 }

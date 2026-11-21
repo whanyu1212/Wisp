@@ -63,7 +63,24 @@ pub(crate) fn preview(
         syntax: Vec::new(),
         gutters: Vec::new(),
     };
-    for (row, emphasis) in rows.iter().zip(emphasis) {
+    let language = crate::syntax::language_for_path(&detail.title);
+    let mut old_by_row = vec![None; rows.len()];
+    let mut new_by_row = vec![None; rows.len()];
+    let mut old_lines = Vec::new();
+    let mut new_lines = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        if matches!(row.kind, DetailRowKind::Context | DetailRowKind::Deletion) {
+            old_by_row[index] = Some(old_lines.len());
+            old_lines.push(row.text.as_str());
+        }
+        if matches!(row.kind, DetailRowKind::Context | DetailRowKind::Addition) {
+            new_by_row[index] = Some(new_lines.len());
+            new_lines.push(row.text.as_str());
+        }
+    }
+    let old_syntax = crate::syntax::highlight_lines(&language, &old_lines);
+    let new_syntax = crate::syntax::highlight_lines(&language, &new_lines);
+    for (row_index, (row, emphasis)) in rows.iter().zip(emphasis).enumerate() {
         if !preview.text.is_empty() {
             preview.text.push('\n');
         }
@@ -79,19 +96,22 @@ pub(crate) fn preview(
         if content_start > 0 {
             preview.gutters.push(start..offset);
         }
-        if matches!(
-            row.kind,
-            DetailRowKind::Addition | DetailRowKind::Deletion | DetailRowKind::Context
-        ) {
-            let language = detail.title.rsplit('.').next().unwrap_or("");
-            if let Ok(highlight) = crate::syntax::highlight_fence(language, &row.text) {
-                preview
-                    .syntax
-                    .extend(highlight.tokens.into_iter().map(|mut token| {
-                        token.range = offset + token.range.start..offset + token.range.end;
-                        token
-                    }));
-            }
+        let tokens = match row.kind {
+            DetailRowKind::Deletion => old_syntax
+                .as_ref()
+                .and_then(|lines| old_by_row[row_index].and_then(|i| lines.get(i))),
+            DetailRowKind::Addition | DetailRowKind::Context => new_syntax
+                .as_ref()
+                .and_then(|lines| new_by_row[row_index].and_then(|i| lines.get(i))),
+            _ => None,
+        };
+        if let Some(tokens) = tokens {
+            preview
+                .syntax
+                .extend(tokens.iter().cloned().map(|mut token| {
+                    token.range = offset + token.range.start..offset + token.range.end;
+                    token
+                }));
         }
 
         preview.emphasis.extend(
@@ -652,5 +672,39 @@ mod tests {
         );
         let deletion = row(DetailRowKind::Deletion, "value");
         assert_eq!(format_row(&deletion, false), ("− value".into(), "− ".len()));
+    }
+
+    #[test]
+    fn preview_highlights_tsx_and_multiline_comments() {
+        let detail = ToolDetailPresentation {
+            kind: crate::tool_detail::DetailPresentationKind::DiffModify,
+            title: "M src/App.tsx".into(),
+            summary: "+2 -0".into(),
+            additions: 2,
+            deletions: 0,
+            rows: vec![
+                row(DetailRowKind::Context, "/* start"),
+                row(DetailRowKind::Addition, "still comment const x"),
+                row(DetailRowKind::Context, "*/"),
+                row(DetailRowKind::Addition, "const count = 42;"),
+            ],
+            truncated: false,
+        };
+        let card = preview(&detail, false);
+        let comment_pos = card.text.find("still comment").unwrap();
+        let comment_class = card
+            .syntax
+            .iter()
+            .find(|token| token.range.contains(&comment_pos))
+            .map(|token| token.class);
+        assert_eq!(comment_class, Some(crate::syntax::SyntaxClass::Comment));
+
+        let const_pos = card.text.find("const count").unwrap();
+        let const_class = card
+            .syntax
+            .iter()
+            .find(|token| token.range.contains(&const_pos))
+            .map(|token| token.class);
+        assert_eq!(const_class, Some(crate::syntax::SyntaxClass::Keyword));
     }
 }
