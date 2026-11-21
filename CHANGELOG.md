@@ -10,7 +10,18 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.16.0 — Unreleased
+## 0.16.1 — Unreleased
+
+- **Close the Browser pane with one click (#1117):** Click `[Close]` beside `[Expand]` or
+  `[Restore]` to dismiss the pane and close the live browser, even while interacting with the page.
+  The Browser tab and keyboard shortcuts still work as before.
+- No changes to the Python API, live RPC payloads, or session format since 0.16.0. Use the same
+  release for backend and frontend.
+
+<!-- Keeps links to the pre-release "0.16.0 — Unreleased" heading working. -->
+<a id="0160--unreleased"></a>
+
+## 0.16.0 — 2026-11-21
 
 0.16.0 upgrades the Rust TUI's everyday editing, review, and approval workflows and refines Wisp's
 default response style: transcript copy with OSC 52 fallback, per-turn change summaries with
