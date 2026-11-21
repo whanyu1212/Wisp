@@ -236,12 +236,14 @@ for line in sys.stdin:
                 in b"".join(re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", output).split())
             ):
                 # Paging before refresh completion can be rejected as stale input.
-                # The queue command adds a row; codemode is now on the next help page.
-                os.write(terminal_fd, b"\x1b[6~")
+                # The queue command adds a row and the top bar takes one, so codemode
+                # sits a row past the next help page.
+                os.write(terminal_fd, b"\x1b[6~\x1b[B")
                 phase = "help scrolled"
             elif (
                 phase == "help scrolled"
-                and b"/codemode" in output
+                # Differential paints can leave the unchanged leading slash out.
+                and b"codemode [automatic" in output
                 and b"/compact" in output
                 and screen_shows(output, "Esc close")
             ):

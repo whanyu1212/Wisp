@@ -216,6 +216,7 @@ pub fn render(
     let mut composer_layout_cache = ComposerLayoutCache::default();
     render_interactive(
         frame,
+        frame.area(),
         state,
         viewport,
         row_cache,
@@ -247,6 +248,7 @@ pub fn render(
 #[allow(clippy::too_many_arguments)]
 pub fn render_interactive(
     frame: &mut Frame<'_>,
+    area: Rect,
     state: &UiState,
     viewport: &mut TranscriptViewport,
     row_cache: &mut TranscriptRowCache,
@@ -267,19 +269,25 @@ pub fn render_interactive(
     pointer: Option<(u16, u16)>,
     side_panel: Option<&SidePanel>,
 ) -> mouse::Conversation {
-    let area = frame.area();
     row_cache.painted_images.clear();
     row_cache.painted_links.clear();
-    frame.render_widget(Block::default().style(palette.base()), area);
     if !decision_context_visible(area) {
+        // The notice takes the whole frame, including the top bar's row above `area`,
+        // and names the frame size that leaves `area` its minimum.
+        let whole = frame.area();
+        let minimum_height = MIN_TERMINAL_HEIGHT + whole.height.saturating_sub(area.height);
+        frame.render_widget(Block::default().style(palette.base()), whole);
         frame.render_widget(
-            Paragraph::new("Wisp: terminal too small (minimum 30x8)")
-                .alignment(Alignment::Center)
-                .wrap(Wrap { trim: true }),
-            area,
+            Paragraph::new(format!(
+                "Wisp: terminal too small (minimum {MIN_TERMINAL_WIDTH}x{minimum_height})"
+            ))
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+            whole,
         );
         return mouse::Conversation::default();
     }
+    frame.render_widget(Block::default().style(palette.base()), area);
 
     // A wide terminal docks the side panel at its right; the conversation lays out in
     // the column beside it.
@@ -423,7 +431,7 @@ pub fn render_interactive(
             activity_frame,
             motion.mode,
             timers,
-            column.width < frame.area().width,
+            panel_docked,
             pointer,
             palette,
         )
@@ -5045,6 +5053,7 @@ mod tests {
             .draw(|frame| {
                 render_interactive(
                     frame,
+                    frame.area(),
                     state,
                     &mut viewport,
                     &mut row_cache,
@@ -5091,6 +5100,7 @@ mod tests {
             .draw(|frame| {
                 render_interactive(
                     frame,
+                    frame.area(),
                     state,
                     &mut viewport,
                     &mut row_cache,
@@ -5510,6 +5520,7 @@ mod tests {
             .draw(|frame| {
                 conversation = render_interactive(
                     frame,
+                    frame.area(),
                     &state,
                     &mut TranscriptViewport::default(),
                     &mut TranscriptRowCache::default(),
@@ -5942,6 +5953,7 @@ mod tests {
             .draw(|frame| {
                 render_interactive(
                     frame,
+                    frame.area(),
                     &state,
                     &mut TranscriptViewport::default(),
                     &mut TranscriptRowCache::default(),
@@ -6784,6 +6796,7 @@ mod tests {
             .draw(|frame| {
                 render_interactive(
                     frame,
+                    frame.area(),
                     &state,
                     &mut viewport,
                     &mut row_cache,
@@ -7039,6 +7052,7 @@ mod tests {
                 .draw(|frame| {
                     render_interactive(
                         frame,
+                        frame.area(),
                         state,
                         &mut viewport,
                         &mut row_cache,
@@ -7136,6 +7150,7 @@ mod tests {
             .draw(|frame| {
                 render_interactive(
                     frame,
+                    frame.area(),
                     &state,
                     &mut viewport,
                     &mut row_cache,
@@ -8408,6 +8423,7 @@ mod tests {
             .draw(|frame| {
                 render_interactive(
                     frame,
+                    frame.area(),
                     &state,
                     &mut TranscriptViewport::default(),
                     &mut TranscriptRowCache::default(),
@@ -8637,6 +8653,7 @@ mod tests {
             .draw(|frame| {
                 render_interactive(
                     frame,
+                    frame.area(),
                     &state,
                     &mut browse_viewport,
                     &mut browse_cache,
@@ -8700,6 +8717,7 @@ mod tests {
             .draw(|frame| {
                 render_interactive(
                     frame,
+                    frame.area(),
                     &state,
                     &mut viewport,
                     &mut row_cache,
@@ -9410,6 +9428,7 @@ mod tests {
             .draw(|frame| {
                 render_interactive(
                     frame,
+                    frame.area(),
                     &state,
                     &mut TranscriptViewport::default(),
                     &mut cache,
@@ -9811,6 +9830,7 @@ mod tests {
                 .draw(|frame| {
                     render_interactive(
                         frame,
+                        frame.area(),
                         state,
                         &mut viewport,
                         &mut cache,

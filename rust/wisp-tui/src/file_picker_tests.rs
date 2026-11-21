@@ -369,7 +369,7 @@ async fn short_multiline_draft_and_empty_or_limited_results_keep_controls_reacha
         truncated: true,
     });
     load(&mut ui, &writer, &id, empty).await;
-    assert!(draw(&mut ui, 30, 8).contains("limited"));
+    assert!(draw(&mut ui, 30, 9).contains("limited"));
     ui.handle_input(key(KeyCode::Enter), &writer, 8192)
         .await
         .unwrap();
@@ -389,7 +389,7 @@ async fn short_multiline_draft_and_empty_or_limited_results_keep_controls_reacha
         snapshot(&[("file.rs", ProjectFileKind::File)]),
     )
     .await;
-    assert!(draw(&mut ui, 30, 8).contains("@ files: fuzzy"));
+    assert!(draw(&mut ui, 30, 9).contains("@ files: fuzzy"));
     assert!(ui.file_picker.rendered.is_some());
     ui.handle_input(key(KeyCode::Enter), &writer, 8192)
         .await
@@ -611,7 +611,7 @@ async fn popup_keeps_transcript_geometry_and_remains_reachable_at_short_sizes() 
     .await
     .unwrap();
     assert!(!ui.transcript_viewport.follows_tail());
-    for (width, height) in [(80, 24), (30, 8), (120, 40)] {
+    for (width, height) in [(80, 24), (30, 9), (120, 40)] {
         assert!(draw(&mut ui, width, height).contains("@ files: fuzzy"));
         assert!(ui.file_picker.rendered.is_some());
     }

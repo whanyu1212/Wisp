@@ -51,6 +51,9 @@ mod mouse;
 mod mouse_tests;
 #[cfg(test)]
 mod overlay_tests;
+mod pointer_shape;
+#[cfg(test)]
+mod pointer_shape_tests;
 mod process;
 #[cfg(test)]
 mod process_peek_tests;
@@ -86,6 +89,9 @@ mod theme_tests;
 mod tool_cards;
 mod tool_detail;
 mod tool_presentation;
+mod top_bar;
+#[cfg(test)]
+mod top_bar_tests;
 mod transcript;
 #[cfg(feature = "transcript-benchmark")]
 pub mod transcript_benchmark;
@@ -769,6 +775,9 @@ struct LiveUi {
     pointer: Option<(u16, u16)>,
     /// Whether the last painted frame drew `[stop]` in its hovered state.
     stop_hovered: bool,
+    /// The pointer shape sent to the terminal, which is a resize arrow over the docked
+    /// side panel's border and while dragging it.
+    pointer_shape: pointer_shape::PointerShapeState,
     /// A drag selection over the transcript and the last frame painted while it was active,
     /// which a release copies from.
     transcript_selection: Option<(mouse::Selection, Option<ratatui::buffer::Buffer>)>,
@@ -866,6 +875,7 @@ impl Default for LiveUi {
             mouse_frame: None,
             pointer: None,
             stop_hovered: false,
+            pointer_shape: pointer_shape::PointerShapeState::default(),
             transcript_selection: None,
             transcript_viewport: TranscriptViewport::default(),
             transcript_row_cache: TranscriptRowCache::default(),
@@ -2152,6 +2162,7 @@ impl LiveUi {
         let mut painted = mouse::Frame {
             layer: self.mouse_layer(),
             conversation: mouse::Conversation::default(),
+            panel_tabs: Vec::new(),
             panel_border: None,
             popup: None,
             rows: mouse::Rows::default(),
@@ -2341,9 +2352,13 @@ impl LiveUi {
                     )
                 })
                 .flatten();
+            // The top bar keeps the frame's first row in every layout; the conversation,
+            // the side panel, and popups lay out in the body beneath it.
+            let (top_bar_area, body) = top_bar::split(frame.area());
             // Popup focus does not change the background's geometry or scroll intent.
             painted.conversation = ui::render_interactive(
                 frame,
+                body,
                 &self.state,
                 &mut self.transcript_viewport,
                 &mut self.transcript_row_cache,
@@ -2375,6 +2390,11 @@ impl LiveUi {
                 pointer,
                 Some(&self.side_panel),
             );
+            // Below the minimum size a notice takes the whole frame instead.
+            if ui::decision_context_visible(body) {
+                painted.panel_tabs =
+                    top_bar::render(frame, top_bar_area, &self.state, &self.side_panel, palette);
+            }
             *painted_links.borrow_mut() =
                 std::mem::take(&mut self.transcript_row_cache.painted_links);
             *painted_images.borrow_mut() =
@@ -2383,11 +2403,11 @@ impl LiveUi {
             // a docked side panel; centred popups still centre on the whole screen.
             let panel_docked = self.side_panel.docked();
             let column = if panel_docked {
-                let (column, panel) = self.side_panel.split(frame.area());
+                let (column, panel) = self.side_panel.split(body);
                 painted.panel_border = Some(side_panel::border_hit_area(panel));
                 column
             } else {
-                frame.area()
+                body
             };
             // A selection belongs to the transcript layout it started in. An approval panel,
             // completion rows, help, or a popup changes or covers that layout, and highlighting
@@ -2409,7 +2429,7 @@ impl LiveUi {
                 *screen = Some(frame.buffer_mut().clone());
             }
             if let Some(help) = &mut self.key_help {
-                if let Some(area) = ui::overlay_area(frame.area()) {
+                if let Some(area) = ui::overlay_area(body) {
                     painted.popup = Some(area);
                     popup_rect.set(Some(area));
                     painted.dialog_controls =
@@ -2419,7 +2439,7 @@ impl LiveUi {
             }
             // A confirmation whose details did not fit is drawn with a hint, but
             // is not armed: nothing may be confirmed while partly hidden.
-            if ui::decision_context_visible(frame.area())
+            if ui::decision_context_visible(body)
                 && ui::decision_panel_complete(&self.state, column, self.notice.as_deref())
             {
                 rendered_decision_context = self.current_decision_context();
@@ -2519,10 +2539,10 @@ impl LiveUi {
                 // composer, so the prompt stays in view — unless expanded, which opens
                 // a large centered overlay for both Work and Browser modes.
                 None if overlay == Some(OverlayKind::SidePanel) && self.side_panel.expanded() => {
-                    Some(side_panel::expanded_area(frame.area()))
+                    Some(side_panel::expanded_area(body))
                 }
                 None if overlay == Some(OverlayKind::SidePanel) && self.side_panel.docked() => {
-                    Some(self.side_panel.split(frame.area()).1)
+                    Some(self.side_panel.split(body).1)
                 }
                 None if overlay == Some(OverlayKind::SidePanel) => ui::docked_popup_area(
                     column,
@@ -2533,7 +2553,7 @@ impl LiveUi {
                     panel_docked,
                 )
                 .map(side_panel::overlay_area),
-                None => ui::overlay_area(frame.area()),
+                None => ui::overlay_area(body),
             };
             let Some((kind, area)) = overlay.zip(area) else {
                 return;
@@ -2736,6 +2756,18 @@ impl LiveUi {
                 .is_some_and(|area| area.contains((column, row).into()))
         });
         self.mouse_frame = self.mouse_enabled.then_some(painted);
+        // After the new mouse frame, so a popup now covering the border, a closed panel,
+        // or a resized terminal never leaves the resize arrow behind.
+        let wanted_shape = self.wanted_pointer_shape();
+        if self.pointer_shape.needs(wanted_shape) {
+            terminal
+                .backend_mut()
+                .write_control(wanted_shape.sequence())?;
+            self.pointer_shape.record(wanted_shape);
+            terminal::set_pointer_shape_set(
+                self.pointer_shape.sent() != pointer_shape::PointerShape::Default,
+            );
+        }
         self.completion.invalidate();
         if let Some(name) = rendered_completion {
             self.completion.mark_rendered(name);
@@ -3016,6 +3048,14 @@ impl LiveUi {
                         .is_some_and(|area| area.contains((column, row).into()))
             });
         if hovered != self.stop_hovered {
+            self.render_pending = true;
+        }
+    }
+
+    /// Requests a paint when the pointer's shape should change; the paint writes it
+    /// once the terminal is at hand.
+    fn request_pointer_shape(&mut self) {
+        if self.pointer_shape.needs(self.wanted_pointer_shape()) {
             self.render_pending = true;
         }
     }
@@ -4172,7 +4212,7 @@ impl LiveUi {
                 }
                 self.exit_browser_takeover();
                 self.clear_browser_address();
-                self.side_panel.show_browser();
+                self.side_panel.show(side_panel::PanelMode::Browser);
                 self.render_pending = true;
                 self.dispatch(
                     UiAction::BrowserInteract(BrowserInteractRequest::LiveOpen { url }),
@@ -5466,6 +5506,7 @@ impl LiveUi {
                 if self.stop_hovered || ended_resize {
                     self.render_pending = true;
                 }
+                self.request_pointer_shape();
             }
             return Ok(LoopControl::Continue);
         }
@@ -5473,8 +5514,14 @@ impl LiveUi {
             if event.kind == MouseEventKind::Moved {
                 if self.mouse_enabled && mouse::supported(*event) {
                     self.update_pointer_hover(event.column, event.row);
+                    self.request_pointer_shape();
                 }
                 return Ok(LoopControl::Continue);
+            }
+            // A drag or release can end away from the border, where the pointer must
+            // lose the resize arrow.
+            if self.mouse_enabled && mouse::supported(*event) {
+                self.pointer = Some((event.column, event.row));
             }
             if matches!(
                 event.kind,
@@ -5491,6 +5538,7 @@ impl LiveUi {
                 } else {
                     self.continue_transcript_selection(*event);
                 }
+                self.request_pointer_shape();
                 return Ok(LoopControl::Continue);
             }
             // Every press ends an earlier selection or panel resize, including presses that
@@ -5501,6 +5549,7 @@ impl LiveUi {
             if ended_selection || ended_resize {
                 self.render_pending = true;
             }
+            self.request_pointer_shape();
         }
         if matches!(&input, Input::Key(key) if key.code == KeyCode::Char('g') && key.modifiers == KeyModifiers::CONTROL)
         {
@@ -6426,7 +6475,7 @@ impl LiveUi {
     }
 
     fn open_and_enter_browser_takeover(&mut self) {
-        self.side_panel.show_browser();
+        self.side_panel.show(side_panel::PanelMode::Browser);
         self.try_enter_browser_takeover();
     }
 
@@ -7491,6 +7540,9 @@ where
                 motion_allowed,
                 hyperlinks: hyperlink::supported(std::env::var("TERM").ok().as_deref()),
                 image_protocol: terminal_images::ImageProtocol::from_env(color_depth, no_color),
+                pointer_shape: pointer_shape::PointerShapeState::new(pointer_shape::supported(
+                    |name| std::env::var(name).ok(),
+                )),
                 cell_size: terminal_images::CellSize::query_stdout(),
                 editor_command: external_editor::editor_command(|name| std::env::var(name).ok()),
                 input_gate: Some(input_gate),
@@ -8344,7 +8396,7 @@ mod tests {
         )
         .await
         .unwrap();
-        draw_model_test(&mut ui, 30, 8);
+        draw_model_test(&mut ui, 30, 9);
         assert!(ui.rendered_model_picker);
         draw_model_test(&mut ui, 29, 7);
         assert!(!ui.rendered_model_picker);
@@ -10985,7 +11037,7 @@ mod tests {
             render_pending: false,
             ..LiveUi::default()
         };
-        let mut terminal = Terminal::new(TestBackend::new(30, 8)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(30, 9)).unwrap();
         live_ui
             .draw(
                 &mut terminal,

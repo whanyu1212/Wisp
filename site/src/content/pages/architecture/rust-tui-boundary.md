@@ -112,7 +112,7 @@ remain in effect; keeping the background current does not require continuous idl
 Approval/trust states dismiss ordinary inspection views and suppress retained connection/session
 views until the decision settles. Backend updates continue while a view is suppressed. Rendering
 readiness is invalidated on actionable catalog changes, navigation, resize, and decision transitions,
-so a hidden or replaced choice cannot be activated before it is drawn. At 30×8 a popup can occupy
+so a hidden or replaced choice cannot be activated before it is drawn. At 30×9 a popup can occupy
 the terminal; the compact decision layout below 11 rows retains its existing accessibility priority.
 
 `/help` lists commands implemented by the Rust frontend, using the backend's descriptions and

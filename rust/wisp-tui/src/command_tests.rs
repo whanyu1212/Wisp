@@ -504,7 +504,7 @@ async fn permission_gate_keys_send_only_the_displayed_scopes() {
                 .unwrap();
             assert!(receiver.try_recv().is_err());
         }
-        let painted = draw(&mut ui, 30, 8);
+        let painted = draw(&mut ui, 30, 9);
         for label in [
             "1  Allow once",
             "2  Allow for session",
@@ -788,7 +788,7 @@ async fn context_during_prompt_is_cached_and_dismissal_preserves_ownership() {
         .unwrap();
     assert!(ui.context_view.is_some());
     assert!(receiver.try_recv().is_err());
-    assert!(draw(&mut ui, 30, 8).contains("Context"));
+    assert!(draw(&mut ui, 30, 9).contains("Context"));
     ui.editor.insert_paste("preserved draft");
     ui.handle_input(
         Input::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
@@ -961,7 +961,7 @@ async fn init_unavailable_or_busy_never_dispatches_and_preserves_the_draft() {
 async fn partial_enter_completes_then_exact_enter_opens_help() {
     let (writer, mut receiver) = mpsc::channel(8);
     let mut ui = ui("/he", false);
-    assert!(draw(&mut ui, 30, 8).contains("/help"));
+    assert!(draw(&mut ui, 30, 9).contains("/help"));
     ui.handle_input(key(KeyCode::Enter), &writer, 8192)
         .await
         .unwrap();
@@ -973,7 +973,7 @@ async fn partial_enter_completes_then_exact_enter_opens_help() {
         .unwrap();
     assert!(ui.command_help.is_some());
     assert_eq!(frame(&mut receiver)["type"], "get_commands");
-    assert!(draw(&mut ui, 30, 8).contains("Commands"));
+    assert!(draw(&mut ui, 30, 9).contains("Commands"));
     ui.handle_input(key(KeyCode::Esc), &writer, 8192)
         .await
         .unwrap();
@@ -1006,7 +1006,7 @@ async fn partial_enter_completes_then_exact_enter_opens_help() {
 async fn hidden_or_changed_completion_cannot_fill_and_escape_dismisses_only_menu() {
     let (writer, mut receiver) = mpsc::channel(8);
     let mut ui = ui("/mo", true);
-    draw(&mut ui, 30, 8);
+    draw(&mut ui, 30, 9);
     ui.handle_input(Input::Redraw, &writer, 8192).await.unwrap();
     ui.handle_input(key(KeyCode::Enter), &writer, 8192)
         .await
@@ -1017,7 +1017,7 @@ async fn hidden_or_changed_completion_cannot_fill_and_escape_dismisses_only_menu
         .await
         .unwrap();
     assert_eq!(ui.editor.text(), "/mo");
-    draw(&mut ui, 30, 8);
+    draw(&mut ui, 30, 9);
     ui.apply_effects(vec![UiEffect::CommandCatalogChanged], &writer, 8192)
         .await
         .unwrap();

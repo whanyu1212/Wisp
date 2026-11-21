@@ -270,7 +270,7 @@ async fn docked_auto_switch_manual_tab_and_session_reset() {
     // Warm the docked width before the first browser event arrives.
     let (_buf, initial) = draw_text(&mut ui, 160, 36);
     assert_eq!(ui.side_panel.mode(), PanelMode::LiveWork);
-    assert!(!initial.contains("Work · Browser"));
+    assert!(!initial.contains("[Expand]"));
 
     // First image-bearing frame auto-switches docked side panel to Browser.
     push_backend_event(
@@ -287,32 +287,20 @@ async fn docked_auto_switch_manual_tab_and_session_reset() {
 
     let (buf, screen) = draw_text(&mut ui, 160, 36);
     assert_eq!(ui.side_panel.mode(), PanelMode::Browser);
-    assert!(screen.contains("Work · Browser"), "{screen}");
+    assert!(screen.contains("[Expand]"), "{screen}");
     assert!(screen.contains("Example Page"), "{screen}");
     assert!(screen.contains("12:34:56Z"), "{screen}");
     assert!(screen.contains("https://example.com/app"), "{screen}");
     assert!(screen.contains("1280×720 · playwright"), "{screen}");
-    let panel_rect = ui.side_panel.split(buf.area).1;
+    let panel_rect = ui.side_panel.split(top_bar::split(buf.area).1).1;
     let has_pixels = (panel_rect.top()..panel_rect.bottom())
         .any(|y| (panel_rect.left()..panel_rect.right()).any(|x| buf[(x, y)].symbol() == "▀"));
     assert!(has_pixels, "expected half-block viewport in side panel");
 
-    // Click the "Work" tab on the Work · Browser row inside the panel body to return to LiveWork.
-    let work_pos = (panel_rect.top()..panel_rect.bottom())
-        .find_map(|y| {
-            let row_text: String = (panel_rect.left()..panel_rect.right())
-                .map(|x| buf[(x, y)].symbol())
-                .collect();
-            row_text
-                .find("Work · Browser")
-                .map(|dx| (panel_rect.left() + dx as u16, y))
-        })
-        .expect("Work · Browser row in panel");
-    assert_eq!(
-        ui.side_panel.click(work_pos.0, work_pos.1),
-        side_panel::OverlayKey::Moved
-    );
+    // The top bar's "Work" tab returns the docked panel to LiveWork.
+    ui.side_panel.click_tab(PanelMode::LiveWork);
     assert_eq!(ui.side_panel.mode(), PanelMode::LiveWork);
+    assert!(ui.side_panel.docked());
 
     // Subsequent frame updates respect the user's manual switch back to LiveWork.
     push_backend_event(
@@ -328,7 +316,7 @@ async fn docked_auto_switch_manual_tab_and_session_reset() {
     .await;
     let (_buf, live_screen) = draw_text(&mut ui, 160, 36);
     assert_eq!(ui.side_panel.mode(), PanelMode::LiveWork);
-    assert!(live_screen.contains("Work · Browser"), "{live_screen}");
+    assert!(live_screen.contains("[Expand]"), "{live_screen}");
     assert!(live_screen.contains("Browser Session"), "{live_screen}");
 
     // Workspace change clears browser state, returns to LiveWork, and re-arms first-frame auto-switch.
@@ -345,7 +333,7 @@ async fn docked_auto_switch_manual_tab_and_session_reset() {
     let (_buf, reset_screen) = draw_text(&mut ui, 160, 36);
     assert!(ui.state.browser_viewport.is_none());
     assert_eq!(ui.side_panel.mode(), PanelMode::LiveWork);
-    assert!(!reset_screen.contains("Work · Browser"), "{reset_screen}");
+    assert!(!reset_screen.contains("[Expand]"), "{reset_screen}");
 
     // Next session's first image frame auto-switches again.
     push_backend_event(
@@ -384,7 +372,7 @@ async fn pre_frame_browser_command_stays_open_and_toggles() {
     run_command(&mut ui, Command::Browser { interact: false }).await;
     let (_buf, toggled_back) = draw_text(&mut ui, 160, 36);
     assert_eq!(ui.side_panel.mode(), PanelMode::LiveWork);
-    assert!(!toggled_back.contains("Work · Browser"));
+    assert!(!toggled_back.contains("[Expand]"));
 }
 
 #[tokio::test]
@@ -421,8 +409,8 @@ async fn narrow_terminal_does_not_auto_pop_overlay_and_browser_command_opens_wit
         "expected unoccluded half-block preview inside SidePanel overlay"
     );
 
-    // Focus inside narrow `/browser` starts on the "Browser" tab (Enter stays in Browser),
-    // and Tab moves focus to "Work" where Enter switches back to LiveWork once painted.
+    // Enter in the narrow `/browser` overlay stays in Browser, and `b` switches the
+    // focused overlay to LiveWork once painted.
     send_input(
         &mut ui,
         Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -433,13 +421,7 @@ async fn narrow_terminal_does_not_auto_pop_overlay_and_browser_command_opens_wit
     let _ = draw_text(&mut ui, 100, 28);
     send_input(
         &mut ui,
-        Input::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-    )
-    .await;
-    let _ = draw_text(&mut ui, 100, 28);
-    send_input(
-        &mut ui,
-        Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        Input::Key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE)),
     )
     .await;
     assert_eq!(ui.side_panel.mode(), PanelMode::LiveWork);
@@ -1014,9 +996,9 @@ async fn browser_takeover_entry_chrome_and_auto_exits() {
     assert!(ui.browser_takeover_active());
     assert!(ui.notice.is_none());
     let (buf, screen) = draw_text(&mut ui, 160, 36);
-    assert!(screen.contains("Work · Browser · INTERACT"), "{screen}");
+    assert!(screen.contains("INTERACT"), "{screen}");
     assert!(screen.contains("Esc exit · Click/Scroll"), "{screen}");
-    let panel_rect = ui.side_panel.split(buf.area).1;
+    let panel_rect = ui.side_panel.split(top_bar::split(buf.area).1).1;
     assert_eq!(buf[(panel_rect.x, panel_rect.y)].fg, ui.palette().primary);
 
     // Esc exits takeover without leaving Browser mode.
@@ -1041,10 +1023,7 @@ async fn browser_takeover_entry_chrome_and_auto_exits() {
     .await;
     assert!(ui.browser_takeover_active());
     let (_ov_buf, ov_screen) = draw_text(&mut ui, 100, 28);
-    assert!(
-        ov_screen.contains("Work · Browser · INTERACT"),
-        "{ov_screen}"
-    );
+    assert!(ov_screen.contains("INTERACT"), "{ov_screen}");
     send_input(
         &mut ui,
         Input::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),

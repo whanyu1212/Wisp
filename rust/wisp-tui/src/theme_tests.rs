@@ -797,7 +797,7 @@ async fn command_and_picker_commit_without_rpc_and_selection_survives_reload() {
     ui.handle_input(key(KeyCode::Enter), &writer, 8192)
         .await
         .unwrap();
-    draw(&mut ui, 30, 8);
+    draw(&mut ui, 30, 9);
     ui.handle_input(key(KeyCode::End), &writer, 8192)
         .await
         .unwrap();
@@ -805,7 +805,7 @@ async fn command_and_picker_commit_without_rpc_and_selection_survives_reload() {
         .await
         .unwrap();
     assert_eq!(ui.theme.active.slug, "wave", "unpainted selection");
-    assert!(text(&draw(&mut ui, 30, 8)).contains("Dawn"));
+    assert!(text(&draw(&mut ui, 30, 9)).contains("Dawn"));
     ui.handle_input(key(KeyCode::Enter), &writer, 8192)
         .await
         .unwrap();

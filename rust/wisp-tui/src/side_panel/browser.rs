@@ -1,4 +1,4 @@
-//! Browser viewport view and mode switcher rendered inside [`super::SidePanel`].
+//! Browser viewport view and panel controls rendered inside [`super::SidePanel`].
 
 use super::*;
 use crate::terminal_images::{
@@ -149,78 +149,45 @@ fn address_text(
     (spans, Some(cursor as u16))
 }
 
-/// Draw the `Work | Browser` tab switcher and right-aligned `Expand` / `Restore` toggle at row 0.
-pub(super) fn push_mode_tabs(
+/// Draw the panel's controls row: `INTERACT` while the page takes input, and the
+/// `[Expand]` / `[Restore]` toggle at the right. A row with neither is left out.
+pub(super) fn push_controls(
     rows: &mut PanelRows,
-    active: PanelMode,
     interacting: bool,
     expanded: bool,
     width: usize,
     palette: Palette,
 ) {
-    let tabs = [
-        ("Work", PanelMode::LiveWork),
-        ("Browser", PanelMode::Browser),
-    ];
-    let muted = Style::default().fg(palette.muted);
-    let active_style = Style::default()
-        .fg(palette.primary)
-        .add_modifier(Modifier::BOLD);
-    let sep = " · ";
-
     let mut spans = Vec::new();
-    let mut hits: Vec<(u16, u16, PanelAction)> = Vec::new();
     let mut col = 0usize;
-
-    for (index, (label, mode)) in tabs.into_iter().enumerate() {
-        if index > 0 {
-            if col + sep.width() >= width {
-                break;
-            }
-            spans.push(Span::styled(sep, muted));
-            col += sep.width();
-        }
-        let room = width.saturating_sub(col);
-        if room == 0 {
-            break;
-        }
-        let clipped = ui::clip_columns(label, room);
-        let span_width = clipped.width();
-        if span_width == 0 {
-            break;
-        }
-        let start = u16::try_from(col).unwrap_or(u16::MAX);
-        let end = u16::try_from(col + span_width).unwrap_or(u16::MAX);
-        let style = if mode == active { active_style } else { muted };
-        spans.push(Span::styled(clipped, style));
-        hits.push((start, end, PanelAction::SwitchMode(mode)));
-        col += span_width;
+    if interacting {
+        let label = ui::clip_columns("INTERACT", width);
+        col = label.width();
+        spans.push(Span::styled(
+            label,
+            Style::default()
+                .fg(palette.primary)
+                .add_modifier(Modifier::BOLD),
+        ));
     }
-
-    if interacting && active == PanelMode::Browser && col + sep.width() < width {
-        spans.push(Span::styled(sep, muted));
-        col += sep.width();
-        let clipped = ui::clip_columns("INTERACT", width.saturating_sub(col));
-        if !clipped.is_empty() {
-            col += clipped.width();
-            spans.push(Span::styled(clipped, active_style));
-        }
-    }
-
     let toggle_label = if expanded { "[Restore]" } else { "[Expand]" };
     let toggle_width = toggle_label.width();
-    if col + 1 + toggle_width <= width {
-        let gap = width - col - toggle_width;
-        spans.push(Span::raw(" ".repeat(gap)));
+    let toggle = (col + usize::from(col > 0) + toggle_width <= width).then(|| {
+        spans.push(Span::raw(" ".repeat(width - col - toggle_width)));
+        spans.push(Span::styled(
+            toggle_label,
+            Style::default().fg(palette.muted),
+        ));
         let start = u16::try_from(width - toggle_width).unwrap_or(u16::MAX);
         let end = u16::try_from(width).unwrap_or(u16::MAX);
-        spans.push(Span::styled(toggle_label, muted));
-        hits.push((start, end, PanelAction::ToggleExpand));
+        (start, end)
+    });
+    if spans.is_empty() {
+        return;
     }
-
-    rows.section(Section::ModeTabs, vec![Line::from(spans)]);
-    for (start, end, action) in hits {
-        rows.action_range(0, start, end, action);
+    rows.section(Section::Controls, vec![Line::from(spans)]);
+    if let Some((start, end)) = toggle {
+        rows.action_range(0, start, end, PanelAction::ToggleExpand);
     }
 }
 

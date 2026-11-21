@@ -735,6 +735,8 @@ pub(super) async fn run_editor<B: FrameBackend>(
         .resume(suspended)
         .and_then(|()| crate::terminal::repaint_all(terminal));
     ui.image_placements.invalidate();
+    // Suspending reset the pointer, so hovering the border must send its shape again.
+    ui.pointer_shape.forget();
     if let Some(gate) = &gate {
         gate.resume();
     }

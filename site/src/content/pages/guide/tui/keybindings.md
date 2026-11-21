@@ -123,7 +123,7 @@ custom application bindings. A bound theme toggle stays global except during the
 Ctrl+G opens read-only help for the current workflow, with resolved keys; Ctrl+G or Escape closes it
 without closing the underlying workflow. Ctrl+C keeps that workflow's cancellation behavior.
 Approval/trust requests preempt help, and positive decisions require the request to be visible.
-Scroll help with arrows, PageUp/PageDown, Home/End, including at 30×8.
+Scroll help with arrows, PageUp/PageDown, Home/End, including at 30×9.
 
 Only user settings supply this preference; project files are ignored even after trust. There is no
 public environment or CLI keybinding override. The launcher resolves user settings once and passes a
