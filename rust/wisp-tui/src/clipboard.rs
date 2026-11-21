@@ -78,15 +78,7 @@ impl ClipboardBackend for SystemClipboard {
             .native()
             .and_then(|clipboard| clipboard.set_text(text))
             .is_ok();
-        // OSC52 keeps copy useful in remote terminals where a local desktop
-        // clipboard is unavailable. Like Textual, emit it even after a native
-        // write so the terminal hosting an SSH session can also receive it.
-        let terminal_succeeded = write_osc52(&mut io::stdout().lock(), text).is_ok();
-        if native_succeeded || terminal_succeeded {
-            Ok(())
-        } else {
-            Err(ClipboardError::CopyFailed)
-        }
+        copy_with_osc52(native_succeeded, &mut io::stdout().lock(), text)
     }
 
     fn paste(&mut self) -> Result<String, ClipboardError> {
@@ -105,6 +97,21 @@ impl ClipboardBackend for SystemClipboard {
             height: image.height,
             rgba: image.bytes.into_owned(),
         })
+    }
+}
+
+/// Emit OSC 52 alongside a native write, succeeding whenever either path succeeds so
+/// copying works both locally and over SSH where no desktop clipboard exists.
+fn copy_with_osc52(
+    native_succeeded: bool,
+    writer: &mut impl Write,
+    text: &str,
+) -> Result<(), ClipboardError> {
+    let terminal_succeeded = write_osc52(writer, text).is_ok();
+    if native_succeeded || terminal_succeeded {
+        Ok(())
+    } else {
+        Err(ClipboardError::CopyFailed)
     }
 }
 
@@ -184,6 +191,29 @@ mod tests {
         let mut output = Vec::new();
         write_osc52(&mut output, "Wisp 🙂\n").unwrap();
         assert_eq!(output, b"\x1b]52;c;V2lzcCDwn5mCCg==\x07");
+    }
+
+    #[test]
+    fn osc52_fallback_succeeds_when_native_clipboard_is_unavailable() {
+        struct FailingWriter;
+        impl Write for FailingWriter {
+            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed"))
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut output = Vec::new();
+        copy_with_osc52(false, &mut output, "hello over ssh").unwrap();
+        assert_eq!(output, b"\x1b]52;c;aGVsbG8gb3ZlciBzc2g=\x07");
+
+        assert_eq!(
+            copy_with_osc52(false, &mut FailingWriter, "hello"),
+            Err(ClipboardError::CopyFailed)
+        );
+        assert_eq!(copy_with_osc52(true, &mut FailingWriter, "hello"), Ok(()));
     }
 
     #[test]

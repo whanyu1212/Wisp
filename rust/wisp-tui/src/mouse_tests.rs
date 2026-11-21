@@ -2248,7 +2248,9 @@ async fn keyboard_browse_distinguishes_group_header_from_first_member() {
                 "Ran 2 commands"
             }
             BrowseTarget::Entry(_) => "echo one",
-            BrowseTarget::Output(_) => unreachable!("this fixture has no folded output"),
+            BrowseTarget::Output(_) | BrowseTarget::Message(_) | BrowseTarget::CodeBlock { .. } => {
+                unreachable!("this fixture has only tool cards")
+            }
         };
         let selected_line = row_text(&buffer, cell_of(&buffer, text).1);
         assert!(selected_line.contains("(click to"), "{selected_line}");
@@ -2355,7 +2357,7 @@ async fn scrolled_group_header_stays_on_top() {
         );
     }
     draw(&mut ui, 80, 12);
-    for key in [KeyCode::F(6), KeyCode::Right] {
+    for key in [KeyCode::F(6), KeyCode::BackTab, KeyCode::Right] {
         ui.handle_input(
             Input::Key(KeyEvent::new(key, KeyModifiers::NONE)),
             &writer,
