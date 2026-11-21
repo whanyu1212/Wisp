@@ -64,7 +64,7 @@ const hasToc = toc.length > 0 && page.layout !== "home";
         />
       </>
     )}
-    <title>{page.title === 'Wisp' ? 'Wisp — terminal coding agent in Python and Rust' : `${page.title} · Wisp`}</title>
+    <title>{page.title === 'Wisp' ? 'Wisp — personal terminal coding agent in Python and Rust' : `${page.title} · Wisp`}</title>
     <link rel="canonical" href={new URL(href(page.route), Astro.site)} />
     {(!page.searchable || compatibility) && (
       <meta name="robots" content="noindex" />
@@ -216,7 +216,9 @@ const hasToc = toc.length > 0 && page.layout !== "home";
       {hasToc && <TableOfContents headings={toc} />}
     </div>
     <footer class="site-footer">
-      <span>One shared runtime. TUI · CLI · RPC · Python SDK.</span>
+      <span>
+        Personal software in Python &amp; Rust · TUI · CLI · RPC · Python SDK.
+      </span>
       <a href={href(changelog.route)}>Changelog</a>
       <a href={href("print.html")}>Print documentation</a>
       <a

@@ -9,44 +9,48 @@ const groups = navigation(
 );
 const introductions: Record<string, { title: string; summary: string }> = {
   using: {
-    title: "Start with your repository",
+    title: "Start using Wisp",
     summary:
-      "Install Wisp, connect a provider, and learn the interactive terminal and live controls.",
+      "Install Wisp, connect a provider, and get comfortable with the terminal UI and live controls.",
   },
   reference: {
-    title: "Find the exact contract",
+    title: "Look up the knobs & APIs",
     summary:
-      "Look up CLI flags, configuration precedence, environment variables, and the Python SDK.",
+      "CLI flags, configuration precedence, environment variables, and the Python SDK in one place.",
   },
   learn: {
     title: "Build a coding agent",
     summary:
-      "Follow runnable chapters from a minimal model-tool loop to controlled side effects.",
+      "Follow runnable chapters from a tiny model-tool loop to controlled side effects—written from what I learned building Wisp.",
   },
 };
 ---
 
-<div class="home-intro">
+<section class="home-intro" aria-labelledby="wisp">
   <div class="home-hero-copy">
-    <div class="eyebrow">Python &amp; Rust · personal software</div>
+    <div class="eyebrow">Personal software · Python &amp; Rust · MIT</div>
     <h1 id="wisp" class="display-title">
       Wisp
     </h1>
     <p class="lede">
-      My personal terminal coding agent and testbed for agent runtime design,
-      built in Python and Rust to explore agent engineering from the loop up.
+      A terminal coding agent I build for daily work—and for the sheer fun of
+      tinkering with agent runtimes from the loop up. Written in Python and
+      Rust, shared openly to run, read, or build on.
     </p>
     <div class="hero-actions">
       <a class="primary" href={href("guide/quickstart.html")}>
-        Start using Wisp →
+        Try Wisp →
       </a>
-      <a class="secondary-action" href={href("guide/index.html")}>
-        Read the guide
+      <a class="secondary-action" href={href("crafting-agents/index.html")}>
+        Build an agent from scratch
       </a>
     </div>
   </div>
   <section class="home-install" aria-labelledby="install-wisp">
-    <h2 id="install-wisp">Install Wisp</h2>
+    <div class="home-install-head">
+      <h2 id="install-wisp">Install Wisp</h2>
+      <a href={href("guide/installation.html")}>Other installations →</a>
+    </div>
     <Code
       code={"uv tool install --python 3.12 wisp-ai\ncd path/to/project\nwisp"}
       lang="bash"
@@ -55,21 +59,119 @@ const introductions: Record<string, { title: string; summary: string }> = {
       themes={{ light: "github-light-high-contrast", dark: "github-dark" }}
     />
     <p class="install-note">
-      Python 3.11+ supported; 3.12 recommended for installation. Native TUI
-      wheels: macOS arm64 and Linux x86_64 (glibc 2.28+).{" "}
-      <a href={href("guide/installation.html")}>Other installations →</a>
+      Python 3.11+ supported; 3.12 recommended for installation. Prebuilt native
+      TUI wheels: macOS arm64 and Linux x86_64 (glibc 2.28+).
     </p>
   </section>
-</div>
+</section>
+
 <div class="home-showcase">
   <TuiCapture
     capture="sessionWelcome"
     eager
-    sizes="(max-width: 760px) calc(100vw - 40px), (max-width: 1096px) calc(100vw - 56px), 1040px"
+    sizes="(max-width: 760px) calc(100vw - 40px), (max-width: 936px) calc(100vw - 56px), 880px"
   />
 </div>
+
+<section class="home-story" aria-labelledby="why-wisp">
+  <div class="home-story-body">
+    <div class="eyebrow">Why I build this</div>
+    <h2 id="why-wisp">Built for daily use, shared for the fun of it</h2>
+    <p>
+      I started Wisp because the best way to understand coding agents is to
+      build one you actually live in every day. The Python runtime, the native
+      Rust terminal UI, the safety boundaries, and the{" "}
+      <a href={href("crafting-agents/index.html")}>Crafting Coding Agents</a>{" "}
+      book all grew out of having a blast exploring how the pieces fit together.
+    </p>
+    <p>
+      Because it is personal software, it evolves freely without much ceremony.
+      Everything is{" "}
+      <a href="https://github.com/whanyu1212/Wisp">MIT-licensed on GitHub</a>
+      —take it for a spin, read the internals, borrow an idea, or fork it into
+      something of your own.
+    </p>
+  </div>
+  <dl class="home-highlights">
+    <div>
+      <dt>One shared runtime</dt>
+      <dd>
+        The Rust TUI, print CLI, JSONL RPC, and Python SDK all drive the same
+        typed engine and append-only session log.
+      </dd>
+    </div>
+    <div>
+      <dt>A runnable book alongside the code</dt>
+      <dd>
+        Every chapter in{" "}
+        <a href={href("crafting-agents/index.html")}>Crafting Coding Agents</a>{" "}
+        pairs a standalone Python checkpoint with Wisp's real trade-offs.
+      </dd>
+    </div>
+    <div>
+      <dt>Made to stay in sync</dt>
+      <dd>
+        Steer active runs, queue follow-ups, read inline diffs as edits land,
+        and keep project trust separate from per-call approval.
+      </dd>
+    </div>
+  </dl>
+</section>
+
+<section class="home-workflows" aria-labelledby="work-with-wisp">
+  <div class="home-section-head">
+    <div class="eyebrow">In action</div>
+    <h2 id="work-with-wisp">Inside a live session</h2>
+  </div>
+  <div class="workflow-rows">
+    <div class="workflow-row">
+      <div class="workflow-copy">
+        <h3>Follow every edit</h3>
+        <p>
+          Watch tool activity and inline diffs land as Wisp works, with context
+          usage, active skills, changed files, and recent turns right beside the
+          conversation.
+        </p>
+        <a class="workflow-link" href={href("guide/tui.html")}>
+          Explore the terminal UI →
+        </a>
+      </div>
+      <div class="workflow-media">
+        <TuiCapture
+          capture="sessionEditing"
+          compact
+          sizes="(max-width: 900px) calc(100vw - 40px), 660px"
+        />
+      </div>
+    </div>
+    <div class="workflow-row">
+      <div class="workflow-copy">
+        <h3>Approve on your terms</h3>
+        <p>
+          Project trust and tool approval stay separate decisions. Inspect any
+          proposed command and allow it once, grant a broader session scope, or
+          deny it before it runs.
+        </p>
+        <a class="workflow-link" href={href("guide/tools-and-safety.html")}>
+          Understand tools and safety →
+        </a>
+      </div>
+      <div class="workflow-media">
+        <TuiCapture
+          capture="sessionApproval"
+          compact
+          sizes="(max-width: 900px) calc(100vw - 40px), 660px"
+        />
+      </div>
+    </div>
+  </div>
+</section>
+
 <section class="home-section" aria-labelledby="choose-a-starting-point">
-  <h2 id="choose-a-starting-point">Choose a starting point</h2>
+  <div class="home-section-head">
+    <div class="eyebrow">Explore the docs</div>
+    <h2 id="choose-a-starting-point">Where to go next</h2>
+  </div>
   <div class="starting-points">
     {groups.slice(0, 3).map(
       (group, index) =>
@@ -85,47 +187,16 @@ const introductions: Record<string, { title: string; summary: string }> = {
     )}
   </div>
 </section>
-<section class="home-workflows" aria-labelledby="work-with-wisp">
-  <h2 id="work-with-wisp">See the work as it happens</h2>
-  <div class="workflow-grid">
-    <div class="workflow-card">
-      <h3>Approve deliberately</h3>
-      <p>
-        Project trust and tool approval are separate decisions. Inspect a
-        proposed command before it executes.
-      </p>
-      <TuiCapture capture="sessionApproval" />
-      <a class="workflow-link" href={href("guide/tools-and-safety.html")}>
-        Understand tools and safety →
-      </a>
-    </div>
-    <div class="workflow-card">
-      <h3>Follow every edit</h3>
-      <p>
-        Read tool activity and inline diffs as Wisp works, with context usage,
-        changed files, and recent turns in the side panel.
-      </p>
-      <TuiCapture capture="sessionEditing" />
-      <a class="workflow-link" href={href("guide/tui.html")}>
-        Explore the terminal UI →
-      </a>
-    </div>
-  </div>
-</section>
+
 <section class="home-content" aria-labelledby="start-reading">
-  <div>
-    <h2 id="start-reading">Start reading</h2>
+  <div class="home-content-copy">
+    <h2 id="start-reading">Keep poking around</h2>
     <p>
-      Use the terminal for interactive work, print mode for one-shot prompts,
-      JSONL RPC for a custom client, or the Python SDK to embed Wisp. They share
-      one typed runtime and append-only sessions; available live controls depend
-      on the interface.
-    </p>
-    <p>
-      <a href={href("guide/interfaces.html")}>Choose an interface</a>,{" "}
+      Run Wisp interactively in the terminal, script one-shot runs in print
+      mode, talk to it over JSONL RPC, or embed it from Python. Browse{" "}
+      <a href={href("guide/interfaces.html")}>all interfaces</a>,{" "}
       <a href={href("guide/sdk.html")}>embed Wisp</a>, or read the{" "}
-      <a href={href("changelog.html")}>release notes</a> and{" "}
-      <a href={href("guide/upgrading-to-0.3.html")}>upgrade guide</a>.
+      <a href={href("changelog.html")}>release notes</a>.
     </p>
   </div>
   <div class="secondary-starts">

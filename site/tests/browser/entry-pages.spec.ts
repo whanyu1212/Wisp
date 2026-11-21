@@ -7,7 +7,9 @@ const groups = navigation(loadMetadata());
 
 test("homepage offers install, product context, and preserved entry anchors without repeated banner content", async ({
   page,
+  context,
 }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await page.goto("");
   const brandLogo = page.locator(
     '.site-header .brand[aria-label="Wisp home"] img',
@@ -22,15 +24,26 @@ test("homepage offers install, product context, and preserved entry anchors with
     .toBe(true);
   await expect(page.locator("h1")).toHaveCount(1);
   await expect(page.locator(".home-intro")).toContainText("coding agent");
-  await expect(page.locator(".home-intro pre")).toHaveText(
-    "uv tool install --python 3.12 wisp-ai\ncd path/to/project\nwisp",
-  );
+  const installCommand =
+    "uv tool install --python 3.12 wisp-ai\ncd path/to/project\nwisp";
+  await expect(page.locator(".home-intro pre")).toHaveText(installCommand);
   await expect(page.locator(".install-note")).toContainText(
     "Python 3.11+ supported; 3.12 recommended for installation.",
   );
   await expect(page.locator(".home-intro .primary")).toHaveAttribute(
     "href",
     "/Wisp/guide/quickstart.html",
+  );
+  const copyButton = page
+    .locator(".home-install")
+    .getByRole("button", { name: "Copy code" });
+  await expect(copyButton).toBeVisible();
+  await copyButton.click();
+  await expect(page.locator(".home-install [role='status']")).toHaveText(
+    "Copied",
+  );
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
+    installCommand,
   );
   await expect(page.locator('main img[src*="wisp-banner"]')).toHaveCount(0);
   for (const id of [
@@ -47,7 +60,7 @@ test("homepage offers install, product context, and preserved entry anchors with
   ]);
 });
 
-test("homepage keeps full screenshot sources with a smaller hero and contextual approval zoom", async ({
+test("homepage centers a reader-friendly hero showcase and renders uncropped workflow captures", async ({
   page,
 }) => {
   await page.goto("");
@@ -57,31 +70,29 @@ test("homepage keeps full screenshot sources with a smaller hero and contextual 
   await expect(hero).toHaveAttribute("alt", /prompt composer, and side panel/);
   const heroBox = (await hero.boundingBox())!;
   const mainBox = (await page.locator("main").boundingBox())!;
-  expect(heroBox.width).toBeLessThanOrEqual(1040);
-  // Ignore the one-pixel image border and allow responsive image rounding.
-  expect(
-    Math.abs(heroBox.height - 1 - (heroBox.width * 1502) / 2592),
-  ).toBeLessThan(1);
-  if (page.viewportSize()!.width > 1096) {
+  expect(heroBox.width).toBeLessThanOrEqual(880);
+  if (page.viewportSize()!.width > 936) {
     expect(heroBox.width).toBeLessThan(mainBox.width);
     expect(heroBox.x + heroBox.width / 2).toBeCloseTo(
       mainBox.x + mainBox.width / 2,
       0,
     );
   }
-  const approval = page.locator(".tui-capture-approval img");
+  // Ignore the one-pixel image border and allow responsive image rounding.
+  expect(
+    Math.abs(heroBox.height - 1 - (heroBox.width * 1502) / 2592),
+  ).toBeLessThan(1);
+
+  const workflowImages = page.locator(".workflow-rows .tui-capture img");
+  await expect(workflowImages).toHaveCount(2);
+  const approval = workflowImages.nth(1);
   await approval.scrollIntoViewIfNeeded();
   await expect(approval).toHaveAttribute("width", "2718");
   await expect(approval).toHaveAttribute("height", "1528");
-  await expect(approval).toHaveCSS("object-fit", "cover");
-  await expect(approval).toHaveCSS("object-position", "0% 100%");
   const approvalBox = (await approval.boundingBox())!;
   expect(
-    Math.abs(approvalBox.height - approvalBox.width / (3 / 2)),
+    Math.abs(approvalBox.height - 1 - (approvalBox.width * 1528) / 2718),
   ).toBeLessThan(1);
-  await expect(page.locator(".tui-capture-approval figcaption")).toContainText(
-    "full session available in the image link",
-  );
   await page.goto("guide/installation.html");
   await expect(page.locator("article")).toContainText(
     "Python 3.11+ is supported; Python 3.12 is recommended for installation.",

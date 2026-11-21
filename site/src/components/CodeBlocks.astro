@@ -1,7 +1,7 @@
 <script>
   // Static code and native scrolling remain available when clipboard access is absent.
   if (navigator.clipboard?.writeText) {
-    document.querySelectorAll<HTMLElement>("article pre").forEach((pre) => {
+    document.querySelectorAll<HTMLElement>("main pre").forEach((pre) => {
       if (pre.closest(".diagram-source")) return;
       const code = pre.querySelector("code");
       if (!code) return;
