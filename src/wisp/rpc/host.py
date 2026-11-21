@@ -23,7 +23,7 @@ from typing_extensions import TypeAliasType
 from wisp.coding import CodingSession, resolve_coding_session_configuration
 from wisp.coding.browser_live import LiveBrowser
 from wisp.coding.prompt import resolve_project_context_root
-from wisp.config.runtime import WispConfig
+from wisp.config.runtime import DEFAULT_BROWSER_SEARCH_ENGINE, WispConfig
 from wisp.config.settings import resolve_settings
 from wisp.events import (
     ErrorEvent,
@@ -675,8 +675,10 @@ class RpcHost:
         working_directory: RpcWorkingDirectory | None = None,
         process_exits: ProcessExitNotices | None = None,
         settings_reloader: RpcSettingsReloader | None = None,
+        project_configuration: RpcProjectConfiguration | None = None,
     ) -> None:
         self.settings_reloader = settings_reloader
+        self.project_configuration = project_configuration
         self.working_directory = working_directory
         self._process_exits = process_exits
         self.runtime = runtime
@@ -981,6 +983,7 @@ class RpcHost:
             )
         host = cls(
             settings_reloader=settings_reloader,
+            project_configuration=project_configuration,
             runtime=runtime,
             sessions=sessions,
             agent=agent,
@@ -1084,6 +1087,11 @@ class RpcHost:
                 change_directory=self._change_directory,
                 settings_reloader=self.settings_reloader,
                 live_browser=live_browser,
+                browser_search_engine=(
+                    self.project_configuration.active_config.browser_search_engine
+                    if self.project_configuration is not None
+                    else DEFAULT_BROWSER_SEARCH_ENGINE
+                ),
             )
             try:
                 result = await executor.dispatch_parsed(command, running_command)

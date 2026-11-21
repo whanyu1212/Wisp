@@ -198,7 +198,7 @@ def test_command_schema_contains_every_discriminator_once() -> None:
     variants = cast(list[dict[str, str]], schema["oneOf"])
     references = {variant["$ref"] for variant in variants}
 
-    assert len(mapping) == 58
+    assert len(mapping) == 59
     assert len(set(mapping.values())) == len(mapping)
     assert references == set(mapping.values())
 
@@ -456,7 +456,7 @@ def test_event_schema_contains_every_current_discriminator_once() -> None:
     variants = cast(list[dict[str, str]], schema["oneOf"])
     references = {variant["$ref"] for variant in variants}
 
-    assert len(mapping) == 72
+    assert len(mapping) == 73
     assert mapping["tool.approval.reviewed"] == "#/$defs/ToolApprovalReviewed"
     assert mapping["browser.viewport.updated"] == "#/$defs/BrowserViewportUpdated"
     assert len(set(mapping.values())) == len(mapping)

@@ -202,7 +202,7 @@ Adding or enabling a server needs confirmation; reconnecting clears per-tool ses
 /unrevert                                 restore the previous branch after navigation
 /cd <path>                                work from another folder, entering its project if needed
 /ps                                       focus the running background processes in the side panel
-/browser [interact | live <url>]          show the browser pane, take over, or open a live tab
+/browser [interact | live <address or search>]  open the Browser view, take over, or open a live tab
 /kill <number|process-id>                 stop a background process the agent started
 /diff                                     review working-tree changes against HEAD
 /compact [instructions]                   summarize older context while preserving the JSONL audit
@@ -250,27 +250,42 @@ prompt is running.
 
 ## Browser viewport and interactive takeover
 
-Run `/browser live https://example.com` in a trusted project to open a live tab using
-installed Chrome or Chromium. Drag the dock border to adjust its width. Wisp holds the last
-page image while you drag, then Chromium reflows the page to the width where you release it.
-Use Kitty or Ghostty graphics in true color for high-resolution page images.
+Click the `Browser` tab in the top bar to open the live browser. With no page open, the view
+shows an address bar, ready for typing. Type an address or a search and press `Enter`. Wisp
+starts installed Chrome or Chromium only then, and only in a trusted project. In an untrusted
+project the view says the live browser is unavailable. Text that is not an address goes to your
+search engine, set with
+[`browser_search_engine`](../../reference/configuration.md#structured-user-settings).
 
-- Click the address bar or press `Ctrl+L` to edit the address. Press `Enter` to navigate in the
-  current tab or `Esc` to cancel. Use the toolbar buttons to go back, go forward, or reload.
+Below the address bar, **Recent** lists the last addresses you opened, newest first. Press `Down`
+to move into the list and `Up` to move back, then `Enter` to open the highlighted address, or
+click one. Typing returns to the address bar. `Esc` returns focus to the prompt and leaves the
+view open; `Ctrl+L` focuses the address bar again. Wisp keeps recent addresses with its
+[saved browser profile](../../reference/configuration.md#saved-live-browser-profile), and
+`wisp browser clear` removes them. Searches are not remembered.
+
+`/browser live <address or search>` opens a page the same way from the prompt. Drag the dock
+border to adjust its width. Wisp holds the last page image while you drag, then Chromium reflows
+the page to the width where you release it. Use Kitty or Ghostty graphics in true color for
+high-resolution page images.
+
+- Click the address bar or press `Ctrl+L` to edit the address. Type an address or a search and
+  press `Enter` to load it in the current tab, or `Esc` to cancel. Use the toolbar buttons to go
+  back, go forward, or reload.
 - Click the page or use `/browser interact` to type while Wisp is idle. While the page has focus,
   `Alt+Left` and `Alt+Right` move through history, `Ctrl+R` reloads, and `Esc` returns focus to Wisp.
-- Switch to `Work` or hide the pane to close the tab. Wisp keeps site sign-ins in its
-  [saved browser profile](../../reference/configuration.md#saved-live-browser-profile) for the
-  next launch. The live tab is for manual browsing, and MCP tools continue to use their own
-  browser.
+- Switch to `Work` or hide the pane to close the tab; the `Browser` view then shows its address
+  bar again. Wisp keeps site sign-ins in its saved browser profile for the next launch. The live
+  tab is for manual browsing, and MCP tools continue to use their own browser.
 
 The top bar always shows the `Work` and `Browser` tabs. Click a tab to open the side panel on
 that view, or click the highlighted tab to close the panel. When a browser MCP server such as
 Playwright (`@playwright/mcp`) or Chrome DevTools (`chrome-devtools-mcp`) is connected, Wisp updates
 the `Browser` view whenever the agent captures a page screenshot.
 
-- `/browser` switches to the `Browser` tab (or opens the side panel as an overlay on narrow
-  terminals). Running `/browser` again toggles back to `Work` (or closes the overlay).
+- `/browser` opens the `Browser` view (as an overlay on narrow terminals) and focuses its address
+  bar when no page is open. Running it again keeps the view open; click the highlighted tab to
+  close it.
 - `/browser interact`, pressing `i` while the `Browser` tab has focus (`F8`), or clicking inside
   the viewport image enters **interactive takeover** (`INTERACT`) while the session is idle:
   - Clicks and wheel scrolls map from terminal cells onto the browser viewport.

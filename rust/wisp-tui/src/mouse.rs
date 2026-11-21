@@ -406,6 +406,10 @@ impl LiveUi {
         // The top bar's tabs come first, so a press there never starts a transcript
         // selection or a border drag.
         if self.press_panel_tab(event) {
+            // The Browser tab opens at its start page when no page is open.
+            if self.side_panel.active_tab() == Some(crate::side_panel::PanelMode::Browser) {
+                return self.begin_browser_start(writer, limit).await;
+            }
             return Ok(LoopControl::Continue);
         }
         // Resizing answers no pending decision, and must precede sidebar clicks
@@ -524,9 +528,7 @@ impl LiveUi {
                         return self.open_from_panel(target, writer, limit).await;
                     }
                     crate::side_panel::OverlayKey::BrowserControl(control) => {
-                        return self
-                            .handle_live_browser_control(control, writer, limit)
-                            .await;
+                        return self.handle_browser_control(control, writer, limit).await;
                     }
                     _ => self.clear_browser_address(),
                 }

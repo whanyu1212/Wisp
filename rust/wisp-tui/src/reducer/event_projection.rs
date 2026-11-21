@@ -2,12 +2,13 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use super::{
-    BackendEvent, BrowserViewportInput, CatalogNavigation, MessageContentKind, PendingApproval,
-    QUEUE_CONTENT_BYTES_LIMIT, QUEUE_MESSAGE_LIMIT, QueueRemovalOperation, SESSION_CATALOG_LIMIT,
-    SESSION_ENTRY_COUNT_MAX, SESSION_ID_MAX_BYTES, SESSION_LABEL_MAX_BYTES, SESSION_PATH_MAX_BYTES,
-    SESSION_TREE_PAGE_LIMIT, SESSION_UPDATED_AT_MAX_BYTES, SessionDerivation, SessionIdentity,
-    SessionMessages, SessionNameChange, SessionSummary, SessionTreeNavigation, SessionTreeNode,
-    SessionTreeNodeKind, SessionTreePage, SessionTreeUnrevert,
+    BackendEvent, BrowserAddresses, BrowserViewportInput, CatalogNavigation, MessageContentKind,
+    PendingApproval, QUEUE_CONTENT_BYTES_LIMIT, QUEUE_MESSAGE_LIMIT, QueueRemovalOperation,
+    SESSION_CATALOG_LIMIT, SESSION_ENTRY_COUNT_MAX, SESSION_ID_MAX_BYTES, SESSION_LABEL_MAX_BYTES,
+    SESSION_PATH_MAX_BYTES, SESSION_TREE_PAGE_LIMIT, SESSION_UPDATED_AT_MAX_BYTES,
+    SessionDerivation, SessionIdentity, SessionMessages, SessionNameChange, SessionSummary,
+    SessionTreeNavigation, SessionTreeNode, SessionTreeNodeKind, SessionTreePage,
+    SessionTreeUnrevert,
 };
 use crate::composer_images::{self, AttachedImage, ComposerImages};
 use crate::history::project_rpc_message_page_with_origins;
@@ -329,6 +330,20 @@ impl BackendEvent {
                     .map(|error| super::bounded_session_text(error, 1024));
                 return Ok(Self::CompactionCompleted(completed));
             }
+            "rpc.browser_addresses" => {
+                let addresses = array_field(&value, &event_type, "addresses")?
+                    .iter()
+                    .map(|address| address.as_str().map(str::to_owned))
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or_else(|| EventProjectionError::InvalidField {
+                        event_type: event_type.clone(),
+                        field: "addresses",
+                    })?;
+                return Ok(Self::BrowserAddressesReported(BrowserAddresses {
+                    trusted: bool_field(&value, &event_type, "trusted")?,
+                    addresses,
+                }));
+            }
             "browser.viewport.updated" => {
                 let update = event.browser_viewport_updated().ok_or_else(|| {
                     EventProjectionError::InvalidField {
@@ -509,6 +524,7 @@ impl BackendEvent {
             | "context.estimated"
             | "compaction.started"
             | "compaction.completed"
+            | "rpc.browser_addresses"
             | "browser.viewport.updated" => {
                 let event = wisp_protocol::events::deserialize(value.clone()).map_err(|_| {
                     EventProjectionError::InvalidField {

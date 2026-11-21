@@ -8,6 +8,8 @@ mod background_strip_tests;
 #[cfg(test)]
 mod browser_drag_tests;
 #[cfg(test)]
+mod browser_start_tests;
+#[cfg(test)]
 mod browser_viewport_tests;
 mod cli;
 mod clipboard;
@@ -1778,13 +1780,22 @@ impl LiveUi {
         let transcript_replaced = effects
             .iter()
             .any(|effect| matches!(effect, UiEffect::ReplaceTranscript));
+        let page_open = self.state.browser_viewport.is_some();
+        let decision_pending = matches!(
+            self.state.view_status,
+            ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
+        );
         if self.state.view_status != ViewStatus::Idle
             || self.state.current_command.is_some()
             || transcript_replaced
-            || self.state.browser_viewport.is_none()
+            || !page_open
         {
             self.exit_browser_takeover();
-            self.clear_browser_address();
+            // The start page keeps its field through a run, where Enter waits for the
+            // run to end, but not through a decision, which needs the keys.
+            if page_open || decision_pending {
+                self.clear_browser_address();
+            }
         } else if is_browser_viewport_update && self.browser_takeover_active() {
             self.bump_browser_refresh_deadline();
         }
@@ -4200,26 +4211,14 @@ impl LiveUi {
                     self.open_and_enter_browser_takeover();
                 } else {
                     self.exit_browser_takeover();
-                    self.side_panel.toggle_browser();
+                    self.side_panel.show(side_panel::PanelMode::Browser);
                 }
                 self.render_pending = true;
-                Ok(LoopControl::Continue)
+                self.begin_browser_start(writer, limit).await
             }
             Command::BrowserLive(url) => {
                 self.editor.clear();
-                if self.browser_interaction_blocked() {
-                    return Ok(LoopControl::Continue);
-                }
-                self.exit_browser_takeover();
-                self.clear_browser_address();
-                self.side_panel.show(side_panel::PanelMode::Browser);
-                self.render_pending = true;
-                self.dispatch(
-                    UiAction::BrowserInteract(BrowserInteractRequest::LiveOpen { url }),
-                    writer,
-                    limit,
-                )
-                .await
+                self.open_live_page(url, writer, limit).await
             }
             Command::KillProcess(target) => {
                 self.editor.clear();
@@ -5878,10 +5877,10 @@ impl LiveUi {
                 .await;
         }
         if matches!(&input, Input::Key(key) if live_browser_ui::browser_address_shortcut(*key))
-            && self.live_browser_visible()
+            && self.browser_address_editable()
         {
             return self
-                .handle_live_browser_control(side_panel::BrowserControl::Address, writer, limit)
+                .handle_browser_control(side_panel::BrowserControl::Address, writer, limit)
                 .await;
         }
         if self.browser_takeover_active() {
@@ -6384,8 +6383,15 @@ impl LiveUi {
         if key.modifiers != KeyModifiers::NONE && key.code != KeyCode::BackTab {
             return Ok(LoopControl::Continue);
         }
+        let browser_shown = self.side_panel.mode() == side_panel::PanelMode::Browser;
         match self.side_panel.key(key.code, &self.state) {
             side_panel::OverlayKey::Close => self.side_panel.close_overlay(),
+            // `b` switched the focused panel to the Browser view.
+            side_panel::OverlayKey::Moved
+                if !browser_shown && self.side_panel.mode() == side_panel::PanelMode::Browser =>
+            {
+                return self.begin_browser_start(writer, limit).await;
+            }
             side_panel::OverlayKey::Open(target) => {
                 self.side_panel.close_overlay();
                 self.render_pending = true;
@@ -6417,9 +6423,7 @@ impl LiveUi {
                 }
             }
             side_panel::OverlayKey::BrowserControl(control) => {
-                return self
-                    .handle_live_browser_control(control, writer, limit)
-                    .await;
+                return self.handle_browser_control(control, writer, limit).await;
             }
             side_panel::OverlayKey::Ignored => return Ok(LoopControl::Continue),
         }

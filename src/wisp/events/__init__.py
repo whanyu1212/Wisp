@@ -54,6 +54,7 @@ from wisp.events.rpc import (
     MAX_LIVE_BROWSER_FRAME_CHARS,
     MAX_LIVE_BROWSER_HEIGHT,
     MAX_LIVE_BROWSER_WIDTH,
+    MAX_RECENT_BROWSER_ADDRESSES,
     MAX_RPC_CONNECTION_LABEL_CHARS,
     MAX_RPC_CONNECTION_METHODS,
     MAX_RPC_CONNECTION_PROVIDERS,
@@ -82,6 +83,7 @@ from wisp.events.rpc import (
     PermissionState,
     ProjectFilesInvalidated,
     ReloadSettingName,
+    RpcBrowserAddressesReported,
     RpcCodemodeReported,
     RpcCommandArgument,
     RpcCommandDescriptor,
@@ -263,6 +265,7 @@ __all__ = [
     "MAX_LIVE_BROWSER_FRAME_CHARS",
     "MAX_LIVE_BROWSER_HEIGHT",
     "MAX_LIVE_BROWSER_WIDTH",
+    "MAX_RECENT_BROWSER_ADDRESSES",
     "MAX_RPC_MODEL_EFFORT_CHARS",
     "MAX_RPC_MODEL_ID_CHARS",
     "MAX_RPC_OAUTH_EXPIRY_CHARS",
@@ -325,6 +328,7 @@ __all__ = [
     "QueueMode",
     "QueueUpdated",
     "RetryReason",
+    "RpcBrowserAddressesReported",
     "RpcCodemodeReported",
     "RpcCommandArgument",
     "RpcCommandDescriptor",
@@ -507,7 +511,8 @@ KnownWispEvent = TypeAliasType(
         | ToolNestedCallEnded
         | WarningEvent
         | ToolApprovalReviewed
-        | BrowserViewportUpdated,
+        | BrowserViewportUpdated
+        | RpcBrowserAddressesReported,
         Field(discriminator="type"),
     ],
 )

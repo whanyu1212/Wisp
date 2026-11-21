@@ -57,6 +57,7 @@ MAX_LIVE_BROWSER_HEIGHT = 1_200
 # Includes base64 overhead for a full-size, incompressible RGBA PNG.
 MAX_LIVE_BROWSER_FRAME_CHARS = 11_000_000
 MAX_BROWSER_URL_CHARS = 2_048
+MAX_RECENT_BROWSER_ADDRESSES = 20
 MAX_BROWSER_TITLE_CHARS = 512
 MAX_BROWSER_SOURCE_TOOL_CHARS = 128
 MAX_BROWSER_VIEWPORT_SIDE = 16_384
@@ -844,3 +845,17 @@ class BrowserViewportUpdated(WispEvent):
         default=None, min_length=1, max_length=MAX_BROWSER_SOURCE_TOOL_CHARS
     )
     call_id: str | None = Field(default=None, min_length=1, max_length=256)
+
+
+class RpcBrowserAddressesReported(WispEvent):
+    """Whether the live browser may open here, and its recently opened addresses.
+
+    ``addresses`` are newest first and always empty when ``trusted`` is false.
+    """
+
+    type: Literal["rpc.browser_addresses"] = "rpc.browser_addresses"
+    command_id: str = Field(min_length=1, max_length=256)
+    trusted: bool
+    addresses: tuple[Annotated[str, Field(min_length=1, max_length=MAX_BROWSER_URL_CHARS)], ...] = (
+        Field(max_length=MAX_RECENT_BROWSER_ADDRESSES)
+    )

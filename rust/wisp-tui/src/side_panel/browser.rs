@@ -12,13 +12,22 @@ use wisp_protocol::commands::LiveBrowserViewport;
 
 use crate::prompt_editor::PromptEditor;
 
-pub(super) struct AddressBar(pub(super) PromptEditor);
+/// The focused address field, and on the start page the recent address that
+/// Up/Down moved the selection to.
+pub(super) struct AddressBar {
+    pub(super) editor: PromptEditor,
+    /// The highlighted row of the recent list; `None` while the field itself has focus.
+    pub(super) recent: Option<usize>,
+}
 
 impl std::fmt::Debug for AddressBar {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("AddressBar([REDACTED])")
     }
 }
+
+/// The address field's text while it is empty, on the start page or a live page.
+const ADDRESS_PLACEHOLDER: &str = "Search or enter address";
 
 /// Lay out the page in CSS pixels while keeping the capture at terminal pixel density.
 pub(super) fn viewport_for_cells(area: Rect, cell: CellSize) -> LiveBrowserViewport {
@@ -37,17 +46,24 @@ pub(super) fn viewport_for_cells(area: Rect, cell: CellSize) -> LiveBrowserViewp
     }
 }
 
-/// Draw browser controls and return the address editor's cursor in pane cells.
-pub(super) fn push_live_toolbar(
+/// Draw the toolbar of a live page, or of the start page when `page` is `None`, and
+/// return the address editor's cursor in pane cells. The start page has no history,
+/// so its Back, Forward and Reload are drawn muted and take no clicks.
+pub(super) fn push_toolbar(
     rows: &mut PanelRows,
-    viewport: &BrowserViewport,
-    editor: Option<&PromptEditor>,
+    page: Option<&BrowserViewport>,
+    address: Option<&AddressBar>,
     width: u16,
     palette: Palette,
 ) -> Option<(u16, u16)> {
     let mut nav = Vec::new();
     let mut actions = Vec::new();
     let muted = Style::default().fg(palette.muted);
+    let nav_style = if page.is_some() {
+        Style::default().fg(palette.primary)
+    } else {
+        muted
+    };
     let mut col = 0;
     for (text, control) in [
         ("[‹]", BrowserControl::Back),
@@ -57,8 +73,10 @@ pub(super) fn push_live_toolbar(
         if col + 3 > width {
             break;
         }
-        nav.push(Span::styled(text, Style::default().fg(palette.primary)));
-        actions.push((col, col + 3, control));
+        nav.push(Span::styled(text, nav_style));
+        if page.is_some() {
+            actions.push((col, col + 3, control));
+        }
         col += 3;
         if col < width {
             nav.push(Span::raw(" "));
@@ -70,12 +88,24 @@ pub(super) fn push_live_toolbar(
     let address_row = usize::from(narrow);
     let start = rows.lines.len() + 1;
     let available = width.saturating_sub(address_col).saturating_sub(2);
-    let (address, cursor) = address_text(viewport, editor, available, palette);
+    // A recent row the start page highlights holds focus, so the field shows its
+    // draft without a caret.
+    let editing = address
+        .filter(|address| address.recent.is_none())
+        .map(|address| &address.editor);
+    let idle = match (page, address) {
+        (Some(page), _) => Some(page.url.as_deref().unwrap_or("Address")),
+        (None, Some(address)) => Some(address.editor.text()).filter(|text| !text.is_empty()),
+        (None, None) => None,
+    };
+    let (address, cursor) = address_text(idle, editing, available, palette);
     let mut location = vec![Span::styled("[", muted)];
     location.extend(address);
     location.push(Span::styled("]", muted));
     let lines = if narrow {
-        let title = sanitize_for_terminal(viewport.title.as_deref().unwrap_or("Browser"));
+        let title = page
+            .and_then(|page| page.title.as_deref())
+            .map_or_else(|| "Browser".to_owned(), sanitize_for_terminal);
         nav.push(Span::styled(
             ui::clip_columns(&title, usize::from(width - col)),
             muted,
@@ -98,15 +128,32 @@ pub(super) fn push_live_toolbar(
     cursor.map(|cursor| (address_col + 1 + cursor, (start + address_row) as u16))
 }
 
+/// The address field's spans `width` columns wide, and the caret's column while
+/// `editor` has focus. Without focus the field shows `idle`, or the muted
+/// placeholder when there is nothing to show; so does an empty editor.
 fn address_text(
-    viewport: &BrowserViewport,
+    idle: Option<&str>,
     editor: Option<&PromptEditor>,
     width: u16,
     palette: Palette,
 ) -> (Vec<Span<'static>>, Option<u16>) {
     let style = Style::default().fg(palette.secondary);
+    let placeholder = |cursor| {
+        let text = ui::clip_columns(ADDRESS_PLACEHOLDER, usize::from(width));
+        let pad = usize::from(width).saturating_sub(text.width());
+        (
+            vec![
+                Span::styled(text, Style::default().fg(palette.muted)),
+                Span::raw(" ".repeat(pad)),
+            ],
+            cursor,
+        )
+    };
     let Some(editor) = editor.filter(|_| width > 0) else {
-        let url = sanitize_for_terminal(viewport.url.as_deref().unwrap_or("Address"));
+        let Some(idle) = idle else {
+            return placeholder(None);
+        };
+        let url = sanitize_for_terminal(idle);
         return (
             vec![Span::styled(
                 ui::clip_columns(&url, usize::from(width)),
@@ -116,6 +163,9 @@ fn address_text(
         );
     };
     let address = editor.text();
+    if address.is_empty() {
+        return placeholder(Some(0));
+    }
     let mut start = editor.cursor_offset();
     let mut cursor = 0;
     for (offset, grapheme) in address[..start].grapheme_indices(true).rev() {
@@ -147,6 +197,84 @@ fn address_text(
     }
     spans.push(Span::raw(" ".repeat(usize::from(width) - columns)));
     (spans, Some(cursor as u16))
+}
+
+/// List the recent addresses under the start page's toolbar, newest first, with the
+/// row Up/Down selected marked. Each row opens its address when clicked. Nothing is
+/// drawn while there are none.
+///
+/// The list fills what is left of a body `height` rows tall. When the addresses do
+/// not all fit, it shows a window from the top that slides down just far enough to
+/// keep the selected row in view; only the rows drawn take clicks.
+pub(super) fn push_recents(
+    rows: &mut PanelRows,
+    addresses: &[String],
+    selected: Option<usize>,
+    height: usize,
+    width: usize,
+    palette: Palette,
+) {
+    if addresses.is_empty() {
+        return;
+    }
+    // The section's blank separator and its heading come first.
+    let fits = height.saturating_sub(rows.lines.len() + 2).max(1);
+    let first = selected
+        .map_or(0, |index| (index + 1).saturating_sub(fits))
+        .min(addresses.len().saturating_sub(fits));
+    let shown = first..addresses.len().min(first + fits);
+    let mut lines = vec![Line::styled(
+        ui::clip_columns("Recent", width),
+        Style::default().add_modifier(Modifier::BOLD),
+    )];
+    for (index, address) in shown.clone().zip(&addresses[shown.clone()]) {
+        let text = ui::clip_columns(
+            &sanitize_for_terminal(shown_address(address)),
+            width.saturating_sub(2),
+        );
+        lines.push(if selected == Some(index) {
+            let style = Style::default().fg(palette.primary);
+            Line::from(vec![
+                Span::styled("▸ ", style),
+                Span::styled(text, style.add_modifier(Modifier::BOLD)),
+            ])
+        } else {
+            Line::from(vec![Span::raw("  "), Span::raw(text)])
+        });
+    }
+    rows.section(Section::BrowserRecents, lines);
+    for (row, index) in shown.enumerate() {
+        rows.action(
+            row + 1,
+            PanelAction::BrowserControl(BrowserControl::Recent(index)),
+        );
+    }
+}
+
+/// A recent address as the list shows it: without `https://`, which most addresses
+/// share. Other schemes, `http://` included, stay visible.
+fn shown_address(address: &str) -> &str {
+    address
+        .get(..8)
+        .filter(|scheme| scheme.eq_ignore_ascii_case("https://"))
+        .map_or(address, |_| &address[8..])
+}
+
+/// Explain why the start page offers no address field in an untrusted project.
+pub(super) fn push_untrusted(rows: &mut PanelRows, width: usize, palette: Palette) {
+    rows.section(
+        Section::BrowserControls,
+        vec![
+            Line::styled(
+                ui::clip_columns("Live browser unavailable", width),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Line::styled(
+                ui::clip_columns("This project is not trusted.", width),
+                Style::default().fg(palette.muted),
+            ),
+        ],
+    );
 }
 
 /// Draw the panel's controls row: `INTERACT` while the page takes input, and the
@@ -228,7 +356,7 @@ pub(super) fn map_cell_to_viewport(
 pub(super) fn render_browser_body(
     frame: &mut Frame<'_>,
     body: Rect,
-    state: &UiState,
+    vp: &BrowserViewport,
     surface: Style,
     palette: Palette,
     preview: Option<&ImagePreviewMeta>,
@@ -241,10 +369,9 @@ pub(super) fn render_browser_body(
         return None;
     }
     let muted = Style::default().fg(palette.muted);
-    let viewport = state.browser_viewport.as_ref();
 
     let mut meta: Vec<Line<'static>> = Vec::new();
-    if let Some(vp) = viewport.filter(|vp| !vp.live) {
+    if !vp.live {
         let title = vp
             .title
             .as_deref()
@@ -294,11 +421,6 @@ pub(super) fn render_browser_body(
                 muted,
             ));
         }
-    } else if viewport.is_none() {
-        meta.push(Line::styled(
-            ui::clip_columns("Browser", width),
-            Style::default().add_modifier(Modifier::BOLD),
-        ));
     }
 
     let meta_rows = meta.len().min(usize::from(body.height));
@@ -328,10 +450,6 @@ pub(super) fn render_browser_body(
         return None;
     }
 
-    let Some(vp) = viewport else {
-        render_placeholder(frame, image_area, "No browser frame yet.", muted);
-        return None;
-    };
     let Some(_image_ref) = &vp.image else {
         render_placeholder(
             frame,

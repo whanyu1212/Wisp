@@ -2736,6 +2736,52 @@
       "pattern": "^[a-z_]+$",
       "type": "string"
     },
+    "RpcBrowserAddressesReported": {
+      "additionalProperties": false,
+      "description": "Whether the live browser may open here, and its recently opened addresses.\n\n``addresses`` are newest first and always empty when ``trusted`` is false.",
+      "properties": {
+        "addresses": {
+          "items": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 20,
+          "title": "Addresses",
+          "type": "array"
+        },
+        "command_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Command Id",
+          "type": "string"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "trusted": {
+          "title": "Trusted",
+          "type": "boolean"
+        },
+        "type": {
+          "const": "rpc.browser_addresses",
+          "default": "rpc.browser_addresses",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "timestamp",
+        "command_id",
+        "trusted",
+        "addresses"
+      ],
+      "title": "RpcBrowserAddressesReported",
+      "type": "object"
+    },
     "RpcCodemodeReported": {
       "additionalProperties": false,
       "description": "Codemode snapshot returned by a codemode inspection or change.",
@@ -9461,6 +9507,7 @@
       "queue.items.removed": "#/$defs/QueueItemsRemoved",
       "queue.message.injected": "#/$defs/QueueMessageInjected",
       "queue.updated": "#/$defs/QueueUpdated",
+      "rpc.browser_addresses": "#/$defs/RpcBrowserAddressesReported",
       "rpc.codemode": "#/$defs/RpcCodemodeReported",
       "rpc.command.finished": "#/$defs/RpcCommandFinished",
       "rpc.command.started": "#/$defs/RpcCommandStarted",
@@ -9731,6 +9778,9 @@
     },
     {
       "$ref": "#/$defs/BrowserViewportUpdated"
+    },
+    {
+      "$ref": "#/$defs/RpcBrowserAddressesReported"
     }
   ],
   "title": "Wisp current live event output",
@@ -9959,6 +10009,15 @@
       "timestamp": "2026-01-02T03:04:05Z",
       "token": null,
       "type": "queue.updated"
+    },
+    "rpc.browser_addresses": {
+      "addresses": [
+        "https://example.test/"
+      ],
+      "command_id": "command-1",
+      "timestamp": "2026-01-02T03:04:05Z",
+      "trusted": true,
+      "type": "rpc.browser_addresses"
     },
     "rpc.codemode": {
       "codemode": {

@@ -97,9 +97,11 @@ pub(crate) struct SidePanel {
     /// Whether the docked panel already auto-switched to `Browser` on the first frame
     /// of the current browser session, so manual switches back to `Work` are respected.
     auto_switched_browser: bool,
-    /// Whether this session has seen any browser viewport state, so manual `/browser`
-    /// toggles before the first frame are not reset back to `LiveWork`.
+    /// Whether this session has seen any browser viewport state, so a Browser view
+    /// opened before the first frame is not reset back to `LiveWork`.
     had_browser_viewport: bool,
+    /// Whether the last browser viewport seen was a live page.
+    had_live_page: bool,
     /// Hidden with Ctrl+P on a terminal wide enough to dock it.
     hidden: bool,
     /// Opened with Ctrl+P on a terminal too narrow to dock it.
@@ -176,13 +178,15 @@ pub(crate) enum PanelAction {
     BrowserControl(BrowserControl),
 }
 
-/// User-facing controls for the live Chromium pane.
+/// User-facing controls for the live Chromium pane and its start page.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum BrowserControl {
     Address,
     Back,
     Forward,
     Reload,
+    /// The start page's recent address at this index, newest first.
+    Recent(usize),
 }
 
 /// A drag of the docked panel's border in progress.
@@ -202,6 +206,8 @@ enum Section {
     /// The `[Expand]` / `[Restore]` row atop the panel.
     Controls,
     BrowserControls,
+    /// The start page's recent addresses.
+    BrowserRecents,
     Header,
     Queue,
     Running,
@@ -341,13 +347,33 @@ impl SidePanel {
             KeyCode::Char('a'),
             crossterm::event::KeyModifiers::ALT,
         ));
-        self.browser_address = Some(browser::AddressBar(editor));
+        self.browser_address = Some(browser::AddressBar {
+            editor,
+            recent: None,
+        });
     }
 
     pub(crate) fn browser_address_editor(
         &mut self,
     ) -> Option<&mut crate::prompt_editor::PromptEditor> {
-        self.browser_address.as_mut().map(|address| &mut address.0)
+        self.browser_address
+            .as_mut()
+            .map(|address| &mut address.editor)
+    }
+
+    /// The start page's highlighted recent address, while the address field has
+    /// handed focus to the list.
+    pub(crate) fn browser_recent(&self) -> Option<usize> {
+        self.browser_address
+            .as_ref()
+            .and_then(|address| address.recent)
+    }
+
+    /// Highlight a recent address, or give focus back to the field with `None`.
+    pub(crate) fn select_browser_recent(&mut self, recent: Option<usize>) {
+        if let Some(address) = &mut self.browser_address {
+            address.recent = recent;
+        }
     }
 
     pub(crate) fn browser_address_focused(&self) -> bool {
@@ -421,6 +447,8 @@ impl SidePanel {
 
     /// Auto-switch a docked panel to `Browser` on the first frame of a session,
     /// resetting back to `LiveWork` when the session clears its browser viewport.
+    /// A live page that goes away while its view is on screen leaves the Browser
+    /// view at its start page instead.
     pub(crate) fn observe_browser_viewport(&mut self, viewport: Option<&BrowserViewport>) {
         if !viewport.is_some_and(|view| view.live) {
             self.browser_resize_pending = false;
@@ -428,13 +456,19 @@ impl SidePanel {
         match viewport {
             None => {
                 self.browser_interacting = false;
+                let live_page_shown = std::mem::take(&mut self.had_live_page)
+                    && self.visible()
+                    && self.mode == PanelMode::Browser;
                 if std::mem::take(&mut self.had_browser_viewport) {
                     self.auto_switched_browser = false;
-                    self.mode = PanelMode::LiveWork;
+                    if !live_page_shown {
+                        self.mode = PanelMode::LiveWork;
+                    }
                 }
             }
             Some(view) => {
                 self.had_browser_viewport = true;
+                self.had_live_page = view.live;
                 if view.image.is_some() && !self.auto_switched_browser {
                     self.auto_switched_browser = true;
                     if self.docked() {
@@ -443,33 +477,6 @@ impl SidePanel {
                 }
             }
         }
-    }
-
-    /// `/browser`: focus/show the Browser viewport on wide or narrow terminals, or
-    /// toggle a visible docked Browser tab back to LiveWork.
-    pub(crate) fn toggle_browser(&mut self) {
-        self.browser_interacting = false;
-        self.expanded = false;
-        if docks(self.width) {
-            self.rehide = false;
-            self.overlay = false;
-            if !self.hidden && self.mode == PanelMode::Browser {
-                self.mode = PanelMode::LiveWork;
-            } else {
-                self.hidden = false;
-                self.mode = PanelMode::Browser;
-            }
-        } else if self.overlay && self.mode == PanelMode::Browser {
-            self.close_overlay();
-        } else {
-            self.mode = PanelMode::Browser;
-            self.overlay = true;
-            self.rehide = false;
-            self.cursor = None;
-            *self.painted.borrow_mut() = Painted::default();
-        }
-        self.scroll.set(0);
-        self.close_peek();
     }
 
     pub(crate) fn visible(&self) -> bool {
@@ -617,9 +624,7 @@ impl SidePanel {
             self.toggle_expanded();
             return OverlayKey::Moved;
         }
-        if key == KeyCode::Char('b')
-            && (state.browser_viewport.is_some() || self.mode == PanelMode::Browser)
-        {
+        if key == KeyCode::Char('b') {
             self.browser_interacting = false;
             self.mode = match self.mode {
                 PanelMode::LiveWork => PanelMode::Browser,
@@ -1215,21 +1220,38 @@ pub(crate) fn render_with_preview(
             .browser_viewport
             .as_ref()
             .filter(|viewport| viewport.live);
-        let mut rows = PanelRows::default();
-        browser::push_controls(&mut rows, interacting, panel.expanded, width, palette);
-        let chrome_cursor = live.and_then(|viewport| {
-            browser::push_live_toolbar(
-                &mut rows,
-                viewport,
-                panel.browser_address.as_ref().map(|address| &address.0),
-                inner.width,
-                palette,
-            )
-        });
-        let footer_height = usize::from(panel.overlay_open() || interacting || live.is_some());
+        // With no page, the view is the start page: an address field and the recent
+        // addresses, or why the live browser cannot open in this project.
+        let start_page = state.browser_viewport.is_none();
+        let untrusted = start_page && state.live_browser_untrusted();
+        let footer_height = usize::from(
+            panel.overlay_open() || interacting || live.is_some() || (start_page && !untrusted),
+        );
         let body = Rect {
             height: inner.height.saturating_sub(footer_height as u16),
             ..inner
+        };
+        let mut rows = PanelRows::default();
+        browser::push_controls(&mut rows, interacting, panel.expanded, width, palette);
+        let address = panel.browser_address.as_ref();
+        let chrome_cursor = if untrusted {
+            browser::push_untrusted(&mut rows, width, palette);
+            None
+        } else if start_page {
+            let cursor = browser::push_toolbar(&mut rows, None, address, inner.width, palette);
+            browser::push_recents(
+                &mut rows,
+                state.browser_recent_addresses(),
+                panel.browser_recent(),
+                usize::from(body.height),
+                width,
+                palette,
+            );
+            cursor
+        } else {
+            live.and_then(|viewport| {
+                browser::push_toolbar(&mut rows, Some(viewport), address, inner.width, palette)
+            })
         };
         panel.scroll.set(0);
         *panel.painted.borrow_mut() = Painted {
@@ -1255,7 +1277,9 @@ pub(crate) fn render_with_preview(
                 mark_focus(&mut rows.lines, &hit, width, palette);
             }
         }
-        let tab_rows = if live.is_some() {
+        let tab_rows = if start_page {
+            body.height.min(rows.lines.len() as u16)
+        } else if live.is_some() {
             body.height.min(rows.lines.len() as u16 + 1)
         } else if rows.lines.is_empty() {
             0
@@ -1279,17 +1303,19 @@ pub(crate) fn render_with_preview(
             height: body.height.saturating_sub(tab_rows),
             ..body
         };
-        let viewport_image_rect = browser::render_browser_body(
-            frame,
-            browser_body,
-            state,
-            surface,
-            palette,
-            preview,
-            cell_size,
-            painted_images,
-            ignore_overlay_rect,
-        );
+        let viewport_image_rect = state.browser_viewport.as_ref().and_then(|viewport| {
+            browser::render_browser_body(
+                frame,
+                browser_body,
+                viewport,
+                surface,
+                palette,
+                preview,
+                cell_size,
+                painted_images,
+                ignore_overlay_rect,
+            )
+        });
         {
             let mut painted = panel.painted.borrow_mut();
             painted.viewport_image_rect = viewport_image_rect;
@@ -1306,8 +1332,16 @@ pub(crate) fn render_with_preview(
                 height: footer_height as u16,
                 ..inner
             };
-            let hints = if panel.browser_address_focused() {
+            let hints = if start_page && panel.browser_address_focused() {
+                if state.browser_recent_addresses().is_empty() {
+                    "Enter open · Esc back to prompt"
+                } else {
+                    "Enter open · ↑↓ recent · Esc back to prompt"
+                }
+            } else if panel.browser_address_focused() {
                 "Enter go · Esc cancel"
+            } else if start_page && !panel.overlay_open() {
+                "Ctrl+L address"
             } else if live.is_some() && interacting {
                 "Esc exit · Ctrl+L address · Alt+←/→ history · Ctrl+R reload"
             } else if live.is_some() {

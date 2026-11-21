@@ -883,13 +883,28 @@ class ConfigureCommand(RpcCommandModel):
         return self
 
 
+class GetBrowserAddressesCommand(RpcCommandModel):
+    """Report whether the live browser may open and its recent addresses, without starting it."""
+
+    type: Literal["get_browser_addresses"] = "get_browser_addresses"
+
+
 class BrowserInteractCommand(RpcCommandModel):
     """Apply one bounded user interaction inside the live browser viewport."""
 
     type: Literal["browser_interact"] = "browser_interact"
     action: BrowserInteractAction
     live: Literal[True] | None = None
-    url: str | None = Field(default=None, min_length=1, max_length=2048, repr=False)
+    url: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=2048,
+        repr=False,
+        description=(
+            "For live_open and live_navigate: an address or search text, resolved by the "
+            "backend with the user's browser_search_engine setting."
+        ),
+    )
     viewport: LiveBrowserViewport | None = None
     x: int | None = Field(default=None, ge=0, le=MAX_RPC_BROWSER_COORD)
     y: int | None = Field(default=None, ge=0, le=MAX_RPC_BROWSER_COORD)
@@ -1067,6 +1082,7 @@ RpcCommand = TypeAliasType(
         | GetProcessOutputCommand
         | BackgroundToolCallCommand
         | BrowserInteractCommand
+        | GetBrowserAddressesCommand
         | ApprovalCommand
         | TrustCommand
         | ShutdownCommand

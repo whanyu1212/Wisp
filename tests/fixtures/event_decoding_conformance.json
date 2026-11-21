@@ -1453,6 +1453,44 @@
    "accepted": false
   },
   {
+   "event": "rpc.browser_addresses",
+   "operation": "remove",
+   "path": [
+    "addresses"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.browser_addresses",
+   "operation": "remove",
+   "path": [
+    "command_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.browser_addresses",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.browser_addresses",
+   "operation": "remove",
+   "path": [
+    "trusted"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.browser_addresses",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
    "event": "rpc.codemode",
    "operation": "remove",
    "path": [

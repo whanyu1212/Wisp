@@ -271,7 +271,10 @@ historical replay displays raw content. Markers are never written into session h
 A one-row top bar shows the session name at its left and the side panel's `Work` and `Browser`
 tabs at its right. The highlighted tab is the view the open panel shows; no tab is highlighted while
 the panel is closed. Click a tab to open the panel on that view, or click the highlighted tab to
-close the panel. The top bar stays in place at every terminal width.
+close the panel. The top bar stays in place at every terminal width. The `Browser` tab is also
+how you open the live browser: with no page open, it shows an address bar for an address or a
+search, and your recent addresses. See
+[Browser viewport and interactive takeover](./tui/commands.md#browser-viewport-and-interactive-takeover).
 
 On a terminal at least 148 columns wide, the Reading sidebar shows the session name and status,
 folder and branch, compact context usage, MCP servers, skills, changed files, and up to three

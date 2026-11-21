@@ -259,6 +259,7 @@ _COMMAND_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     "get_processes": {},
     "background_tool_call": {"call_id": "call-1"},
     "browser_interact": {"action": "refresh"},
+    "get_browser_addresses": {},
     "clear_queue": {},
     "clone_session": {},
     "compact": {},
@@ -576,6 +577,11 @@ _EVENT_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     },
     "rpc.sessions": {"command_id": "command-1"},
     "rpc.skills": {"command_id": "command-1", "catalog": {}},
+    "rpc.browser_addresses": {
+        "command_id": "command-1",
+        "trusted": True,
+        "addresses": ["https://example.test/"],
+    },
     "rpc.git_diff": {
         "command_id": "diff-1",
         "generation": 1,

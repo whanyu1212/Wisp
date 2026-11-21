@@ -20,6 +20,7 @@ from pydantic import (
 from wisp.config.settings import (
     BROWSER_PROFILE_SUBPATH,
     DEFAULT_PROTECTED_PATHS,
+    BrowserSearchEngine,
     ResolvedSettings,
     resolve_settings,
     user_settings_path,
@@ -46,6 +47,7 @@ DEFAULT_CONTEXT_RESERVE_TOKENS = 16_384
 DEFAULT_AUTO_COMPACTION_ENABLED = True
 DEFAULT_WEB_SEARCH_ENABLED = False
 DEFAULT_SUBAGENTS_ENABLED = False
+DEFAULT_BROWSER_SEARCH_ENGINE: BrowserSearchEngine = "google"
 OPENAI_COMPATIBLE_CONFIG_ENV = "WISP_OPENAI_COMPATIBLE_CONFIG"
 _DEFAULT_AUTH_PATH = Path("~/.wisp/auth.json")
 _DEFAULT_SESSION_DIR = Path("~/.wisp/sessions")
@@ -89,6 +91,8 @@ class WispConfig(BaseModel):
     )
     mcp_tool_exposure: McpToolExposure = DEFAULT_MCP_TOOL_EXPOSURE
     openai_compatible: OpenAICompatibleSettings | None = None
+    # Where the live browser sends address-bar text that is not an address.
+    browser_search_engine: BrowserSearchEngine = DEFAULT_BROWSER_SEARCH_ENGINE
 
     @model_validator(mode="wrap")
     @classmethod
@@ -171,6 +175,7 @@ class WispConfig(BaseModel):
         mcp_servers: tuple[McpServerConfig, ...] | None = None,
         mcp_tool_exposure: McpToolExposure | None = None,
         openai_compatible: OpenAICompatibleSettings | None = None,
+        browser_search_engine: BrowserSearchEngine | None = None,
         project_dir: Path | None = None,
         trusted: bool = False,
         settings: ResolvedSettings | None = None,
@@ -242,6 +247,10 @@ class WispConfig(BaseModel):
         decides whether the model gets every MCP tool's schema or finds tools on
         demand, which changes what it sees and what each request costs. The default,
         ``auto``, finds them on demand only for a large catalog.
+
+        ``browser_search_engine`` is user-only, because it decides where the live
+        browser sends text the user typed that is not an address. It defaults to
+        ``google``.
         """
 
         if settings is None:
@@ -379,6 +388,11 @@ class WispConfig(BaseModel):
                 )
             ),
             openai_compatible=compatible_override or settings.openai_compatible,
+            browser_search_engine=(
+                browser_search_engine
+                or settings.browser_search_engine
+                or DEFAULT_BROWSER_SEARCH_ENGINE
+            ),
         )
 
 

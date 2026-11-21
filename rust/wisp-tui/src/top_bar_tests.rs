@@ -105,7 +105,7 @@ fn active_tab_follows_panel() {
     let buffer = draw(&mut docked, DOCKED);
     assert!(tab_active(&docked, &buffer, "Work"));
     assert!(!tab_active(&docked, &buffer, "Browser"));
-    docked.side_panel.toggle_browser();
+    docked.side_panel.show(PanelMode::Browser);
     let buffer = draw(&mut docked, DOCKED);
     assert!(!tab_active(&docked, &buffer, "Work"));
     assert!(tab_active(&docked, &buffer, "Browser"));

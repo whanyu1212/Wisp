@@ -14,7 +14,8 @@ from typing import NamedTuple
 
 from wisp.coding.browser_control import BrowserControlError
 
-_MARKER = ".wisp-browser-profile"
+# An empty private file that marks a directory as Wisp's own browser profile.
+PROFILE_MARKER_NAME = ".wisp-browser-profile"
 _IN_USE = "The remembered profile is in use. Close its live browser and try again."
 
 
@@ -64,7 +65,7 @@ def _open_profile(profile: Path, parent_fd: int, *, create: bool) -> int:
     with TemporaryDirectory(prefix=".wisp-browser-init-", dir=profile.parent) as temporary:
         staging = Path(temporary) / "profile"
         staging.mkdir(mode=0o700)
-        (staging / _MARKER).touch(mode=0o600)
+        (staging / PROFILE_MARKER_NAME).touch(mode=0o600)
         os.rename(staging, profile.name, dst_dir_fd=parent_fd)
     return os.open(profile.name, flags, dir_fd=parent_fd)
 
@@ -74,7 +75,9 @@ def _lock_marker(profile_fd: int, stack: ExitStack) -> int:
     if info.st_uid != os.getuid() or info.st_mode & 0o077:
         raise BrowserControlError("The remembered profile must be a private, user-owned directory")
     try:
-        fd = os.open(_MARKER, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=profile_fd)
+        fd = os.open(
+            PROFILE_MARKER_NAME, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=profile_fd
+        )
     except FileNotFoundError as exc:
         raise BrowserControlError("The directory is not a Wisp-owned browser profile") from exc
     stack.callback(os.close, fd)
@@ -165,7 +168,7 @@ def clear_browser_profile(profile_dir: Path) -> None:
             # Keep ownership verifiable if disk errors interrupt a clear.
             with os.scandir(profile_fd) as entries:
                 for entry in entries:
-                    if entry.name == _MARKER:
+                    if entry.name == PROFILE_MARKER_NAME:
                         continue
                     if entry.is_dir(follow_symlinks=False):
                         shutil.rmtree(entry.name, dir_fd=profile_fd)

@@ -61,7 +61,8 @@ Some fields are **user-only** and a project file can never set them:
 `protected_paths` · `retry` · `codex_read_timeout_seconds` · `effort` · `context_reserve_tokens` ·
 `auto_compaction_enabled` · `web_search` · `wake_on_process_exit` · `codemode` · `codemode_presentation` · `subagents` ·
 `subagent_model` ·
-`mcp_servers` · `mcp_tool_exposure` · `openai_compatible` · `tui_keybindings` · `tui_images`
+`mcp_servers` · `mcp_tool_exposure` · `openai_compatible` · `tui_keybindings` · `tui_images` ·
+`browser_search_engine`
 
 A repository cannot increase your API spending, prolong waits, launch an MCP command, configure a
 credential-receiving provider endpoint, or weaken the secret guard.
@@ -79,6 +80,7 @@ These settings belong in `~/.wisp/settings.json`, not the project file:
 | Field | Format and example |
 |---|---|
 | `tui_images` | Preferred terminal image protocol: `auto` (default), `kitty-unicode`, `kitty`, `iterm2`, `sixel`, or `halfblock`. Restart Wisp to apply. `WISP_TUI_IMAGES` overrides this setting. |
+| `browser_search_engine` | Where the live browser searches text you type that is not an address: `google` (default), `duckduckgo`, or `bing`. Restart Wisp to apply. |
 | `tui_keybindings` | Object mapping action IDs to arrays of key chords. See [Keybinding preferences](../guide/tui/keybindings.md#keybinding-preferences) for an example, available actions, and restart requirements. |
 | `mcp_servers` | Object keyed by server name, with either a stdio `command` or an HTTP `url` per entry. See [MCP servers](../guide/mcp.md#add-a-server) for complete JSON examples and authentication options. |
 | `codemode_presentation` | User-only model presentation: `"direct_and_codemode"` (default) or `"codemode_only"`. Separate from availability; falls back to direct tools when codemode is not offered. |
@@ -111,8 +113,11 @@ a time. On macOS, Chrome may ask for Keychain access to encrypt and restore save
 The profile's permissions protect saved data on disk, and Chrome exposes its debugger on the
 loopback network interface while the live tab is open.
 
+The profile also holds the last 20 addresses you opened in the live tab, which the Browser view
+offers again; searches are not kept.
+
 To clear the saved data, close the live browser and run `wisp browser clear`. This removes Wisp's
-local copy and does not sign you out on the sites themselves.
+local copy, including the recent addresses, and does not sign you out on the sites themselves.
 
 ## Remembered preferences
 

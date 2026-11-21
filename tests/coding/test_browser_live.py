@@ -15,7 +15,7 @@ import anyio
 import pytest
 
 from wisp.coding.browser_control import BrowserControlError, BrowserInteraction
-from wisp.coding.browser_live import LiveBrowser, _desktop_identity_args
+from wisp.coding.browser_live import LiveBrowser, _desktop_identity_args, validate_browser_url
 from wisp.coding.browser_profile import clear_browser_profile
 from wisp.events import LiveBrowserViewport
 
@@ -151,6 +151,12 @@ def test_navigate_validates_before_dispatch(monkeypatch: pytest.MonkeyPatch) -> 
             assert dispatched == [("Page.navigate", {"url": "https://example.org/page"})]
 
     anyio.run(scenario)
+
+
+@pytest.mark.parametrize("url", ["http://localhost:65536", "https://host:abc"])
+def test_invalid_port_rejected(url: str) -> None:
+    with pytest.raises(BrowserControlError, match="HTTP or HTTPS"):
+        validate_browser_url(url)
 
 
 @pytest.mark.parametrize(

@@ -13,7 +13,8 @@ from typing_extensions import TypeAliasType
 from wisp.coding import CodingSession
 from wisp.coding.browser_live import LiveBrowser
 from wisp.coding.session import DirectoryChangeError
-from wisp.config.settings import SettingsDocumentError
+from wisp.config.runtime import DEFAULT_BROWSER_SEARCH_ENGINE
+from wisp.config.settings import BrowserSearchEngine, SettingsDocumentError
 from wisp.events import RpcPermissionsReported, WispEvent
 from wisp.rpc.commands import (
     AddMcpServerCommand,
@@ -31,6 +32,7 @@ from wisp.rpc.commands import (
     DisconnectProviderCommand,
     FollowUpCommand,
     ForkSessionCommand,
+    GetBrowserAddressesCommand,
     GetCodemodeCommand,
     GetCommandsCommand,
     GetConnectionCatalogCommand,
@@ -77,7 +79,10 @@ from wisp.rpc.commands import (
     TrustCommand,
     UnrevertSessionTreeCommand,
 )
-from wisp.rpc.handlers.browser import start_rpc_browser_interact_command
+from wisp.rpc.handlers.browser import (
+    handle_rpc_browser_addresses_command,
+    start_rpc_browser_interact_command,
+)
 from wisp.rpc.handlers.inspection import rpc_workspace_report
 from wisp.rpc.handlers.mcp import (
     McpServerCommand,
@@ -202,8 +207,10 @@ class RpcCommandExecutor:
         change_directory: DirectoryChanger | None = None,
         settings_reloader: RpcSettingsReloader | None = None,
         live_browser: LiveBrowser | None = None,
+        browser_search_engine: BrowserSearchEngine = DEFAULT_BROWSER_SEARCH_ENGINE,
     ) -> None:
         self.live_browser = live_browser
+        self.browser_search_engine = browser_search_engine
         self.settings_reloader = settings_reloader
         self.change_directory = change_directory
         self.project_files = project_files
@@ -362,6 +369,15 @@ class RpcCommandExecutor:
         if isinstance(known, BrowserInteractCommand):
             self.coordinator.running_command = running_command
             return self._dispatch_browser_interact(known, running_command)
+        if isinstance(known, GetBrowserAddressesCommand):
+            self.coordinator.running_command = running_command
+            await handle_rpc_browser_addresses_command(
+                known,
+                agent=self.agent,
+                live_browser=self.live_browser,
+                write_event=self.write_event,
+            )
+            return _RpcDispatchResult(running_command=running_command)
         if isinstance(known, CancelProcessCommand):
             self.coordinator.running_command = running_command
             start_cancel_process_command(
@@ -982,6 +998,7 @@ class RpcCommandExecutor:
             running_command=start_rpc_browser_interact_command(
                 command,
                 live_browser=self.live_browser,
+                search_engine=self.browser_search_engine,
                 agent=self.agent,
                 runtime=self.runtime,
                 sessions=self.sessions,

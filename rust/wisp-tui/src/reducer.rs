@@ -826,6 +826,14 @@ impl RunProgress {
     }
 }
 
+/// Whether the live browser may open in this project, and its recent addresses.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BrowserAddresses {
+    pub trusted: bool,
+    /// Newest first; always empty in an untrusted project.
+    pub addresses: Vec<String>,
+}
+
 /// Transient browser viewport snapshot shown in the side panel's Browser tab.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BrowserViewport {
@@ -1037,6 +1045,8 @@ pub struct UiState {
     pub(crate) codemode_picker_open: bool,
     pub(crate) project_files: project_files::ProjectFiles,
     pub browser_viewport: Option<BrowserViewport>,
+    /// The latest `rpc.browser_addresses` report.
+    pub browser_addresses: Option<BrowserAddresses>,
     pub(crate) browser_requested_geometry: Option<LiveBrowserViewport>,
     pub(crate) browser_page_revision: u64,
     browser_interact_pending: std::collections::BTreeMap<String, BrowserCommandCompletion>,
@@ -1136,6 +1146,7 @@ impl UiState {
             side_panel_visible: false,
             codemode_picker_open: false,
             browser_viewport: None,
+            browser_addresses: None,
             browser_requested_geometry: None,
             browser_page_revision: 0,
             browser_interact_pending: std::collections::BTreeMap::new(),
@@ -1151,6 +1162,21 @@ impl UiState {
 
     pub fn browser_interact_in_flight(&self) -> bool {
         !self.browser_interact_pending.is_empty()
+    }
+
+    /// The live browser's recent addresses from the last report, newest first.
+    pub(crate) fn browser_recent_addresses(&self) -> &[String] {
+        self.browser_addresses
+            .as_ref()
+            .map_or(&[], |report| report.addresses.as_slice())
+    }
+
+    /// Whether the last report said this project is not trusted, so the backend
+    /// refuses to open the live browser. Before any report this is `false`.
+    pub(crate) fn live_browser_untrusted(&self) -> bool {
+        self.browser_addresses
+            .as_ref()
+            .is_some_and(|report| !report.trusted)
     }
 
     pub(crate) fn browser_page_transition_in_flight(&self) -> bool {
@@ -1342,6 +1368,7 @@ pub enum CommandKind {
     GetProcesses,
     GetProcessOutput,
     BrowserInteract,
+    GetBrowserAddresses,
     StoreApiKey,
     DisconnectProvider,
     BeginDeviceCode,
@@ -1394,6 +1421,7 @@ impl CommandKind {
             Self::GetProcesses => "get_processes",
             Self::GetProcessOutput => "get_process_output",
             Self::BrowserInteract => "browser_interact",
+            Self::GetBrowserAddresses => "get_browser_addresses",
             Self::StoreApiKey => "store_api_key",
             Self::DisconnectProvider => "disconnect_provider",
             Self::BeginDeviceCode => "begin_device_code",
@@ -1593,6 +1621,7 @@ pub enum BackendEvent {
     },
     Diagnostic(String),
     BrowserViewportUpdated(Box<BrowserViewportInput>),
+    BrowserAddressesReported(BrowserAddresses),
     DeviceCodeReported {
         command_id: String,
         challenge: DeviceCodeChallenge,
@@ -1843,6 +1872,9 @@ pub enum UiAction {
     },
     Cancel,
     BrowserInteract(BrowserInteractRequest),
+    /// Ask whether the live browser may open in this project, and for its recent
+    /// addresses. Never starts Chrome.
+    LoadBrowserAddresses,
     BackendEvent(BackendEvent),
     TransportClosed {
         error: Option<String>,
@@ -2128,6 +2160,12 @@ pub fn reduce(
         } => answer_trust(state, request_id, trusted, reason, transient, ids),
         UiAction::Cancel => cancel(state, ids),
         UiAction::BrowserInteract(request) => handle_browser_interact(state, request, ids),
+        UiAction::LoadBrowserAddresses => {
+            let id = ids.next_id(CommandKind::GetBrowserAddresses);
+            Ok(vec![UiEffect::SendCommand(
+                WispTypedClientRpcCommands::get_browser_addresses(&id)?,
+            )])
+        }
         UiAction::BackendEvent(event) => Ok(handle_backend_event(state, event, ids)?),
         UiAction::TransportClosed { .. } => Ok(close_transport(state)),
     }?;
@@ -5766,6 +5804,10 @@ fn handle_backend_event(
             state.git_branch = git_branch;
             Ok(vec![UiEffect::RequestRender])
         }
+        BackendEvent::BrowserAddressesReported(addresses) => {
+            state.browser_addresses = Some(addresses);
+            Ok(vec![UiEffect::RequestRender])
+        }
         BackendEvent::BrowserViewportUpdated(update) => {
             if !update.live
                 && state
@@ -8007,6 +8049,47 @@ mod tests {
                 delta: "hello".into(),
                 content_kind: MessageContentKind::Text,
             }
+        );
+    }
+
+    #[test]
+    fn browser_addresses_report_lands_in_state() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+        for (trusted, addresses) in [
+            (true, vec!["https://example.test/", "http://localhost:3000"]),
+            (false, vec![]),
+        ] {
+            let live = wisp_protocol::events::deserialize(serde_json::json!({
+                "type": "rpc.browser_addresses",
+                "timestamp": "2026-01-02T03:04:05Z",
+                "command_id": "addresses-1",
+                "trusted": trusted,
+                "addresses": addresses,
+            }))
+            .unwrap();
+            let event = BackendEvent::from_live(&live).unwrap();
+
+            let effects = reduce(&mut state, UiAction::BackendEvent(event), &mut ids).unwrap();
+
+            assert!(matches!(effects.as_slice(), [UiEffect::RequestRender]));
+            assert_eq!(
+                state.browser_addresses,
+                Some(BrowserAddresses {
+                    trusted,
+                    addresses: addresses.into_iter().map(str::to_owned).collect(),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn browser_addresses_command_round_trips() {
+        let command = WispTypedClientRpcCommands::get_browser_addresses("addresses-1").unwrap();
+        let wire = serde_json::to_value(&command).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"type": "get_browser_addresses", "id": "addresses-1"})
         );
     }
 

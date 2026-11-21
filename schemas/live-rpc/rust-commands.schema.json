@@ -366,6 +366,7 @@
               "type": "string"
             }
           ],
+          "description": "For live_open and live_navigate: an address or search text, resolved by the backend with the user's browser_search_engine setting.",
           "title": "BrowserInteractCommandUrl"
         },
         "viewport": {
@@ -859,6 +860,33 @@
         "entry_id"
       ],
       "title": "ForkSessionCommand",
+      "type": "object"
+    },
+    "GetBrowserAddressesCommand": {
+      "additionalProperties": false,
+      "description": "Report whether the live browser may open and its recent addresses, without starting it.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "GetBrowserAddressesCommandId"
+        },
+        "type": {
+          "const": "get_browser_addresses",
+          "default": "get_browser_addresses",
+          "title": "GetBrowserAddressesCommandType",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "GetBrowserAddressesCommand",
       "type": "object"
     },
     "GetCodemodeCommand": {
@@ -2650,6 +2678,7 @@
       "disconnect_provider": "#/$defs/DisconnectProviderCommand",
       "follow_up": "#/$defs/FollowUpCommand",
       "fork_session": "#/$defs/ForkSessionCommand",
+      "get_browser_addresses": "#/$defs/GetBrowserAddressesCommand",
       "get_codemode": "#/$defs/GetCodemodeCommand",
       "get_commands": "#/$defs/GetCommandsCommand",
       "get_connection_catalog": "#/$defs/GetConnectionCatalogCommand",
@@ -2852,6 +2881,9 @@
     },
     {
       "$ref": "#/$defs/BrowserInteractCommand"
+    },
+    {
+      "$ref": "#/$defs/GetBrowserAddressesCommand"
     },
     {
       "$ref": "#/$defs/ApprovalCommand"

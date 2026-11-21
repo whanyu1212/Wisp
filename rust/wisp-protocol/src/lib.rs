@@ -1582,6 +1582,11 @@ pub mod commands {
             deserialize(value)
         }
 
+        /// Ask whether the live browser may open here and for its recent addresses.
+        pub fn get_browser_addresses(id: &str) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({"type": "get_browser_addresses", "id": id}))
+        }
+
         /// Open a user-controlled Chromium tab at the supplied address.
         pub fn browser_live_open(id: &str, url: &str) -> Result<Self, super::ProtocolDecodeError> {
             deserialize(serde_json::json!({

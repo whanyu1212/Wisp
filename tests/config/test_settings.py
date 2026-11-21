@@ -51,6 +51,24 @@ def test_invalid_codemode_presentation(model: type[WispSettings] | type[WispConf
         model.model_validate({"codemode_presentation": "invalid"})
 
 
+def test_browser_search_engine_precedence(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    _write_settings(project, browser_search_engine="duckduckgo")
+    assert WispConfig.from_env(project_dir=project, trusted=True).browser_search_engine == "google"
+
+    _write_settings(Path.home(), browser_search_engine="bing")
+    config = WispConfig.from_env(project_dir=project, trusted=True)
+    assert config.browser_search_engine == "bing"
+    explicit = WispConfig.from_env(browser_search_engine="duckduckgo")
+    assert explicit.browser_search_engine == "duckduckgo"
+
+
+@pytest.mark.parametrize("model", [WispSettings, WispConfig])
+def test_invalid_browser_search_engine(model: type[WispSettings] | type[WispConfig]) -> None:
+    with pytest.raises(ValidationError, match="browser_search_engine"):
+        model.model_validate({"browser_search_engine": "yahoo"})
+
+
 def test_codex_read_timeout_is_user_only_and_respects_precedence(
     tmp_path: Path, monkeypatch: MonkeyPatch
 ) -> None:
@@ -205,6 +223,11 @@ def test_user_protected_paths_are_used(tmp_path: Path) -> None:
         pytest.param("subagents", None, True, None, id="subagents-unset"),
         pytest.param("subagent_model", "small", "large", "small", id="subagent-model"),
         pytest.param("subagent_model", None, "large", None, id="subagent-model-unset"),
+        # A repo must not choose where the user's typed browser text is sent.
+        pytest.param(
+            "browser_search_engine", "duckduckgo", "bing", "duckduckgo", id="browser-search"
+        ),
+        pytest.param("browser_search_engine", None, "bing", None, id="browser-search-unset"),
         pytest.param(
             "tui_keybindings",
             {"prompt.submit": ["ctrl+enter"]},

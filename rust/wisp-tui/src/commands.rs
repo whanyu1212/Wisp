@@ -54,10 +54,11 @@ pub(crate) enum Command {
     ChangeDirectory(String),
     /// `/ps`: focus the running background processes in the side panel.
     Processes,
-    /// `/browser`: show or toggle the live browser viewport (or enter takeover).
+    /// `/browser`: open and focus the Browser view (or enter takeover).
     Browser {
         interact: bool,
     },
+    /// `/browser live`: open a live page at an address or a search, as typed.
     BrowserLive(String),
     /// `/kill`: the process to stop, by `/ps` number or id.
     KillProcess(String),
@@ -104,7 +105,7 @@ fn usage(name: &str) -> Option<&'static str> {
         "unrevert" => "/unrevert",
         "cd" => "/cd <path>",
         "ps" => "/ps",
-        "browser" => "/browser [interact | live <url>]",
+        "browser" => "/browser [interact | live <address or search>]",
         "kill" => "/kill <number|process-id>",
         _ => return None,
     })
@@ -226,15 +227,17 @@ fn parse_browser(tail: &str, syntax: &str) -> Command {
         Command::Browser { interact: false }
     } else if trimmed.eq_ignore_ascii_case("interact") {
         Command::Browser { interact: true }
-    } else if let Some(url) = trimmed
+    } else if let Some(text) = trimmed
         .strip_prefix("live ")
         .map(str::trim)
-        .filter(|url| !url.is_empty())
+        .filter(|text| !text.is_empty())
     {
-        if url.chars().count() > 2_048 {
-            Command::Invalid("Browser addresses must be 2,048 characters or fewer.".into())
+        if text.chars().count() > 2_048 {
+            Command::Invalid(
+                "Browser addresses and searches must be 2,048 characters or fewer.".into(),
+            )
         } else {
-            Command::BrowserLive(url.to_owned())
+            Command::BrowserLive(text.to_owned())
         }
     } else {
         Command::Invalid(format!("Usage: {syntax}"))
@@ -1682,8 +1685,12 @@ pub(crate) mod tests {
             Some(Command::Browser { interact: true })
         ));
         assert!(matches!(
+            classify("/browser live  rust ratatui docs ", None),
+            Some(Command::BrowserLive(text)) if text == "rust ratatui docs"
+        ));
+        assert!(matches!(
             classify("/browser extra", None),
-            Some(Command::Invalid(msg)) if msg == "Usage: /browser [interact | live <url>]"
+            Some(Command::Invalid(msg)) if msg == "Usage: /browser [interact | live <address or search>]"
         ));
     }
 
