@@ -219,6 +219,7 @@ async fn permissions_dock_above_the_composer_and_apply_only_a_painted_highlight(
                 saved_mode: Some(PermissionMode::Yolo),
                 project_path: Some("/project".into()),
                 session_only_yolo: false,
+                command_allow_rules: Vec::new(),
             })),
         }),
         &writer,
@@ -365,6 +366,7 @@ async fn permissions_in_the_home_folder_say_yolo_is_not_saved() {
                 saved_mode: None,
                 project_path: Some("/Users/me".into()),
                 session_only_yolo: true,
+                command_allow_rules: Vec::new(),
             })),
         }),
         &writer,
@@ -420,6 +422,7 @@ async fn permissions_require_a_confirmed_snapshot_and_painted_choice() {
                 saved_mode: None,
                 project_path: Some("/project".into()),
                 session_only_yolo: false,
+                command_allow_rules: Vec::new(),
             })),
         }),
         &writer,
@@ -496,6 +499,7 @@ async fn permission_gate_keys_send_only_the_displayed_scopes() {
             safety: "command".into(),
             grants_allowed: true,
             session_only_yolo: false,
+            command_prefix: None,
             detail_source: tool_detail::ToolDetailSource::None,
         });
         if approved {
@@ -536,6 +540,7 @@ fn approval_ui() -> LiveUi {
         safety: "command".into(),
         grants_allowed: true,
         session_only_yolo: false,
+        command_prefix: None,
         detail_source: tool_detail::ToolDetailSource::None,
     });
     ui

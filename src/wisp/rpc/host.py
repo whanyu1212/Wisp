@@ -78,8 +78,12 @@ from wisp.tools.mcp_servers import PROPOSE_MCP_SERVER, PROPOSE_MCP_SERVER_CHANGE
 from wisp.tools.selection import select_session, select_tools, tool_approval_policy
 from wisp.tools.shell.external_reads import resolve_auto_command_read_dir
 from wisp.trust.permissions import (
+    command_matches_allow_rule,
     ignored_broad_root_yolo,
+    load_command_allow_rules,
     load_permission_mode,
+    remove_command_allow_rule,
+    save_command_allow_rule,
     save_permission_mode,
 )
 from wisp.trust.records import (
@@ -155,6 +159,9 @@ class _PendingApproval:
     # and its arguments are what the confirmation handler acts on.
     confirm_only: bool = False
     arguments: Mapping[str, object] | None = None
+    # Saveable command prefix and raw command captured when preparing a bash approval.
+    command_prefix: str | None = None
+    command: str | None = None
 
 
 ConfirmationHandler = TypeAliasType(
@@ -235,6 +242,9 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
         # is granted for this session only (see ``wisp.trust.scope``).
         self.session_only_yolo = project_path is not None and is_broad_root(project_path)
         self._saved_mode = load_permission_mode(project_path) if project_path is not None else None
+        self.command_allow_rules = (
+            load_command_allow_rules(project_path) if project_path is not None else ()
+        )
         self.approved_tools = self._fallback.approved_tools
         self.approved_safety = self._fallback.approved_safety
         self.mode = self._saved_mode or self._fallback.mode
@@ -291,7 +301,16 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
             saved_mode=self._saved_mode,
             project_path=self._project_path,
             session_only_yolo=self.session_only_yolo,
+            command_allow_rules=self.command_allow_rules,
         )
+
+    def revoke_command_allow_rule(self, prefix: str) -> None:
+        """Remove one saved command-prefix allow rule for the active project."""
+
+        if self._project_path is None:
+            raise OSError("No project is available for updating permissions")
+        self.command_allow_rules = remove_command_allow_rule(self._project_path, prefix)
+        self.generation += 1
 
     def set_permissions(self, mode: PermissionMode) -> None:
         """Save the new default before applying it and clearing temporary grants.
@@ -338,6 +357,7 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
         if self.approves(tool):
             return
         confirm_only = confirms_every_call(tool)
+        raw_command = arguments.get("command") if tool.name == "bash" else None
         pending = _PendingApproval(
             call_id=call_id,
             tool_name=tool.name,
@@ -345,6 +365,8 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
             event=anyio.Event(),
             confirm_only=confirm_only,
             arguments=dict(arguments) if confirm_only else None,
+            command_prefix=self.suggested_command_prefix(tool, arguments),
+            command=raw_command if isinstance(raw_command, str) else None,
         )
         self._pending[call_id] = pending
         if self._input_closed_reason is not None:
@@ -406,6 +428,7 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
             # proceed.
             self._resolve_pending(pending, approved=approved, reason=reason)
             return True
+        saved_prefix: str | None = None
         if approved and scope == "all_project":
             try:
                 self.set_permissions("yolo")
@@ -414,6 +437,33 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
                     pending,
                     approved=False,
                     reason="Could not save project permissions. Retry or choose Allow once.",
+                )
+                return True
+        elif approved and scope == "command_prefix_project":
+            if (
+                pending.command_prefix is None
+                or self._project_path is None
+                or self.session_only_yolo
+            ):
+                self._resolve_pending(
+                    pending,
+                    approved=False,
+                    reason=(
+                        "This command cannot be saved as a project allow rule. Choose Allow once."
+                    ),
+                )
+                return True
+            try:
+                self.command_allow_rules = save_command_allow_rule(
+                    self._project_path, pending.command_prefix
+                )
+                self.generation += 1
+                saved_prefix = pending.command_prefix
+            except (OSError, ValueError):
+                self._resolve_pending(
+                    pending,
+                    approved=False,
+                    reason="Could not save command allow rule. Retry or choose Allow once.",
                 )
                 return True
         elif approved and scope == "tool_session":
@@ -431,6 +481,12 @@ class RpcToolApprovalPolicy(ToolApprovalPolicy):
                     and (
                         other.tool_name in self.approved_tools
                         or other.tool_safety in self.approved_safety
+                        or (
+                            saved_prefix is not None
+                            and other.tool_name == "bash"
+                            and other.command is not None
+                            and command_matches_allow_rule(other.command, saved_prefix)
+                        )
                     )
                 ):
                     self._resolve_pending(other, approved=True, reason=None)

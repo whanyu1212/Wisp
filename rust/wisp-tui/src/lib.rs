@@ -7598,8 +7598,15 @@ impl LiveUi {
             .pending_approval
             .as_ref()
             .is_some_and(|pending| !pending.grants_allowed);
+        let has_prefix = self
+            .state
+            .pending_approval
+            .as_ref()
+            .is_some_and(|pending| pending.grants_allowed && pending.command_prefix.is_some());
         let choice_keys: &[char] = if confirmation {
             &CONFIRMATION_CHOICE_KEYS
+        } else if has_prefix {
+            &APPROVAL_PREFIX_CHOICE_KEYS
         } else {
             &APPROVAL_CHOICE_KEYS
         };
@@ -7617,6 +7624,9 @@ impl LiveUi {
                 if !self.unsendable_current_response() {
                     self.notice = Some(if confirmation {
                         "Choose 1 confirm or 2 deny.".into()
+                    } else if has_prefix {
+                        "Choose 1 allow once, 2 allow prefix, 3 allow tool, 4 YOLO, or 5 deny."
+                            .into()
                     } else {
                         "Choose 1 allow once, 2 allow tool, 3 YOLO, or 4 deny.".into()
                     });
@@ -7932,6 +7942,8 @@ fn printable_char(key: KeyEvent) -> Option<char> {
 
 /// Keys of the approval panel's choices, in panel order.
 const APPROVAL_CHOICE_KEYS: [char; ui::APPROVAL_CHOICES] = ['1', '2', '3', '4'];
+/// Keys of a bash approval panel that offers a saved command-prefix allow rule.
+const APPROVAL_PREFIX_CHOICE_KEYS: [char; ui::APPROVAL_PREFIX_CHOICES] = ['1', '2', '3', '4', '5'];
 /// Keys of a confirm-every-call tool's choices: confirm once, or deny.
 const CONFIRMATION_CHOICE_KEYS: [char; ui::CONFIRMATION_CHOICES] = ['1', '2'];
 /// Keys of the trust panel's choices, in panel order.
@@ -7959,18 +7971,24 @@ fn approval_decision(key: KeyEvent, pending: Option<&PendingApproval>) -> Option
             scope: approved.then_some(ApprovalScope::Once),
         });
     }
-    let approved = match printable_char(key)?.to_ascii_lowercase() {
-        '1' | 'y' => true,
-        '2' | 't' => true,
-        '3' | 'a' => true,
-        '4' | 'n' => false,
-        _ => return None,
-    };
-    let scope = match printable_char(key)?.to_ascii_lowercase() {
-        '2' | 't' => Some(ApprovalScope::ToolSession),
-        '3' | 'a' => Some(ApprovalScope::AllProject),
-        '1' | 'y' => Some(ApprovalScope::Once),
-        _ => None,
+    let ch = printable_char(key)?.to_ascii_lowercase();
+    let (approved, scope) = if pending.command_prefix.is_some() {
+        match ch {
+            '1' | 'y' => (true, Some(ApprovalScope::Once)),
+            '2' | 'p' => (true, Some(ApprovalScope::CommandPrefixProject)),
+            '3' | 't' => (true, Some(ApprovalScope::ToolSession)),
+            '4' | 'a' => (true, Some(ApprovalScope::AllProject)),
+            '5' | 'n' => (false, None),
+            _ => return None,
+        }
+    } else {
+        match ch {
+            '1' | 'y' => (true, Some(ApprovalScope::Once)),
+            '2' | 't' => (true, Some(ApprovalScope::ToolSession)),
+            '3' | 'a' => (true, Some(ApprovalScope::AllProject)),
+            '4' | 'n' => (false, None),
+            _ => return None,
+        }
     };
     Some(UiAction::ApprovalDecision {
         call_id: pending.call_id.clone(),
@@ -11306,6 +11324,7 @@ mod tests {
             safety: "read".into(),
             grants_allowed: true,
             session_only_yolo: false,
+            command_prefix: None,
         });
         let mut live_ui = LiveUi {
             state,
@@ -11682,6 +11701,7 @@ mod tests {
             safety: "read".into(),
             grants_allowed: true,
             session_only_yolo: false,
+            command_prefix: None,
         });
         let mut live_ui = LiveUi {
             state,
@@ -11768,6 +11788,7 @@ mod tests {
             safety: "command".into(),
             grants_allowed: false,
             session_only_yolo: false,
+            command_prefix: None,
         }
     }
 
@@ -12356,6 +12377,7 @@ mod tests {
             safety: "read".into(),
             grants_allowed: true,
             session_only_yolo: false,
+            command_prefix: None,
         });
         let mut live_ui = LiveUi {
             state,
@@ -12479,6 +12501,7 @@ mod tests {
             safety: "read".into(),
             grants_allowed: true,
             session_only_yolo: false,
+            command_prefix: None,
         });
         let mut approval_ui = LiveUi {
             state: approval_state,
@@ -12657,6 +12680,7 @@ mod tests {
                 safety: "command".into(),
                 grants_allowed: true,
                 session_only_yolo: false,
+                command_prefix: None,
             }));
 
         let control = approval_ui
@@ -13519,6 +13543,7 @@ mod tests {
                     safety: "read".into(),
                     grants_allowed: true,
                     session_only_yolo: false,
+                    command_prefix: None,
                 })),
                 &writer_tx,
                 MAX_APPLICATION_FRAME_BYTES,

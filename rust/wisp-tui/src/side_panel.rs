@@ -2054,6 +2054,7 @@ mod tests {
             saved_mode: None,
             project_path: None,
             session_only_yolo: false,
+            command_allow_rules: Vec::new(),
         }));
         state.mcp.snapshot = Some(Arc::new(McpStatusSnapshot {
             servers: ["docs", "linear"]
@@ -2203,6 +2204,7 @@ mod tests {
             saved_mode: Some(PermissionMode::Yolo),
             project_path: Some("/srv/wisp".into()),
             session_only_yolo: false,
+            command_allow_rules: Vec::new(),
         }));
         let mut compacting = state.clone();
         compacting.view_status = ViewStatus::Running;
@@ -2935,6 +2937,7 @@ mod tests {
             safety: "command".into(),
             grants_allowed: true,
             session_only_yolo: false,
+            command_prefix: None,
         });
         state.view_status = ViewStatus::WaitingForApproval;
         queue(&mut state, &[], &["then open the PR"]);

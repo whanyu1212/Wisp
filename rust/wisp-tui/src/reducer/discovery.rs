@@ -361,6 +361,33 @@ pub(super) fn permissions(
     ])
 }
 
+pub(super) fn revoke_command_rule(
+    state: &mut UiState,
+    prefix: &str,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
+    if state.exit_requested {
+        return Ok(Vec::new());
+    }
+    if state.permissions.loading() {
+        return Ok(vec![UiEffect::Notice(
+            "Permissions are still loading; try again.".into(),
+        )]);
+    }
+    if !state.can_select_model() || super::session_sync_pending(state) {
+        return Ok(vec![UiEffect::Notice(
+            "Finish the current operation before changing permissions.".into(),
+        )]);
+    }
+    let id = ids.next_id(CommandKind::Permissions);
+    let command = WispTypedClientRpcCommands::revoke_command_rule(&id, prefix)?;
+    state.permissions.start_change(id);
+    Ok(vec![
+        UiEffect::SendCommand(command),
+        UiEffect::RequestRender,
+    ])
+}
+
 /// Read the codemode setting, or apply and save `setting`. The setting changes
 /// what a run offers, so it waits for the current operation, like permissions.
 pub(super) fn codemode(

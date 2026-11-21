@@ -285,3 +285,193 @@ def test_rpc_reports_saved_permissions_only_after_success(
             assert reports[0].permissions.saved_mode == "yolo"
 
     anyio.run(scenario)
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("cargo test --workspace", "cargo test"),
+        ("uv run pytest tests/trust/test_permissions.py -k prefix", "uv run pytest"),
+        ("python -m pytest -q", "python -m pytest"),
+        ("npm run test -- --watch=false", "npm run test"),
+        ("git status -s", "git status"),
+        ("pytest -k 'foo bar'", "pytest"),
+        # Disallowed or compound commands never yield a saveable prefix.
+        ("cargo test && rm -rf /", None),
+        ("cargo test || true", None),
+        ("cargo test; id", None),
+        ("cargo test | tee out.txt", None),
+        ("cargo test > out.txt", None),
+        ("cargo test < in.txt", None),
+        ("cargo test $(whoami)", None),
+        ("cargo test `whoami`", None),
+        ("FOO=bar cargo test", None),
+        ("PATH=/evil:$PATH cargo test", None),
+        ("env cargo test", None),
+        ("sudo cargo test", None),
+        ("bash -c 'cargo test'", None),
+        ("python -c 'print(1)'", None),
+        ("rm -rf build", None),
+        ("curl https://example.com", None),
+        ("cargo test\nrm -rf /", None),
+        ("cargo test # comment", None),
+        ("cargo test 'unclosed", None),
+        ("cargo --version", None),
+        ("cargo", None),
+        ("uv run", None),
+        ("uv run --no-sync", None),
+        ("uv run ./script.py", None),
+        ("python -m", None),
+        ("python -m --help", None),
+        ("git ./foo", None),
+        ("! pytest", None),
+        ("! rm -rf /tmp/example", None),
+        ("if true", None),
+        ("while true", None),
+        ("export FOO=1", None),
+        (": noop", None),
+        ("-flag arg", None),
+        ("./script.sh", None),
+        ("cargo test " + "a" * 4001, None),
+    ],
+)
+def test_suggest_command_prefix_is_conservative(command: str, expected: str | None) -> None:
+    assert permissions.suggest_command_prefix(command) == expected
+
+
+@pytest.mark.parametrize(
+    "invalid_rule",
+    [
+        "",
+        "   ",
+        "a" * (permissions.MAX_COMMAND_PREFIX_CHARS + 1),
+        "a b c d e",
+        "cargo test && id",
+        "cargo\ntest",
+        "cargo \u202etest",
+        "café test",
+        "FOO=1",
+        "/usr/bin/pytest",
+        "-x",
+        "bash",
+        "!",
+        ":",
+        "{",
+        "[[",
+        "if",
+        "while",
+        "export",
+        "python",
+        "python -m",
+        "python -m -v",
+        "cargo",
+        "cargo -v",
+        "cargo sub/cmd",
+        "uv run",
+        "uv run -q",
+        "uv run ./foo",
+    ],
+)
+def test_validate_command_prefix_rejects_invalid_and_unsafe_rules(invalid_rule: str) -> None:
+    assert permissions.validate_command_prefix(invalid_rule) is None
+    assert not permissions.command_matches_allow_rule("cargo test", invalid_rule)
+    assert not permissions.command_matches_allow_rule("! rm -rf /tmp/example", invalid_rule)
+
+
+@pytest.mark.parametrize(
+    "adversarial",
+    [
+        "cargo testing",
+        "cargo test && rm -rf /",
+        "cargo test || echo hi",
+        "cargo test; id",
+        "cargo test | cat",
+        "cargo test > /tmp/out",
+        "cargo test < /etc/passwd",
+        "cargo test $(id)",
+        "cargo test `id`",
+        "cargo test $HOME",
+        'cargo test "$(id)"',
+        "FOO=1 cargo test",
+        "env cargo test",
+        "cargo test\\;id",
+        "cargo test\nid",
+        "cargo test # sneaky",
+        "cargo test 'unterminated",
+        "cargo test \u202e",
+        "",
+    ],
+)
+def test_command_allow_rule_rejects_adversarial_inputs(adversarial: str) -> None:
+    assert not permissions.command_matches_allow_rule(adversarial, "cargo test")
+
+
+def test_command_allow_rule_matches_simple_invocations_and_persists_per_project(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+
+    assert permissions.command_matches_allow_rule("cargo test", "cargo test")
+    assert permissions.command_matches_allow_rule("cargo test --workspace", "cargo test")
+    assert not permissions.command_matches_allow_rule("cargo", "cargo test")
+    assert permissions.command_matches_allow_rule("cargo  test   -p 'wisp tui'", "cargo test")
+    assert permissions.command_matches_allow_rule("uv run pytest -q", "uv run pytest")
+
+    assert permissions.save_command_allow_rule(project, "cargo test") == ("cargo test",)
+    assert permissions.save_command_allow_rule(project, "uv run pytest") == (
+        "cargo test",
+        "uv run pytest",
+    )
+    # Preserves rules when permission mode changes and isolates them per project.
+    save_permission_mode(project, "auto")
+    assert load_permission_mode(project) == "auto"
+    assert permissions.load_command_allow_rules(project) == ("cargo test", "uv run pytest")
+    assert permissions.load_command_allow_rules(other) == ()
+
+    # Revoking removes only the targeted rule and preserves the saved mode.
+    assert permissions.remove_command_allow_rule(project, "cargo test") == ("uv run pytest",)
+    assert load_permission_mode(project) == "auto"
+    assert permissions.load_command_allow_rules(project) == ("uv run pytest",)
+
+
+def test_command_allow_rules_are_refused_in_broad_roots() -> None:
+    with pytest.raises(permissions.BroadRootYoloError):
+        permissions.save_command_allow_rule(Path.home(), "cargo test")
+    assert permissions.load_command_allow_rules(Path.home()) == ()
+
+
+def test_rpc_command_prefix_approval_and_revoke_round_trip(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        policy = RpcToolApprovalPolicy(ToolApprovalPolicy.require_approval(), project_path=tmp_path)
+        tool = BashTool()
+        context = ToolContext(cwd=tmp_path)
+        args = {"command": "cargo test --workspace"}
+
+        policy.prepare_approval(tool, call_id="c1", arguments=args)
+        # Second waiting call matching the same prefix should release automatically too.
+        policy.prepare_approval(tool, call_id="c2", arguments={"command": "cargo test -p wisp"})
+        assert policy.resolve_approval(call_id="c1", approved=True, scope="command_prefix_project")
+        d1 = await policy.await_approval(tool, call_id="c1", arguments=args)
+        d2 = await policy.await_approval(
+            tool, call_id="c2", arguments={"command": "cargo test -p wisp"}
+        )
+        assert d1.approved and d2.approved
+        assert policy.permissions_snapshot().command_allow_rules == ("cargo test",)
+
+        # Future matching commands auto-approve with command_allow_rule_v1; chained ones do not.
+        auto = await policy.evaluate_call(tool, arguments=args, context=context)
+        assert auto is not None and auto.approved and auto.rule_id == "command_allow_rule_v1"
+        chained = await policy.evaluate_call(
+            tool, arguments={"command": "cargo test && id"}, context=context
+        )
+        assert chained is None
+
+        # Revoking immediately stops matching and persists to disk.
+        policy.revoke_command_allow_rule("cargo test")
+        assert policy.permissions_snapshot().command_allow_rules == ()
+        assert await policy.evaluate_call(tool, arguments=args, context=context) is None
+
+    anyio.run(scenario)

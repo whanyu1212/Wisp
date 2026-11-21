@@ -539,6 +539,7 @@ async fn decisions_preempt_every_overlay_even_before_the_next_frame() {
                         safety: "read".into(),
                         grants_allowed: true,
                         session_only_yolo: false,
+                        command_prefix: None,
                     })
                 };
                 let draft = ui.editor.clone();
@@ -1085,6 +1086,7 @@ async fn panel_overlay_yields_to_ctrl_c_decisions_and_overlays() {
             safety: "read".into(),
             grants_allowed: true,
             session_only_yolo: false,
+            command_prefix: None,
         })),
         &writer,
         8192,
@@ -2154,6 +2156,7 @@ async fn key_help_footer_and_outside_clicks_close_without_answering_decision() {
                 safety: "ask".into(),
                 grants_allowed: true,
                 session_only_yolo: false,
+                command_prefix: None,
             });
         }
         let mut terminal = Terminal::new(TestBackend::new(100, 28)).unwrap();

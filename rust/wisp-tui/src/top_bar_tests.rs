@@ -197,6 +197,7 @@ async fn blocked_tab_click_ignored() {
                     safety: "command".into(),
                     grants_allowed: true,
                     session_only_yolo: false,
+                    command_prefix: None,
                 })),
                 &writer,
                 8192,

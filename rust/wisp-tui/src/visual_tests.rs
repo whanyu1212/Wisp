@@ -174,6 +174,7 @@ fn fixture(scenario: &str) -> LiveUi {
             safety: "command".into(),
             grants_allowed: true,
             session_only_yolo: false,
+            command_prefix: None,
         });
     }
     if scenario == "mcp" {
@@ -198,6 +199,7 @@ fn fixture(scenario: &str) -> LiveUi {
             saved_mode: Some(wisp_protocol::commands::PermissionMode::Ask),
             project_path: Some("/projects/wisp".into()),
             session_only_yolo: false,
+            command_allow_rules: Vec::new(),
         }));
         ui.discovery_view = Some(DiscoveryView::permissions());
     }
@@ -218,6 +220,7 @@ fn fixture(scenario: &str) -> LiveUi {
                     saved_mode: Some(wisp_protocol::commands::PermissionMode::Yolo),
                     project_path: Some("/projects/wisp".into()),
                     session_only_yolo: false,
+                    command_allow_rules: Vec::new(),
                 }));
             ui.editor.insert_paste(
                 "Refactor the retry helper so that:\n- backoff is capped at 30s\n\
@@ -554,6 +557,7 @@ fn showcase_state(worked: bool) -> UiState {
         saved_mode: Some(wisp_protocol::commands::PermissionMode::Ask),
         project_path: Some("/projects/demo-app".into()),
         session_only_yolo: false,
+        command_allow_rules: Vec::new(),
     }));
     state.mcp.snapshot = Some(Arc::new(McpStatusSnapshot {
         servers: ["demo-docs", "demo-issues"]
@@ -3243,4 +3247,79 @@ fn turn_change_summary_styles_diff_counts_and_compacts_on_narrow_width() {
     let ny = row_containing(&narrow, "+2 −1 1f");
     let nrow = buffer_row(&narrow, ny);
     assert!(!nrow.contains("tok/s"), "{nrow}");
+}
+
+#[test]
+fn approval_dock_renders_inline_edit_diff_and_bash_prefix_choice() {
+    let mut ui = LiveUi::default();
+    let palette = ui.palette();
+    ui.state.view_status = ViewStatus::WaitingForApproval;
+    let BackendEvent::ToolApprovalRequested(edit_approval) =
+        BackendEvent::from_projection_value(&json!({
+            "type": "tool.approval.requested",
+            "call_id": "edit-approval",
+            "name": "edit",
+            "arguments": {
+                "path": "src/retry.py",
+                "edits": [{"oldText": "return 1\n", "newText": "return 2\n"}]
+            },
+            "safety": "mutating",
+            "grants_allowed": true,
+            "session_only_yolo": false
+        }))
+        .unwrap()
+    else {
+        panic!("approval expected");
+    };
+    ui.state.pending_approval = Some(edit_approval);
+    let edit_buf = draw(&mut ui, 90, 24);
+    let title_y = row_containing(&edit_buf, "Allow edit on src/retry.py?");
+    assert!(buffer_row(&edit_buf, title_y).contains("mutating"));
+    let del_y = row_containing(&edit_buf, "return 1");
+    let add_y = row_containing(&edit_buf, "return 2");
+    assert_eq!(edit_buf[(6, del_y)].bg, palette.deletion_background);
+    assert_eq!(edit_buf[(6, add_y)].bg, palette.addition_background);
+
+    // Bash approval with a saveable prefix shows `$` command and 5 choices including saved prefix.
+    ui.state.pending_approval = Some(PendingApproval {
+        call_id: "bash-approval".into(),
+        name: "bash".into(),
+        arguments: json!({"command": "uv run pytest tests/trust/test_permissions.py"}),
+        detail_source: tool_detail::ToolDetailSource::None,
+        safety: "command".into(),
+        grants_allowed: true,
+        session_only_yolo: false,
+        command_prefix: Some("uv run pytest".into()),
+    });
+    let bash_buf = draw(&mut ui, 90, 24);
+    let _ = row_containing(&bash_buf, "$ uv run pytest");
+    let _ = row_containing(&bash_buf, "2  Always allow `uv run pytest` (saved)");
+    let _ = row_containing(&bash_buf, "5  Deny");
+
+    // Write approval shows path-bearing title and numbered syntax-highlighted proposed content.
+    let BackendEvent::ToolApprovalRequested(write_approval) =
+        BackendEvent::from_projection_value(&json!({
+            "type": "tool.approval.requested",
+            "call_id": "write-approval",
+            "name": "write",
+            "arguments": {
+                "path": "src/new.rs",
+                "content": "fn hello() {\n    println!(\"hi\");\n}\n"
+            },
+            "safety": "mutating",
+            "grants_allowed": true,
+            "session_only_yolo": false
+        }))
+        .unwrap()
+    else {
+        panic!("approval expected");
+    };
+    ui.state.pending_approval = Some(write_approval);
+    let write_buf = draw(&mut ui, 90, 24);
+    let _ = row_containing(&write_buf, "Allow write on src/new.rs?");
+    let fn_y = row_containing(&write_buf, "1 │ fn hello() {");
+    let fn_row = buffer_row(&write_buf, fn_y);
+    let fn_byte = fn_row.find("fn").unwrap();
+    let fn_col = unicode_width::UnicodeWidthStr::width(&fn_row[..fn_byte]) as u16;
+    assert_eq!(write_buf[(fn_col, fn_y)].fg, palette.accent);
 }

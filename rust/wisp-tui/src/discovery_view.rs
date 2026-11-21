@@ -137,7 +137,9 @@ impl DiscoveryView {
     pub fn rendered_selection(&self) -> Option<&str> {
         match self {
             Self::Skills(view) => view.rendered.as_deref(),
-            Self::Permissions(view) => view.rendered.map(|index| PERMISSION_CHOICES[index].1),
+            Self::Permissions(view) => view
+                .rendered
+                .and_then(|index| PERMISSION_CHOICES.get(index).map(|choice| choice.1)),
             Self::Codemode(view) => view.rendered.map(|index| {
                 if index < CODEMODE_CHOICES.len() {
                     CODEMODE_CHOICES[index].1
@@ -178,7 +180,10 @@ impl DiscoveryView {
         }
         key.code == KeyCode::Enter
             || (matches!(self, Self::Permissions(_))
-                && matches!(key.code, KeyCode::Char('1'..='4')))
+                && matches!(
+                    key.code,
+                    KeyCode::Char('1'..='4') | KeyCode::Char('d') | KeyCode::Backspace
+                ))
             || (matches!(self, Self::Codemode(_)) && matches!(key.code, KeyCode::Char('1'..='5')))
     }
 
@@ -285,11 +290,45 @@ impl DiscoveryView {
         match self {
             Self::Permissions(view) => {
                 let ready = !state.permissions.loading() && state.permissions.snapshot.is_some();
-                view.choose(key.code, PERMISSION_CHOICES.len(), ready)
+                let rules: &[String] = state
+                    .permissions
+                    .snapshot
+                    .as_deref()
+                    .map_or(&[], |snapshot| snapshot.command_allow_rules.as_slice());
+                let total = PERMISSION_CHOICES.len() + rules.len();
+                if matches!(key.code, KeyCode::Char('d') | KeyCode::Backspace) {
+                    if ready
+                        && view.painted
+                        && let Some(index) = view.rendered
+                        && let Some(rule) = index
+                            .checked_sub(PERMISSION_CHOICES.len())
+                            .and_then(|i| rules.get(i))
+                    {
+                        let prefix = rule.clone();
+                        view.invalidate();
+                        return DiscoveryAction::Refresh(UiAction::RevokeCommandRule(prefix));
+                    }
+                    return DiscoveryAction::None;
+                }
+                if let KeyCode::Char(digit @ '1'..='4') = key.code {
+                    let index = usize::from(digit as u8 - b'1');
+                    if ready {
+                        view.invalidate();
+                        return DiscoveryAction::Refresh(UiAction::Permissions(Some(
+                            PERMISSION_CHOICES[index].2,
+                        )));
+                    }
+                    return DiscoveryAction::None;
+                }
+                view.choose(key.code, total, ready)
                     .map_or(DiscoveryAction::None, |choice| {
-                        DiscoveryAction::Refresh(UiAction::Permissions(Some(
-                            PERMISSION_CHOICES[choice].2,
-                        )))
+                        if let Some(mode) = PERMISSION_CHOICES.get(choice) {
+                            DiscoveryAction::Refresh(UiAction::Permissions(Some(mode.2)))
+                        } else if let Some(rule) = rules.get(choice - PERMISSION_CHOICES.len()) {
+                            DiscoveryAction::Refresh(UiAction::RevokeCommandRule(rule.clone()))
+                        } else {
+                            DiscoveryAction::None
+                        }
                     })
             }
             Self::Codemode(view) => {
@@ -733,7 +772,24 @@ fn render_permissions(
     state: &UiState,
     palette: Palette,
 ) -> dialog::Controls {
-    let hints = choice_panel_hints(area.width);
+    let snapshot = state.permissions.snapshot.as_ref();
+    let rules: &[String] = snapshot.map_or(&[], |s| s.command_allow_rules.as_slice());
+    let total = PERMISSION_CHOICES.len() + rules.len();
+    if view.selected.is_some_and(|index| index >= total) {
+        view.selected = total.checked_sub(1);
+    }
+    let mut hints = choice_panel_hints(area.width);
+    if !rules.is_empty() && area.width >= 56 {
+        let insert_at = hints.len().saturating_sub(1);
+        hints.insert(
+            insert_at,
+            Hint {
+                label: "d",
+                description: "revoke rule",
+                key: KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE),
+            },
+        );
+    }
     let layout = Dialog {
         title: "Project permissions",
         tabs: &[],
@@ -749,7 +805,6 @@ fn render_permissions(
         body.height,
     );
     let width = usize::from(inner.width);
-    let snapshot = state.permissions.snapshot.as_ref();
     let muted = Style::default().fg(palette.muted);
     let mut lines = choice_lines(
         &PERMISSION_CHOICES,
@@ -758,7 +813,6 @@ fn render_permissions(
         width,
         palette,
     );
-    lines.push(Line::default());
     let status = if let Some(error) = &state.permissions.error {
         Some(Line::styled(
             terminal_row(&format!("Error: {error}"), width),
@@ -791,6 +845,58 @@ fn render_permissions(
                 )
             })
     };
+    let project_row = snapshot
+        .and_then(|snapshot| snapshot.project_path.as_deref())
+        .map(|project| {
+            Line::styled(
+                crate::ui::tail_row(&format!("Project: {project}"), width),
+                muted,
+            )
+        });
+    let footer_rows = 1 + usize::from(status.is_some()) + 1 + usize::from(project_row.is_some());
+    let mut visible_rules: std::ops::Range<usize> = 0..0;
+    if !rules.is_empty() {
+        let fixed_rows = PERMISSION_CHOICES.len() + 2 + footer_rows;
+        let slots = usize::from(inner.height).saturating_sub(fixed_rows);
+        let window = slots.min(rules.len());
+        if window > 0 {
+            let selected_rule = view
+                .selected
+                .and_then(|index| index.checked_sub(PERMISSION_CHOICES.len()));
+            let max_start = rules.len().saturating_sub(window);
+            let start = selected_rule
+                .map_or(0, |index| index.saturating_sub(window.saturating_sub(1)))
+                .min(max_start);
+            let end = start + window;
+            visible_rules = start..end;
+            lines.push(Line::default());
+            let heading = if rules.len() > window {
+                format!(
+                    "Saved command rules ({}–{} of {})",
+                    start + 1,
+                    end,
+                    rules.len()
+                )
+            } else {
+                "Saved command rules (this project)".to_owned()
+            };
+            lines.push(Line::styled(
+                terminal_row(&heading, width),
+                Style::default()
+                    .fg(palette.foreground)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            ));
+            for (offset, rule) in rules[start..end].iter().enumerate() {
+                let index = PERMISSION_CHOICES.len() + start + offset;
+                let selected = view.selected == Some(index);
+                let suffix = selected.then_some("  d/Enter revoke");
+                lines.push(crate::ui::choice_line_with_suffix(
+                    "•", rule, suffix, selected, width, palette,
+                ));
+            }
+        }
+    }
+    lines.push(Line::default());
     lines.extend(status);
     let scope = if snapshot.is_some_and(|snapshot| snapshot.session_only_yolo) {
         "Elevated modes are not saved here. Changing mode clears grants."
@@ -798,15 +904,19 @@ fn render_permissions(
         "Saved for this project. Changing mode clears temporary grants."
     };
     lines.push(Line::styled(terminal_row(scope, width), muted));
-    if let Some(project) = snapshot.and_then(|snapshot| snapshot.project_path.as_deref()) {
-        lines.push(Line::styled(
-            crate::ui::tail_row(&format!("Project: {project}"), width),
-            muted,
-        ));
-    }
+    lines.extend(project_row);
     frame.render_widget(Paragraph::new(lines), inner);
     view.painted = inner.height >= 4 && inner.width >= 22 && !state.permissions.loading();
-    view.rendered = if view.painted { view.selected } else { None };
+    let selected_visible = match view.selected {
+        Some(index) if index < PERMISSION_CHOICES.len() => true,
+        Some(index) => visible_rules.contains(&(index - PERMISSION_CHOICES.len())),
+        None => false,
+    };
+    view.rendered = if view.painted && selected_visible {
+        view.selected
+    } else {
+        None
+    };
     layout.controls
 }
 
@@ -984,8 +1094,14 @@ pub(crate) fn permissions_panel_height(state: &UiState) -> u16 {
         || state.permissions.loading()
         || snapshot.is_some_and(|snapshot| snapshot.saved_mode != Some(snapshot.mode));
     let project = snapshot.is_some_and(|snapshot| snapshot.project_path.is_some());
+    let rules = snapshot.map_or(0, |snapshot| snapshot.command_allow_rules.len());
+    let rule_rows = if rules > 0 {
+        u16::try_from(rules.min(8) + 2).unwrap_or(10)
+    } else {
+        0
+    };
     // Borders, footer, four choices, a gap and the grants note, then optional rows.
-    9 + u16::from(status) + u16::from(project)
+    9 + u16::from(status) + u16::from(project) + rule_rows
 }
 
 #[cfg(test)]
@@ -1350,5 +1466,87 @@ mod tests {
         for (width, height) in [(0, 0), (1, 1), (10, 3)] {
             draw(&mut skills, &state, width, height);
         }
+    }
+
+    #[test]
+    fn permissions_view_lists_and_revokes_saved_command_rules() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.permissions.snapshot = Some(Arc::new(wisp_protocol::events::PermissionState {
+            mode: wisp_protocol::commands::PermissionMode::Ask,
+            saved_mode: Some(wisp_protocol::commands::PermissionMode::Ask),
+            project_path: Some("/projects/wisp".into()),
+            session_only_yolo: false,
+            command_allow_rules: vec!["cargo test".into(), "uv run pytest".into()],
+        }));
+        let mut view = DiscoveryView::permissions();
+        let text = draw(&mut view, &state, 80, 22);
+        assert!(
+            text.contains("Saved command rules (this project)"),
+            "{text}"
+        );
+        assert!(text.contains("cargo test"), "{text}");
+        assert!(text.contains("uv run pytest"), "{text}");
+
+        // Move past the 4 modes onto the first saved rule (`cargo test`), then press `d`.
+        for _ in 0..5 {
+            assert!(matches!(
+                view.handle_key(key(KeyCode::Down), &state),
+                DiscoveryAction::None
+            ));
+        }
+        let _ = draw(&mut view, &state, 80, 22);
+        let action = view.handle_key(key(KeyCode::Char('d')), &state);
+        assert!(matches!(
+            action,
+            DiscoveryAction::Refresh(UiAction::RevokeCommandRule(ref prefix))
+                if prefix == "cargo test"
+        ));
+    }
+
+    #[test]
+    fn permissions_view_scrolls_long_rule_lists_and_blocks_invisible_revocation() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let rules: Vec<String> = (1..=12).map(|i| format!("cargo test-{i}")).collect();
+        state.permissions.snapshot = Some(Arc::new(wisp_protocol::events::PermissionState {
+            mode: wisp_protocol::commands::PermissionMode::Ask,
+            saved_mode: Some(wisp_protocol::commands::PermissionMode::Ask),
+            project_path: Some("/projects/wisp".into()),
+            session_only_yolo: false,
+            command_allow_rules: rules,
+        }));
+        let mut view = DiscoveryView::permissions();
+        // Compact height where only 4 rule rows fit at once.
+        let initial = draw(&mut view, &state, 80, 16);
+        assert!(
+            initial.contains("Saved command rules (1–4 of 12)"),
+            "{initial}"
+        );
+        assert!(initial.contains("cargo test-1"), "{initial}");
+        assert!(!initial.contains("cargo test-12"), "{initial}");
+
+        // Move down to the 12th rule (4 modes + 12 rules = 16 Down presses).
+        for _ in 0..16 {
+            assert!(matches!(
+                view.handle_key(key(KeyCode::Down), &state),
+                DiscoveryAction::None
+            ));
+        }
+        // Before redrawing, the newly selected 12th rule is not yet rendered and cannot be revoked.
+        assert!(matches!(
+            view.handle_key(key(KeyCode::Char('d')), &state),
+            DiscoveryAction::None
+        ));
+        let scrolled = draw(&mut view, &state, 80, 16);
+        assert!(
+            scrolled.contains("Saved command rules (9–12 of 12)"),
+            "{scrolled}"
+        );
+        assert!(scrolled.contains("cargo test-12"), "{scrolled}");
+        let action = view.handle_key(key(KeyCode::Char('d')), &state);
+        assert!(matches!(
+            action,
+            DiscoveryAction::Refresh(UiAction::RevokeCommandRule(ref prefix))
+                if prefix == "cargo test-12"
+        ));
     }
 }
