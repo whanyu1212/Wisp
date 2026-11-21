@@ -517,7 +517,7 @@ def _codex_request_body(
             *_messages_to_codex_input(messages, native_output=native_output),
             *continuation_input,
         ],
-        "text": {"verbosity": "low"},
+        "text": {"verbosity": "medium"},
         "include": ["reasoning.encrypted_content"],
         "tool_choice": "auto",
         "parallel_tool_calls": True,
