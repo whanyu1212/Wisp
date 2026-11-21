@@ -109,8 +109,6 @@ from wisp.coding.subagent import (
 )
 from wisp.coding.tool_execution import BackgroundRequests, ConfiguredToolExecutor, ImageStore
 from wisp.coding.tool_progress import LiveEventSink
-from wisp.config.runtime import DEFAULT_BROWSER_DEFAULT
-from wisp.config.settings import BrowserDefault
 from wisp.events import (
     DEFAULT_AGENT_MODE,
     AgentCompleted,
@@ -210,6 +208,7 @@ from wisp.skills.models import SkillCatalog
 from wisp.skills.prompt import build_skill_index
 from wisp.skills.tool import SkillTool
 from wisp.tool_presentation import tool_result_status
+from wisp.tool_types import DEFAULT_BROWSER_DEFAULT, BrowserDefault
 from wisp.tools.approval import ToolApprovalPolicy, confirms_every_call
 from wisp.tools.base import Tool, ToolExecutionMetadata
 from wisp.tools.codemode.calls import CODEMODE, SCRIPT_RESULT_LIMITS, NestedCallResult
@@ -636,6 +635,7 @@ class CodingSession:
         self._live_browser: LiveBrowser | None = live_browser
         self.tool_policy = tool_policy or ToolPolicy.allow_all_tools()
         self.tool_approval_policy = tool_approval_policy or ToolApprovalPolicy.require_approval()
+        self._explicit_tools = tools is not None
         self.tools = (
             tuple(tools)
             if tools is not None
@@ -3886,13 +3886,32 @@ class CodingSession:
         """Return the startup-authorized tools available in the current mode."""
 
         effective_registry = registry if registry is not None else self.tool_registry
-        if self.mode == "build" or effective_registry is None:
-            return self.tools if self.mode == "build" else ()
+        if self.mode == "build":
+            if (
+                effective_registry is None
+                or self._explicit_tools
+                or not self._live_browser_available()
+            ):
+                return self.tools
+            existing = {tool.name for tool in self.tools}
+            extra = tuple(
+                ToolSpec.from_tool(tool)
+                for tool in effective_registry.all()
+                if tool.name in LIVE_BROWSER_TOOL_NAMES
+                and tool.name not in existing
+                and self.tool_policy.allows(tool)
+            )
+            return (*self.tools, *extra) if extra else self.tools
+        if effective_registry is None:
+            return ()
         build_names = {tool.name for tool in self.tools}
+        include_live = not self._explicit_tools and self._live_browser_available()
         return tuple(
             ToolSpec.from_tool(tool)
             for tool in effective_registry.all()
-            if tool.name in build_names and tool.safety == "read" and self.tool_policy.allows(tool)
+            if (tool.name in build_names or (include_live and tool.name in LIVE_BROWSER_TOOL_NAMES))
+            and tool.safety == "read"
+            and self.tool_policy.allows(tool)
         )
 
     def _effective_tool_policy(self, tools: Sequence[ToolSpec]) -> ToolPolicy:

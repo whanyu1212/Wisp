@@ -19,12 +19,11 @@ from wisp.coding.browser_viewport import (
     is_browser_mcp_tool,
     is_screenshot_tool_name,
 )
-from wisp.config.runtime import DEFAULT_BROWSER_DEFAULT
-from wisp.config.settings import BrowserDefault
 from wisp.events import BrowserViewportUpdated, ImagePart
 from wisp.images import ImageRejectedError
 from wisp.mcp.discovery import McpCatalogTool
 from wisp.sessions.errors import SessionError
+from wisp.tool_types import DEFAULT_BROWSER_DEFAULT, BrowserDefault
 from wisp.tools.base import Tool, ToolArguments
 from wisp.tools.context import ToolContext
 from wisp.tools.policy import ToolPolicy

@@ -20,7 +20,6 @@ from pydantic import (
 from wisp.config.settings import (
     BROWSER_PROFILE_SUBPATH,
     DEFAULT_PROTECTED_PATHS,
-    BrowserDefault,
     BrowserSearchEngine,
     ResolvedSettings,
     resolve_settings,
@@ -36,6 +35,8 @@ from wisp.mcp.config import (
 from wisp.mcp.credentials import mcp_auth_path
 from wisp.openai_compatible import OpenAICompatibleSettings
 from wisp.retry import RetryPolicy
+from wisp.tool_types import DEFAULT_BROWSER_DEFAULT as DEFAULT_BROWSER_DEFAULT
+from wisp.tool_types import BrowserDefault as BrowserDefault
 from wisp.trust.permissions import permissions_directory
 from wisp.validation import redact_validation_error_inputs
 
@@ -49,7 +50,6 @@ DEFAULT_AUTO_COMPACTION_ENABLED = True
 DEFAULT_WEB_SEARCH_ENABLED = False
 DEFAULT_SUBAGENTS_ENABLED = False
 DEFAULT_BROWSER_SEARCH_ENGINE: BrowserSearchEngine = "google"
-DEFAULT_BROWSER_DEFAULT: BrowserDefault = "live"
 OPENAI_COMPATIBLE_CONFIG_ENV = "WISP_OPENAI_COMPATIBLE_CONFIG"
 _DEFAULT_AUTH_PATH = Path("~/.wisp/auth.json")
 _DEFAULT_SESSION_DIR = Path("~/.wisp/sessions")

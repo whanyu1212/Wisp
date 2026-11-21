@@ -2,6 +2,11 @@
 
 from typing import Literal
 
+from typing_extensions import TypeAliasType
+
+BrowserDefault = TypeAliasType("BrowserDefault", Literal["live", "mcp", "none"])
+DEFAULT_BROWSER_DEFAULT: BrowserDefault = "live"
+
 ToolSafety = Literal["read", "mutating", "command"]
 ToolFailureCode = Literal[
     "approval_denied",

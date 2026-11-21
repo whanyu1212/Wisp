@@ -1034,7 +1034,8 @@ class RpcHost:
         live_browser = LiveBrowser(task_group)
         previous_live_browser = self._live_browser
         self._live_browser = live_browser
-        self.agent.set_live_browser(live_browser)
+        if hasattr(self.agent, "set_live_browser"):
+            self.agent.set_live_browser(live_browser)
 
         async def dispatch(
             command: ParsedRpcCommand,
@@ -1156,7 +1157,8 @@ class RpcHost:
                 self._process_exits.set_wake_listener(None)
             await live_browser.close()
             self._live_browser = previous_live_browser
-            self.agent.set_live_browser(previous_live_browser)
+            if hasattr(self.agent, "set_live_browser"):
+                self.agent.set_live_browser(previous_live_browser)
             await self._wait_for_published_events()
             self._event_task_group = previous_event_task_group
 

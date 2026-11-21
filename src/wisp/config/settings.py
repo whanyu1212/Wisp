@@ -47,6 +47,7 @@ from typing_extensions import TypeAliasType
 from wisp.mcp.config import MAX_MCP_SERVERS, McpServerConfig, McpToolExposure
 from wisp.openai_compatible import OpenAICompatibleSettings
 from wisp.retry import RetrySettings
+from wisp.tool_types import BrowserDefault as BrowserDefault
 from wisp.validation import redact_validation_error_inputs
 
 if TYPE_CHECKING:
@@ -57,7 +58,6 @@ TuiImageProtocol = TypeAliasType(
     "TuiImageProtocol", Literal["auto", "kitty-unicode", "kitty", "iterm2", "sixel", "halfblock"]
 )
 BrowserSearchEngine = TypeAliasType("BrowserSearchEngine", Literal["google", "duckduckgo", "bing"])
-BrowserDefault = TypeAliasType("BrowserDefault", Literal["live", "mcp", "none"])
 
 GLOBAL_SETTINGS_PATH = Path("~/.wisp/settings.json")
 BROWSER_PROFILE_SUBPATH = GLOBAL_SETTINGS_PATH.relative_to("~").with_name("browser-profile")

@@ -486,3 +486,57 @@ def test_executor_denies_unapproved_browser_click_in_ask_mode(tmp_path: Path) ->
             await registry.get("browser_click").run({}, ToolContext(cwd=tmp_path))
 
     anyio.run(scenario)
+
+
+def test_session_exposes_live_browser_specs_and_guidance_after_set_live_browser(
+    tmp_path: Path,
+) -> None:
+    fake: Any = _FakeLiveBrowser(tmp_path, available=True)
+    session = CodingSession(
+        provider=_DummyProvider(),
+        sessions=JsonlSessionStore(tmp_path / "sessions"),
+        tool_registry=ToolRegistry(),
+        trusted=True,
+    )
+    # Mirrors WispRpcHost.run_with_streams attaching LiveBrowser after construction.
+    session.set_live_browser(fake)
+
+    op_registry = session._operation_tool_registry()
+    offered, _executor = session._run_tools(
+        op_registry,
+        None,
+        context=ToolContext(cwd=tmp_path),
+    )
+    offered_names = {spec.name for spec in offered}
+    assert LIVE_BROWSER_TOOL_NAMES.issubset(offered_names)
+
+    prompt = session._prompt_messages(offered, registry=op_registry)
+    assert any("[LIVE BROWSER WORKFLOW]" in msg.content for msg in prompt.messages)
+
+    # Plan mode exposes only read-only live browser tools.
+    session.mode = "plan"
+    plan_offered, _ = session._run_tools(
+        op_registry,
+        None,
+        context=ToolContext(cwd=tmp_path),
+    )
+    plan_names = {spec.name for spec in plan_offered}
+    assert {"browser_read", "browser_screenshot"}.issubset(plan_names)
+    assert not ({"browser_navigate", "browser_click", "browser_type"} & plan_names)
+
+    # Explicit tools= restriction on CodingSession is preserved.
+    restricted = CodingSession(
+        provider=_DummyProvider(),
+        sessions=JsonlSessionStore(tmp_path / "sessions-restricted"),
+        tools=(),
+        tool_registry=ToolRegistry(),
+        trusted=True,
+        live_browser=fake,
+    )
+    restricted_reg = restricted._operation_tool_registry()
+    restricted_offered, _ = restricted._run_tools(
+        restricted_reg,
+        None,
+        context=ToolContext(cwd=tmp_path),
+    )
+    assert restricted_offered == ()
