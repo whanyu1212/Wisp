@@ -222,18 +222,48 @@ impl GitDiffView {
     fn recompute_scope(&mut self, transcript: &Transcript, reset_selection: bool) {
         let mut turns = BTreeSet::new();
         self.visible_files.clear();
+        let transcript_file_turns = transcript.edited_file_turns();
         if let Some(snapshot) = &self.snapshot {
             for (index, file) in snapshot.files.iter().enumerate() {
-                let mut matches_turn = false;
+                let mut file_turns = BTreeSet::new();
+                // 1. Resolve turns from the backend's recorded edit list and collect each
+                //    matched card's canonical path key (so earlier turns evicted past the
+                //    16-edit backend cap are still found in the retained transcript).
+                let mut matched_keys = BTreeSet::new();
                 for edit in &file.edits {
-                    if let Some(turn) = turn_of_edit(transcript, edit) {
-                        turns.insert(turn);
-                        if self.scope == DiffScope::Turn(turn) {
-                            matches_turn = true;
+                    if let Some(card_id) =
+                        edit_card_entry(transcript, &edit.entry_id, &edit.call_id)
+                    {
+                        if let Some(turn) = transcript.turn_number_of_entry(card_id) {
+                            file_turns.insert(turn);
+                        }
+                        if let Some(key) = transcript
+                            .entry(card_id)
+                            .and_then(|entry| entry.tool_card())
+                            .and_then(crate::transcript::edited_file_key)
+                        {
+                            matched_keys.insert(key);
                         }
                     }
                 }
-                if self.scope == DiffScope::All || matches_turn {
+                for key in matched_keys {
+                    if let Some(extra) = transcript_file_turns.get(&key) {
+                        file_turns.extend(extra.iter().copied());
+                    }
+                }
+                // 2. Also match a normalized repo-relative path directly when cards were
+                //    recorded with relative paths (e.g. without a display base).
+                let rel_key =
+                    crate::transcript::normalize_lexical_path(std::path::Path::new(&file.path));
+                if let Some(extra) = transcript_file_turns.get(&rel_key) {
+                    file_turns.extend(extra.iter().copied());
+                }
+                let matches_turn = match self.scope {
+                    DiffScope::All => true,
+                    DiffScope::Turn(turn) => file_turns.contains(&turn),
+                };
+                turns.extend(file_turns);
+                if matches_turn {
                     self.visible_files.push(index);
                 }
             }
@@ -1819,5 +1849,70 @@ mod tests {
         let _ = screen(&mut view, &state, &transcript, 200, 30);
         assert_eq!(view.active, 0);
         assert_eq!(view.review.hunk_position(), Some((2, 2)));
+    }
+
+    #[test]
+    fn turn_filter_retains_earlier_turn_beyond_backend_edit_cap() {
+        let mut transcript = Transcript::default();
+        transcript.set_tool_cwd("/repo");
+        let finish_edit = |transcript: &mut Transcript, call_id: &str, path: &str| {
+            let crate::reducer::BackendEvent::ToolCall(call) =
+                crate::reducer::BackendEvent::from_projection_value(&serde_json::json!({
+                    "type": "tool.call",
+                    "call_id": call_id,
+                    "name": "edit",
+                    "arguments": {
+                        "path": path,
+                        "edits": [{"oldText": "a\n", "newText": "b\n"}]
+                    }
+                }))
+                .unwrap()
+            else {
+                panic!("tool call expected");
+            };
+            transcript.observe_tool_call(call);
+            let crate::reducer::BackendEvent::ToolResult(result) =
+                crate::reducer::BackendEvent::from_projection_value(&serde_json::json!({
+                    "type": "tool.result",
+                    "message_entry_id": null,
+                    "call_id": call_id,
+                    "name": "edit",
+                    "output": "Applied 1 edit",
+                    "is_error": false
+                }))
+                .unwrap()
+            else {
+                panic!("tool result expected");
+            };
+            transcript.observe_tool_result(*result);
+        };
+
+        // Turn 1 edits src/a.py once via a relative path.
+        transcript.append_prompt("turn 1".into());
+        finish_edit(&mut transcript, "t1-edit", "src/a.py");
+
+        // Turn 2 edits the same file 16 times via an absolute path, pushing Turn 1's edit
+        // out of the backend's 16-entry `file.edits` cap.
+        transcript.append_prompt("turn 2".into());
+        let mut recent_edits = Vec::new();
+        for index in 0..16 {
+            let call_id = format!("t2-edit-{index}");
+            finish_edit(&mut transcript, &call_id, "/repo/src/a.py");
+            recent_edits.push(edit(&call_id));
+        }
+
+        let mut file = changed("src/a.py", "a\n", "b\n");
+        file.edits = recent_edits;
+        let state = state_of(vec![file]);
+
+        let mut view = GitDiffView::for_turn(1);
+        let text = screen(&mut view, &state, &transcript, 200, 24);
+        assert!(text.contains("[Turn 1]"), "{text}");
+        assert!(text.contains("a.py"), "{text}");
+        assert!(
+            !text.contains("No remaining working-tree changes"),
+            "{text}"
+        );
+        assert_eq!(view.available_turns, vec![1, 2]);
     }
 }

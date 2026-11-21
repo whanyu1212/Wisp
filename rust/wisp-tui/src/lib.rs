@@ -14109,6 +14109,56 @@ mod tests {
     }
 
     #[test]
+    fn turn_change_summary_deduplicates_relative_absolute_and_parent_paths() {
+        let mut transcript = transcript::Transcript::default();
+        transcript.set_tool_cwd("/repo");
+        transcript.append_exchange("edit same file three ways".into());
+        for (call_id, path) in [
+            ("p1", "src/a.py"),
+            ("p2", "/repo/src/a.py"),
+            ("p3", "src/sub/../a.py"),
+        ] {
+            let BackendEvent::ToolCall(call) = BackendEvent::from_projection_value(&json!({
+                "type": "tool.call",
+                "call_id": call_id,
+                "name": "edit",
+                "arguments": {
+                    "path": path,
+                    "edits": [{"oldText": "old\n", "newText": "new\n"}]
+                }
+            }))
+            .unwrap() else {
+                panic!("tool call expected");
+            };
+            transcript.observe_tool_call(call);
+            let BackendEvent::ToolResult(result) = BackendEvent::from_projection_value(&json!({
+                "type": "tool.result",
+                "message_entry_id": null,
+                "call_id": call_id,
+                "name": "edit",
+                "output": "Applied 1 edit",
+                "is_error": false
+            }))
+            .unwrap() else {
+                panic!("tool result expected");
+            };
+            transcript.observe_tool_result(*result);
+        }
+        let reply = transcript.start_message(1);
+        transcript.append_message_delta(1, "Done.");
+        transcript.complete_message(1, "Done.".into());
+        assert!(transcript.attach_run_summary(transcript::RunTotals::finished(1_000, 3)));
+        let changes = transcript
+            .entry(reply)
+            .unwrap()
+            .run_summary_changes()
+            .unwrap();
+        assert_eq!(changes.files, 1);
+        assert_eq!(changes.additions, 3);
+        assert_eq!(changes.deletions, 3);
+    }
+
+    #[test]
     fn transcript_navigation_keybindings_do_not_capture_editor_arrows() {
         assert_eq!(
             transcript_view_action(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE)),

@@ -219,9 +219,35 @@ fn is_completed_file_edit(card: &ToolCardSnapshot) -> bool {
     card.status == ToolStatus::Done && matches!(card.name.as_str(), "edit" | "write")
 }
 
-/// Normalize the file identity of a completed `edit` or `write` card so repeated edits to
-/// the same file within one turn count once.
-fn edited_file_key(card: &ToolCardSnapshot) -> Option<(Option<String>, String)> {
+/// Lexically normalize `.` and `..` components without touching the filesystem.
+pub(crate) fn normalize_lexical_path(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::{Component, PathBuf};
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(
+                    normalized.components().next_back(),
+                    Some(Component::Normal(_))
+                ) {
+                    normalized.pop();
+                } else if !normalized.is_absolute() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    normalized
+}
+
+/// Normalize the file identity of a completed `edit` or `write` card so relative,
+/// absolute, and `..`-containing paths pointing to the same file resolve to one key.
+pub(crate) fn edited_file_key(card: &ToolCardSnapshot) -> Option<std::path::PathBuf> {
     let raw = match &card.detail_source {
         ToolDetailSource::Edit(source) => source.path.as_str(),
         ToolDetailSource::Write(source) => source.path.as_str(),
@@ -231,13 +257,16 @@ fn edited_file_key(card: &ToolCardSnapshot) -> Option<(Option<String>, String)> 
     if trimmed.is_empty() {
         return None;
     }
-    let normalized = trimmed.strip_prefix("./").unwrap_or(trimmed).to_owned();
-    let base = if std::path::Path::new(&normalized).is_absolute() {
-        None
+    let path = std::path::Path::new(trimmed);
+    let combined = if path.is_absolute() {
+        path.to_path_buf()
+    } else if let Some(base) = card.display_base.as_deref() {
+        std::path::Path::new(base).join(path)
     } else {
-        card.display_base.as_deref().map(str::to_owned)
+        path.to_path_buf()
     };
-    Some((base, normalized))
+    let normalized = normalize_lexical_path(&combined);
+    (!normalized.as_os_str().is_empty()).then_some(normalized)
 }
 
 /// Aggregate completed file edits in the turn segment ending at `summary_index`.
@@ -1038,6 +1067,29 @@ impl Transcript {
             }
         }
         latest
+    }
+
+    /// Map each normalized edited file path to every 1-based turn in the retained
+    /// transcript that completed an `edit` or `write` on that file.
+    pub(crate) fn edited_file_turns(
+        &self,
+    ) -> HashMap<std::path::PathBuf, std::collections::BTreeSet<usize>> {
+        let mut turn = 0;
+        let mut by_file: HashMap<std::path::PathBuf, std::collections::BTreeSet<usize>> =
+            HashMap::new();
+        for entry in &self.entries {
+            if entry.role == TranscriptRole::User {
+                turn += 1;
+            } else if turn > 0
+                && let Some(card) = entry
+                    .tool_card()
+                    .filter(|card| is_completed_file_edit(card))
+                && let Some(key) = edited_file_key(card)
+            {
+                by_file.entry(key).or_default().insert(turn);
+            }
+        }
+        by_file
     }
 
     /// Record how the run that `prompt` started ended. Steers and follow-ups the run
