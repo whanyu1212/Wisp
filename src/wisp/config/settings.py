@@ -56,6 +56,7 @@ if TYPE_CHECKING:
 TuiImageProtocol = TypeAliasType(
     "TuiImageProtocol", Literal["auto", "kitty-unicode", "kitty", "iterm2", "sixel", "halfblock"]
 )
+BrowserSearchEngine = TypeAliasType("BrowserSearchEngine", Literal["google", "duckduckgo", "bing"])
 
 GLOBAL_SETTINGS_PATH = Path("~/.wisp/settings.json")
 BROWSER_PROFILE_SUBPATH = GLOBAL_SETTINGS_PATH.relative_to("~").with_name("browser-profile")
@@ -80,6 +81,7 @@ _USER_ONLY_SETTINGS_FIELDS = frozenset(
         "openai_compatible",
         "tui_keybindings",
         "tui_images",
+        "browser_search_engine",
     }
 )
 
@@ -162,6 +164,7 @@ class WispSettings(BaseModel):
     openai_compatible: OpenAICompatibleSettings | None = None
     tui_images: TuiImageProtocol | None = None
     tui_keybindings: dict[str, list[str]] | None = None
+    browser_search_engine: BrowserSearchEngine | None = None
 
     @field_validator("tui_keybindings", mode="before")
     @classmethod
@@ -264,6 +267,7 @@ class ResolvedSettings(BaseModel):
     openai_compatible: OpenAICompatibleSettings | None = None
     tui_images: TuiImageProtocol | None = None
     tui_keybindings: dict[str, list[str]] = Field(default_factory=dict)
+    browser_search_engine: BrowserSearchEngine | None = None
     # Provenance used only while applying higher-precedence provider overrides.
     # Excluded from serialization because these are resolver details, not settings.
     user_provider: str | None = Field(default=None, exclude=True)
@@ -347,6 +351,8 @@ def resolve_settings(
     # MCP server definitions are user-only because they name commands that Wisp may
     # later execute; project trust never grants authority to configure executables.
     # MCP tool exposure is user-only too: it decides what the model sees and costs.
+    # The browser search engine is user-only: a project must not choose where the
+    # user's address-bar text is sent.
     return ResolvedSettings(
         provider=project_provider or user_provider,
         model=project_model or user_model,
@@ -369,6 +375,7 @@ def resolve_settings(
         openai_compatible=user_settings.openai_compatible,
         tui_images=user_settings.tui_images,
         tui_keybindings=user_settings.tui_keybindings or {},
+        browser_search_engine=user_settings.browser_search_engine,
         user_provider=user_provider,
         model_from_user=project_model is None and user_model is not None,
     )

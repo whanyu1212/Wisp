@@ -353,7 +353,7 @@ async fn docked_auto_switch_manual_tab_and_session_reset() {
 }
 
 #[tokio::test]
-async fn pre_frame_browser_command_stays_open_and_toggles() {
+async fn bare_browser_command_stays_open() {
     let dir = TempSessionDir::new("preframe");
     let mut ui = ui_with_session(&dir);
     let _ = draw_text(&mut ui, 160, 36);
@@ -361,18 +361,17 @@ async fn pre_frame_browser_command_stays_open_and_toggles() {
     run_command(&mut ui, Command::Browser { interact: false }).await;
     let (_buf, screen) = draw_text(&mut ui, 160, 36);
     assert_eq!(ui.side_panel.mode(), PanelMode::Browser);
-    assert!(screen.contains("No browser frame yet."), "{screen}");
+    assert!(ui.browser_address_active());
+    assert!(screen.contains("Search or enter address"), "{screen}");
 
-    // Second frame keeps Browser open rather than snapping back to LiveWork.
-    let (_buf, second_screen) = draw_text(&mut ui, 160, 36);
-    assert_eq!(ui.side_panel.mode(), PanelMode::Browser);
-    assert!(second_screen.contains("No browser frame yet."));
-
-    // Running /browser again toggles back to LiveWork on a docked panel.
+    // Running /browser again keeps the Browser view and its focused field rather
+    // than switching back to Work.
     run_command(&mut ui, Command::Browser { interact: false }).await;
-    let (_buf, toggled_back) = draw_text(&mut ui, 160, 36);
-    assert_eq!(ui.side_panel.mode(), PanelMode::LiveWork);
-    assert!(!toggled_back.contains("[Expand]"));
+    let (_buf, again) = draw_text(&mut ui, 160, 36);
+    assert_eq!(ui.side_panel.mode(), PanelMode::Browser);
+    assert!(ui.side_panel.visible());
+    assert!(ui.browser_address_active());
+    assert!(again.contains("Search or enter address"), "{again}");
 }
 
 #[tokio::test]
@@ -636,7 +635,7 @@ async fn native_protocols_use_cell_diff_option_and_clear_on_tab_switch() {
         }
 
         // Switching to LiveWork reverts every cell back to CellDiffOption::None and deletes Kitty.
-        ui.side_panel.toggle_browser();
+        ui.side_panel.show(PanelMode::LiveWork);
         ui.draw(&mut terminal, &conn()).unwrap();
         let f3 = terminal.backend_mut().take_events();
         let f3_drawn = terminal.backend_mut().take_drawn_coords();
@@ -1876,7 +1875,8 @@ async fn address_focus_keeps_chat_draft() {
         .await;
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0]["action"], "live_navigate");
-        assert_eq!(commands[0]["url"], "https://example.net/next");
+        // The backend resolves the text, so it is sent as typed.
+        assert_eq!(commands[0]["url"], "example.net/next");
         assert_eq!(ui.editor.text(), "draft for the agent");
         assert!(!ui.browser_address_active());
         push_backend_event(
@@ -1889,4 +1889,48 @@ async fn address_focus_keeps_chat_draft() {
         .await;
         ui.enter_browser_takeover();
     }
+}
+
+#[tokio::test]
+async fn lost_page_shows_start_page() {
+    let dir = TempSessionDir::new("lost-page");
+    let mut ui = ui_with_session(&dir);
+    push_live_browser_frame(
+        &mut ui,
+        &dir,
+        wisp_protocol::commands::LiveBrowserViewport {
+            width: 320,
+            height: 240,
+            device_scale_factor: 1,
+        },
+    )
+    .await;
+    draw_text(&mut ui, 160, 36);
+    assert_eq!(ui.side_panel.mode(), PanelMode::Browser);
+
+    // A frame read that fails means Chrome went away.
+    let (writer, mut commands) = mpsc::channel(8);
+    ui.poll_browser_viewport(
+        std::time::Instant::now(),
+        &writer,
+        MAX_APPLICATION_FRAME_BYTES,
+    )
+    .await
+    .unwrap();
+    let requests = drain_sent_commands(&mut commands);
+    push_backend_event(
+        &mut ui,
+        serde_json::json!({
+            "type": "rpc.command.finished", "timestamp": "2026-11-20T12:34:57Z",
+            "command_type": "browser_interact", "command_id": requests[0]["id"], "ok": false,
+            "error": "browser closed",
+        }),
+    )
+    .await;
+
+    let (_buf, screen) = draw_text(&mut ui, 160, 36);
+    assert!(ui.state.browser_viewport.is_none());
+    assert_eq!(ui.side_panel.mode(), PanelMode::Browser);
+    assert!(screen.contains("[Search or enter address"), "{screen}");
+    assert!(!screen.contains("example.test"), "{screen}");
 }

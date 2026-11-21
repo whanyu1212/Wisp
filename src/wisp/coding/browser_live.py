@@ -77,6 +77,8 @@ def validate_browser_url(url: str) -> str:
     """
     try:
         parsed = urlsplit(url)
+        # Reading the port raises ValueError unless it is a number from 0 to 65535.
+        _ = parsed.port
         if (
             parsed.scheme in {"http", "https"}
             and parsed.hostname
@@ -126,6 +128,11 @@ class LiveBrowser:
         self._frame: str | None = None
         self._delivered: tuple[str, str | None] | None = None
         self._url: str | None = None
+
+    @property
+    def profile_dir(self) -> Path:
+        """The saved Chromium profile directory this browser opens tabs on."""
+        return self._profile_dir or browser_profile_path()
 
     async def open(self, url: str) -> BrowserViewportUpdated:
         """Replace the existing tab with a new one on the saved Chromium profile.
@@ -290,7 +297,7 @@ class LiveBrowser:
         try:
             with (
                 anyio.CancelScope() as scope,
-                browser_profile(self._profile_dir or browser_profile_path()) as profile,
+                browser_profile(self.profile_dir) as profile,
             ):
                 self._scope = scope
                 env_keys = ["PATH", "HOME", "TMPDIR", "LANG"]

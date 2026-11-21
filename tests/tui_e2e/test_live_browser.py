@@ -16,7 +16,12 @@ from urllib.parse import urlsplit
 import pytest
 
 from tests.support.live_browser import keychain_safe_chrome_path
-from tests.tui_e2e.support import complete_frames, context_stats_ready, screen_rows
+from tests.tui_e2e.support import (
+    complete_frames,
+    context_stats_ready,
+    rendered_without_spacing,
+    screen_rows,
+)
 from tests.tui_e2e.test_browser_takeover import _start_wide_tui, _wait_screen
 from tests.tui_e2e.test_readiness import _TuiProcess
 
@@ -82,6 +87,49 @@ def _profile_released(home: Path) -> bool:
         except BlockingIOError:
             return False
     return True
+
+
+def _click_tab(tui: _TuiProcess, label: str) -> None:
+    """Click the top bar's ``label`` tab where the last complete frame painted it."""
+    top_bar = screen_rows(complete_frames(tui.output))[0]
+    column = top_bar.rfind(f" {label}")
+    assert column >= 0, f"No {label} tab in {top_bar!r}"
+    tui.send(f"\x1b[<0;{column + 2};1M\x1b[<0;{column + 2};1m".encode())
+
+
+def _recent_listed(output: bytes, offset: int, address: str) -> bool:
+    """Whether output since ``offset`` painted "Recent" and ``address`` as a whole entry.
+
+    Kitty image payloads confuse the screen replay, so this reads the painted text.
+    """
+    painted = rendered_without_spacing(output[offset:])
+    return b"Recent" in painted and bool(
+        re.search(re.escape(address.encode()) + rb"(?!other)", painted)
+    )
+
+
+@pytest.mark.process
+def test_browser_tab_start_page(tmp_path: Path) -> None:
+    """The Browser tab opens a focused address field without starting Chrome."""
+    home = tmp_path / "home"
+    home.mkdir()
+    tui = _start_wide_tui(tmp_path, home)
+    try:
+        tui.wait_until(context_stats_ready, timeout=15, failure="TUI did not start")
+        tui.send(b"draft for the agent")
+        _wait_screen(tui, "draft for the agent", "The composer did not show the draft")
+        _click_tab(tui, "Browser")
+        _wait_screen(tui, "Search or enter address", "The Browser tab showed no address field")
+        _wait_screen(tui, "Enter open", "The address field did not take focus")
+        tui.send(b"example")
+        _wait_screen(tui, "[example", "Typing did not reach the address field")
+        _wait_screen(tui, "draft for the agent", "Opening the Browser tab lost the draft")
+        assert not (home / ".wisp" / "browser-profile").exists()
+        tui.send(b"\x1b")
+        _wait_screen(tui, "Ctrl+L address", "Esc did not return focus to the prompt")
+        tui.quit()
+    finally:
+        tui.close()
 
 
 def _click_control(tui: _TuiProcess, label: str) -> None:
@@ -165,8 +213,11 @@ def test_live_browser_controls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
         try:
             try:
                 tui.wait_until(context_stats_ready, timeout=15, failure="TUI did not start")
+                first_address = f"http://127.0.0.1:{server.server_port}/"
+                _click_tab(tui, "Browser")
+                _wait_screen(tui, "Enter open", "The Browser tab did not focus its address field")
                 opened_at = time.monotonic()
-                tui.send(f"/browser live http://127.0.0.1:{server.server_port}/\r".encode())
+                tui.send(f"{first_address}\r".encode())
                 _wait_screen(
                     tui,
                     f"127.0.0.1:{server.server_port}/page",
@@ -288,12 +339,24 @@ def test_live_browser_controls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
                 tui.wait_until(
                     lambda _: clicked.is_set(), timeout=5, failure="Resized click missed the page"
                 )
-                tui.send(b"\x03/browser\r")
+                # Ctrl+C leaves the page's input, then the active tab hides the pane.
+                tui.send(b"\x03")
+                _click_tab(tui, "Browser")
                 tui.wait_until(
                     lambda _: _profile_released(home),
                     timeout=6,
                     failure="Hiding the pane did not stop Chrome and release its profile",
                 )
+                # The address typed into the start page is remembered for the next visit.
+                start_page_offset = len(tui.output)
+                _click_tab(tui, "Browser")
+                tui.wait_until(
+                    lambda output: _recent_listed(output, start_page_offset, first_address),
+                    timeout=5,
+                    failure="The reopened start page did not list the first address",
+                )
+                tui.send(b"\x1b")
+                _wait_screen(tui, "Ctrl+L address", "Esc did not leave the address field")
                 # Chromium writes cookies on a timer, so one set moments before the pane
                 # closes reaches the next visit only if Chromium exits cleanly.
                 address = f"http://127.0.0.1:{server.server_port}/page"
@@ -307,7 +370,7 @@ def test_live_browser_controls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
                     timeout=10,
                     failure="Chromium did not store the cookie and paint the page",
                 )
-                tui.send(b"/browser\r")
+                _click_tab(tui, "Browser")
                 tui.wait_until(
                     lambda _: _profile_released(home),
                     timeout=6,

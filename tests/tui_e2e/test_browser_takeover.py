@@ -282,7 +282,10 @@ def test_browser_takeover_click_type_key_and_panel_expand_over_pty(tmp_path: Pat
 
         # Open Browser tab, focus side panel (F8), pull an immediate screenshot with `r`, then `i`.
         tui.send(b"/browser\r")
-        _wait_screen(tui, "No browser frame yet.", "Browser tab did not open")
+        _wait_screen(tui, "Search or enter address", "Browser tab did not open")
+        # The empty Browser view focuses its address field; Esc returns to the prompt.
+        tui.send(b"\x1b")
+        _wait_screen(tui, "Ctrl+L address", "Esc did not leave the address field")
         tui.send(b"\x1b[19~")
         _wait_screen(tui, "i interact", "Side panel focus footer did not render")
         tui.send(b"r")

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import anyio
@@ -10,6 +12,7 @@ from anyio.abc import TaskGroup
 from anyio.streams.memory import MemoryObjectSendStream
 from typing_extensions import TypeAliasType
 
+from wisp.coding.browser_address import resolve_browser_address
 from wisp.coding.browser_control import (
     BrowserControlError,
     BrowserController,
@@ -18,9 +21,17 @@ from wisp.coding.browser_control import (
     McpBrowserController,
 )
 from wisp.coding.browser_live import LiveBrowser
+from wisp.coding.browser_recents import (
+    RECENT_ADDRESSES_FILENAME,
+    RecentAddressesBusyError,
+    load_recent_addresses,
+    record_recent_address,
+)
 from wisp.coding.session import CodingSession
-from wisp.events import BrowserViewportUpdated
-from wisp.rpc.commands import BrowserInteractCommand
+from wisp.config.runtime import DEFAULT_BROWSER_SEARCH_ENGINE
+from wisp.config.settings import BrowserSearchEngine
+from wisp.events import BrowserViewportUpdated, RpcBrowserAddressesReported
+from wisp.rpc.commands import BrowserInteractCommand, GetBrowserAddressesCommand
 from wisp.rpc.coordinator import (
     _RpcCommandCompleted,
     _RpcControlEvent,
@@ -30,6 +41,7 @@ from wisp.rpc.coordinator import (
 from wisp.rpc.handlers.mcp import RpcMcpServers
 from wisp.rpc.lifecycle import RpcCommandLifecycle, RpcEventWriter
 from wisp.runtime.api import WispRuntime
+from wisp.sessions.errors import SessionError
 from wisp.sessions.images import IMAGE_DIRECTORY_NAME, SessionImageStore
 from wisp.sessions.jsonl import JsonlSessionStore
 
@@ -40,6 +52,8 @@ RunningCommandFactory = TypeAliasType("RunningCommandFactory", Callable[..., _Rp
 CommandCompletedFactory = TypeAliasType(
     "CommandCompletedFactory", Callable[..., _RpcCommandCompleted]
 )
+
+_logger = logging.getLogger(__name__)
 
 
 def start_rpc_browser_interact_command(
@@ -57,8 +71,13 @@ def start_rpc_browser_interact_command(
     command_completed_factory: CommandCompletedFactory = _RpcCommandCompleted,
     controller: BrowserController | None = None,
     live_browser: LiveBrowser | None = None,
+    search_engine: BrowserSearchEngine = DEFAULT_BROWSER_SEARCH_ENGINE,
 ) -> _RpcRunningCommand:
-    """Start one user-initiated browser takeover interaction sequentially on ``task_group``."""
+    """Start one user-initiated browser takeover interaction sequentially on ``task_group``.
+
+    ``search_engine`` receives the text of a ``live_open`` or ``live_navigate`` that
+    is not an address.
+    """
 
     lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
     command_id = lifecycle.command_id
@@ -80,6 +99,7 @@ def start_rpc_browser_interact_command(
         command_completed_factory,
         controller or McpBrowserController(),
         live_browser,
+        search_engine,
     )
     return running_command_factory(
         command_id=command_id,
@@ -141,13 +161,16 @@ async def _run_browser_interact(
     command_completed_factory: CommandCompletedFactory,
     controller: BrowserController,
     live_browser: LiveBrowser | None,
+    search_engine: BrowserSearchEngine,
 ) -> None:
     error: str | None = None
     entry_count = session_state.entry_count
     try:
         with cancel_scope:
             if command.live or command.action.startswith("live_"):
-                await _run_live_browser_command(command, agent, lifecycle, live_browser)
+                await _run_live_browser_command(
+                    command, agent, lifecycle, live_browser, search_engine
+                )
             else:
                 if mcp_servers is not None:
                     await mcp_servers.wait_for_startup()
@@ -199,6 +222,7 @@ async def _run_live_browser_command(
     agent: CodingSession,
     lifecycle: RpcCommandLifecycle,
     browser: LiveBrowser | None,
+    search_engine: BrowserSearchEngine,
 ) -> None:
     if browser is None:
         raise BrowserControlError("This RPC host does not support the live browser")
@@ -210,13 +234,19 @@ async def _run_live_browser_command(
     frame: BrowserViewportUpdated | None
     if command.action == "live_open":
         assert command.url is not None
-        frame = await browser.open(command.url)
+        address = resolve_browser_address(command.url, search_engine)
+        frame = await browser.open(address.url)
+        if not address.is_search:
+            await _remember_address(browser.profile_dir, address.url)
     elif command.action == "live_resize":
         assert command.viewport is not None
         frame = await browser.resize(command.viewport)
     elif command.action == "live_navigate":
         assert command.url is not None
-        await browser.navigate(command.url)
+        address = resolve_browser_address(command.url, search_engine)
+        await browser.navigate(address.url)
+        if not address.is_search:
+            await _remember_address(browser.profile_dir, address.url)
         frame = await browser.poll_frame()
     elif command.action == "live_forward":
         await browser.move_in_history(1)
@@ -230,3 +260,56 @@ async def _run_live_browser_command(
         frame = await browser.poll_frame()
     if frame is not None:
         lifecycle.write_event(frame)
+
+
+async def _remember_address(profile_dir: Path, url: str) -> None:
+    # The page is already open, so a list that cannot be saved must not fail it.
+    try:
+        await anyio.to_thread.run_sync(record_recent_address, profile_dir, url)
+    except (OSError, SessionError, RecentAddressesBusyError) as exc:
+        # Only the error's type and errno: its message could carry a URL or file content.
+        reason = type(exc).__name__
+        if isinstance(exc, OSError) and exc.errno is not None:
+            reason += f" (errno {exc.errno})"
+        _logger.warning(
+            "Could not save the live browser's recent addresses to %s: %s",
+            profile_dir / RECENT_ADDRESSES_FILENAME,
+            reason,
+        )
+
+
+async def handle_rpc_browser_addresses_command(
+    command: GetBrowserAddressesCommand,
+    *,
+    agent: CodingSession,
+    live_browser: LiveBrowser | None,
+    write_event: RpcEventWriter,
+) -> None:
+    """Report whether the live browser may open and the addresses it opened recently.
+
+    Only reads the saved list; it never starts Chromium. An untrusted project gets
+    no addresses, and the list is not read for it.
+
+    Args:
+        command (GetBrowserAddressesCommand): The request being answered.
+        agent (CodingSession): Session whose project trust gates the live browser.
+        live_browser (LiveBrowser | None): The host's live browser, or None when the
+            host cannot run one; the command then fails.
+        write_event (RpcEventWriter): Receives the report and lifecycle events.
+    """
+    lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
+    if live_browser is None:
+        lifecycle.fail("This RPC host does not support the live browser")
+        return
+    trusted = agent.trusted
+    addresses = (
+        await anyio.to_thread.run_sync(load_recent_addresses, live_browser.profile_dir)
+        if trusted
+        else ()
+    )
+    write_event(
+        RpcBrowserAddressesReported(
+            command_id=lifecycle.command_id, trusted=trusted, addresses=addresses
+        )
+    )
+    lifecycle.finish()

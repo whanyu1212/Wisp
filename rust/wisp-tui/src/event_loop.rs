@@ -363,6 +363,7 @@ pub(super) fn changes_activation_target(action: &UiAction, state: &UiState) -> b
                 | BackendEvent::RunCompleted(_)
                 | BackendEvent::WorkspaceReported { .. }
                 | BackendEvent::BrowserViewportUpdated(_)
+                | BackendEvent::BrowserAddressesReported(_)
                 | BackendEvent::Other { .. }
         ),
     }
