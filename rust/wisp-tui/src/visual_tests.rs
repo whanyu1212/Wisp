@@ -827,7 +827,7 @@ fn tool_activity_matches_the_mockup_across_themes_and_resize() {
                     row_containing(&buffer, "linear/list_issues · astro");
                     row_containing(&buffer, "linear/get_issue · 5 times");
                     row_containing(&buffer, "npm test && npm run check");
-                    row_containing(&buffer, "Browser tests · passed");
+                    row_containing(&buffer, "Browser tests · exit 0");
                 }
             }
         }
@@ -1208,6 +1208,41 @@ fn user_and_code_surfaces_fill_only_their_allocated_rows() {
             assert!(theme::contrast_ratio(palette.foreground, palette.panel) >= 4.5);
             assert!(theme::contrast_ratio(palette.primary, palette.panel) >= 4.5);
         }
+    }
+}
+
+#[test]
+fn approval_tag_survives_clipping_and_low_colour_then_disappears() {
+    for depth in [ColorDepth::Ansi16, ColorDepth::Ansi256] {
+        let mut ui = LiveUi {
+            color_depth: depth,
+            ..LiveUi::default()
+        };
+        ui.state.transcript.observe_approval_requested(ToolCallInput {
+            call_id: "shell".into(), name: "bash".into(),
+            arguments: json!({"command": format!("cargo test {}", "very-long-name".repeat(10))}),
+            detail_source: tool_detail::ToolDetailSource::None,
+        });
+        let buffer = draw(&mut ui, 80, 20);
+        let y = row_containing(&buffer, "Run cargo test");
+        let line = buffer_row(&buffer, y);
+        let byte = line
+            .find(" awaiting approval ")
+            .expect("visible padded tag");
+        let x = u16::try_from(line[..byte].chars().count()).unwrap();
+        let palette = ui.palette();
+        for col in x..x + 19 {
+            let cell = &buffer[(col, y)];
+            assert_eq!(cell.fg, depth.downconvert(palette.warning));
+            assert_eq!(cell.bg, depth.downconvert(palette.surface));
+            assert!(!cell.modifier.contains(Modifier::BOLD));
+        }
+        ui.state
+            .transcript
+            .observe_approval_resolved("shell", true, None);
+        let buffer = draw(&mut ui, 80, 20);
+        row_containing(&buffer, "Running cargo test");
+        assert!(!screen_text(&buffer).contains("awaiting approval"));
     }
 }
 
@@ -2306,6 +2341,29 @@ fn finished_script_folds_to_one_line() {
 }
 
 #[test]
+fn nested_edits_report_the_recorded_outcome() {
+    let mut done = finished_script("ok", false);
+    done["nested_calls"] = json!(["stale_input", "approval_denied"].map(|code| {
+        let mut call = nested(
+            code,
+            "edit",
+            json!({"path":"src/main.rs"}),
+            Some("diagnostic"),
+        );
+        call["failure_code"] = json!(code);
+        call
+    }));
+    let text = screen_text(&script_card(&[script_call(Some("edit")), done], true, 80));
+    assert!(
+        text.contains("Edit failed: src/main.rs · stale input"),
+        "{text}"
+    );
+    assert!(text.contains("Edit src/main.rs · denied"), "{text}");
+    assert!(text.contains("1 failed, 1 denied"), "{text}");
+    assert!(!text.contains("Edited"));
+}
+
+#[test]
 fn opened_script_shows_code_calls_and_result() {
     let buffer = script_card(
         &[
@@ -2323,7 +2381,7 @@ fn opened_script_shows_code_calls_and_result() {
         "+ 2 more lines",
         "• Searched",
         "• Read src/a.rs · +1 more reads",
-        "✗ Read ../vendor/c.rs · path outside the project",
+        "✗ Read failed: ../vendor/c.rs · path outside the project",
         "Returned 12",
     ] {
         assert!(
@@ -2346,7 +2404,10 @@ fn failed_script_peeks_at_its_cause() {
         100,
     );
 
-    assert!(buffer_row(&buffer, row_containing(&buffer, "Scripted")).contains("✗ Scripted scan"));
+    assert!(
+        buffer_row(&buffer, row_containing(&buffer, "✗ Script failed:"))
+            .contains("✗ Script failed: scan")
+    );
     let peek = buffer_row(&buffer, row_containing(&buffer, "more than 200"));
     assert!(
         peek.contains("The script made more than 200 tool calls."),
@@ -2809,7 +2870,7 @@ async fn finished_script_details() {
             "1 • Searched",
             "3 • Read src/b.rs <0.1s",
             "path: \"src/b.rs\"",
-            "4 ✗ Read ../vendor/c.rs",
+            "4 ✗ Read failed: ../vendor/c.rs",
             "error: path outside the project",
         ],
     );
@@ -2841,8 +2902,8 @@ async fn failed_script_details() {
     assert_shows(
         &text,
         &[
-            "✗ Scripted scan",
-            "4 ✗ Read ../vendor/c.rs",
+            "✗ Script failed: scan",
+            "4 ✗ Read failed: ../vendor/c.rs",
             "error: path outside the project",
             "Output · 2 lines",
             "Script failed (limit): The script made more than 200 tool calls.",

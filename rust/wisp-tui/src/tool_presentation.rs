@@ -2,6 +2,10 @@
 
 use crate::tool_cards::ToolStatus;
 
+pub(crate) fn is_denial(code: Option<&str>) -> bool {
+    matches!(code, Some("approval_denied" | "policy_denied"))
+}
+
 pub(crate) fn failure_reason(
     is_error: bool,
     exit_code: Option<i64>,
@@ -35,6 +39,27 @@ pub(crate) fn failure_reason(
         _ => "Tool reported an error",
     };
     Some(reason.to_owned())
+}
+
+/// An inline reason adds detail to a failed verb, not a second announcement of failure.
+/// A shell exit is evidence even when the retained output has no completion envelope.
+pub(crate) fn inline_failure_reason(
+    name: &str,
+    exit: Option<i64>,
+    code: Option<&str>,
+    process: Option<&str>,
+) -> Option<String> {
+    if name == "bash"
+        && code.is_none()
+        && process != Some("timed_out")
+        && let Some(exit) = exit.filter(|exit| *exit != 0)
+    {
+        return Some(format!("exit {exit}"));
+    }
+    if code.is_none() && exit.is_none() && process.is_none() {
+        return None;
+    }
+    failure_reason(true, exit, code, process).map(|reason| reason.to_ascii_lowercase())
 }
 
 /// A group's members as observed, not inferred from its worst status or later retries.

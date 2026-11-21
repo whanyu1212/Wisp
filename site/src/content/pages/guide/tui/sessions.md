@@ -107,12 +107,10 @@ returns after the final result while another model step is pending. A completed 
 background process remains alive does not suppress this separate model activity. Compaction keeps
 its separate activity row.
 
-Each tool card's marker shows its state by shape as well as colour: `✓` completed, `✗` failed,
-`⊘` denied or cancelled, and `?` awaiting approval. A blank column separates the marker from the
-tool's name in bold, in that tool's colour (`Bash`, `Read`, `Search`, `List`, `Edit`, `Write`,
-`Process`, or `MCP` followed by `server/tool`). Plain padding after the name keeps every command or
-path in the same column; monochrome mode draws the name in bold. A state the marker alone does not
-name ends the row as a muted note, such as `· awaiting approval` or `· denied`. The first result
+Tool cards open with a marker and a bold action. Failed calls use `✗` and say what failed;
+`⊘` marks a denied or cancelled call, with the outcome spelled out. A pending approval has a
+steady bullet and a quiet `awaiting approval` tag after the command or path. Only the tag has
+a tinted background, and it disappears when approval is no longer pending. The first result
 row under an expanded card starts with `└`. Back-to-back collapsed cards are separated by a thin
 rule, so a run of tool calls reads as one list, and an open group's header is separated from its
 first call by the same rule; a card showing its results keeps a blank row before the next card, and

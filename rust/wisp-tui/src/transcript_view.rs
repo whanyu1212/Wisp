@@ -31,16 +31,15 @@ const ENTRY_PRESENTATION_CHUNK_BYTES: usize = 4 * 1024;
 const OVERSCAN_ROWS: usize = 8;
 /// The marker that opens a tool or process card's action line, as a bullet before its
 /// verb. Its shape carries the state, so it reads without colour: `•` done, `✗` failed,
-/// `⊘` denied or cancelled, `?` awaiting approval. In-progress cards keep a steady `●`,
+/// `⊘` denied or cancelled. Approval waits keep a bullet beside the explicit tag. In-progress cards keep a steady `●`,
 /// which the renderer animates as a spinner while the run is active (a resumed
 /// session's stale in-progress card stays a steady dot). Every glyph is one column
 /// wide and followed by one space.
 pub(crate) fn status_marker(status: ToolStatus) -> &'static str {
     match status {
-        ToolStatus::Done => "• ",
+        ToolStatus::Done | ToolStatus::AwaitingApproval => "• ",
         ToolStatus::Error => "✗ ",
         ToolStatus::Denied | ToolStatus::Cancelled => "⊘ ",
-        ToolStatus::AwaitingApproval => "? ",
         ToolStatus::Requested | ToolStatus::Running => "● ",
     }
 }
@@ -597,6 +596,7 @@ struct CardRowStyle<'a> {
     argument_start: usize,
     argument_style: crate::markdown::InlineStyle,
     suffix_start: usize,
+    approval_tag_start: Option<usize>,
     emphasis: &'a [std::ops::Range<usize>],
     syntax: &'a [crate::syntax::SyntaxToken],
     gutters: &'a [std::ops::Range<usize>],
@@ -620,6 +620,7 @@ impl CardRowStyle<'_> {
         argument_start: usize::MAX,
         argument_style: crate::markdown::InlineStyle::Normal,
         suffix_start: usize::MAX,
+        approval_tag_start: None,
         emphasis: &[],
         syntax: &[],
         gutters: &[],
@@ -658,6 +659,11 @@ impl CardRowStyle<'_> {
             InlineStyle::ToolStatus
         } else if offset < self.label_end {
             InlineStyle::ToolName
+        } else if self
+            .approval_tag_start
+            .is_some_and(|start| (start..start + APPROVAL_TAG.len()).contains(&offset))
+        {
+            InlineStyle::ApprovalTag
         } else if offset >= self.suffix_start {
             InlineStyle::Normal
         } else if offset >= self.argument_start {
@@ -690,6 +696,7 @@ struct CardProjection {
     /// Where a status note or a diff's `+N -M` summary starts in `action`. It is
     /// styled like plain text and kept whole when the row is truncated.
     action_suffix_start: usize,
+    approval_tag_start: Option<usize>,
     inline_detail: bool,
     omission: Option<String>,
     omission_before_detail: bool,
@@ -1824,6 +1831,7 @@ impl TranscriptRowCache {
             });
             let label = match &kind {
                 CardGroupKey::Explore if outcomes.is_open() => "Exploring".to_owned(),
+                CardGroupKey::Explore if outcomes.noteworthy() => "Explore".to_owned(),
                 CardGroupKey::Explore => "Explored".to_owned(),
                 CardGroupKey::Tool(_) => entry.tool_card()?.action_verb(),
                 CardGroupKey::Process => PROCESS_LABEL.to_owned(),
@@ -2073,6 +2081,7 @@ impl TranscriptRowCache {
                     argument_start: projection.action_argument_start,
                     argument_style: projection.action_argument_style,
                     suffix_start: projection.action_suffix_start,
+                    approval_tag_start: projection.approval_tag_start,
                     emphasis: &[],
                     syntax: &projection.action_syntax,
                     gutters: &[],
@@ -2754,7 +2763,7 @@ impl TranscriptRowCache {
             column += UnicodeWidthStr::width(safe.as_str());
             push(
                 &safe,
-                crate::markdown::InlineStyle::Normal,
+                style.inline_at(kind, split + offset, grapheme.len()),
                 split + offset,
                 split + offset + grapheme.len(),
             );
@@ -4034,10 +4043,9 @@ fn script_projection(card: &crate::tool_cards::ToolCardSnapshot) -> CardProjecti
     let (mut action, action_marker_end, action_label_end, action_argument_start, _) =
         tool_action_projection(card);
     let tally = script.tally();
-    let suffix_start =
-        push_status_note(&mut action, (!tally.is_empty()).then_some(tally.as_str())).min(
-            push_status_note(&mut action, card.status_note().or(card.live_line())),
-        );
+    let tally_start = push_status_note(&mut action, (!tally.is_empty()).then_some(tally.as_str()));
+    let (status_start, approval_tag_start) = push_tool_state(&mut action, card);
+    let suffix_start = tally_start.min(status_start);
     let mut detail = String::new();
     let mut detail_tones = Vec::new();
     let mut detail_syntax = Vec::new();
@@ -4118,6 +4126,7 @@ fn script_projection(card: &crate::tool_cards::ToolCardSnapshot) -> CardProjecti
         detail_syntax,
         detail_gutters,
         action_suffix_start: suffix_start,
+        approval_tag_start,
         inline_detail: false,
         omission: None,
         omission_before_detail: false,
@@ -4211,7 +4220,10 @@ fn push_script_calls(
     while index < calls.len() {
         let call = &calls[index];
         let mut run = 1;
-        if call.state != ScriptCallState::Failed {
+        if !matches!(
+            call.state,
+            ScriptCallState::Failed | ScriptCallState::Denied
+        ) {
             while calls
                 .get(index + run)
                 .is_some_and(|next| next.tool == call.tool && next.state == call.state)
@@ -4230,7 +4242,7 @@ fn push_script_calls(
             row.push_str(&format!(" · +{} more {}", run - 1, call_noun(&call.tool)));
         }
         match call.state {
-            ScriptCallState::Failed => {
+            ScriptCallState::Failed | ScriptCallState::Denied => {
                 if let Some(error) = &call.error {
                     row.push_str(" · ");
                     row.push_str(error);
@@ -4249,6 +4261,7 @@ fn push_script_calls(
         push_detail_row(detail, &row);
         let tone = match call.state {
             ScriptCallState::Failed => Some(TranscriptRowTone::Error),
+            ScriptCallState::Denied => Some(TranscriptRowTone::Warning),
             ScriptCallState::Unfinished => Some(TranscriptRowTone::Muted),
             ScriptCallState::Running | ScriptCallState::Done => None,
         };
@@ -4278,6 +4291,7 @@ pub(crate) fn script_call_action(
         ScriptCallState::Running => ToolStatus::Running,
         ScriptCallState::Done => ToolStatus::Done,
         ScriptCallState::Failed => ToolStatus::Error,
+        ScriptCallState::Denied => ToolStatus::Denied,
         ScriptCallState::Unfinished => ToolStatus::Cancelled,
     };
     let input = crate::tool_cards::ToolCallInput {
@@ -4294,10 +4308,10 @@ pub(crate) fn script_call_action(
     row_card.display_base.clone_from(&card.display_base);
     row_card.auto_approved = call.auto_approved;
     row_card.approval_note.clone_from(&call.approval_note);
-    if !call.arguments.is_object() {
+    let mut action = if !call.arguments.is_object() {
         // Its arguments were too large to keep: name the tool alone.
         let target = row_card.mcp_target().map(|target| format!(" {target}"));
-        return format!(
+        format!(
             "{}{}{}{}",
             status_marker(status),
             row_card.action_verb(),
@@ -4305,9 +4319,22 @@ pub(crate) fn script_call_action(
             approval_note(&row_card)
                 .map(|note| format!(" · {note}"))
                 .unwrap_or_default(),
+        )
+    } else {
+        tool_action_projection(&row_card).0
+    };
+    if status == ToolStatus::Denied {
+        push_status_note(&mut action, Some("denied"));
+    } else if status == ToolStatus::Error && call.failure_code.is_some() {
+        let reason = crate::tool_presentation::inline_failure_reason(
+            &call.tool,
+            None,
+            call.failure_code.as_deref(),
+            None,
         );
+        push_status_note(&mut action, reason.as_deref());
     }
-    tool_action_projection(&row_card).0
+    action
 }
 
 /// What `+N more` counts for a run of calls to one tool.
@@ -4348,6 +4375,30 @@ fn shell_action_syntax(
                 .collect()
         },
     )
+}
+
+const APPROVAL_TAG: &str = " awaiting approval ";
+
+/// Protect the whole suffix when clipping, but colour only the padded words.
+fn push_approval_tag(action: &mut String) -> usize {
+    action.push_str("  ");
+    let start = action.len();
+    action.push_str(APPROVAL_TAG);
+    start
+}
+
+fn push_tool_state(
+    action: &mut String,
+    card: &crate::tool_cards::ToolCardSnapshot,
+) -> (usize, Option<usize>) {
+    if card.status == ToolStatus::AwaitingApproval {
+        (action.len(), Some(push_approval_tag(action)))
+    } else {
+        (
+            push_status_note(action, card.status_note().or(card.live_line())),
+            None,
+        )
+    }
 }
 
 /// Close an action line with its status note, such as ` · denied`. Returns where the
@@ -4396,8 +4447,8 @@ fn card_projection(
             ) = tool_action_projection(card);
             let action_link = card_file_link(card);
             let action_syntax = shell_action_syntax(card, &action, action_argument_start);
-            let note_start = push_status_note(&mut action, card.status_note().or(card.live_line()))
-                .min(push_image_note(&mut action, &card.images));
+            let (status_start, approval_tag_start) = push_tool_state(&mut action, card);
+            let note_start = status_start.min(push_image_note(&mut action, &card.images));
             if let DetailAvailability::LiveRetained(detail) = &card.structured_detail {
                 let diff = matches!(
                     detail.kind,
@@ -4452,6 +4503,7 @@ fn card_projection(
                     detail_syntax,
                     detail_gutters,
                     action_suffix_start,
+                    approval_tag_start,
                     inline_detail: diff,
                     omission: None,
                     omission_before_detail: false,
@@ -4556,6 +4608,7 @@ fn card_projection(
                 detail_syntax: Vec::new(),
                 detail_gutters: Vec::new(),
                 action_suffix_start: note_start,
+                approval_tag_start,
                 inline_detail: false,
                 omission,
                 omission_before_detail: tail_preview,
@@ -4587,7 +4640,20 @@ fn card_projection(
                 process_marker(card),
                 card.task_label.as_deref().unwrap_or("command")
             );
-            let note_start = push_status_note(&mut action, card.status_note());
+            let (note_start, approval_tag_start) = match card.display_state {
+                ProcessDisplayState::PollAwaitingApproval
+                | ProcessDisplayState::CancelAwaitingApproval => {
+                    let operation =
+                        if card.display_state == ProcessDisplayState::PollAwaitingApproval {
+                            "poll"
+                        } else {
+                            "cancel"
+                        };
+                    let start = push_status_note(&mut action, Some(operation));
+                    (start, Some(push_approval_tag(&mut action)))
+                }
+                _ => (push_status_note(&mut action, card.status_note()), None),
+            };
             // Background output has no completion line, so the row names the exit code.
             let exit = card
                 .exit_code
@@ -4618,6 +4684,7 @@ fn card_projection(
                 detail_syntax: Vec::new(),
                 detail_gutters: Vec::new(),
                 action_suffix_start: note_start.min(exit_start),
+                approval_tag_start,
                 inline_detail: false,
                 omission,
                 omission_before_detail: true,
@@ -4920,15 +4987,13 @@ impl McpGroupHeader {
         });
 
         let marker = status_marker(shown.status);
-        let verb = live
-            .or_else(|| {
-                cards
-                    .iter()
-                    .copied()
-                    .find(|card| matches!(card.status, ToolStatus::Done | ToolStatus::Error))
-            })
-            .unwrap_or(shown)
-            .action_verb();
+        // Never let the first terminal member speak for a mixed group.
+        let mixed = live.is_none() && cards.iter().any(|card| card.status != first.status);
+        let verb = if mixed {
+            "Calls to".to_owned()
+        } else {
+            shown.action_verb()
+        };
         let mut source = format!("{marker}{verb}");
         let label_end = source.len();
         source.push_str(ACTION_GAP);
@@ -4944,7 +5009,11 @@ impl McpGroupHeader {
         source.push_str(&format!(
             " · {} {}",
             cards.len(),
-            if live.is_some() { "calls" } else { "times" }
+            if live.is_some() || mixed {
+                "calls"
+            } else {
+                "times"
+            }
         ));
         let mut outcomes = crate::tool_presentation::OutcomeCounts::default();
         for card in &cards {
@@ -4973,6 +5042,7 @@ impl McpGroupHeader {
             argument_start: self.label_end + ACTION_GAP.len(),
             argument_style: crate::markdown::InlineStyle::ToolArgument,
             suffix_start: self.suffix_start,
+            approval_tag_start: None,
             emphasis: &[],
             syntax: &[],
             gutters: &[],
@@ -8033,7 +8103,7 @@ mod tests {
         assert!(
             pending_action
                 .plain_text()
-                .contains("Read README.md · awaiting approval")
+                .contains("Read README.md   awaiting approval")
         );
         assert_eq!(pending_action.tone, TranscriptRowTone::Pending);
 
@@ -8220,7 +8290,7 @@ mod tests {
             .iter()
             .find(|row| {
                 row.kind == TranscriptRowKind::CardGroup
-                    && row.plain_text().contains("Explored 2 files")
+                    && row.plain_text().contains("Explore 2 files")
             })
             .expect("collapsed explore group");
         assert_eq!(row.tone, TranscriptRowTone::Error);
@@ -8332,7 +8402,7 @@ mod tests {
             let rows = walked_rows(&transcript, &mut cache);
             assert!(
                 rows.iter()
-                    .any(|row| row.contains("Path or resource not found")),
+                    .any(|row| row.contains("path or resource not found")),
                 "{rows:?}"
             );
             assert!(
@@ -8574,7 +8644,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(groups.len(), 1, "{rows:?}");
         let group = groups[0];
-        assert_eq!(group.plain_text(), "• Background 2 commands · passed");
+        assert_eq!(group.plain_text(), "• Background 2 commands · exit 0");
         assert_eq!(group.anchor.entry_id, ids[0]);
         assert_eq!(group.tone, TranscriptRowTone::Success);
         assert_eq!(group.fold_hint, FoldHint::Expand);
@@ -8591,14 +8661,14 @@ mod tests {
             .iter()
             .find(|row| row.kind == TranscriptRowKind::CardAction)
             .unwrap();
-        assert_eq!(single.plain_text(), "• Background command · passed");
+        assert_eq!(single.plain_text(), "• Background command · exit 0");
         let style_of = |row: &TranscriptRow, text: &str| {
             row.spans
                 .iter()
                 .find(|span| span.text.contains(text))
                 .map(|span| span.style)
         };
-        for text in ["Background", "passed"] {
+        for text in ["Background", "exit 0"] {
             assert!(style_of(group, text).is_some(), "{text}");
             assert_eq!(style_of(group, text), style_of(single, text), "{text}");
         }
@@ -8626,7 +8696,7 @@ mod tests {
         assert_eq!(actions, ids[..2].to_vec());
         assert!(rows.iter().any(|row| {
             row.kind == TranscriptRowKind::CardGroup
-                && row.plain_text() == "• Background 2 commands · passed"
+                && row.plain_text() == "• Background 2 commands · exit 0"
         }));
     }
 
@@ -8665,17 +8735,17 @@ mod tests {
             rows,
             [
                 (
-                    "• Background 2 commands · passed".to_owned(),
+                    "• Background 2 commands · exit 0".to_owned(),
                     RowGutter::None,
                     FoldHint::Collapse
                 ),
                 (
-                    "• Background command · passed".to_owned(),
+                    "• Background command · exit 0".to_owned(),
                     RowGutter::Connector,
                     FoldHint::Expand
                 ),
                 (
-                    "• Background command · passed".to_owned(),
+                    "• Background command · exit 0".to_owned(),
                     RowGutter::Indent,
                     FoldHint::Expand
                 ),

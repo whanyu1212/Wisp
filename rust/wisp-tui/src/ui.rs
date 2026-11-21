@@ -1254,7 +1254,7 @@ fn row_tool_in_progress(state: &UiState, row: &TranscriptRow) -> bool {
             .entry(row.anchor.entry_id)
             .is_some_and(tool_in_progress),
         TranscriptRowKind::CardGroup => {
-            // A repeated MCP call's row carries its own marker, which shows `?` while a call
+            // A repeated MCP call's row carries its own marker, which stays still while a call
             // awaits approval, as a single card would; the spinner must not replace it.
             let marked = row
                 .spans
@@ -2477,6 +2477,10 @@ fn markdown_span_style(base: Style, semantic: TranscriptSpanStyle, palette: Pale
         InlineStyle::ToolPath => style.patch(palette.tool_path()),
         InlineStyle::ToolArgument => style.patch(palette.tool_argument()),
         InlineStyle::ToolStatus => style,
+        InlineStyle::ApprovalTag => style
+            .fg(palette.warning)
+            .bg(palette.surface)
+            .remove_modifier(Modifier::BOLD),
         // Modifiers, not colour, so the changed words stay visible in monochrome.
         InlineStyle::DiffChange => palette.diff_change(style),
         InlineStyle::DiffGutter => style.fg(palette.muted),
@@ -8089,7 +8093,7 @@ mod tests {
     }
 
     #[test]
-    fn approval_keeps_question_marker() {
+    fn approval_keeps_pending_words() {
         let mut state = UiState::unconfigured();
         state.transcript.append_prompt("plan".into());
         observe_mcp_call(&mut state, "s1", "save_issue", "HY-1");
@@ -8105,7 +8109,7 @@ mod tests {
         let screen = draw_cards(&state, &mut TranscriptRowCache::default());
         assert!(
             screen.contains(
-                "? Call linear/save_issue · HY-2 · 2 calls · 1 succeeded · 1 awaiting approval"
+                "• Call linear/save_issue · HY-2 · 2 calls · 1 succeeded · 1 awaiting approval"
             ),
             "{screen}"
         );
@@ -8378,11 +8382,23 @@ mod tests {
         let short = draw(3);
         let text = short.to_string();
         assert!(!text.contains("Command exited with code 3"), "{text}");
-        assert!(text.contains("Command exited 3"), "{text}");
+        assert!(text.contains(" · exit 3"), "{text}");
         // The action line already names the command, so the output opens the details.
         assert!(text.contains("│└ line 0"), "{text}");
         assert_eq!(style_at_text(&short, "line 0").unwrap().1, palette.surface);
-        assert_eq!(style_at_text(&short, "exit 3").unwrap().1, palette.surface);
+        // Both the action and footer now name the exit. Check the footer's text cell,
+        // not its unfilled gutter or the first (action-line) occurrence.
+        let buf = short.buffer();
+        let (x, y) = (0..buf.area.height)
+            .find_map(|y| {
+                let line = (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>();
+                let byte = line.find("│  exit 3")? + "│  ".len();
+                Some((u16::try_from(line[..byte].chars().count()).unwrap(), y))
+            })
+            .unwrap();
+        assert_eq!(buf[(x, y)].bg, palette.surface);
 
         // A long tail counts the lines above it instead of the bytes.
         let long = draw(40);
@@ -8649,7 +8665,7 @@ mod tests {
             .observe_approval_resolved("s2", false, None);
         let screen = draw_cards(&state, &mut TranscriptRowCache::default());
         assert!(
-            screen.contains("⊘ Called linear/save_issue · 2 times · 1 succeeded · 1 denied"),
+            screen.contains("⊘ Calls to linear/save_issue · 2 calls · 1 succeeded · 1 denied"),
             "{screen}"
         );
     }
@@ -8805,26 +8821,22 @@ mod tests {
             pending
                 .backend()
                 .to_string()
-                .contains("Read README.md · awaiting approval")
+                .contains("Read README.md   awaiting approval")
         );
         let palette = Palette::default();
         let (pending_fg, _, pending_modifiers) =
             style_at_text(pending.backend(), "Read README.md").unwrap();
         let verb = palette.action_verb(false);
         assert_eq!(Some(pending_fg), verb.fg);
-        // Awaiting approval is marked by shape as well as colour.
+        // The pending row keeps its bullet; the words carry the state.
         assert_eq!(
-            style_at_text(pending.backend(), "? Read").unwrap().0,
+            style_at_text(pending.backend(), "• Read").unwrap().0,
             Palette::default().primary
         );
         assert!(pending_modifiers.contains(Modifier::BOLD));
-        // The note names the state after the verb, in the row's muted text.
-        assert_eq!(
-            style_at_text(pending.backend(), "awaiting approval")
-                .unwrap()
-                .0,
-            palette.muted
-        );
+        let (fg, bg, modifiers) = style_at_text(pending.backend(), " awaiting approval ").unwrap();
+        assert_eq!((fg, bg), (palette.warning, palette.surface));
+        assert!(!modifiers.contains(Modifier::BOLD));
 
         state
             .transcript
@@ -8833,6 +8845,7 @@ mod tests {
             .transcript
             .observe_tool_result(tool_result("call-1", "contents"));
         let complete = draw(&state);
+        assert!(!complete.backend().to_string().contains("awaiting approval"));
         assert!(complete.backend().to_string().contains("Read README.md"));
         assert!(!complete.backend().to_string().contains("contents"));
         let (success_fg, success_bg, success_modifiers) =
@@ -10322,7 +10335,6 @@ mod tests {
             marker(ToolStatus::Done),
             marker(ToolStatus::Error),
             marker(ToolStatus::Denied),
-            marker(ToolStatus::AwaitingApproval),
             marker(ToolStatus::Running),
         ];
         let distinct: std::collections::HashSet<_> = outcomes.iter().collect();
@@ -10441,7 +10453,7 @@ mod tests {
                         ),
                         0
                     );
-                    // Awaiting approval, the card's `?` holds still.
+                    // Awaiting approval, the card's bullet holds still.
                     state.transcript.observe_approval_requested(call);
                     assert_eq!(
                         spinning(
