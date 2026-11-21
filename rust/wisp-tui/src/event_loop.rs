@@ -2,9 +2,10 @@
 
 use crate::{
     ACTIVITY_INTERVAL, BackendEvent, CommandKind, ConnectionInfo, DIFF_AGE_INTERVAL, Error,
-    FRAME_INTERVAL, Input, LiveUi, LoopControl, OverlayKind, PEEK_POLL_INTERVAL, QueuedEvent,
-    ReaderTermination, RenderedDecisionContext, UiAction, UiState, WriterMessage, is_ctrl_c,
-    is_escape, mouse, printable_char, receive_reader_outcome, terminal::FrameBackend,
+    FRAME_INTERVAL, Input, LIVE_FRAME_MIN_PAINT_INTERVAL, LiveUi, LoopControl, OverlayKind,
+    PEEK_POLL_INTERVAL, QueuedEvent, ReaderTermination, RenderedDecisionContext, UiAction, UiState,
+    WriterMessage, is_ctrl_c, is_escape, mouse, printable_char, receive_reader_outcome,
+    terminal::FrameBackend,
 };
 use ratatui::Terminal;
 use std::sync::Arc;
@@ -383,7 +384,7 @@ async fn receive_writer(outcome: &mut WriterOutcome) -> Result<(), Error> {
     }
 }
 
-trait InterruptSource {
+pub(super) trait InterruptSource {
     async fn receive(&mut self) -> Result<(), Error>;
 }
 
@@ -451,7 +452,7 @@ pub(super) async fn run<B: FrameBackend>(
     .await
 }
 
-async fn run_with_interrupts<B: FrameBackend>(
+pub(super) async fn run_with_interrupts<B: FrameBackend>(
     ui: &mut LiveUi,
     terminal: &mut Terminal<B>,
     connection: &ConnectionInfo,
@@ -465,6 +466,7 @@ async fn run_with_interrupts<B: FrameBackend>(
     let mut eof = false;
     let mut events_open = true;
     let mut next_paint = Instant::now();
+    let mut last_paint = Instant::now();
     let mut next_activity = Instant::now() + ACTIVITY_INTERVAL;
     let mut next_age_tick = Instant::now() + DIFF_AGE_INTERVAL;
     let mut next_peek_poll = Instant::now() + PEEK_POLL_INTERVAL;
@@ -589,10 +591,16 @@ async fn run_with_interrupts<B: FrameBackend>(
             }
             next_peek_poll = now + PEEK_POLL_INTERVAL;
         }
-        if now >= next_paint {
+        // A live browser frame paints as soon as it arrives rather than at the next
+        // tick, which would add latency and beat against Chromium's own cadence.
+        let live_frame_due = ui.live_frame_awaiting_paint
+            && ui.render_pending
+            && now >= last_paint + LIVE_FRAME_MIN_PAINT_INTERVAL;
+        if now >= next_paint || live_frame_due {
             ui.advance_stream_reveal(now.into_std());
             if ui.render_pending {
                 ui.draw(terminal, connection)?;
+                last_paint = now;
             }
             next_paint = now + FRAME_INTERVAL;
             // A frame learns the terminal's width, which decides whether the panel
@@ -602,16 +610,20 @@ async fn run_with_interrupts<B: FrameBackend>(
             }
         }
         // A released border drag can supply its final Chromium geometry only
-        // after paint. Poll here so it can be sent on the same turn.
-        if !eof
-            && pending_input.is_none()
-            && sources.inputs.is_empty()
-            && ui
-                .poll_browser_viewport(now.into_std(), writer, limit)
-                .await?
-                == LoopControl::Exit
-        {
-            return Ok(Exit::User);
+        // after paint. Poll here so it can be sent on the same turn. Queued input
+        // keeps its order against scroll, resize, and close, which wait for it to
+        // drain; a frame read changes nothing, so it goes out regardless and the
+        // picture keeps up with sustained input.
+        if !eof {
+            let control = if pending_input.is_none() && sources.inputs.is_empty() {
+                ui.poll_browser_viewport(now.into_std(), writer, limit)
+                    .await?
+            } else {
+                ui.request_live_frame(now.into_std(), writer, limit).await?
+            };
+            if control == LoopControl::Exit {
+                return Ok(Exit::User);
+            }
         }
         if eof && sources.ready_event.is_none() && sources.events.is_empty() {
             return Ok(Exit::Eof);
@@ -657,6 +669,7 @@ async fn run_with_interrupts<B: FrameBackend>(
                 match event { Some(event) => *sources.ready_event = Some(event), None => events_open = false }
             }
             _ = tokio::time::sleep_until(next_paint), if ui.render_pending || ui.stream_reveal_pending() => {}
+            _ = tokio::time::sleep_until(last_paint + LIVE_FRAME_MIN_PAINT_INTERVAL), if ui.live_frame_awaiting_paint && ui.render_pending => {}
             _ = tokio::time::sleep_until(next_activity), if ui.activity_animation_active() || ui.notice_scrolling => {}
             // An idle UI has no other timer, so a notice's deadline needs its own.
             _ = tokio::time::sleep_until(notice_deadline.unwrap_or(next_paint)), if notice_deadline.is_some() => {}

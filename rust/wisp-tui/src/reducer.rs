@@ -952,11 +952,23 @@ impl std::fmt::Debug for BrowserInteractRequest {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BrowserCommandCompletion {
     Input,
+    Scroll,
     Frame,
     Resize,
     Navigation,
+    /// A live page opening, which replaces any page on screen.
+    Open,
     Close,
 }
+
+/// Errors with which the backend turns a browser command away before running it.
+/// The browser is unaffected, so the command can simply be sent again later.
+const BROWSER_ADMISSION_REFUSALS: [&str; 4] = [
+    "Finish or cancel the active operation before interacting with the browser",
+    "RPC command queue is full while another RPC command is running",
+    "RPC command queue byte limit exceeded while another RPC command is running",
+    "A live browser frame read is already waiting",
+];
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct UiState {
@@ -1049,6 +1061,9 @@ pub struct UiState {
     pub browser_addresses: Option<BrowserAddresses>,
     pub(crate) browser_requested_geometry: Option<LiveBrowserViewport>,
     pub(crate) browser_page_revision: u64,
+    /// The backend turned the last live frame read away at admission; the loop
+    /// clears this as it schedules the retry.
+    pub(crate) live_frame_refused: bool,
     browser_interact_pending: std::collections::BTreeMap<String, BrowserCommandCompletion>,
     pending_queue_submissions: std::collections::BTreeMap<String, PendingQueueSubmission>,
     pending_queue_restore: Option<PendingQueueRestore>,
@@ -1149,6 +1164,7 @@ impl UiState {
             browser_addresses: None,
             browser_requested_geometry: None,
             browser_page_revision: 0,
+            live_frame_refused: false,
             browser_interact_pending: std::collections::BTreeMap::new(),
             pending_queue_submissions: std::collections::BTreeMap::new(),
             pending_queue_restore: None,
@@ -1160,8 +1176,26 @@ impl UiState {
         self.pending_queue_restore.is_some() || self.queue.management.pending.is_some()
     }
 
+    /// Whether a browser command other than a live frame read is waiting for its result.
     pub fn browser_interact_in_flight(&self) -> bool {
-        !self.browser_interact_pending.is_empty()
+        self.browser_interact_pending
+            .values()
+            .any(|pending| *pending != BrowserCommandCompletion::Frame)
+    }
+
+    /// Whether a browser scroll is waiting for its result.
+    pub(crate) fn browser_scroll_in_flight(&self) -> bool {
+        self.browser_interact_pending
+            .values()
+            .any(|pending| *pending == BrowserCommandCompletion::Scroll)
+    }
+
+    /// Whether a live frame read is waiting for the backend's next frame. At most
+    /// one is sent at a time; the backend answers when Chromium paints something new.
+    pub(crate) fn live_frame_in_flight(&self) -> bool {
+        self.browser_interact_pending
+            .values()
+            .any(|pending| *pending == BrowserCommandCompletion::Frame)
     }
 
     /// The live browser's recent addresses from the last report, newest first.
@@ -1179,11 +1213,16 @@ impl UiState {
             .is_some_and(|report| !report.trusted)
     }
 
+    /// Whether a command that replaces or ends the page on screen is on its way:
+    /// a resize, a navigation, or a live page opening or closing.
     pub(crate) fn browser_page_transition_in_flight(&self) -> bool {
         self.browser_interact_pending.values().any(|pending| {
             matches!(
                 pending,
-                BrowserCommandCompletion::Resize | BrowserCommandCompletion::Navigation
+                BrowserCommandCompletion::Resize
+                    | BrowserCommandCompletion::Navigation
+                    | BrowserCommandCompletion::Open
+                    | BrowserCommandCompletion::Close
             )
         })
     }
@@ -6470,6 +6509,7 @@ fn clear_browser_viewport(state: &mut UiState) {
     state.browser_viewport = None;
     state.browser_page_revision = state.browser_page_revision.wrapping_add(1);
     state.browser_requested_geometry = None;
+    state.live_frame_refused = false;
     state.browser_interact_pending.clear();
 }
 
@@ -6494,6 +6534,7 @@ fn handle_browser_interact(
     let completion = match request {
         BrowserInteractRequest::Nav(BrowserNavAction::LiveFrame) => BrowserCommandCompletion::Frame,
         BrowserInteractRequest::Nav(BrowserNavAction::LiveClose) => BrowserCommandCompletion::Close,
+        BrowserInteractRequest::LiveOpen { .. } => BrowserCommandCompletion::Open,
         BrowserInteractRequest::LiveResize(_) => BrowserCommandCompletion::Resize,
         BrowserInteractRequest::LiveNavigate { .. }
         | BrowserInteractRequest::Nav(BrowserNavAction::LiveForward) => {
@@ -6502,6 +6543,7 @@ fn handle_browser_interact(
         BrowserInteractRequest::Nav(BrowserNavAction::Back | BrowserNavAction::Reload) if live => {
             BrowserCommandCompletion::Navigation
         }
+        BrowserInteractRequest::Scroll { .. } => BrowserCommandCompletion::Scroll,
         _ => BrowserCommandCompletion::Input,
     };
     let command = match request {
@@ -6544,6 +6586,14 @@ fn handle_browser_interact(
     } else {
         command
     };
+    if matches!(
+        completion,
+        BrowserCommandCompletion::Navigation | BrowserCommandCompletion::Open
+    ) {
+        // The page on screen is on its way out; input held back for it, such as
+        // summed wheel input, must not reach the next one.
+        state.browser_page_revision = state.browser_page_revision.wrapping_add(1);
+    }
     state.browser_interact_pending.insert(id, completion);
     Ok(vec![UiEffect::SendCommand(command)])
 }
@@ -6572,16 +6622,19 @@ fn finish_command(
         }
         if !ok {
             let detail = error.unwrap_or_else(|| "browser interaction failed".into());
+            // Turned away before it ran: the page is unaffected, and the loop sends
+            // the command again at its own pace.
             if matches!(
                 completion,
                 BrowserCommandCompletion::Frame
                     | BrowserCommandCompletion::Close
                     | BrowserCommandCompletion::Resize
-            ) && detail
-                == "Finish or cancel the active operation before interacting with the browser"
+            ) && BROWSER_ADMISSION_REFUSALS.contains(&detail.as_str())
             {
-                if completion == BrowserCommandCompletion::Resize {
-                    state.browser_requested_geometry = None;
+                match completion {
+                    BrowserCommandCompletion::Resize => state.browser_requested_geometry = None,
+                    BrowserCommandCompletion::Frame => state.live_frame_refused = true,
+                    _ => {}
                 }
                 return Ok(Vec::new());
             }

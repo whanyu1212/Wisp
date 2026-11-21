@@ -39,6 +39,7 @@ _MAX_CAPTURE_PIXELS = MAX_LIVE_BROWSER_WIDTH * MAX_LIVE_BROWSER_HEIGHT
 _INITIAL_VIEWPORT = LiveBrowserViewport(width=900, height=600, device_scale_factor=1)
 _STARTUP_TIMEOUT = 20
 _TIMEOUT = 10
+_CLOSED = "The live browser is closed; reopen it with /browser live"
 _CHROME_MAC = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
 _CHROME_VERSION = re.compile(r"\b(\d+)\.\d+\.\d+\.\d+\b")
 # User-agent reduction froze the platform token and the minor version fields.
@@ -128,6 +129,13 @@ class LiveBrowser:
         self._frame: str | None = None
         self._delivered: tuple[str, str | None] | None = None
         self._url: str | None = None
+        # Held while capture state changes (open, resize, a fresh capture after a
+        # document change) so a frame reader never takes the frame such a change
+        # returns, and pointer input never sees the capture half-built.
+        self._capture_lock = anyio.Lock()
+        # Set and replaced whenever a frame, the page address, or the browser's
+        # lifetime changes, waking every next_frame reader at once.
+        self._changed = anyio.Event()
 
     @property
     def profile_dir(self) -> Path:
@@ -148,20 +156,21 @@ class LiveBrowser:
             TimeoutError: The first frame did not arrive within the startup deadline.
         """
         url = validate_browser_url(url)
-        await self.close()
-        executable = _chrome_binary()
-        try:
-            with anyio.fail_after(_STARTUP_TIMEOUT):
-                await self._tasks.start(self._run, executable)
-                await self._set_metrics(_INITIAL_VIEWPORT)
-                await self._command("Page.enable", {})
-                await self._command("Inspector.enable", {})
-                await self._command("Page.bringToFront", {})
-                await self._navigate(url)
-                return await self._start_capture(_INITIAL_VIEWPORT)
-        except BaseException:
-            await self.close()
-            raise
+        async with self._capture_lock:
+            await self._stop()
+            executable = _chrome_binary()
+            try:
+                with anyio.fail_after(_STARTUP_TIMEOUT):
+                    await self._tasks.start(self._run, executable)
+                    await self._set_metrics(_INITIAL_VIEWPORT)
+                    await self._command("Page.enable", {})
+                    await self._command("Inspector.enable", {})
+                    await self._command("Page.bringToFront", {})
+                    await self._navigate(url)
+                    return await self._start_capture(_INITIAL_VIEWPORT)
+            except BaseException:
+                await self._stop()
+                raise
 
     async def navigate(self, url: str) -> None:
         """Navigate the existing tab to a validated HTTP or HTTPS address."""
@@ -205,9 +214,64 @@ class LiveBrowser:
 
     async def poll_frame(self) -> BrowserViewportUpdated | None:
         """Return the newest frame, starting a fresh capture after a document change."""
+        async with self._capture_lock:
+            return await self._poll_frame()
+
+    async def _poll_frame(self) -> BrowserViewportUpdated | None:
         if self._viewport is not None and self._capture_loader != self._loader:
             return await self._restart_capture(self._viewport, resize=False)
         return self.take_frame()
+
+    async def next_frame(self) -> BrowserViewportUpdated | None:
+        """Wait until a frame or page address the caller has not seen exists, then return it.
+
+        Delivery is latest-wins: frames Chromium produces while nobody waits
+        replace each other, so a slow reader gets only the newest one. A
+        document change starts a fresh capture first, as ``poll_frame`` does.
+        Waiting costs nothing on a static page.
+
+        Returns:
+            The newest undelivered update, or None if the browser this wait
+            began on was closed on request (``close``, ``request_close``, or a
+            replacing ``open``).
+
+        Raises:
+            BrowserControlError: The browser is not open, Chromium exited on
+                its own, or a fresh capture failed.
+        """
+        # Pinned before the first await: a replacing open may hold the capture lock,
+        # and its new tab must not answer a read begun on the old one.
+        scope = self._scope
+        if self._socket is None or scope is None or scope.cancel_called:
+            raise BrowserControlError(_CLOSED)
+        while True:
+            # Taken before the check, so a change during the check wakes the wait.
+            changed = self._changed
+            async with self._capture_lock:
+                if scope.cancel_called:
+                    return None
+                if self._scope is not scope:
+                    raise BrowserControlError(_CLOSED)
+                frame = await self._poll_frame()
+            if frame is not None:
+                return frame
+            await changed.wait()
+
+    @property
+    def lifetime(self) -> anyio.CancelScope | None:
+        """A token for the open tab, or None while closed; see ``is_current``."""
+        return self._scope
+
+    def is_current(self, lifetime: anyio.CancelScope | None) -> bool:
+        """Whether the tab ``lifetime`` was taken from is still open and not closing.
+
+        A close, ``request_close``, or a replacing ``open`` ends a lifetime for good.
+        """
+        return lifetime is not None and lifetime is self._scope and not lifetime.cancel_called
+
+    def _signal_change(self) -> None:
+        self._changed.set()
+        self._changed = anyio.Event()
 
     async def resize(self, viewport: LiveBrowserViewport) -> BrowserViewportUpdated:
         """Apply CSS layout and device scale, then return a frame from the new capture.
@@ -218,7 +282,8 @@ class LiveBrowser:
         Returns:
             The first matching frame, including on a static page.
         """
-        return await self._restart_capture(viewport, resize=True)
+        async with self._capture_lock:
+            return await self._restart_capture(viewport, resize=True)
 
     async def _restart_capture(
         self, viewport: LiveBrowserViewport, *, resize: bool
@@ -234,7 +299,7 @@ class LiveBrowser:
             return await self._start_capture(viewport)
         except BaseException:
             # Once capture has stopped its state is ambiguous on interruption.
-            await self.close()
+            await self._stop()
             raise
 
     async def _set_metrics(self, viewport: LiveBrowserViewport) -> None:
@@ -280,7 +345,16 @@ class LiveBrowser:
         raise BrowserControlError("Chromium did not return a frame for the requested viewport")
 
     async def close(self) -> None:
-        """Stop capture and reap the browser before returning, even on cancellation."""
+        """Stop capture and reap the browser before returning, even on cancellation.
+
+        A capture change in progress, such as a reader's fresh capture after a
+        document change, finishes first, so its frame is delivered before the close.
+        """
+        with anyio.CancelScope(shield=True):
+            async with self._capture_lock:
+                await self._stop()
+
+    async def _stop(self) -> None:
         self.request_close()
         if self._stopped is not None:
             with anyio.CancelScope(shield=True):
@@ -378,6 +452,7 @@ class LiveBrowser:
             self._capture_loader = None
             self._navigation.set()
             self._first_frame.set()
+            self._signal_change()
             stopped.set()
 
     async def _attach_tab(self) -> str:
@@ -421,10 +496,12 @@ class LiveBrowser:
                                 self._loader = frame["loaderId"]
                                 self._url = frame["url"]
                                 self._navigation.set()
+                                self._signal_change()
                         case "Page.navigatedWithinDocument":
                             if params["frameId"] == self._main_frame:
                                 self._url = params["url"]
                                 self._navigation.set()
+                                self._signal_change()
                         case "Page.screencastFrame":
                             self._accept_frame(params)
                             await self._send(
@@ -455,13 +532,14 @@ class LiveBrowser:
         ):
             self._frame = data
             self._first_frame.set()
+            self._signal_change()
 
     async def _send(
         self, method: str, params: Mapping[str, object], *, expect_reply: bool = False
     ) -> asyncio.Future[dict[str, object]] | None:
         socket = self._socket
         if socket is None or self._scope is None:
-            raise BrowserControlError("The live browser is closed; reopen it with /browser live")
+            raise BrowserControlError(_CLOSED)
         self._next_id += 1
         request_id = self._next_id
         message: dict[str, object] = {"id": request_id, "method": method, "params": dict(params)}
@@ -501,7 +579,7 @@ class LiveBrowser:
             BrowserControlError: The browser has closed.
         """
         if self._socket is None or self._scope is None or self._scope.cancel_called:
-            raise BrowserControlError("The live browser is closed; reopen it with /browser live")
+            raise BrowserControlError(_CLOSED)
         viewport = self._viewport
         if viewport is None or self._frame is None or (self._frame, self._url) == self._delivered:
             return None
@@ -525,7 +603,7 @@ class LiveBrowser:
             BrowserControlError: The request failed or the browser has closed.
         """
         if self._scope is None or self._scope.cancel_called:
-            raise BrowserControlError("The live browser is closed; reopen it with /browser live")
+            raise BrowserControlError(_CLOSED)
         match request.action:
             case "click" | "scroll":
                 await self._mouse(request)
@@ -557,10 +635,13 @@ class LiveBrowser:
 
     async def _mouse(self, request: BrowserInteraction) -> None:
         x, y = request.x, request.y
-        viewport = self._viewport
+        # Pointer coordinates are checked against the capture, so wait out a change.
+        async with self._capture_lock:
+            viewport = self._viewport
+            frame = self._frame
         if (
             viewport is None
-            or self._frame is None
+            or frame is None
             or x is None
             or y is None
             or not (0 <= x < viewport.width and 0 <= y < viewport.height)

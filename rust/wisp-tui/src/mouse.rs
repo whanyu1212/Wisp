@@ -2,7 +2,10 @@
 
 use crate::pointer_shape::PointerShape;
 use crate::reducer::{BrowserInteractRequest, UiAction};
-use crate::{Error, Input, LiveUi, LoopControl, TranscriptViewAction, ViewStatus, WriterMessage};
+use crate::{
+    BROWSER_SCROLL_MAX_DELTA, Error, Input, LiveUi, LoopControl, TranscriptViewAction, ViewStatus,
+    WriterMessage,
+};
 use crate::{OverlayKind, prompt_editor::PromptEditor};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
@@ -443,11 +446,21 @@ impl LiveUi {
                 if let Some(lines) = scroll_lines {
                     if lines != 0 && !self.browser_interaction_blocked() {
                         self.notice = None;
+                        self.bump_browser_refresh_deadline();
+                        let delta_y = i64::from(lines) * 120;
+                        if self
+                            .state
+                            .browser_viewport
+                            .as_ref()
+                            .is_some_and(|view| view.live)
+                        {
+                            return self.scroll_live_browser(x, y, delta_y, writer, limit).await;
+                        }
                         if self.flush_browser_typing(writer, limit).await? == LoopControl::Exit {
                             return Ok(LoopControl::Exit);
                         }
-                        self.bump_browser_refresh_deadline();
-                        let delta_y = (i64::from(lines) * 120).clamp(-10_000, 10_000);
+                        let delta_y =
+                            delta_y.clamp(-BROWSER_SCROLL_MAX_DELTA, BROWSER_SCROLL_MAX_DELTA);
                         return self
                             .dispatch(
                                 UiAction::BrowserInteract(BrowserInteractRequest::Scroll {

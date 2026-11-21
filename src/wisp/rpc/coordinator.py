@@ -215,6 +215,9 @@ class RpcCoordinator:
         self.running_command: _RpcRunningCommand | None = None
         self.auxiliary_commands: dict[str, _RpcRunningCommand] = {}
         self._auxiliary_command_bytes: dict[str, int] = {}
+        # Auxiliary commands waiting for a live browser frame. A wait can last as long
+        # as the page stays still, so it orders, blocks, and delays nothing else.
+        self._live_frame_reads: set[str] = set()
         self.queued_commands: deque[ParsedRpcCommand] = deque()
         self.pending_prompt_queue_commands: deque[ParsedRpcCommand] = deque()
         self.input_closed = False
@@ -244,12 +247,23 @@ class RpcCoordinator:
     def _ordered_auxiliary_pending(self) -> bool:
         return any(
             command.command_type not in {"get_project_files", "get_git_diff"}
-            for command in self.auxiliary_commands.values()
+            and command_id not in self._live_frame_reads
+            for command_id, command in self.auxiliary_commands.items()
         )
 
-    def _cancel_discovery(self) -> None:
-        for command in self.auxiliary_commands.values():
-            if command.command_type in {"get_project_files", "get_git_diff"}:
+    def _auxiliary_besides_frame_reads(self) -> bool:
+        return any(
+            command_id not in self._live_frame_reads for command_id in self.auxiliary_commands
+        )
+
+    def _cancel_background_reads(self) -> None:
+        """Cancel discovery and live frame waits, which only a live client needs."""
+
+        for command_id, command in self.auxiliary_commands.items():
+            if (
+                command.command_type in {"get_project_files", "get_git_diff"}
+                or command_id in self._live_frame_reads
+            ):
                 command.cancel_scope.cancel()
 
     def _shutdown_is_next(self) -> bool:
@@ -361,7 +375,7 @@ class RpcCoordinator:
             or not self._wake_due()
             or self.input_closed
             or self.running_command is not None
-            or self.auxiliary_commands
+            or self._auxiliary_besides_frame_reads()
             or self.pending_prompt_queue_commands
             or self.queued_commands
         )
@@ -445,7 +459,7 @@ class RpcCoordinator:
         if self.input_closed:
             return
         self.input_closed = True
-        self._cancel_discovery()
+        self._cancel_background_reads()
         for handler in self._input_closed_handlers:
             handler()
         if (
@@ -477,6 +491,7 @@ class RpcCoordinator:
         auxiliary = self.auxiliary_commands.get(completed.command_id)
         if auxiliary is not None and completed.command_type == auxiliary.command_type:
             del self.auxiliary_commands[completed.command_id]
+            self._live_frame_reads.discard(completed.command_id)
             self._release_command_bytes(self._auxiliary_command_bytes.pop(completed.command_id, 0))
             return
         running = self.running_command
@@ -544,8 +559,11 @@ class RpcCoordinator:
     ) -> bool:
         """Reject, hold, queue, or dispatch a new command, by the first rule that applies.
 
-        The rules, in order: a duplicate ID is rejected; shutdown cancels discovery;
-        discovery is rejected once shutdown is pending; an idle shutdown is queued so
+        The rules, in order: a duplicate ID is rejected; a live frame read runs
+        alongside everything, unless shutdown is pending or another read is still
+        waiting; shutdown cancels discovery
+        and frame reads; discovery is rejected once shutdown is pending; an idle
+        shutdown is queued so
         buffered control drains first; a user's prompt, `/init`, or compaction
         cancels a running wake run and waits for it to stop; steering and follow-ups
         wait until a running prompt is ready for them; discovery, and reads a prompt
@@ -562,9 +580,19 @@ class RpcCoordinator:
             return False
         selected_type = command.command_type
         running = self.running_command
+        if command.reads_live_frame:
+            if self.input_closed or any(c.command_type == "shutdown" for c in self.queued_commands):
+                await reject(command, "Live browser frames are unavailable during shutdown")
+                return False
+            # A read can wait as long as the page stays still. One at a time keeps
+            # waiting reads from using up the command bound other work needs.
+            if self._live_frame_reads:
+                await reject(command, "A live browser frame read is already waiting")
+                return False
+            return await self._dispatch_alongside(command, dispatch=dispatch, reject=reject)
         if selected_type == "reload" and (
             running is not None
-            or self.auxiliary_commands
+            or self._auxiliary_besides_frame_reads()
             or self.queued_commands
             or self.pending_prompt_queue_commands
         ):
@@ -582,7 +610,7 @@ class RpcCoordinator:
             )
             return False
         if selected_type == "shutdown":
-            self._cancel_discovery()
+            self._cancel_background_reads()
         if selected_type in {"get_project_files", "get_git_diff"} and (
             self.input_closed or any(c.command_type == "shutdown" for c in self.queued_commands)
         ):
@@ -702,6 +730,8 @@ class RpcCoordinator:
         self.running_command = previous_running
         if auxiliary is not None and auxiliary is not previous_running:
             self.auxiliary_commands[auxiliary.command_id] = auxiliary
+            if command.reads_live_frame:
+                self._live_frame_reads.add(auxiliary.command_id)
             self._auxiliary_command_bytes[auxiliary.command_id] = command_bytes
         else:
             self._release_command_bytes(command_bytes)

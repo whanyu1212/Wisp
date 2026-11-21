@@ -1197,6 +1197,11 @@ class ParsedRpcCommand:
         return isinstance(self.value, GetMessagesCommand) and self.value.allow_during_prompt is True
 
     @property
+    def reads_live_frame(self) -> bool:
+        """Whether this waits for the live browser's next frame rather than changing anything."""
+        return isinstance(self.value, BrowserInteractCommand) and self.value.action == "live_frame"
+
+    @property
     def provided_fields(self) -> frozenset[str]:
         """Return submitted payload field names without exposing their values."""
 
