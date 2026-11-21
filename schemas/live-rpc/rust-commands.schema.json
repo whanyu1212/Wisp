@@ -166,7 +166,8 @@
         "once",
         "tool_session",
         "all_session",
-        "all_project"
+        "all_project",
+        "command_prefix_project"
       ],
       "type": "string"
     },
@@ -2026,6 +2027,40 @@
       "title": "RemoveMcpServerCommand",
       "type": "object"
     },
+    "RevokeCommandRuleCommand": {
+      "additionalProperties": false,
+      "description": "Remove one saved per-project command-prefix allow rule.",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "RevokeCommandRuleCommandId"
+        },
+        "prefix": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "RevokeCommandRuleCommandPrefix",
+          "type": "string"
+        },
+        "type": {
+          "const": "revoke_command_rule",
+          "default": "revoke_command_rule",
+          "title": "RevokeCommandRuleCommandType",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "prefix"
+      ],
+      "title": "RevokeCommandRuleCommand",
+      "type": "object"
+    },
     "RpcImageData": {
       "maxLength": 10000000,
       "minLength": 1,
@@ -2710,6 +2745,7 @@
       "reconnect_mcp": "#/$defs/ReconnectMcpCommand",
       "reload": "#/$defs/ReloadCommand",
       "remove_mcp_server": "#/$defs/RemoveMcpServerCommand",
+      "revoke_command_rule": "#/$defs/RevokeCommandRuleCommand",
       "select_session": "#/$defs/SelectSessionCommand",
       "set_codemode": "#/$defs/SetCodemodeCommand",
       "set_mcp_server_enabled": "#/$defs/SetMcpServerEnabledCommand",
@@ -2747,6 +2783,9 @@
     },
     {
       "$ref": "#/$defs/SetPermissionsCommand"
+    },
+    {
+      "$ref": "#/$defs/RevokeCommandRuleCommand"
     },
     {
       "$ref": "#/$defs/GetCodemodeCommand"

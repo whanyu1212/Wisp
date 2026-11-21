@@ -2081,6 +2081,14 @@
       "additionalProperties": false,
       "description": "Effective approval mode and user-owned default for the active project.",
       "properties": {
+        "command_allow_rules": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Command Allow Rules",
+          "type": "array"
+        },
         "mode": {
           "$ref": "#/$defs/PermissionMode"
         },
@@ -2118,7 +2126,8 @@
         "mode",
         "saved_mode",
         "project_path",
-        "session_only_yolo"
+        "session_only_yolo",
+        "command_allow_rules"
       ],
       "title": "PermissionState",
       "type": "object"
@@ -7542,6 +7551,18 @@
           "title": "Call Id",
           "type": "string"
         },
+        "command_prefix": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Command Prefix"
+        },
         "grants_allowed": {
           "default": true,
           "title": "Grants Allowed",
@@ -7598,7 +7619,8 @@
         "arguments",
         "safety",
         "grants_allowed",
-        "session_only_yolo"
+        "session_only_yolo",
+        "command_prefix"
       ],
       "title": "ToolApprovalRequested",
       "type": "object"
@@ -7635,6 +7657,7 @@
             {
               "enum": [
                 "workspace_edit_v1",
+                "command_allow_rule_v1",
                 "command_review_v1",
                 "sandbox_development_v1",
                 "sandbox_process_v1"
@@ -10232,6 +10255,7 @@
     "rpc.permissions": {
       "command_id": "command-1",
       "permissions": {
+        "command_allow_rules": [],
         "mode": "ask",
         "project_path": null,
         "saved_mode": null,
@@ -10611,6 +10635,7 @@
     "tool.approval.requested": {
       "arguments": {},
       "call_id": "call-1",
+      "command_prefix": null,
       "grants_allowed": true,
       "name": "read",
       "safety": "read",

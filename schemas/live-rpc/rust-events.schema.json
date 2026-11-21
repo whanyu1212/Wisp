@@ -2003,6 +2003,14 @@
       "additionalProperties": false,
       "description": "Effective approval mode and user-owned default for the active project.",
       "properties": {
+        "command_allow_rules": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "PermissionStateCommandAllowRules",
+          "type": "array"
+        },
         "mode": {
           "$ref": "#/$defs/PermissionMode",
           "title": "PermissionStateMode"
@@ -2042,7 +2050,8 @@
         "mode",
         "saved_mode",
         "project_path",
-        "session_only_yolo"
+        "session_only_yolo",
+        "command_allow_rules"
       ],
       "title": "PermissionState",
       "type": "object"
@@ -7145,6 +7154,18 @@
           "title": "ToolApprovalRequestedCallId",
           "type": "string"
         },
+        "command_prefix": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "ToolApprovalRequestedCommandPrefix"
+        },
         "grants_allowed": {
           "default": true,
           "title": "ToolApprovalRequestedGrantsAllowed",
@@ -7201,7 +7222,8 @@
         "arguments",
         "safety",
         "grants_allowed",
-        "session_only_yolo"
+        "session_only_yolo",
+        "command_prefix"
       ],
       "title": "ToolApprovalRequested",
       "type": "object"
@@ -7238,6 +7260,7 @@
             {
               "enum": [
                 "workspace_edit_v1",
+                "command_allow_rule_v1",
                 "command_review_v1",
                 "sandbox_development_v1",
                 "sandbox_process_v1"

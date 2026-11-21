@@ -73,6 +73,7 @@ from wisp.rpc.commands import (
     ReconnectMcpCommand,
     ReloadCommand,
     RemoveMcpServerCommand,
+    RevokeCommandRuleCommand,
     RpcCommand,
     SelectSessionCommand,
     SetCodemodeCommand,
@@ -222,6 +223,13 @@ class RpcController:
 
         selected_id = command_id or self._command_id_factory("permissions")
         await self._transport.send(SetPermissionsCommand(id=selected_id, mode=mode))
+        return selected_id
+
+    async def revoke_command_rule(self, prefix: str, *, command_id: str | None = None) -> str:
+        """Remove one saved per-project command-prefix allow rule."""
+
+        selected_id = command_id or self._command_id_factory("permissions")
+        await self._transport.send(RevokeCommandRuleCommand(id=selected_id, prefix=prefix))
         return selected_id
 
     async def get_codemode(self, *, command_id: str | None = None) -> str:

@@ -2877,6 +2877,15 @@
    "operation": "remove",
    "path": [
     "permissions",
+    "command_allow_rules"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.permissions",
+   "operation": "remove",
+   "path": [
+    "permissions",
     "mode"
    ],
    "accepted": false
@@ -5603,6 +5612,14 @@
     "call_id"
    ],
    "accepted": false
+  },
+  {
+   "event": "tool.approval.requested",
+   "operation": "remove",
+   "path": [
+    "command_prefix"
+   ],
+   "accepted": true
   },
   {
    "event": "tool.approval.requested",

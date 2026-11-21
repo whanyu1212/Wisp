@@ -41,7 +41,8 @@ from wisp.sessions.jsonl import SAVED_SESSION_ID_PATTERN
 from wisp.validation import redact_validation_error_inputs
 
 ApprovalScope = TypeAliasType(
-    "ApprovalScope", Literal["once", "tool_session", "all_session", "all_project"]
+    "ApprovalScope",
+    Literal["once", "tool_session", "all_session", "all_project", "command_prefix_project"],
 )
 
 MAX_RPC_COMMAND_ID_CHARS = 256
@@ -268,6 +269,13 @@ class SetPermissionsCommand(RpcCommandModel):
 
     type: Literal["set_permissions"] = "set_permissions"
     mode: PermissionMode
+
+
+class RevokeCommandRuleCommand(RpcCommandModel):
+    """Remove one saved per-project command-prefix allow rule."""
+
+    type: Literal["revoke_command_rule"] = "revoke_command_rule"
+    prefix: str = Field(min_length=1, max_length=128)
 
 
 class GetCodemodeCommand(RpcCommandModel):
@@ -1038,6 +1046,7 @@ RpcCommand = TypeAliasType(
         | GetStateCommand
         | GetPermissionsCommand
         | SetPermissionsCommand
+        | RevokeCommandRuleCommand
         | GetCodemodeCommand
         | SetCodemodeCommand
         | GetSubagentsCommand

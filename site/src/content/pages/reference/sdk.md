@@ -164,6 +164,7 @@ request. Completion and results arrive through `events()`.
 | `get_session_stats` | `(*, command_id: str \| None = None)` | `SessionStatsReported` |
 | `get_permissions` | `(*, command_id: str \| None = None)` | `RpcPermissionsReported` |
 | `set_permissions` | `(mode: PermissionMode, *, command_id: str \| None = None)` | Saved project default, then `RpcPermissionsReported` |
+| `revoke_command_rule` | `(prefix: str, *, command_id: str \| None = None)` | Removes one saved per-project command-prefix allow rule, then `RpcPermissionsReported` |
 | `get_codemode` | `(*, command_id: str \| None = None)` | `RpcCodemodeReported` |
 | `set_codemode` | `(setting: CodemodeSetting, *, presentation: CodemodePresentation \| None = None, command_id: str \| None = None)` | Applied from the next run and saved as the user setting, then `RpcCodemodeReported` |
 | `get_subagents` | `(*, command_id: str \| None = None)` | `RpcSubagentsReported` |
@@ -271,8 +272,10 @@ transaction rollback: do not blindly retry a pop or clear after an unknown outco
 | `trust` | `(request_id: str, *, trusted: bool, reason: str \| None = None, transient: bool = False, command_id: str \| None = None)` |
 | `approve` | `(call_id: str, *, approved: bool = True, reason: str \| None = None, scope: ApprovalScope \| None = None, command_id: str \| None = None)` |
 
-`ApprovalScope` is `"once" | "tool_session" | "all_session" | "all_project"`.
-`all_project` saves YOLO for the current project; the other scopes remain temporary. In the home
+`ApprovalScope` is `"once" | "tool_session" | "all_session" | "all_project" | "command_prefix_project"`.
+`all_project` saves YOLO for the current project and `command_prefix_project` saves the pending
+`bash` call's `command_prefix` as a per-project allow rule (removed via `revoke_command_rule`); the
+other scopes remain temporary. In the home
 folder or a folder above it YOLO is never saved: `ToolApprovalRequested.session_only_yolo` and
 `PermissionState.session_only_yolo` are true, and `all_project` or `set_permissions("yolo")` applies
 YOLO for the session only.

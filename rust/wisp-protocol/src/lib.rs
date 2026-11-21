@@ -560,6 +560,7 @@ pub mod commands {
         ToolSession,
         AllSession,
         AllProject,
+        CommandPrefixProject,
     }
 
     /// Mouse button forwarded during live browser takeover.
@@ -672,6 +673,7 @@ pub mod commands {
                 Self::ToolSession => "tool_session",
                 Self::AllSession => "all_session",
                 Self::AllProject => "all_project",
+                Self::CommandPrefixProject => "command_prefix_project",
             }
         }
     }
@@ -703,6 +705,18 @@ pub mod commands {
                 None => serde_json::json!({"type": "get_permissions", "id": id}),
             };
             deserialize(value)
+        }
+
+        /// Remove one saved per-project command-prefix allow rule.
+        pub fn revoke_command_rule(
+            id: &str,
+            prefix: &str,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({
+                "type": "revoke_command_rule",
+                "id": id,
+                "prefix": prefix,
+            }))
         }
         /// Read the codemode setting, or apply and save a new one.
         pub fn codemode(
@@ -1678,6 +1692,9 @@ pub mod events {
         /// True in the home folder or a folder above it, where YOLO is never saved.
         #[serde(default)]
         pub session_only_yolo: bool,
+        /// Saved per-project bash command-prefix allow rules, oldest first.
+        #[serde(default)]
+        pub command_allow_rules: Vec<String>,
     }
 
     /// The session's codemode setting and whether its next run would offer the tool.

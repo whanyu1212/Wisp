@@ -532,6 +532,7 @@ fn initial_state(initial: &TraceInitial) -> Result<UiState, String> {
                 safety: "unknown".into(),
                 grants_allowed: true,
                 session_only_yolo: false,
+                command_prefix: None,
             });
         }
         match (

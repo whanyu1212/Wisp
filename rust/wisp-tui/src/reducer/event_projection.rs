@@ -632,6 +632,7 @@ impl BackendEvent {
                 let grants_allowed = bool_field_or(value, &event_type, "grants_allowed", true)?;
                 let session_only_yolo =
                     bool_field_or(value, &event_type, "session_only_yolo", false)?;
+                let command_prefix = optional_string_field(value, &event_type, "command_prefix")?;
                 Self::ToolApprovalRequested(PendingApproval {
                     call_id: string_field(value, &event_type, "call_id")?,
                     detail_source: project_tool_detail_source(
@@ -652,6 +653,7 @@ impl BackendEvent {
                     safety: bounded_display_string_field(value, &event_type, "safety", 128)?,
                     grants_allowed,
                     session_only_yolo,
+                    command_prefix,
                 })
             }
             // A proxied call's target is resolved before any approval; its card shows

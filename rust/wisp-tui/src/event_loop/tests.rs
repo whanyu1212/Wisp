@@ -40,6 +40,7 @@ fn approval(id: &str) -> UiAction {
         safety: "command".into(),
         grants_allowed: true,
         session_only_yolo: false,
+        command_prefix: None,
     }))
 }
 fn draw(ui: &mut LiveUi) {

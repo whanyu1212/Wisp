@@ -165,6 +165,7 @@ _ACTIVE_COMMAND_BYPASS_COMMANDS = QUEUE_RPC_COMMAND_TYPES | {
     "get_state",
     "get_permissions",
     "set_permissions",
+    "revoke_command_rule",
     "get_codemode",
     "get_subagents",
     "get_skills",

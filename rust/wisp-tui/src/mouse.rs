@@ -317,6 +317,13 @@ pub(crate) struct WelcomeRow {
     pub index: usize,
 }
 
+/// A painted choice row inside a docked approval panel that a plain left click confirms.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct DecisionChoiceRow {
+    pub area: Rect,
+    pub key: char,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct Conversation {
     pub transcript: Rect,
@@ -335,6 +342,8 @@ pub(crate) struct Conversation {
     pub fold_rows: Vec<FoldRow>,
     /// The welcome menu's rows while the menu takes keys; empty otherwise.
     pub welcome_rows: Vec<WelcomeRow>,
+    /// Painted choice rows in the docked approval panel while waiting for approval.
+    pub decision_choices: Vec<DecisionChoiceRow>,
     /// Whether the footer notice is too long for its row and scrolls, so the
     /// footer needs repainting while it stays on screen.
     pub notice_scrolls: bool,
@@ -588,11 +597,31 @@ impl LiveUi {
             self.reconcile_browse_selection();
             return Ok(control);
         }
-        if matches!(
-            self.state.view_status,
-            ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust
-        ) {
-            // Clicks never answer, dismiss, or move focus away from a decision.
+        if self.state.view_status == ViewStatus::WaitingForApproval {
+            if matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
+                && event.modifiers == KeyModifiers::NONE
+                && let Some(choice) = self.mouse_frame.as_ref().and_then(|frame| {
+                    frame
+                        .conversation
+                        .decision_choices
+                        .iter()
+                        .find(|row| contains(row.area, event))
+                        .copied()
+                })
+            {
+                return self
+                    .handle_approval_key(
+                        KeyEvent::new(KeyCode::Char(choice.key), KeyModifiers::NONE),
+                        writer,
+                        limit,
+                    )
+                    .await;
+            }
+            // Clicks outside painted approval choices never answer, dismiss, or move focus.
+            return Ok(LoopControl::Continue);
+        }
+        if self.state.view_status == ViewStatus::WaitingForTrust {
+            // Project trust remains keyboard-only.
             return Ok(LoopControl::Continue);
         }
         let Some(frame) = self

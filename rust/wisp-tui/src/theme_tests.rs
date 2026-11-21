@@ -944,6 +944,7 @@ async fn theme_toggles_preserve_unsendable_approval_trust_and_cancellation_notic
                 safety: "command".into(),
                 grants_allowed: true,
                 session_only_yolo: false,
+                command_prefix: None,
             })
         };
         ui.dispatch(UiAction::BackendEvent(event), &writer, 1)

@@ -746,6 +746,7 @@ class ConfiguredToolExecutor:
                 safety=tool.safety,
                 grants_allowed=not confirms_every_call(tool),
                 session_only_yolo=self._approval_policy.session_only_yolo,
+                command_prefix=self._approval_policy.suggested_command_prefix(tool, arguments),
             )
             decision = await self._approval_policy.await_approval(
                 tool, call_id=tool_call.call_id, arguments=arguments
@@ -779,6 +780,11 @@ class ConfiguredToolExecutor:
             tool, arguments=arguments, context=self._context
         )
         if decision is not None:
+            rule_id: Literal["workspace_edit_v1", "command_allow_rule_v1"] = (
+                "command_allow_rule_v1"
+                if decision.rule_id == "command_allow_rule_v1"
+                else "workspace_edit_v1"
+            )
             return _ApprovalEvaluation(
                 resolution=ToolApprovalResolved(
                     call_id=tool_call.call_id,
@@ -787,7 +793,7 @@ class ConfiguredToolExecutor:
                     approved=decision.approved,
                     reason=decision.reason,
                     source="auto",
-                    rule_id="workspace_edit_v1",
+                    rule_id=rule_id,
                 )
             )
         if (

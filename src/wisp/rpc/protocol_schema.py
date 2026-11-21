@@ -247,6 +247,7 @@ _COMMAND_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     "approval": {"call_id": "call-1", "approved": True},
     "get_permissions": {},
     "set_permissions": {"mode": "ask"},
+    "revoke_command_rule": {"prefix": "cargo test"},
     "get_codemode": {},
     "set_codemode": {"setting": "always"},
     "get_subagents": {},
