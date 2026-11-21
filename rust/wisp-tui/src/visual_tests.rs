@@ -836,7 +836,7 @@ async fn earlier_output_is_independently_browsable_and_clickable() {
     let process = ui.state.transcript.entries().last().unwrap().id;
     draw(&mut ui, 100, 64);
     assert!(
-        ui.visible_foldable_entries()
+        ui.visible_browse_targets()
             .contains(&BrowseTarget::Output(process))
     );
     ui.browse_selected = Some(BrowseTarget::Output(process));
@@ -3131,4 +3131,48 @@ fn tool_card_with_stored_image_renders_thumbnail_with_connector() {
     assert!(!row1.contains('└') && row1.contains('▀'), "{row1:?}");
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn browse_selection_highlights_code_block_and_message_rows_with_selection_band() {
+    let mut ui = LiveUi::default();
+    let reply = concat!(
+        "Prose intro\n\n",
+        "```rust\n",
+        "let alpha = 1;\n",
+        "```\n\n",
+        "```sh\n",
+        "echo beta\n",
+        "```",
+    );
+    let reply_id = ui.state.transcript.start_message(1);
+    ui.state.transcript.append_message_delta(1, reply);
+    ui.state.transcript.complete_message(1, reply.into());
+    let blocks = crate::markdown::code_blocks(reply);
+    assert_eq!(blocks.len(), 2);
+
+    let band = ui.palette().selected;
+    let unselected = draw(&mut ui, 80, 24);
+    let prose_y = row_containing(&unselected, "Prose intro");
+    let first_code_y = row_containing(&unselected, "let alpha = 1;");
+    let second_code_y = row_containing(&unselected, "echo beta");
+    assert_ne!(unselected[(4, first_code_y)].bg, band);
+    assert_ne!(unselected[(4, second_code_y)].bg, band);
+
+    // Selecting the first code block highlights only that code block's rows.
+    ui.browse_selected = Some(BrowseTarget::CodeBlock {
+        entry_id: reply_id,
+        source_start: blocks[0].source.start,
+    });
+    let code_selected = draw(&mut ui, 80, 24);
+    assert_eq!(code_selected[(4, first_code_y)].bg, band);
+    assert_ne!(code_selected[(4, prose_y)].bg, band);
+    assert_ne!(code_selected[(4, second_code_y)].bg, band);
+
+    // Selecting the message highlights prose and both code blocks in that message.
+    ui.browse_selected = Some(BrowseTarget::Message(reply_id));
+    let message_selected = draw(&mut ui, 80, 24);
+    assert_eq!(message_selected[(4, prose_y)].bg, band);
+    assert_eq!(message_selected[(4, first_code_y)].bg, band);
+    assert_eq!(message_selected[(4, second_code_y)].bg, band);
 }

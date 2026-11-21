@@ -50,7 +50,8 @@ the entire default keymap; other valid user settings still apply.
 | `panel.focus` | F8 | Focus the side panel; Esc returns to the composer |
 | `panel.background` | Unbound (`Down`, `/ps`) | Focus the side panel's background processes |
 | `session.tree` | Ctrl+T | Open the session tree to switch branches (`/tree`) |
-| `transcript.browse` | F6 | Select transcript cards |
+| `transcript.browse` | F6 | Browse and copy transcript messages, code blocks, and cards |
+| `transcript.copy_last_response` | Alt+Y | Copy the last assistant response (raw source Markdown) |
 | `transcript.page_up`, `transcript.page_down` | PgUp, PgDn | Scroll one page |
 | `transcript.home`, `transcript.tail` | Ctrl+Home, Ctrl+End | Oldest content / live tail |
 | `transcript.line_up`, `transcript.line_down` | Ctrl+Up, Ctrl+Down | Scroll one line |
@@ -114,7 +115,10 @@ Ctrl+C copies when the composer owns a non-empty selection; without one it retai
 and idle-exit behavior. A failed cut preserves the selected draft, and clipboard paste follows the
 same control-character filtering, size limits, compact-fold handling, and undo behavior as bracketed
 paste. Native desktop clipboard access supports copy, cut, and paste; copy also emits an OSC52 fallback
-for remote terminals. Mouse drag selection and transcript clipboard copy remain separate work.
+for remote terminals. From the transcript, `Alt+Y` (`transcript.copy_last_response`) copies the
+latest assistant response as raw Markdown, `F6` browse mode selects messages, code blocks, thoughts,
+or cards with `Tab`/`Shift+Tab`, `↑`/`↓`, or `j`/`k` and copies the selection on `y`, and dragging
+across painted transcript text copies on release.
 
 Focused controls retain their local keys: picker arrows/Enter, completion Tab/Enter, card browsing
 Tab/Shift+Tab/Enter/Space, decision approval/denial, and editor navigation. They take precedence over
@@ -149,7 +153,8 @@ characters per chord.
 | `Ctrl+P` | Hide or show the side panel on a wide terminal; open or close it as an overlay otherwise |
 | `Ctrl+B` | While the agent runs a shell command in the foreground, move it to the background (in tmux, press it twice) |
 | `F8` | Focus the side panel for keyboard navigation (`f` expands/restores; `b` switches Work/Browser; `i` enters browser takeover; `r` refreshes) |
-| `F6` | Browse transcript cards; Right expands, Left collapses, and Enter opens retained detail |
+| `F6` | Browse transcript messages, code blocks, and cards (`Tab`/`↑`/`↓`/`j`/`k` select, `y` copies, `Right` expands, `Left` collapses, `Enter` opens retained detail) |
+| `Alt+Y` | Copy the last assistant response as raw source Markdown (with OSC 52 fallback over SSH) |
 | `Ctrl+G` | Toggle contextual help for the focused Rust surface |
 | `Ctrl+L` | Edit the address of the visible live Chromium tab, or focus the `Browser` view's address bar when no page is open |
 | `Ctrl+R` | Search prompt history for this TUI run |

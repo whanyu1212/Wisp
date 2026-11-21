@@ -11,9 +11,13 @@ const MAX_CONFIG_ENTRIES: usize = 64;
 const MAX_CHORDS_PER_ACTION: usize = 8;
 const MAX_CHORD_CHARS: usize = 64;
 const MAX_DIAGNOSTIC_CHARS: usize = 512;
-/// Actions whose default chord changed in 0.9.2: the panel moved to Ctrl+P so
-/// Ctrl+B could move a running command to the background.
-const RECENT_DEFAULTS: [Action; 2] = [Action::TogglePanel, Action::BackgroundCommand];
+/// Actions whose defaults were added or changed recently; user overrides take
+/// precedence over these defaults so existing configs never break on upgrade.
+const RECENT_DEFAULTS: [Action; 3] = [
+    Action::TogglePanel,
+    Action::BackgroundCommand,
+    Action::CopyLastResponse,
+];
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum Action {
@@ -24,6 +28,7 @@ pub(crate) enum Action {
     History,
     ToggleTheme,
     Browse,
+    CopyLastResponse,
     PageUp,
     PageDown,
     Home,
@@ -40,7 +45,7 @@ pub(crate) enum Action {
 }
 
 impl Action {
-    pub(crate) const ALL: [Self; 20] = [
+    pub(crate) const ALL: [Self; 21] = [
         Self::Submit,
         Self::AlternateSubmit,
         Self::Newline,
@@ -48,6 +53,7 @@ impl Action {
         Self::History,
         Self::ToggleTheme,
         Self::Browse,
+        Self::CopyLastResponse,
         Self::PageUp,
         Self::PageDown,
         Self::Home,
@@ -79,6 +85,7 @@ impl Action {
             Self::History => "history.open",
             Self::ToggleTheme => "theme.toggle",
             Self::Browse => "transcript.browse",
+            Self::CopyLastResponse => "transcript.copy_last_response",
             Self::PageUp => "transcript.page_up",
             Self::PageDown => "transcript.page_down",
             Self::Home => "transcript.home",
@@ -105,7 +112,8 @@ impl Action {
             }
             Self::History => "Open prompt history",
             Self::ToggleTheme => "Toggle the theme",
-            Self::Browse => "Browse transcript details",
+            Self::Browse => "Browse and copy transcript items",
+            Self::CopyLastResponse => "Copy the last assistant response",
             Self::PageUp => "Scroll transcript up one page",
             Self::PageDown => "Scroll transcript down one page",
             Self::Home => "Go to the start of the transcript",
@@ -277,6 +285,8 @@ impl Default for Bindings {
             "Ctrl+O",
         )];
         chords[Browse.index()] = vec![Chord::exact(KeyCode::F(6), KeyModifiers::NONE, "F6")];
+        chords[CopyLastResponse.index()] =
+            vec![Chord::exact(KeyCode::Char('y'), KeyModifiers::ALT, "Alt+Y")];
         chords[FocusPanel.index()] = vec![Chord::exact(KeyCode::F(8), KeyModifiers::NONE, "F8")];
         chords[TogglePanel.index()] = vec![Chord::exact(
             KeyCode::Char('p'),
@@ -1089,5 +1099,22 @@ mod tests {
         assert_eq!(entries[5].action, Action::ToggleTheme);
         assert_eq!(entries[5].label, "Unbound");
         assert!(!entries[5].description.is_empty());
+    }
+
+    #[test]
+    fn copy_last_response_defaults_to_alt_y_and_yields_to_user_overrides() {
+        let bindings = Bindings::default();
+        assert_eq!(
+            bindings.action(key(KeyCode::Char('y'), KeyModifiers::ALT)),
+            Some(Action::CopyLastResponse)
+        );
+        assert_eq!(bindings.label(Action::CopyLastResponse), "Alt+Y");
+
+        let overridden = Bindings::from_json(r#"{"theme.toggle":["Alt+Y"]}"#).unwrap();
+        assert_eq!(
+            overridden.action(key(KeyCode::Char('y'), KeyModifiers::ALT)),
+            Some(Action::ToggleTheme)
+        );
+        assert_eq!(overridden.label(Action::CopyLastResponse), "Unbound");
     }
 }

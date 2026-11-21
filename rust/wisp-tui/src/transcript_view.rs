@@ -111,18 +111,28 @@ pub struct RowAnchor {
     pub position: RowPosition,
 }
 
-/// Groups and their first member share an entry ID but have independent controls.
+/// Groups and their first member share an entry ID but have independent controls;
+/// messages and their fenced/indented code blocks are addressed independently too.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum BrowseTarget {
     Entry(TranscriptEntryId),
     Group(TranscriptEntryId),
     Output(TranscriptEntryId),
+    Message(TranscriptEntryId),
+    CodeBlock {
+        entry_id: TranscriptEntryId,
+        source_start: usize,
+    },
 }
 
 impl BrowseTarget {
     pub fn entry_id(self) -> TranscriptEntryId {
         match self {
-            Self::Entry(id) | Self::Group(id) | Self::Output(id) => id,
+            Self::Entry(id)
+            | Self::Group(id)
+            | Self::Output(id)
+            | Self::Message(id)
+            | Self::CodeBlock { entry_id: id, .. } => id,
         }
     }
 

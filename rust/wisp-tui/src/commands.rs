@@ -930,7 +930,10 @@ pub(crate) fn help_rows(
             Line::raw("Ctrl+G shows the resolved shortcuts for the focused workflow."),
             Line::raw("Mouse navigation is on by default; WISP_TUI_MOUSE=0 disables it."),
             Line::raw("Wheel scrolls; click selects; Enter activates. Outside click closes a popup."),
-            Line::raw("Approvals/trust remain keyboard-only. Drag selection and copy are not implemented."),
+            Line::raw(format!(
+                "Approvals/trust remain keyboard-only. Drag in the transcript, or browse ({}) and press y, to copy.",
+                bindings.label(crate::keybindings::Action::Browse)
+            )),
         ])
         .chain(bindings.help_entries().into_iter().map(|entry| Line::raw(format!("{}: {}", entry.label, entry.description))))
         .collect()

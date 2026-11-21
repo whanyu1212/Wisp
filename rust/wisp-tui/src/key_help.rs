@@ -83,8 +83,8 @@ impl KeyHelp {
                 "Enter activates an exact command; Escape dismisses suggestions.",
             ],
             Owner::Browse => &[
-                "Browse: Tab/Shift+Tab select, Right expand, Left collapse.",
-                "Enter expands or opens retained detail. Esc returns to the prompt.",
+                "Browse: Tab/Shift+Tab or ↑↓/jk select messages, code blocks, and cards; y copies.",
+                "Right expands, Left collapses, Enter opens retained detail. Esc returns to the prompt.",
             ],
             Owner::Overlay(OverlayKind::GitDiff) => &[
                 "Diff: Tab switches focus, Enter expands/opens, [] hunks, s split, c context, r refresh, Esc closes.",

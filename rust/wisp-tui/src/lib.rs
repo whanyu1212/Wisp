@@ -145,7 +145,7 @@ use reducer::{
 use session_picker::{SessionPicker, SessionPickerAction, SessionPickerPurpose};
 use session_tree_picker::{SessionTreePicker, SessionTreePickerAction};
 use startup_logo::LogoChoice;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::future::pending;
 use std::io;
@@ -165,7 +165,7 @@ use tokio::sync::{Semaphore, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout};
 use tool_detail::{DetailAvailability, ToolDetailPresentation};
-use transcript::TranscriptEntryId;
+use transcript::{TranscriptEntryId, TranscriptEntryKind, TranscriptRole};
 use transcript_view::{
     BrowseTarget, RowPosition, TranscriptRowCache, TranscriptRowKind, TranscriptViewAction,
     TranscriptViewport, card_run,
@@ -3862,12 +3862,14 @@ impl LiveUi {
         Ok(None)
     }
 
-    fn visible_foldable_entries(&mut self) -> Vec<BrowseTarget> {
+    fn visible_browse_targets(&mut self) -> Vec<BrowseTarget> {
         let rows = self
             .transcript_viewport
             .visible_rows(&self.state.transcript, &mut self.transcript_row_cache);
         let mut entries = Vec::new();
         let mut seen = HashSet::new();
+        let mut code_blocks_by_entry: HashMap<TranscriptEntryId, Vec<markdown::CodeBlock>> =
+            HashMap::new();
         for row in rows {
             let foldable = matches!(
                 row.kind,
@@ -3877,27 +3879,240 @@ impl LiveUi {
                     | TranscriptRowKind::CardOmission
                     | TranscriptRowKind::Thought
             ) && !matches!(row.anchor.position, RowPosition::ThoughtContent(_));
-            let target = BrowseTarget::for_row(&row);
-            if !foldable || !seen.insert(target) {
+            if foldable {
+                let target = BrowseTarget::for_row(&row);
+                if seen.insert(target) {
+                    entries.push(target);
+                }
                 continue;
             }
-            entries.push(target);
+            if !matches!(
+                row.kind,
+                TranscriptRowKind::Header | TranscriptRowKind::Content
+            ) {
+                continue;
+            }
+            let Some(entry) = self.state.transcript.entry(row.anchor.entry_id) else {
+                continue;
+            };
+            if !matches!(entry.kind, TranscriptEntryKind::Message) || entry.content.is_empty() {
+                continue;
+            }
+            let message_target = BrowseTarget::Message(entry.id);
+            if seen.insert(message_target) {
+                entries.push(message_target);
+            }
+            if row.kind != TranscriptRowKind::Content {
+                continue;
+            }
+            let Some(code_offset) = row
+                .spans
+                .iter()
+                .find(|span| span.style.block == markdown::BlockStyle::Code)
+                .map(|span| span.affinity.source_offset)
+            else {
+                continue;
+            };
+            let blocks = code_blocks_by_entry
+                .entry(entry.id)
+                .or_insert_with(|| markdown::code_blocks(&entry.content));
+            if let Some(block) = blocks
+                .iter()
+                .find(|block| block.source.start <= code_offset && code_offset <= block.source.end)
+            {
+                let code_target = BrowseTarget::CodeBlock {
+                    entry_id: entry.id,
+                    source_start: block.source.start,
+                };
+                if seen.insert(code_target) {
+                    entries.push(code_target);
+                }
+            }
         }
         entries
     }
 
     fn browse_notice(&self) -> String {
-        let open = if self.bindings.label(KeyAction::ExternalEditor) == "Unbound" {
-            String::new()
-        } else {
-            format!(
-                " · {} open file",
-                self.bindings.label(KeyAction::ExternalEditor)
-            )
+        match self.browse_selected {
+            Some(BrowseTarget::Message(entry_id)) => {
+                let kind = self
+                    .state
+                    .transcript
+                    .entry(entry_id)
+                    .map(|entry| match entry.role {
+                        TranscriptRole::User => "Prompt",
+                        TranscriptRole::Assistant | TranscriptRole::Tool => "Response",
+                    })
+                    .unwrap_or("Message");
+                format!("Browse: {kind} · y copy · ↑↓/Tab select · Esc prompt")
+            }
+            Some(BrowseTarget::CodeBlock {
+                entry_id,
+                source_start,
+            }) => {
+                let language = self
+                    .state
+                    .transcript
+                    .entry(entry_id)
+                    .and_then(|entry| markdown::code_block_at(&entry.content, source_start))
+                    .and_then(|block| block.language)
+                    .map(|lang| sanitize_code_language(&lang))
+                    .filter(|lang| !lang.is_empty());
+                match language {
+                    Some(lang) => {
+                        format!("Browse: Code block ({lang}) · y copy · ↑↓/Tab select · Esc prompt")
+                    }
+                    None => "Browse: Code block · y copy · ↑↓/Tab select · Esc prompt".into(),
+                }
+            }
+            _ => {
+                let open = if self.bindings.label(KeyAction::ExternalEditor) == "Unbound" {
+                    String::new()
+                } else {
+                    format!(
+                        " · {} open file",
+                        self.bindings.label(KeyAction::ExternalEditor)
+                    )
+                };
+                format!(
+                    "Browse: Tab/↑↓ select · y copy · Right expand · Left collapse · Enter details{open} · Esc prompt"
+                )
+            }
+        }
+    }
+
+    /// Copy the raw source Markdown of the latest non-empty assistant response.
+    fn copy_last_response(&mut self) {
+        let Some(text) = self
+            .state
+            .transcript
+            .entries()
+            .iter()
+            .rev()
+            .find(|entry| {
+                entry.role == TranscriptRole::Assistant
+                    && matches!(entry.kind, TranscriptEntryKind::Message)
+                    && !entry.content.is_empty()
+            })
+            .map(|entry| entry.content.clone())
+        else {
+            self.notice = Some("No assistant response to copy.".into());
+            self.render_pending = true;
+            return;
         };
-        format!(
-            "Browse: Tab select · Right expand · Left collapse · Enter details{open} · Esc prompt"
-        )
+        self.notice = Some(match self.clipboard.copy(&text) {
+            Ok(()) => format!("Copied last response ({} chars).", text.chars().count()),
+            Err(error) => format!("Could not copy response: {error}."),
+        });
+        self.render_pending = true;
+    }
+
+    fn copy_selected_browse_target(&mut self) {
+        let Some(selected) = self.browse_selected else {
+            return;
+        };
+        let Some((label, text)) = self.browse_target_copy_payload(selected) else {
+            self.notice = Some("Nothing to copy for the selected item.".into());
+            self.render_pending = true;
+            return;
+        };
+        let chars = text.chars().count();
+        match self.clipboard.copy(&text) {
+            Ok(()) => {
+                self.browse_selected = None;
+                self.notice = Some(format!("Copied {label} ({chars} chars)."));
+            }
+            Err(error) => {
+                self.notice = Some(format!("Could not copy {label}: {error}."));
+            }
+        }
+        self.render_pending = true;
+    }
+
+    fn browse_target_copy_payload(&self, target: BrowseTarget) -> Option<(String, String)> {
+        match target {
+            BrowseTarget::Message(entry_id) => {
+                let entry = self.state.transcript.entry(entry_id)?;
+                if entry.content.is_empty() {
+                    return None;
+                }
+                let label = match entry.role {
+                    TranscriptRole::User => "prompt",
+                    TranscriptRole::Assistant | TranscriptRole::Tool => "response",
+                };
+                Some((label.into(), entry.content.clone()))
+            }
+            BrowseTarget::CodeBlock {
+                entry_id,
+                source_start,
+            } => {
+                let entry = self.state.transcript.entry(entry_id)?;
+                let block = markdown::code_block_at(&entry.content, source_start)?;
+                let label = block
+                    .language
+                    .as_deref()
+                    .map(sanitize_code_language)
+                    .filter(|lang| !lang.is_empty())
+                    .map_or_else(|| "code block".into(), |lang| format!("{lang} code block"));
+                Some((label, block.code))
+            }
+            BrowseTarget::Entry(entry_id) => {
+                let entry = self.state.transcript.entry(entry_id)?;
+                match &entry.kind {
+                    TranscriptEntryKind::Message => {
+                        let thinking = entry.thinking();
+                        (!thinking.is_empty()).then(|| ("thought".into(), thinking.to_owned()))
+                    }
+                    TranscriptEntryKind::Tool(card) => {
+                        if !card.retained_output.text.is_empty() {
+                            Some(("tool output".into(), card.retained_output.text.clone()))
+                        } else if !card.detail.is_empty() {
+                            Some(("tool output".into(), card.detail.clone()))
+                        } else if !card.action_arguments.is_empty() {
+                            Some(("tool call".into(), card.action_arguments.clone()))
+                        } else {
+                            None
+                        }
+                    }
+                    TranscriptEntryKind::Process(card) => {
+                        if !card.retained_output.text.is_empty() {
+                            Some(("process output".into(), card.retained_output.text.clone()))
+                        } else {
+                            let label = card
+                                .task_label
+                                .as_deref()
+                                .unwrap_or(card.process_id.as_str());
+                            (!label.is_empty()).then(|| ("process".into(), label.to_owned()))
+                        }
+                    }
+                }
+            }
+            BrowseTarget::Output(entry_id) => {
+                let entry = self.state.transcript.entry(entry_id)?;
+                let text = match &entry.kind {
+                    TranscriptEntryKind::Tool(card) => card.retained_output.text.as_str(),
+                    TranscriptEntryKind::Process(card) => card.retained_output.text.as_str(),
+                    TranscriptEntryKind::Message => "",
+                };
+                (!text.is_empty()).then(|| ("output".into(), text.to_owned()))
+            }
+            BrowseTarget::Group(entry_id) => {
+                let (_, members) = card_run(&self.state.transcript, entry_id)?;
+                let lines = members
+                    .into_iter()
+                    .filter_map(|id| self.state.transcript.entry(id))
+                    .filter_map(|entry| entry.tool_card())
+                    .map(|card| {
+                        if card.action_arguments.is_empty() {
+                            card.name.clone()
+                        } else {
+                            format!("{} {}", card.name, card.action_arguments)
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                (!lines.is_empty()).then(|| ("tool group".into(), lines.join("\n")))
+            }
+        }
     }
 
     fn selected_closed_group(&self) -> Option<TranscriptEntryId> {
@@ -3924,6 +4139,7 @@ impl LiveUi {
                 self.transcript_row_cache.fold_mut().expand_output(entry);
                 self.transcript_viewport.reveal_output(entry);
             }
+            BrowseTarget::Message(_) | BrowseTarget::CodeBlock { .. } => return,
         }
         self.notice = Some(self.browse_notice());
         self.render_pending = true;
@@ -3971,6 +4187,12 @@ impl LiveUi {
         let Some(selected) = self.browse_selected else {
             return;
         };
+        if matches!(
+            selected,
+            BrowseTarget::Message(_) | BrowseTarget::CodeBlock { .. }
+        ) {
+            return;
+        }
         let entry = selected.entry_id();
         if matches!(selected, BrowseTarget::Output(_)) {
             self.transcript_row_cache.fold_mut().collapse_output(entry);
@@ -3996,10 +4218,10 @@ impl LiveUi {
         ) {
             return;
         }
-        let entries = self.visible_foldable_entries();
+        let entries = self.visible_browse_targets();
         if entries.is_empty() {
             self.browse_selected = None;
-            self.notice = Some("No foldable transcript row is in view.".into());
+            self.notice = Some("No browsable transcript row is in view.".into());
         } else if let Some(selected) = self.browse_selected {
             let next = entries
                 .iter()
@@ -4015,10 +4237,10 @@ impl LiveUi {
     }
 
     fn cycle_browse(&mut self, reverse: bool) {
-        let entries = self.visible_foldable_entries();
+        let entries = self.visible_browse_targets();
         if entries.is_empty() {
             self.browse_selected = None;
-            self.notice = Some("No foldable transcript row is in view.".into());
+            self.notice = Some("No browsable transcript row is in view.".into());
             self.render_pending = true;
             return;
         }
@@ -4032,6 +4254,7 @@ impl LiveUi {
             (None, false) => 0,
         };
         self.browse_selected = Some(entries[index]);
+        self.notice = Some(self.browse_notice());
         self.render_pending = true;
     }
 
@@ -4042,7 +4265,10 @@ impl LiveUi {
         match target {
             BrowseTarget::Group(entry) => card_run(&self.state.transcript, entry)
                 .map_or(target, |(start, _)| BrowseTarget::Group(start)),
-            BrowseTarget::Entry(_) | BrowseTarget::Output(_) => target,
+            BrowseTarget::Entry(_)
+            | BrowseTarget::Output(_)
+            | BrowseTarget::Message(_)
+            | BrowseTarget::CodeBlock { .. } => target,
         }
     }
 
@@ -4055,7 +4281,7 @@ impl LiveUi {
         if let (BrowseTarget::Group(from), BrowseTarget::Group(to)) = (previous, selected) {
             self.transcript_viewport.follow_moved_group_header(from, to);
         }
-        let entries = self.visible_foldable_entries();
+        let entries = self.visible_browse_targets();
         if entries.contains(&selected) {
             self.browse_selected = Some(selected);
         } else {
@@ -4063,7 +4289,7 @@ impl LiveUi {
             self.notice = if self.browse_selected.is_some() {
                 Some(self.browse_notice())
             } else {
-                Some("No foldable transcript row is in view.".into())
+                Some("No browsable transcript row is in view.".into())
             };
         }
     }
@@ -5248,9 +5474,25 @@ impl LiveUi {
             }
             KeyCode::Tab => self.cycle_browse(false),
             KeyCode::BackTab => self.cycle_browse(true),
+            KeyCode::Down | KeyCode::Char('j') if key.modifiers == KeyModifiers::NONE => {
+                self.cycle_browse(false);
+            }
+            KeyCode::Up | KeyCode::Char('k') if key.modifiers == KeyModifiers::NONE => {
+                self.cycle_browse(true);
+            }
+            KeyCode::Char('y') if key.modifiers == KeyModifiers::NONE => {
+                self.copy_selected_browse_target();
+                return Ok(LoopControl::Continue);
+            }
             KeyCode::Right => self.expand_selected_fold(),
             KeyCode::Left => self.collapse_selected_fold(),
             KeyCode::Enter | KeyCode::Char(' ') => {
+                if matches!(
+                    self.browse_selected,
+                    Some(BrowseTarget::Message(_) | BrowseTarget::CodeBlock { .. })
+                ) {
+                    return Ok(LoopControl::Continue);
+                }
                 if let Some(target @ BrowseTarget::Output(_)) = self.browse_selected {
                     self.toggle_clicked_fold(target);
                     return Ok(LoopControl::Continue);
@@ -5280,7 +5522,12 @@ impl LiveUi {
             }
             _ if self.bindings.action(key) == Some(KeyAction::Browse) => self.cycle_browse(false),
             _ if self.bindings.action(key) == Some(KeyAction::ExternalEditor) => {
-                if let Some(target) = self.browse_selected {
+                if let Some(
+                    target @ (BrowseTarget::Entry(_)
+                    | BrowseTarget::Group(_)
+                    | BrowseTarget::Output(_)),
+                ) = self.browse_selected
+                {
                     self.open_card_file(target.entry_id());
                 }
             }
@@ -6148,6 +6395,12 @@ impl LiveUi {
                 self.dispatch(UiAction::RefreshQueueState, writer, limit)
                     .await
                     .map(Some)
+            }
+            Some(KeyAction::CopyLastResponse)
+                if self.active_overlay().is_none() && !decision_pending =>
+            {
+                self.copy_last_response();
+                Ok(Some(LoopControl::Continue))
             }
             _ => Ok(None),
         }
@@ -8234,6 +8487,16 @@ impl std::fmt::Write for BoundedTerminalText {
         }
         Ok(())
     }
+}
+
+fn sanitize_code_language(language: &str) -> String {
+    language
+        .chars()
+        .filter(|character| {
+            !character.is_control() && !is_bidi_control(*character) && !character.is_whitespace()
+        })
+        .take(24)
+        .collect()
 }
 
 fn is_bidi_control(character: char) -> bool {
@@ -13221,7 +13484,7 @@ mod tests {
             panic!("tool result expected");
         };
         live_ui.state.transcript.observe_tool_result(*result);
-        live_ui.state.transcript.append_exchange("later".into());
+        let _ = live_ui.state.transcript.append_exchange("later".into());
         live_ui.transcript_viewport.set_geometry(
             &live_ui.state.transcript,
             &mut live_ui.transcript_row_cache,
@@ -13233,8 +13496,7 @@ mod tests {
             &live_ui.state.transcript,
             &mut live_ui.transcript_row_cache,
         );
-        live_ui.enter_or_cycle_browse();
-        assert_eq!(live_ui.browse_selected, Some(BrowseTarget::Entry(card_id)));
+        live_ui.browse_selected = Some(BrowseTarget::Entry(card_id));
 
         live_ui.transcript_viewport.set_geometry(
             &live_ui.state.transcript,
@@ -13248,7 +13510,7 @@ mod tests {
             &mut live_ui.transcript_row_cache,
         );
         for _ in 0..32 {
-            if live_ui.visible_foldable_entries().is_empty() {
+            if live_ui.visible_browse_targets().is_empty() {
                 break;
             }
             live_ui.transcript_viewport.reduce(
@@ -13257,7 +13519,7 @@ mod tests {
                 &mut live_ui.transcript_row_cache,
             );
         }
-        assert!(live_ui.visible_foldable_entries().is_empty());
+        assert!(live_ui.visible_browse_targets().is_empty());
         assert_eq!(live_ui.browse_selected, Some(BrowseTarget::Entry(card_id)));
 
         let connection = ConnectionInfo {
@@ -13271,7 +13533,7 @@ mod tests {
             live_ui
                 .notice
                 .as_deref()
-                .is_some_and(|notice| notice.starts_with("No foldable transcript row"))
+                .is_some_and(|notice| notice.starts_with("No browsable transcript row"))
         );
         assert!(live_ui.render_pending);
     }
@@ -13315,7 +13577,7 @@ mod tests {
         live_ui.enter_or_cycle_browse();
         assert_eq!(live_ui.browse_selected, Some(BrowseTarget::Entry(card_id)));
         assert_eq!(
-            live_ui.visible_foldable_entries(),
+            live_ui.visible_browse_targets(),
             vec![BrowseTarget::Entry(card_id)]
         );
 
@@ -13337,12 +13599,262 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(live_ui.browse_selected.is_none());
+        let reply_id = live_ui.state.transcript.entries().last().unwrap().id;
+        assert_eq!(
+            live_ui.browse_selected,
+            Some(BrowseTarget::Message(reply_id))
+        );
+    }
+
+    #[tokio::test]
+    async fn alt_y_copies_last_assistant_response_source_markdown() {
+        let (clipboard, copied) = clipboard::test_clipboard();
+        let mut ui = LiveUi {
+            state: UiState::new("fake".into(), None, None),
+            clipboard,
+            ..LiveUi::default()
+        };
+        let (writer, _receiver) = mpsc::channel(4);
+
+        // No assistant response yet reports a notice without touching the clipboard.
+        ui.handle_input(
+            Input::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::ALT)),
+            &writer,
+            MAX_APPLICATION_FRAME_BYTES,
+        )
+        .await
+        .unwrap();
+        assert!(copied.lock().unwrap().copied.is_empty());
+        assert_eq!(ui.notice.as_deref(), Some("No assistant response to copy."));
+
+        // Append a long Markdown reply that wraps visually, plus a trailing user prompt.
+        let markdown = concat!(
+            "Here is a **very long** sentence with [a link](https://example.com) that wraps across lines when rendered on a narrow screen.\n\n",
+            "```rust\n",
+            "fn greet() {\n    println!(\"hello\");\n}\n",
+            "```",
+        );
+        ui.state.transcript.append_exchange("write rust".into());
+        ui.state.transcript.start_message(1);
+        ui.state.transcript.append_message_delta(1, markdown);
+        ui.state.transcript.complete_message(1, markdown.into());
+        ui.state.transcript.append_exchange("follow-up".into());
+
+        let connection = ConnectionInfo {
+            backend_version: "test".into(),
+        };
+        let mut terminal = Terminal::new(TestBackend::new(50, 20)).unwrap();
+        ui.draw(&mut terminal, &connection).unwrap();
+
+        ui.handle_input(
+            Input::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::ALT)),
+            &writer,
+            MAX_APPLICATION_FRAME_BYTES,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(copied.lock().unwrap().copied, vec![markdown.to_owned()]);
         assert!(
-            live_ui
-                .notice
+            ui.notice
                 .as_deref()
-                .is_some_and(|notice| notice.starts_with("No foldable transcript row"))
+                .is_some_and(|notice| notice.starts_with("Copied last response"))
+        );
+    }
+
+    #[tokio::test]
+    async fn browse_selects_and_copies_messages_and_individual_code_blocks() {
+        let (clipboard, copied) = clipboard::test_clipboard();
+        let mut ui = LiveUi {
+            state: UiState::new("fake".into(), None, None),
+            clipboard,
+            ..LiveUi::default()
+        };
+        ui.editor.insert_paste("keep draft");
+        let (writer, _receiver) = mpsc::channel(4);
+
+        let (user_id, _) = ui
+            .state
+            .transcript
+            .append_exchange("show two blocks".into());
+        let reply = concat!(
+            "First **snippet**:\n\n",
+            "```rust\n",
+            "let x = 1;\n",
+            "let y = 2;\n",
+            "```\n\n",
+            "Then run:\n\n",
+            "```sh\n",
+            "cargo test --workspace\n",
+            "```",
+        );
+        let assistant_id = ui.state.transcript.start_message(1);
+        ui.state.transcript.append_message_delta(1, reply);
+        ui.state.transcript.complete_message(1, reply.into());
+
+        let blocks = markdown::code_blocks(reply);
+        assert_eq!(blocks.len(), 2);
+
+        let connection = ConnectionInfo {
+            backend_version: "test".into(),
+        };
+        let mut terminal = Terminal::new(TestBackend::new(72, 26)).unwrap();
+        ui.draw(&mut terminal, &connection).unwrap();
+
+        // F6 enters browse on the bottom-most target (the second code block).
+        ui.handle_input(
+            Input::Key(KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE)),
+            &writer,
+            MAX_APPLICATION_FRAME_BYTES,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            ui.browse_selected,
+            Some(BrowseTarget::CodeBlock {
+                entry_id: assistant_id,
+                source_start: blocks[1].source.start,
+            })
+        );
+        assert!(
+            ui.notice.as_deref().is_some_and(
+                |notice| notice.contains("Code block (sh)") && notice.contains("y copy")
+            )
+        );
+
+        // Press y to copy the sh code block without its fences or trailing newline.
+        ui.handle_input(
+            Input::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
+            &writer,
+            MAX_APPLICATION_FRAME_BYTES,
+        )
+        .await
+        .unwrap();
+        assert!(ui.browse_selected.is_none());
+        assert_eq!(
+            copied.lock().unwrap().copied,
+            vec!["cargo test --workspace"]
+        );
+        assert!(
+            ui.notice
+                .as_deref()
+                .is_some_and(|notice| notice.starts_with("Copied sh code block"))
+        );
+        assert_eq!(ui.editor.text(), "keep draft");
+
+        // Re-enter browse, move up to the rust block, and copy it.
+        ui.handle_input(
+            Input::Key(KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE)),
+            &writer,
+            MAX_APPLICATION_FRAME_BYTES,
+        )
+        .await
+        .unwrap();
+        ui.handle_input(
+            Input::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            &writer,
+            MAX_APPLICATION_FRAME_BYTES,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            ui.browse_selected,
+            Some(BrowseTarget::CodeBlock {
+                entry_id: assistant_id,
+                source_start: blocks[0].source.start,
+            })
+        );
+        ui.handle_input(
+            Input::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
+            &writer,
+            MAX_APPLICATION_FRAME_BYTES,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            copied.lock().unwrap().copied.last().map(String::as_str),
+            Some("let x = 1;\nlet y = 2;")
+        );
+
+        // Re-enter browse, press k twice to reach the full assistant message, and copy raw Markdown.
+        ui.handle_input(
+            Input::Key(KeyEvent::new(KeyCode::F(6), KeyModifiers::NONE)),
+            &writer,
+            MAX_APPLICATION_FRAME_BYTES,
+        )
+        .await
+        .unwrap();
+        for _ in 0..2 {
+            ui.handle_input(
+                Input::Key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE)),
+                &writer,
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            ui.browse_selected,
+            Some(BrowseTarget::Message(assistant_id))
+        );
+        ui.handle_input(
+            Input::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
+            &writer,
+            MAX_APPLICATION_FRAME_BYTES,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            copied.lock().unwrap().copied.last().map(String::as_str),
+            Some(reply)
+        );
+
+        // User prompts are selectable and copyable too.
+        ui.browse_selected = Some(BrowseTarget::Message(user_id));
+        ui.handle_input(
+            Input::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
+            &writer,
+            MAX_APPLICATION_FRAME_BYTES,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            copied.lock().unwrap().copied.last().map(String::as_str),
+            Some("show two blocks")
+        );
+    }
+
+    #[tokio::test]
+    async fn copy_reports_clipboard_errors_and_leaves_browse_selection_for_retry() {
+        let (clipboard, state) = clipboard::test_clipboard();
+        state.lock().unwrap().copy_error = Some(clipboard::ClipboardError::CopyFailed);
+        let mut ui = LiveUi {
+            state: UiState::new("fake".into(), None, None),
+            clipboard,
+            ..LiveUi::default()
+        };
+        let (writer, _receiver) = mpsc::channel(4);
+        let assistant_id = ui.state.transcript.start_message(1);
+        ui.state.transcript.append_message_delta(1, "hello");
+        ui.state.transcript.complete_message(1, "hello".into());
+        ui.browse_selected = Some(BrowseTarget::Message(assistant_id));
+
+        ui.handle_input(
+            Input::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),
+            &writer,
+            MAX_APPLICATION_FRAME_BYTES,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            ui.browse_selected,
+            Some(BrowseTarget::Message(assistant_id))
+        );
+        assert!(
+            ui.notice
+                .as_deref()
+                .is_some_and(|notice| notice.starts_with("Could not copy response"))
         );
     }
 

@@ -1120,6 +1120,69 @@ fn fenced_code_is_closed(source: &str, block: Range<usize>, segments: &[CodeText
         .is_some_and(|line| is_closing_fence_line(line, delimiter, opening_len))
 }
 
+/// A non-empty fenced or indented code block extracted from a Markdown message.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CodeBlock {
+    /// Byte range of the whole code block (fences included) in the Markdown source.
+    pub source: Range<usize>,
+    /// First whitespace-delimited token of a fenced code block's info string, if any.
+    pub language: Option<String>,
+    /// Raw code content with fences and enclosing quote/list prefixes removed, and at most
+    /// one trailing newline stripped so pasting a single-line command does not execute it.
+    pub code: String,
+}
+
+/// Extract every non-empty code block from `source` in document order.
+pub(crate) fn code_blocks(source: &str) -> Vec<CodeBlock> {
+    let mut blocks = Vec::new();
+    let mut active: Option<(Range<usize>, Option<String>, String)> = None;
+    for (event, range) in Parser::new_ext(source, MARKDOWN_OPTIONS).into_offset_iter() {
+        match event {
+            Event::Start(Tag::CodeBlock(kind)) => {
+                let language = match kind {
+                    CodeBlockKind::Fenced(info) => info
+                        .split_whitespace()
+                        .next()
+                        .filter(|token| !token.is_empty())
+                        .map(str::to_owned),
+                    CodeBlockKind::Indented => None,
+                };
+                active = Some((range, language, String::new()));
+            }
+            Event::Text(text) => {
+                if let Some((_, _, code)) = &mut active {
+                    code.push_str(&text);
+                }
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                if let Some((block_range, language, mut code)) = active.take() {
+                    if let Some(stripped) = code.strip_suffix("\r\n") {
+                        code.truncate(stripped.len());
+                    } else if let Some(stripped) = code.strip_suffix('\n') {
+                        code.truncate(stripped.len());
+                    }
+                    if !code.is_empty() {
+                        blocks.push(CodeBlock {
+                            source: block_range,
+                            language,
+                            code,
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    blocks
+}
+
+/// Return the non-empty code block starting at `source_start` in `source`, if any.
+pub(crate) fn code_block_at(source: &str, source_start: usize) -> Option<CodeBlock> {
+    code_blocks(source)
+        .into_iter()
+        .find(|block| block.source.start == source_start)
+}
+
 /// The text of one line of Markdown without its markup, for a one-line summary that
 /// draws in a single style: `**Plan** the \`fix\`` gives `Plan the fix`.
 pub(crate) fn inline_text(line: &str) -> String {
@@ -2511,5 +2574,35 @@ mod tests {
         let replacement = state.build("replacement", 0, 2, true);
         assert_eq!(replacement.work.incremental_builds, 1);
         assert_eq!(replacement.work.source_bytes_parsed, "replacement".len());
+    }
+
+    #[test]
+    fn code_blocks_extract_fenced_indented_and_nested_blocks_without_trailing_newline() {
+        let source = concat!(
+            "Intro\n\n",
+            "```rust title=demo\n",
+            "fn main() {\n\n    println!(\"hi\");\n}\n",
+            "```\n\n",
+            "> ```sh\n",
+            "> cargo test\n",
+            "> ```\n\n",
+            "```\n```\n\n",
+            "    indented()\n",
+        );
+        let blocks = code_blocks(source);
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0].language.as_deref(), Some("rust"));
+        assert_eq!(blocks[0].code, "fn main() {\n\n    println!(\"hi\");\n}");
+        assert!(source[blocks[0].source.clone()].starts_with("```rust"));
+        assert_eq!(
+            code_block_at(source, blocks[0].source.start),
+            Some(blocks[0].clone())
+        );
+
+        assert_eq!(blocks[1].language.as_deref(), Some("sh"));
+        assert_eq!(blocks[1].code, "cargo test");
+
+        assert_eq!(blocks[2].language, None);
+        assert_eq!(blocks[2].code, "indented()");
     }
 }

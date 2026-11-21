@@ -1014,32 +1014,7 @@ fn render_transcript(
     }
     rows.truncate(visible_lines);
     let painted_rows = rows.len();
-    let selected_row = browse_selected.and_then(|selected_entry| {
-        rows.iter()
-            .find(|row| {
-                BrowseTarget::for_row(row) == selected_entry
-                    && matches!(
-                        row.kind,
-                        TranscriptRowKind::CardAction
-                            | TranscriptRowKind::CardGroup
-                            | TranscriptRowKind::Thought
-                    )
-                    && !matches!(
-                        row.anchor.position,
-                        crate::transcript_view::RowPosition::ThoughtContent(_)
-                    )
-            })
-            .or_else(|| {
-                rows.iter().find(|row| {
-                    BrowseTarget::for_row(row) == selected_entry
-                        && matches!(
-                            row.kind,
-                            TranscriptRowKind::CardDetail | TranscriptRowKind::CardOmission
-                        )
-                })
-            })
-            .map(|row| row.anchor)
-    });
+    let selected_rows = selected_browse_rows(state, &rows, browse_selected);
     let mut fold_rows = Vec::new();
     let mut welcome_rows = Vec::new();
     if rows.is_empty() && status_lines.is_empty() {
@@ -1138,7 +1113,7 @@ fn render_transcript(
                 frame,
                 area,
                 row.clone(),
-                selected_row,
+                selected_rows.contains(row),
                 user_surface,
                 palette,
                 pulse,
@@ -1816,12 +1791,96 @@ fn turn_rail(
     ))
 }
 
+enum SelectedRows {
+    None,
+    Anchor(RowAnchor),
+    Message(TranscriptEntryId),
+    CodeBlock {
+        entry_id: TranscriptEntryId,
+        source: std::ops::Range<usize>,
+    },
+}
+
+impl SelectedRows {
+    fn contains(&self, row: &TranscriptRow) -> bool {
+        match self {
+            Self::None => false,
+            Self::Anchor(anchor) => row.anchor == *anchor,
+            Self::Message(entry_id) => {
+                row.anchor.entry_id == *entry_id
+                    && matches!(
+                        row.kind,
+                        TranscriptRowKind::Header | TranscriptRowKind::Content
+                    )
+            }
+            Self::CodeBlock { entry_id, source } => {
+                row.anchor.entry_id == *entry_id
+                    && row.kind == TranscriptRowKind::Content
+                    && row.spans.iter().any(|span| {
+                        span.style.block == BlockStyle::Code
+                            && span.affinity.source_offset >= source.start
+                            && span.affinity.source_offset <= source.end
+                    })
+            }
+        }
+    }
+}
+
+fn selected_browse_rows(
+    state: &UiState,
+    rows: &[TranscriptRow],
+    browse_selected: Option<BrowseTarget>,
+) -> SelectedRows {
+    let Some(target) = browse_selected else {
+        return SelectedRows::None;
+    };
+    match target {
+        BrowseTarget::Message(entry_id) => SelectedRows::Message(entry_id),
+        BrowseTarget::CodeBlock {
+            entry_id,
+            source_start,
+        } => state
+            .transcript
+            .entry(entry_id)
+            .and_then(|entry| crate::markdown::code_block_at(&entry.content, source_start))
+            .map_or(SelectedRows::None, |block| SelectedRows::CodeBlock {
+                entry_id,
+                source: block.source,
+            }),
+        BrowseTarget::Entry(_) | BrowseTarget::Group(_) | BrowseTarget::Output(_) => rows
+            .iter()
+            .find(|row| {
+                BrowseTarget::for_row(row) == target
+                    && matches!(
+                        row.kind,
+                        TranscriptRowKind::CardAction
+                            | TranscriptRowKind::CardGroup
+                            | TranscriptRowKind::Thought
+                    )
+                    && !matches!(
+                        row.anchor.position,
+                        crate::transcript_view::RowPosition::ThoughtContent(_)
+                    )
+            })
+            .or_else(|| {
+                rows.iter().find(|row| {
+                    BrowseTarget::for_row(row) == target
+                        && matches!(
+                            row.kind,
+                            TranscriptRowKind::CardDetail | TranscriptRowKind::CardOmission
+                        )
+                })
+            })
+            .map_or(SelectedRows::None, |row| SelectedRows::Anchor(row.anchor)),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_transcript_row(
     frame: &mut Frame<'_>,
     area: Rect,
     row: TranscriptRow,
-    selected_row: Option<RowAnchor>,
+    selected: bool,
     user_surface: bool,
     palette: Palette,
     pulse: Option<u8>,
@@ -1831,7 +1890,6 @@ fn render_transcript_row(
     links: &mut Vec<crate::hyperlink::PaintedLink>,
     painted_images: &mut Vec<crate::terminal_images::PaintedImage>,
 ) {
-    let selected = selected_row == Some(row.anchor);
     let user = user_surface;
     let code = row
         .spans
@@ -8815,7 +8873,7 @@ mod tests {
                             frame,
                             area,
                             row.clone(),
-                            None,
+                            false,
                             false,
                             palette,
                             None,
@@ -8826,13 +8884,12 @@ mod tests {
                             &mut Vec::new(),
                         );
                     }
-                    let selected = Some(action.anchor);
                     let area = Rect::new(0, 2, 40, 1);
                     render_transcript_row(
                         frame,
                         area,
                         action.clone(),
-                        selected,
+                        true,
                         false,
                         palette,
                         None,
@@ -8924,7 +8981,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(60, 2)).unwrap();
         terminal
             .draw(|frame| {
-                for (y, selected) in [None, Some(anchor)].into_iter().enumerate() {
+                for (y, selected) in [false, true].into_iter().enumerate() {
                     render_transcript_row(
                         frame,
                         Rect::new(0, y as u16, 60, 1),
@@ -8991,7 +9048,7 @@ mod tests {
             // changes, or in monochrome the row reverses.
             terminal
                 .draw(|frame| {
-                    for (y, selected) in [None, Some(anchor)].into_iter().enumerate() {
+                    for (y, selected) in [false, true].into_iter().enumerate() {
                         let area = Rect::new(0, y as u16, 30, 1);
                         render_transcript_row(
                             frame,
