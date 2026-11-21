@@ -19,6 +19,7 @@ _NEUTRAL_TERMINAL = {
     "TERM": "xterm-256color",
     "TERM_PROGRAM": "",
     "KITTY_WINDOW_ID": "",
+    "REX_SESSION": "",
     "TMUX": "",
 }
 
@@ -38,12 +39,23 @@ def _hover(column: int) -> bytes:
 
 
 @pytest.mark.process
-@pytest.mark.parametrize("kitty", [True, False], ids=["kitty", "unsupported"])
-def test_border_hover_pointer(tmp_path: Path, kitty: bool) -> None:
-    """Kitty gets the resize pointer on hover and a reset on leave and exit; others get none."""
+@pytest.mark.parametrize(
+    ("terminal_env", "expected_supported"),
+    [
+        ({"KITTY_WINDOW_ID": "1"}, True),
+        ({"TERM_PROGRAM": "rex"}, True),
+        ({"REX_SESSION": "1"}, True),
+        ({}, False),
+    ],
+    ids=["kitty", "rex", "rex-session", "unsupported"],
+)
+def test_border_hover_pointer(
+    tmp_path: Path, terminal_env: dict[str, str], expected_supported: bool
+) -> None:
+    """Supported terminals get the resize pointer across the 3-column seam; others get none."""
     home = tmp_path / "home"
     (home / ".wisp").mkdir(parents=True)
-    environment = {**_NEUTRAL_TERMINAL, "KITTY_WINDOW_ID": "1" if kitty else ""}
+    environment = {**_NEUTRAL_TERMINAL, **terminal_env}
     tui = _start_wide_tui(tmp_path, home, width=_WIDTH, environment=environment)
     try:
         tui.wait_until(
@@ -52,11 +64,11 @@ def test_border_hover_pointer(tmp_path: Path, kitty: bool) -> None:
             failure="wide TUI did not finish startup",
         )
         border = _border_column(_WIDTH)
-        if kitty:
-            tui.send(_hover(border))
+        if expected_supported:
+            tui.send(_hover(border - 1))
             tui.wait_until(
                 lambda output: _SET in output,
-                failure="hovering the border did not set the resize pointer",
+                failure="hovering left of the border seam did not set the resize pointer",
             )
             offset = len(tui.output)
             tui.send(_hover(border - 10))
@@ -68,13 +80,25 @@ def test_border_hover_pointer(tmp_path: Path, kitty: bool) -> None:
             tui.send(_hover(border + 1))
             tui.wait_until(
                 lambda output: _SET in output[offset:],
-                failure="hovering the border again did not set the resize pointer",
+                failure="hovering inside the border seam did not set the resize pointer",
+            )
+            offset = len(tui.output)
+            tui.send(_hover(border - 2))
+            tui.wait_until(
+                lambda output: _RESET in output[offset:],
+                failure="moving two columns left of the seam did not reset the pointer",
+            )
+            offset = len(tui.output)
+            tui.send(_hover(border))
+            tui.wait_until(
+                lambda output: _SET in output[offset:],
+                failure="hovering the border column did not set the resize pointer",
             )
         else:
             tui.send(_hover(border))
         tui.quit()
         output = bytes(tui.output)
-        if kitty:
+        if expected_supported:
             assert output.rfind(_RESET) > output.rfind(_SET)
         else:
             assert b"\x1b]22;" not in output

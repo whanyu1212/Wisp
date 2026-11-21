@@ -84,13 +84,24 @@ def test_resize_discards_stale_frames(
                         {"sessionId": number, "metadata": metadata, "data": raster}
                     )
                 elif method == "Input.dispatchMouseEvent":
+                    assert params["type"] != "mouseWheel"
                     mouse.append(params)
-                else:
-                    assert method == "Page.stopScreencast"
+                elif method == "Runtime.evaluate":
+                    mouse.append({"type": "smoothScroll", "expression": params["expression"]})
+                    return {"result": {"value": True}}
+                elif method == "Page.stopScreencast":
                     assert browser.take_frame() is None
+                else:
+                    raise AssertionError(f"unexpected CDP command: {method}")
                 return {}
 
+            async def send(
+                method: str, params: Mapping[str, object], *, expect_reply: bool = False
+            ) -> None:
+                raise AssertionError(f"unexpected _send call: {method} {params} {expect_reply}")
+
             monkeypatch.setattr(browser, "_command", command)
+            monkeypatch.setattr(browser, "_send", send)
             for scale in (1, 2):
                 viewport = LiveBrowserViewport(
                     width=width, height=height, device_scale_factor=scale
@@ -113,12 +124,13 @@ def test_resize_discards_stale_frames(
             await browser.interact(
                 BrowserInteraction(action="scroll", x=width - 1, y=height - 1, delta_y=1)
             )
-            assert mouse == [
-                {"x": width - 1, "y": height - 1, "type": "mouseWheel", "deltaX": 0, "deltaY": 1}
-            ]
+            assert len(mouse) == 1
+            assert mouse[0]["type"] == "smoothScroll"
+            assert str(mouse[0]["expression"]).endswith(f"({width - 1}, {height - 1}, 0, 1)")
             mouse.clear()
             await browser.interact(BrowserInteraction(action="click", x=3, y=4))
-            assert [(event["type"], event["x"], event["y"]) for event in mouse] == [
+            assert mouse[0]["type"] == "smoothScroll"
+            assert [(event["type"], event["x"], event["y"]) for event in mouse[1:]] == [
                 ("mouseMoved", 3, 4),
                 ("mousePressed", 3, 4),
                 ("mouseReleased", 3, 4),
@@ -625,5 +637,161 @@ def test_click_needs_a_frame(monkeypatch: pytest.MonkeyPatch) -> None:
             _open_capture(browser, monkeypatch)
             with pytest.raises(BrowserControlError, match="inside"):
                 await browser.interact(BrowserInteraction(action="click", x=3, y=4))
+
+    anyio.run(scenario)
+
+
+def test_smooth_scroll_fallback_and_click_cancellation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Smooth rAF scroll runs in DOM, falls back to mouseWheel, and clicks cancel momentum."""
+
+    async def scenario() -> None:
+        async with anyio.create_task_group() as tasks:
+            browser = LiveBrowser(tasks)
+            monkeypatch.setattr(browser, "_socket", object())
+            monkeypatch.setattr(browser, "_scope", tasks.cancel_scope)
+            browser._viewport = LiveBrowserViewport(width=200, height=200, device_scale_factor=1)
+            browser._frame = _png_header(200, 200)
+            sent: list[tuple[str, Mapping[str, object], bool]] = []
+            commands: list[tuple[str, Mapping[str, object]]] = []
+            eval_reply: dict[str, object] = {"result": {"value": True}}
+
+            async def send(
+                method: str, params: Mapping[str, object], *, expect_reply: bool = False
+            ) -> None:
+                sent.append((method, params, expect_reply))
+                return None
+
+            async def command(method: str, params: Mapping[str, object]) -> dict[str, object]:
+                commands.append((method, params))
+                if method == "Runtime.evaluate":
+                    return eval_reply
+                return {}
+
+            monkeypatch.setattr(browser, "_send", send)
+            monkeypatch.setattr(browser, "_command", command)
+
+            # Click with no active smooth scroll should not run extra Runtime.evaluate.
+            await browser.interact(BrowserInteraction(action="click", x=5, y=6))
+            assert [m for m, _ in commands] == ["Input.dispatchMouseEvent"] * 3
+            assert sent == []
+            commands.clear()
+
+            # Smooth scroll returns True: no mouseWheel fallback, active flag set.
+            await browser.interact(BrowserInteraction(action="scroll", x=10, y=20, delta_y=60))
+            assert [m for m, _ in commands] == ["Runtime.evaluate"]
+            assert "(10, 20, 0, 60)" in str(commands[0][1]["expression"])
+            assert commands[0][1]["returnByValue"] is True
+            assert sent == []
+            commands.clear()
+
+            # Next click cancels active momentum first, then runs mouse events.
+            await browser.interact(BrowserInteraction(action="click", x=10, y=20))
+            assert [m for m, _ in commands] == ["Runtime.evaluate"] + [
+                "Input.dispatchMouseEvent"
+            ] * 3
+            commands.clear()
+
+            # Cross-origin iframe returns False -> falls back to pipelined mouseWheel.
+            eval_reply = {"result": {"value": False}}
+            await browser.interact(BrowserInteraction(action="scroll", x=15, y=25, delta_y=-60))
+            assert sent == [
+                (
+                    "Input.dispatchMouseEvent",
+                    {"x": 15, "y": 25, "type": "mouseWheel", "deltaX": 0, "deltaY": -60},
+                    False,
+                )
+            ]
+            sent.clear()
+            commands.clear()
+
+            # Evaluation exception -> falls back to pipelined mouseWheel.
+            eval_reply = {"exceptionDetails": {"text": "Uncaught"}}
+            await browser.interact(BrowserInteraction(action="scroll", x=15, y=25, delta_y=30))
+            assert sent == [
+                (
+                    "Input.dispatchMouseEvent",
+                    {"x": 15, "y": 25, "type": "mouseWheel", "deltaX": 0, "deltaY": 30},
+                    False,
+                )
+            ]
+
+    anyio.run(scenario)
+
+
+def test_navigation_and_click_element_cancel_smooth_scroll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same-doc events, navigate, history traversal, and click_element cancel scroll momentum."""
+
+    async def scenario() -> None:
+        async with anyio.create_task_group() as tasks:
+            browser = LiveBrowser(tasks)
+            _open_capture(browser, monkeypatch)
+            sent: list[tuple[str, Mapping[str, object], bool]] = []
+            commands: list[tuple[str, Mapping[str, object]]] = []
+
+            async def send(
+                method: str, params: Mapping[str, object], *, expect_reply: bool = False
+            ) -> None:
+                sent.append((method, params, expect_reply))
+                return None
+
+            async def command(method: str, params: Mapping[str, object]) -> dict[str, object]:
+                commands.append((method, params))
+                if method == "Runtime.evaluate":
+                    if "wisp.liveScroll" in str(params["expression"]):
+                        return {"result": {"value": True}}
+                    return {"result": {"value": {"x": 20, "y": 30}}}
+                if method == "Page.getNavigationHistory":
+                    return {"currentIndex": 1, "entries": [{"id": 10}, {"id": 11}]}
+                if method == "Page.navigateToHistoryEntry":
+                    browser._navigation.set()
+                    return {}
+                if method == "Page.navigate":
+                    browser._loader = "nav-2"
+                    browser._navigation.set()
+                    return {"loaderId": "nav-2"}
+                return {}
+
+            monkeypatch.setattr(browser, "_send", send)
+            monkeypatch.setattr(browser, "_command", command)
+
+            # Same-document navigation from _read cancels active smooth scroll without waiting.
+            browser._smooth_scroll_active = True
+            await browser._read(
+                _cdp_events(
+                    (
+                        "Page.navigatedWithinDocument",
+                        {"frameId": "main", "url": "https://a.test/#2"},
+                    )
+                )  # type: ignore[arg-type]
+            )
+            assert not browser._smooth_scroll_active
+            assert len(sent) == 1 and sent[0][0] == "Runtime.evaluate"
+            assert not sent[0][2]
+
+            # click_element cancels active momentum before resolving target coordinates.
+            commands.clear()
+            browser._smooth_scroll_active = True
+            await browser.click_element(x=20, y=30)
+            assert commands[0][0] == "Runtime.evaluate"
+            assert "cancelAnimationFrame" in str(commands[0][1]["expression"])
+            assert not browser._smooth_scroll_active
+
+            # navigate cancels active momentum before Page.navigate.
+            commands.clear()
+            browser._smooth_scroll_active = True
+            await browser.navigate("https://example.org/next")
+            assert commands[0][0] == "Runtime.evaluate"
+            assert "cancelAnimationFrame" in str(commands[0][1]["expression"])
+            assert commands[1][0] == "Page.navigate"
+
+            # move_in_history cancels active momentum before history queries/navigation.
+            commands.clear()
+            browser._smooth_scroll_active = True
+            await browser.move_in_history(-1)
+            assert commands[0][0] == "Runtime.evaluate"
+            assert "cancelAnimationFrame" in str(commands[0][1]["expression"])
+            assert any(method == "Page.navigateToHistoryEntry" for method, _ in commands)
 
     anyio.run(scenario)

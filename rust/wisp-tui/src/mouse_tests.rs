@@ -1405,13 +1405,14 @@ async fn border_drag_resizes_panel() {
     assert!(ui.transcript_selection.is_none());
     assert!(copied.lock().unwrap().copied.is_empty());
 
-    // The next paint moves the border, and a double-click there returns to auto.
+    // The next paint moves the border, and a double-click anywhere inside the 3-column
+    // seam handle (`109..=111`) returns the panel to auto width.
     draw(&mut ui, 200, 30);
     let border_area = ui.mouse_frame.as_ref().unwrap().panel_border.unwrap();
-    assert_eq!(border_area.x, 110);
+    assert_eq!(border_area, Rect::new(109, 1, 3, 29));
     for input in [
-        click(110, 5),
-        drag(MouseEventKind::Up(MouseButton::Left), 110, 5),
+        click(109, 5),
+        drag(MouseEventKind::Up(MouseButton::Left), 109, 5),
         click(111, 5),
     ] {
         ui.handle_input(input, &writer, 8192).await.unwrap();

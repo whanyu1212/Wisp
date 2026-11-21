@@ -41,8 +41,10 @@ pub(crate) fn supported(var: impl Fn(&str) -> Option<String>) -> bool {
     set("KITTY_WINDOW_ID")
         || term.contains("kitty")
         || term_program == "ghostty"
-        // Rex reports a plain xterm TERM, so only its TERM_PROGRAM names it.
+        // Rex reports a plain xterm TERM; wrappers/subshells may alter TERM_PROGRAM,
+        // so also accept Rex's session marker.
         || term_program == "rex"
+        || set("REX_SESSION")
         || term.contains("ghostty")
         || term.starts_with("foot")
 }
@@ -100,7 +102,9 @@ mod tests {
             (&[("TERM", "foot")], true),
             (&[("TERM", "foot-extra")], true),
             (&[("TERM_PROGRAM", "Rex"), ("TERM", "xterm-256color")], true),
+            (&[("REX_SESSION", "1"), ("TERM", "xterm-256color")], true),
             (&[("TERM_PROGRAM", "rex"), ("TMUX", "/tmp/tmux,1,0")], false),
+            (&[("REX_SESSION", "1"), ("TMUX", "/tmp/tmux,1,0")], false),
             (
                 &[("KITTY_WINDOW_ID", "1"), ("TMUX", "/tmp/tmux,1,0")],
                 false,
@@ -110,6 +114,7 @@ mod tests {
             (&[("TERM_PROGRAM", "WezTerm")], false),
             (&[("TERM_PROGRAM", "iTerm.app")], false),
             (&[("KITTY_WINDOW_ID", " ")], false),
+            (&[("REX_SESSION", " ")], false),
             (&[], false),
         ];
         for (env, expected) in cases {

@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import anyio
 import pytest
 
 from tests.support.live_browser import keychain_safe_chrome_path
@@ -24,6 +25,9 @@ from tests.tui_e2e.support import (
 )
 from tests.tui_e2e.test_browser_takeover import _start_wide_tui, _wait_screen
 from tests.tui_e2e.test_readiness import _TuiProcess
+from wisp.coding.browser_control import BrowserInteraction
+from wisp.coding.browser_live import LiveBrowser
+from wisp.events import LiveBrowserViewport
 
 _PAGE = b"""<!doctype html>
 <style>
@@ -385,6 +389,154 @@ def test_live_browser_controls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
                 tui.quit()
             finally:
                 tui.close()
+        finally:
+            server.shutdown()
+            thread.join(timeout=2)
+
+
+@pytest.mark.process
+@pytest.mark.skipif(
+    os.environ.get("WISP_TEST_LIVE_BROWSER") != "1",
+    reason="set WISP_TEST_LIVE_BROWSER=1 on a host with Chrome or Chromium",
+)
+def test_live_browser_smooth_scroll_dom_cases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exercise _JS_SMOOTH_SCROLL in real Chromium across DOM, iframe, and CSS edge cases."""
+    monkeypatch.setenv("PATH", keychain_safe_chrome_path(tmp_path, os.environ["PATH"]))
+
+    child_doc = b"<!doctype html><body style='margin:0;height:400px;background:#88c'>child</body>"
+    dom_page = (
+        b"<!doctype html><body style='margin:0;height:2000px'>"
+        b"<div id='contain' style='position:fixed;left:0;top:0;width:120px;height:100px;"
+        b"overflow-y:auto;overscroll-behavior-y:contain'><div style='height:150px'>c</div></div>"
+        b"<div id='prevent' style='position:fixed;left:120px;top:0;width:120px;height:100px;"
+        b"overflow-y:auto'><div style='height:300px'>p</div></div>"
+        b"<div id='host' style='position:fixed;left:240px;top:0;width:120px;height:100px'></div>"
+        b"<div id='wrap' style='position:fixed;left:0;top:110px;width:180px;height:120px;"
+        b"overflow-y:auto'><iframe id='same' src='/child' "
+        b"style='width:160px;height:90px;border:0'></iframe><div style='height:300px'></div></div>"
+        b"<iframe id='xorigin' sandbox='' srcdoc='<body style=height:400px>x</body>' "
+        b"style='position:fixed;left:190px;top:110px;width:150px;height:100px;border:0'></iframe>"
+        b"<script>"
+        b"document.getElementById('prevent').addEventListener('wheel',e=>e.preventDefault(),{passive:false});"
+        b"const sh=document.getElementById('host').attachShadow({mode:'open'});"
+        b'sh.innerHTML=\'<div id=s style="width:120px;height:100px;overflow-y:auto">'
+        b"<div style=height:400px>shadow</div></div>';"
+        b"</script></body>"
+    )
+    body_scroll_page = (
+        b"<!doctype html><html style='overflow:hidden;height:100%'>"
+        b"<body style='margin:0;overflow-y:auto;height:100%'><div style='height:1000px'>b</div>"
+        b"</body></html>"
+    )
+    locked_page = (
+        b"<!doctype html><html style='overflow:hidden'><body style='margin:0;height:2000px'>"
+        b"locked</body></html>"
+    )
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            path = urlsplit(self.path).path
+            body = {
+                "/dom": dom_page,
+                "/child": child_doc,
+                "/body-scroll": body_scroll_page,
+                "/locked": locked_page,
+            }.get(path, b"")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    async def scenario(port: int) -> None:
+        async with anyio.create_task_group() as tasks:
+            browser = LiveBrowser(tasks, profile_dir=tmp_path / "profile")
+            await browser.open(f"http://127.0.0.1:{port}/dom")
+            await browser.resize(LiveBrowserViewport(width=400, height=400, device_scale_factor=1))
+            for _ in range(50):
+                if (
+                    await browser._evaluate(
+                        "Boolean(document.getElementById('same')"
+                        "?.contentDocument?.body?.scrollHeight > 100)"
+                    )
+                    is True
+                ):
+                    break
+                await anyio.sleep(0.02)
+
+            # 1. overscroll-behavior: contain scrolls inner box and blocks window chain.
+            await browser.interact(BrowserInteraction(action="scroll", x=50, y=50, delta_y=120))
+            await anyio.sleep(0.25)
+            assert await browser._evaluate(
+                "[document.getElementById('contain').scrollTop, Math.round(window.scrollY)]"
+            ) == [50, 0]
+
+            # 2. preventDefault() suppresses scrolling while still succeeding.
+            await browser.interact(BrowserInteraction(action="scroll", x=170, y=50, delta_y=120))
+            await anyio.sleep(0.2)
+            assert await browser._evaluate(
+                "[document.getElementById('prevent').scrollTop, Math.round(window.scrollY)]"
+            ) == [0, 0]
+
+            # 3. Shadow DOM scrollable container scrolls cleanly.
+            await browser.interact(BrowserInteraction(action="scroll", x=290, y=50, delta_y=90))
+            await anyio.sleep(0.2)
+            assert (
+                await browser._evaluate(
+                    "document.getElementById('host').shadowRoot.getElementById('s').scrollTop"
+                )
+                == 90
+            )
+
+            # 4. Same-origin iframe chains excess scroll to parent #wrap div.
+            await browser.interact(BrowserInteraction(action="scroll", x=70, y=150, delta_y=360))
+            await anyio.sleep(0.25)
+            child_y, wrap_y = await browser._evaluate(
+                "[Math.round(document.getElementById('same').contentWindow.scrollY),"
+                " Math.round(document.getElementById('wrap').scrollTop)]"
+            )  # type: ignore[misc]
+            assert child_y == 310 and wrap_y == 50
+
+            # 5. Cross-origin (sandbox='') iframe falls back to mouseWheel without hanging/error.
+            await browser.interact(BrowserInteraction(action="scroll", x=220, y=150, delta_y=60))
+            await anyio.sleep(0.1)
+
+            # 6. Direction reversal cancels remaining positive tail immediately.
+            await browser._evaluate("window.scrollTo(0, 500)")
+            await browser.interact(BrowserInteraction(action="scroll", x=380, y=380, delta_y=240))
+            await browser.interact(BrowserInteraction(action="scroll", x=380, y=380, delta_y=-60))
+            await anyio.sleep(0.25)
+            reversed_y = await browser._evaluate("Math.round(window.scrollY)")
+            assert isinstance(reversed_y, int) and reversed_y < 500
+
+            # 7. html { overflow: hidden } body { overflow-y: auto } scrolls body, not window.
+            await browser.navigate(f"http://127.0.0.1:{port}/body-scroll")
+            await browser.poll_frame()
+            await browser.interact(BrowserInteraction(action="scroll", x=50, y=50, delta_y=120))
+            await anyio.sleep(0.2)
+            assert await browser._evaluate(
+                "[Math.round(document.body.scrollTop), Math.round(window.scrollY)]"
+            ) == [120, 0]
+
+            # 8. html { overflow: hidden } modal scroll lock leaves window at 0.
+            await browser.navigate(f"http://127.0.0.1:{port}/locked")
+            await browser.poll_frame()
+            await browser.interact(BrowserInteraction(action="scroll", x=50, y=50, delta_y=120))
+            await anyio.sleep(0.2)
+            assert await browser._evaluate("Math.round(window.scrollY)") == 0
+
+            await browser.close()
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            anyio.run(scenario, server.server_port)
         finally:
             server.shutdown()
             thread.join(timeout=2)

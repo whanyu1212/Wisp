@@ -447,15 +447,16 @@ impl LiveUi {
                     if lines != 0 && !self.browser_interaction_blocked() {
                         self.notice = None;
                         self.bump_browser_refresh_deadline();
-                        let delta_y = i64::from(lines) * 120;
                         if self
                             .state
                             .browser_viewport
                             .as_ref()
                             .is_some_and(|view| view.live)
                         {
+                            let delta_y = i64::from(lines) * crate::LIVE_SCROLL_PIXELS_PER_NOTCH;
                             return self.scroll_live_browser(x, y, delta_y, writer, limit).await;
                         }
+                        let delta_y = i64::from(lines) * 120;
                         if self.flush_browser_typing(writer, limit).await? == LoopControl::Exit {
                             return Ok(LoopControl::Exit);
                         }
@@ -842,8 +843,10 @@ impl LiveUi {
             self.side_panel.forget_border_click();
             return false;
         };
-        self.side_panel
-            .press_border(Instant::now(), event.column - border.x);
+        let seam_x = self.side_panel.painted_left_edge().unwrap_or(border.x);
+        let grab = (i32::from(event.column) - i32::from(seam_x))
+            .clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+        self.side_panel.press_border(Instant::now(), grab);
         self.last_browser_click = None;
         self.render_pending = true;
         true
@@ -866,16 +869,20 @@ impl LiveUi {
             .and_then(|frame| frame.panel_border)
     }
 
+    /// Whether the pointer currently rests over a pressable docked side-panel border.
+    pub(super) fn pointer_over_panel_border(&self) -> bool {
+        self.key_help.is_none()
+            && self.pointer.is_some_and(|(column, row)| {
+                self.pressable_panel_border()
+                    .is_some_and(|area| area.contains((column, row).into()))
+            })
+    }
+
     /// The pointer shape the terminal should show: the resize arrow while the border is
     /// dragged, wherever the pointer is, or while the pointer rests on a pressable border.
     /// Key help takes every press while it is open, so it hides the arrow too.
     pub(super) fn wanted_pointer_shape(&self) -> PointerShape {
-        let over_border = self.key_help.is_none()
-            && self.pointer.is_some_and(|(column, row)| {
-                self.pressable_panel_border()
-                    .is_some_and(|area| area.contains((column, row).into()))
-            });
-        if self.side_panel.resizing() || over_border {
+        if self.side_panel.resizing() || self.pointer_over_panel_border() {
             PointerShape::Resize
         } else {
             PointerShape::Default
