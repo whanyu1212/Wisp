@@ -141,8 +141,8 @@ All of them are listed in the
 frontend must be the same release, and external RPC clients should use the 0.15.0 schema bundle.
 
 The supported Python API adds optional `saved_session_id` on `RpcController.prompt()` and
-`read_only` on `RpcController.get_sessions()`, plus `auto_command_read_dir`,
-`browser_search_engine`, and `browser_default` on `WispConfig`. See the
+`read_only` on `RpcController.get_sessions()`, `auto_command_read_dir` on `InProcessOptions`, and
+`browser_search_engine` and `browser_default` on `WispConfig`. See the
 [0.15.0 release checklist](../maintainers/releases/0.15.0-release.md).
 
 ## Wisp 0.14 compatibility

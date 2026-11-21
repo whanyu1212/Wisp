@@ -68,8 +68,9 @@ The backend and every frontend must use the same release.
 ### Permissions, docs, and CI
 
 - **Scoped external reads in Auto commands (#1092):** Added `--auto-command-read-dir` (and
-  `WispConfig.auto_command_read_dir`) to grant one external read-only directory to the launch
-  session under macOS Seatbelt `Auto commands` for eligible bare `/bin/ls` and `/bin/cat` calls.
+  `InProcessOptions.auto_command_read_dir`) to grant one external read-only directory to the
+  launch session under macOS Seatbelt `Auto commands` for eligible bare `/bin/ls` and `/bin/cat`
+  calls.
 - **Docs and CI throughput (#1087–#1090, #1105):** Refreshed the documentation homepage around
   personal software framing (#1105), fixed Rust wheel/fuzz caching (`rust-cache` v2.9.3), and
   sharded/parallelized Python, Rust, and release verification workflows (#1087–#1090).
@@ -84,8 +85,8 @@ The backend and every frontend must use the same release.
   `rpc.browser_addresses` events, and `session_images_dir` on `rpc.workspace`. Frontends and
   external RPC clients must match the `0.15.0` release.
 - Supported Python APIs add optional `saved_session_id` on `RpcController.prompt()` and
-  `read_only` on `RpcController.get_sessions()`, plus `auto_command_read_dir`,
-  `browser_search_engine`, and `browser_default` on `WispConfig`. New user-only settings
+  `read_only` on `RpcController.get_sessions()`, `auto_command_read_dir` on `InProcessOptions`,
+  and `browser_search_engine` and `browser_default` on `WispConfig`. New user-only settings
   (`tui_images`, `browser_search_engine`, `browser_default`) are ignored by `0.14.x`.
 
 <!-- Keeps links to the pre-release "0.14.2 — Unreleased" heading working. -->
