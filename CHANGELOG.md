@@ -10,7 +10,89 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.14.2 — Unreleased
+## 0.15.0 — Unreleased
+
+0.15.0 introduces an embedded interactive Chromium live browser with agent awareness in the TUI
+side panel, inline image thumbnails in the transcript, a redesigned live-work side panel with top
+tabs, sharing saved sessions with the next prompt, and scoped external reads in `Auto commands`.
+The backend and every frontend must use the same release.
+
+### Embedded live browser
+
+- **Interactive live browser pane and persistent profile (#1098–#1103):** Added the `Browser`
+  side-panel view (`/browser`) displaying live browser frames over `browser.viewport.updated` using
+  Kitty `U=1` Unicode placeholders (or iTerm2/Sixel/halfblock fallbacks), with centered overlay
+  expansion (`f` / `[Expand]`), MCP takeover (`browser_interact`), interactive isolated Chromium
+  tabs with high-DPI Retina capture, inline address bar and history/reload controls, a dedicated
+  protected profile at `~/.wisp/browser-profile` (preserving sign-ins across launches and cleared
+  via `wisp browser clear`), and `session_images_dir` in `rpc.workspace` so fresh runs resolve
+  screenshots before first session persistence.
+- **Browser start page, streaming frames, and 60 fps smooth scrolling (#1104, #1106, #1107,
+  #1109):** Replaced the old empty pane with a start page (`get_browser_addresses` /
+  `rpc.browser_addresses`) featuring a focused address/search input (using the user-only
+  `browser_search_engine` setting, defaulting to `google`) and the 20 most recent opened
+  addresses; converted `live_frame` to a waiting request beside normal commands and coalesced
+  wheel input; added 60 px ease-out scrolling across Chromium's 60 Hz `requestAnimationFrame`
+  loop (supporting Shadow DOM, same-origin iframes, RTL/negative-range `column-reverse`
+  containers, and CDP `mouseWheel` fallback); skipped redundant PNG decoding on unoccluded Kitty
+  viewports; and reused a single Kitty image ID across frames.
+- **Docked border resize cursor and Rex support (#1103, #1104, #1109):** Added drag-to-resize on
+  the docked side panel border with held-image reflow on release, a 3-column hit area straddling
+  the left seam with signed grab tracking and subtle hover edge highlight, and OSC 22 `ew-resize`
+  cursor feedback in supported terminals (including Rex via `TERM_PROGRAM=rex` or `REX_SESSION`).
+- **Agent live-browser awareness (#1108):** Added agent tools (`browser_navigate`,
+  `browser_read`, `browser_click`, `browser_type`, `browser_screenshot`) driving Wisp's shared
+  live browser in docked or desktop `window` mode, bidirectional TUI/agent handoff, prompt
+  guidance governed by the user-only `browser_default` / `WISP_BROWSER_DEFAULT` setting (`live`,
+  `mcp`, `none`), and automatic `protected_paths` protection for `~/.wisp/browser-profile`.
+
+### Terminal UI and sessions
+
+- **Inline image thumbnails in transcript (#1097):** Rendered aspect-preserving thumbnails
+  beneath `[image ...]` labels in user messages and tool cards via Kitty, iTerm2, Sixel, or
+  Unicode half-block protocols (`tui_images` user setting and `WISP_TUI_IMAGES` override), with
+  non-blocking `O_NOFOLLOW | O_NONBLOCK` reads and overlay occlusion handling.
+- **Redesigned live-work side panel and top tab bar (#1093, #1104):** Focused the side panel on
+  pending approvals, the active Plan checklist, running background processes, and live activity,
+  and moved the `Work` / `Browser` tabs into a one-row top bar (`#1104`, raising the minimum
+  terminal size from `30x8` to `30x9`).
+- **Share saved sessions with a prompt (#1095):** Added `/past-sessions` in the TUI (backed by
+  `read_only` listing on `get_sessions`, `saved_session_id` on `prompt`, and the
+  `read_saved_session` tool) so users can attach bounded read-only excerpts from another saved
+  session to their next prompt without modifying or leaving the active session.
+- **TUI and launcher reliability (#1091, #1094, #1096):** Fixed macOS zombie process-group
+  `EPERM` handling during launcher foreground cleanup (#1094), unlinked temporary external-editor
+  draft files before foreground reclaim (#1091), and waited for resolved startup context stats in
+  TUI E2E suites (#1096).
+
+### Permissions, docs, and CI
+
+- **Scoped external reads in Auto commands (#1092):** Added `--auto-command-read-dir` (and
+  `InProcessOptions.auto_command_read_dir`) to grant one external read-only directory to the
+  launch session under macOS Seatbelt `Auto commands` for eligible bare `/bin/ls` and `/bin/cat`
+  calls.
+- **Docs and CI throughput (#1087–#1090, #1105):** Refreshed the documentation homepage around
+  personal software framing (#1105), fixed Rust wheel/fuzz caching (`rust-cache` v2.9.3), and
+  sharded/parallelized Python, Rust, and release verification workflows (#1087–#1090).
+
+### Compatibility
+
+- Session `schema_version` 6 and event-envelope format 1 remain unchanged, and no new persisted
+  session entry fields are introduced, so `0.15.0` and `0.14.x` read each other's sessions.
+- `schemas/live-rpc/` and `tests/fixtures/event_decoding_conformance.json` add
+  `browser_interact` and `get_browser_addresses` commands, optional `saved_session_id` on
+  `prompt` and `read_only` on `get_sessions`, `browser.viewport.updated` and
+  `rpc.browser_addresses` events, and `session_images_dir` on `rpc.workspace`. Frontends and
+  external RPC clients must match the `0.15.0` release.
+- Supported Python APIs add optional `saved_session_id` on `RpcController.prompt()` and
+  `read_only` on `RpcController.get_sessions()`, `auto_command_read_dir` on `InProcessOptions`,
+  and `browser_search_engine` and `browser_default` on `WispConfig`. New user-only settings
+  (`tui_images`, `browser_search_engine`, `browser_default`) are ignored by `0.14.x`.
+
+<!-- Keeps links to the pre-release "0.14.2 — Unreleased" heading working. -->
+<a id="0142--unreleased"></a>
+
+## 0.14.2 — 2026-11-20
 
 0.14.2 is a patch release on 0.14.0 with two terminal UI improvements: a redesigned live status
 row with a clickable `[stop]` control, and the remaining pickers and overlays moved onto the

@@ -13,7 +13,7 @@ from pathlib import Path
 import anyio
 import pytest
 
-from tests.tui_e2e.support import context_stats_ready, screen_shows
+from tests.tui_e2e.support import context_stats_ready, run_settled, screen_shows
 from tests.tui_e2e.test_readiness import _rust_binary, _TuiProcess
 from wisp import __version__
 from wisp.messages import Message
@@ -160,8 +160,11 @@ def test_picker_shares_into_current_chat(tmp_path: Path) -> None:
             failure="share did not attach to the current composer",
         )
         tui.send(b"What did we choose?")
+        offset = len(tui.output)
         tui.submit(
-            lambda output: screen_shows(output, "Finished reading history."),
+            lambda output: (
+                screen_shows(output, "Finished reading history.") and run_settled(output, offset)
+            ),
             failure="the shared prompt did not complete",
         )
         tui.quit()
