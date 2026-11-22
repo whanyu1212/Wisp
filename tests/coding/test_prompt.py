@@ -631,6 +631,12 @@ def test_session_includes_user_shell_mode_guidance_only_when_trusted(tmp_path: P
     )
     build_prompt = trusted_session._prompt_messages()
     assert any(USER_SHELL_MODE_GUIDANCE in msg.content for msg in build_prompt.messages)
+    assert len(build_prompt.messages) == 3
+    assert any(
+        part.source == "system_prompt" and part.label == "shell mode"
+        for message_parts in build_prompt.parts
+        for part in message_parts
+    )
 
     trusted_session.mode = "plan"
     plan_prompt = trusted_session._prompt_messages()

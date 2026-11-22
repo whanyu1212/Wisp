@@ -199,6 +199,7 @@ async def test_run_shell_cancel_terminates_process(tmp_path: Path) -> None:
 
 @pytest.mark.anyio
 async def test_run_shell_rejects_untrusted_and_protected_paths(tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text("SECRET=1\n", encoding="utf-8")
     fixture = await build_rpc_executor_fixture(tmp_path)
     fixture.agent = CodingSession(
         provider=fixture.runtime.providers.get("fake"),
@@ -220,20 +221,26 @@ async def test_run_shell_rejects_untrusted_and_protected_paths(tmp_path: Path) -
         assert untrusted_done.ok is False
 
         fixture.agent.trusted = True
-        for idx, blocked_cmd in enumerate(
-            (
-                "cat .env",
-                "ls ~/.wisp/browser-profile",
-                "cat notes.secret",
-                "ENV_FILE=.env printenv",
-                "cat <.env",
-                "cat .env;echo ok",
-                "cat .env|head",
-                'cat ".env";ls',
-                '"cat .env;echo',
-            ),
-            start=1,
-        ):
+        blocked_commands = (
+            "cat .env",
+            "ls ~/.wisp/browser-profile",
+            "cat notes.secret",
+            "ENV_FILE=.env printenv",
+            "cat <.env",
+            "cat .env;echo ok",
+            "cat .env|head",
+            'cat ".env";ls',
+            '"cat .env;echo',
+            "cat .en[v]",
+            "sh -c 'cat .env'",
+            f"{sys.executable} -c \"print(open('.env').read())\"",
+            "cat $(echo .env)",
+            "cat `echo .env`",
+            "a=.en; cat ${a}v",
+            "cat .{env,bak}",
+            "eval 'cat .env'",
+        )
+        for idx, blocked_cmd in enumerate(blocked_commands, start=1):
             await dispatch_parsed(
                 executor,
                 {"type": "run_shell", "id": f"shell-prot-{idx}", "command": blocked_cmd},
@@ -245,10 +252,14 @@ async def test_run_shell_rejects_untrusted_and_protected_paths(tmp_path: Path) -
 
     assert not [e for e in fixture.events if isinstance(e, RpcShellCompleted)]
     finished = [e for e in fixture.events if isinstance(e, RpcCommandFinished)]
-    assert len(finished) == 10
+    assert len(finished) == 1 + len(blocked_commands)
     assert all(not item.ok for item in finished)
     assert "trusted" in (finished[0].error or "").lower()
-    assert all("protected" in (item.error or "").lower() for item in finished[1:])
+    assert all(
+        "protected" in (item.error or "").lower()
+        or "cannot be validated" in (item.error or "").lower()
+        for item in finished[1:]
+    )
 
 
 @pytest.mark.anyio

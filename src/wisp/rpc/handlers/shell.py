@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import glob
 import re
 import shlex
 import time
@@ -38,9 +39,14 @@ CommandCompletedFactory = TypeAliasType(
 )
 
 _MAX_SHELL_EVENT_TEXT_CHARS = 65_536
+_MAX_GLOB_EXPANSION = 2_048
+_MAX_TOKEN_RECURSION_DEPTH = 4
 _PROGRESS_MIN_INTERVAL_SECONDS = 0.2
 _CONTROL_DIRECTORIES = frozenset({".git", ".wisp", ".claude", ".codex", ".agents"})
 _REDIRECTION_PREFIX_RE = re.compile(r"^(?:\d*(?:>>?|<<?|<&|>&|&>|&>>)|<>)")
+_UNVALIDATABLE_EXPANSION_RE = re.compile(r"(?:`|\$\(|<\(|>\(|\$[A-Za-z_{@*?#0-9])")
+_BRACE_EXPANSION_RE = re.compile(r"\{[^{}\s]*(?:,|\.\.)[^{}\s]*\}")
+_QUOTED_LITERAL_RE = re.compile(r"'([^']*)'|\"([^\"]*)\"")
 
 
 class _ShellPolicyError(ValueError):
@@ -158,35 +164,106 @@ def _check_shell_policy(command: str, *, agent: CodingSession) -> ToolContext:
         if ancestor.name.casefold() in _CONTROL_DIRECTORIES:
             raise _ShellPolicyError("Shell command refused inside a protected directory")
 
+    if not context.protected_paths:
+        return context
+
+    if _UNVALIDATABLE_EXPANSION_RE.search(command) or _BRACE_EXPANSION_RE.search(command):
+        raise _ShellPolicyError(
+            "Shell command refused: dynamic expansion cannot be validated against protected paths"
+        )
+
     for candidate in _command_path_candidates(command):
-        path = Path(candidate)
-        if is_protected_path(path, context):
-            raise _ShellPolicyError(f"Shell command refused: '{candidate}' is a protected path")
-        if candidate.startswith("~") and is_protected_path(path.expanduser(), context):
-            raise _ShellPolicyError(f"Shell command refused: '{candidate}' is a protected path")
+        if candidate == "eval":
+            raise _ShellPolicyError(
+                "Shell command refused: 'eval' cannot be validated against protected paths"
+            )
+        _assert_candidate_unprotected(candidate, context)
+        if any(ch in candidate for ch in "*?["):
+            _check_glob_candidate(candidate, context=context, cwd=cwd)
     return context
 
 
-def _command_path_candidates(command: str) -> list[str]:
-    try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
-        lexer.whitespace_split = True
-        tokens = list(lexer)
-    except ValueError:
-        tokens = re.split(r"[\s;|&<>()]+", command)
+def _assert_candidate_unprotected(candidate: str, context: ToolContext) -> None:
+    path = Path(candidate)
+    if is_protected_path(path, context):
+        raise _ShellPolicyError(f"Shell command refused: '{candidate}' is a protected path")
+    if candidate.startswith("~") and is_protected_path(path.expanduser(), context):
+        raise _ShellPolicyError(f"Shell command refused: '{candidate}' is a protected path")
 
+
+def _check_glob_candidate(candidate: str, *, context: ToolContext, cwd: Path) -> None:
+    pattern = candidate
+    root_dir: str | None = str(cwd)
+    if candidate.startswith("~"):
+        pattern = str(Path(candidate).expanduser())
+        root_dir = None
+    elif Path(candidate).is_absolute():
+        root_dir = None
+
+    try:
+        matches = glob.iglob(pattern, root_dir=root_dir, recursive=True)
+    except OSError:
+        return
+
+    count = 0
+    for match in matches:
+        count += 1
+        if count > _MAX_GLOB_EXPANSION:
+            raise _ShellPolicyError(
+                "Shell command refused: glob expansion exceeds validation limit"
+            )
+        matched_path = Path(match)
+        if is_protected_path(matched_path, context) or (
+            root_dir is not None and is_protected_path(cwd / matched_path, context)
+        ):
+            raise _ShellPolicyError(f"Shell command refused: '{candidate}' matches protected path")
+
+
+def _tokenize_shell_fragment(fragment: str) -> list[str]:
+    try:
+        lexer = shlex.shlex(fragment, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        return list(lexer)
+    except ValueError:
+        return re.split(r"[\s;|&<>()]+", fragment)
+
+
+def _command_path_candidates(command: str) -> list[str]:
     candidates: list[str] = []
-    for raw in tokens:
+    seen: set[str] = set()
+    _collect_candidates(command, depth=0, candidates=candidates, seen=seen)
+    return candidates
+
+
+def _collect_candidates(
+    fragment: str, *, depth: int, candidates: list[str], seen: set[str]
+) -> None:
+    for raw in _tokenize_shell_fragment(fragment):
         stripped = _REDIRECTION_PREFIX_RE.sub("", raw).strip()
         if not stripped:
             continue
-        candidates.append(stripped)
+        _record_candidate(stripped, depth=depth, candidates=candidates, seen=seen)
         if "=" in stripped:
             _, rhs = stripped.split("=", 1)
             rhs = rhs.strip()
             if rhs:
-                candidates.append(rhs)
-    return candidates
+                _record_candidate(rhs, depth=depth, candidates=candidates, seen=seen)
+
+
+def _record_candidate(value: str, *, depth: int, candidates: list[str], seen: set[str]) -> None:
+    if value not in seen:
+        seen.add(value)
+        candidates.append(value)
+    if depth >= _MAX_TOKEN_RECURSION_DEPTH:
+        return
+    # Inspect quoted literals (e.g. `python -c "open('.env')"`) and inner subshell strings
+    # (e.g. `sh -c 'cat .env'`) so nested scripts cannot smuggle protected targets past checks.
+    for match in _QUOTED_LITERAL_RE.finditer(value):
+        inner = match.group(1) if match.group(1) is not None else match.group(2)
+        if inner:
+            _collect_candidates(inner, depth=depth + 1, candidates=candidates, seen=seen)
+    if any(ch in value for ch in " \t\n;|&<>()'\""):
+        _collect_candidates(value, depth=depth + 1, candidates=candidates, seen=seen)
 
 
 async def _run_shell_command(

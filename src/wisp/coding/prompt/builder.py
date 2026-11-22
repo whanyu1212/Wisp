@@ -143,6 +143,14 @@ def assemble_prompt(
         ),
         (Message(role="system", content=context), context_parts),
     ]
+    shell_mode_parts = tuple(
+        guidance
+        for guidance in additional_guidance
+        if guidance.text and guidance.source == "system_prompt" and guidance.label == "shell mode"
+    )
+    remaining_guidance = tuple(
+        guidance for guidance in additional_guidance if guidance not in shell_mode_parts
+    )
     if tool_guidance := _tool_guidance(tool_prompt_metadata):
         messages.append(
             (
@@ -150,15 +158,18 @@ def assemble_prompt(
                 (PromptPart("system_prompt", "tool guidance", tool_guidance),),
             )
         )
-    messages.extend(_guidance_messages(additional_guidance))
+    messages.extend(_guidance_messages(remaining_guidance))
+    boundary_content = "\n\n".join(
+        (INSTRUCTION_BOUNDARY_SYSTEM_PROMPT, *(part.text for part in shell_mode_parts))
+    )
+    boundary_parts = (
+        PromptPart("system_prompt", "instruction boundary", INSTRUCTION_BOUNDARY_SYSTEM_PROMPT),
+        *shell_mode_parts,
+    )
     messages.append(
         (
-            Message(role="system", content=INSTRUCTION_BOUNDARY_SYSTEM_PROMPT),
-            (
-                PromptPart(
-                    "system_prompt", "instruction boundary", INSTRUCTION_BOUNDARY_SYSTEM_PROMPT
-                ),
-            ),
+            Message(role="system", content=boundary_content),
+            boundary_parts,
         )
     )
     messages.extend(_mode_messages(mode))
