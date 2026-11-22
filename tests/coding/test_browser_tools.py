@@ -248,6 +248,21 @@ def test_guidance_preference_when_both_browsers_available(
         assert expected in guidance
 
 
+def test_guidance_includes_html_mockup_workflow_without_duplication() -> None:
+    live_only = browser_prompt_guidance((), live_browser_available=True)
+    assert "self-contained HTML file in the scratch folder" in live_only
+    assert "127.0.0.1" in live_only
+    assert "browser_navigate" in live_only
+
+    mcp_only = browser_prompt_guidance((_fake_browser_mcp_tool(),), live_browser_available=False)
+    assert "self-contained HTML file in the scratch folder" in mcp_only
+    assert "/browser pane" in mcp_only
+    assert "browser_navigate" not in mcp_only
+
+    both = browser_prompt_guidance((_fake_browser_mcp_tool(),), live_browser_available=True)
+    assert both.count("self-contained HTML file in the scratch folder") == 1
+
+
 def test_tool_descriptions_identify_wisp_live_browser(tmp_path: Path) -> None:
     fake: Any = _FakeLiveBrowser(tmp_path)
     tools = build_live_browser_tools(fake, is_trusted=lambda: True)
