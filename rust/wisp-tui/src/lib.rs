@@ -1290,6 +1290,7 @@ impl LiveUi {
                     {
                         self.session_picker = None;
                     }
+                    self.side_panel.reset_files_view();
                     self.reset_transcript_presentation();
                 }
                 UiEffect::HistoryWindowChanged { .. } | UiEffect::ReanchorTranscript { .. } => {
@@ -5192,6 +5193,18 @@ impl LiveUi {
         {
             return Ok(LoopControl::Exit);
         }
+        if let Some(files_open) = self.side_panel.take_files_tab_change()
+            && self
+                .dispatch(
+                    UiAction::SetProjectFilesPanelOpen(files_open),
+                    writer,
+                    limit,
+                )
+                .await?
+                == LoopControl::Exit
+        {
+            return Ok(LoopControl::Exit);
+        }
         if self.side_panel.take_processes_wanted()
             && self
                 .dispatch(UiAction::LoadBackgroundProcesses, writer, limit)
@@ -6588,8 +6601,8 @@ impl LiveUi {
             | OverlayKind::Logo
             | OverlayKind::Session
             | OverlayKind::PromptHistory
-            | OverlayKind::Queue
-            | OverlayKind::SidePanel => key.code == KeyCode::Enter,
+            | OverlayKind::Queue => key.code == KeyCode::Enter,
+            OverlayKind::SidePanel => self.side_panel.key_activates(key),
             OverlayKind::Discovery => self
                 .discovery_view
                 .as_ref()
@@ -6925,7 +6938,7 @@ impl LiveUi {
             self.render_pending = true;
             return Ok(LoopControl::Continue);
         }
-        if key.modifiers != KeyModifiers::NONE && key.code != KeyCode::BackTab {
+        if !matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT) {
             return Ok(LoopControl::Continue);
         }
         let browser_shown = self.side_panel.mode() == side_panel::PanelMode::Browser;
@@ -6941,6 +6954,18 @@ impl LiveUi {
                 self.side_panel.close_overlay();
                 self.render_pending = true;
                 return self.open_from_panel(target, writer, limit).await;
+            }
+            side_panel::OverlayKey::InsertFileReference(reference) => {
+                self.side_panel.close_overlay();
+                self.insert_panel_file_reference(&reference);
+                return Ok(LoopControl::Continue);
+            }
+            side_panel::OverlayKey::RefreshFiles => {
+                self.notice = None;
+                self.render_pending = true;
+                return self
+                    .dispatch(UiAction::RefreshProjectFiles, writer, limit)
+                    .await;
             }
             side_panel::OverlayKey::Moved => {}
             side_panel::OverlayKey::Stop(process_id) => {
@@ -6974,6 +6999,15 @@ impl LiveUi {
         }
         self.render_pending = true;
         Ok(LoopControl::Continue)
+    }
+
+    fn insert_panel_file_reference(&mut self, reference: &str) {
+        let insertion = format!("{reference} ");
+        let outcome = self.editor.insert_paste(&insertion);
+        if !self.update_edit_notice(outcome) {
+            self.notice = Some(format!("Inserted {reference} into prompt."));
+        }
+        self.render_pending = true;
     }
 
     fn browser_takeover_active(&self) -> bool {

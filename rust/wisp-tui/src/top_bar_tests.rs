@@ -91,8 +91,9 @@ fn closed_panel_shows_bar() {
         let buffer = draw(&mut ui, width);
         let row = row_text(&buffer, 0);
         assert!(row.starts_with(" fix-login-redirect "), "{row:?}");
-        assert!(row.ends_with(" Work   Browser  "), "{row:?}");
-        assert!(!tab_active(&ui, &buffer, "Work"));
+        assert!(row.ends_with(" Session   Files   Browser  "), "{row:?}");
+        assert!(!tab_active(&ui, &buffer, "Session"));
+        assert!(!tab_active(&ui, &buffer, "Files"));
         assert!(!tab_active(&ui, &buffer, "Browser"));
         // The conversation starts beneath the bar.
         assert!(!row.contains("and keep the session"));
@@ -103,11 +104,17 @@ fn closed_panel_shows_bar() {
 fn active_tab_follows_panel() {
     let mut docked = ui();
     let buffer = draw(&mut docked, DOCKED);
-    assert!(tab_active(&docked, &buffer, "Work"));
+    assert!(tab_active(&docked, &buffer, "Session"));
+    assert!(!tab_active(&docked, &buffer, "Files"));
+    assert!(!tab_active(&docked, &buffer, "Browser"));
+    docked.side_panel.show(PanelMode::Files);
+    let buffer = draw(&mut docked, DOCKED);
+    assert!(!tab_active(&docked, &buffer, "Session"));
+    assert!(tab_active(&docked, &buffer, "Files"));
     assert!(!tab_active(&docked, &buffer, "Browser"));
     docked.side_panel.show(PanelMode::Browser);
     let buffer = draw(&mut docked, DOCKED);
-    assert!(!tab_active(&docked, &buffer, "Work"));
+    assert!(!tab_active(&docked, &buffer, "Session"));
     assert!(tab_active(&docked, &buffer, "Browser"));
     docked.side_panel.toggle();
     let buffer = draw(&mut docked, DOCKED);
@@ -116,7 +123,7 @@ fn active_tab_follows_panel() {
     let mut narrow = closed(NARROW);
     narrow.side_panel.toggle();
     let buffer = draw(&mut narrow, NARROW);
-    assert!(tab_active(&narrow, &buffer, "Work"));
+    assert!(tab_active(&narrow, &buffer, "Session"));
     assert!(!tab_active(&narrow, &buffer, "Browser"));
 }
 
@@ -128,11 +135,16 @@ async fn inactive_tab_opens_panel() {
         assert!(ui.side_panel.visible(), "width {width}");
         assert_eq!(ui.side_panel.mode(), PanelMode::Browser);
         assert_eq!(ui.side_panel.overlay_open(), width == NARROW);
-        click_tab(&mut ui, width, "Work").await;
+        click_tab(&mut ui, width, "Files").await;
+        assert!(ui.side_panel.visible(), "width {width}");
+        assert_eq!(ui.side_panel.mode(), PanelMode::Files);
+        let buffer = draw(&mut ui, width);
+        assert!(tab_active(&ui, &buffer, "Files"));
+        click_tab(&mut ui, width, "Session").await;
         assert!(ui.side_panel.visible(), "width {width}");
         assert_eq!(ui.side_panel.mode(), PanelMode::LiveWork);
         let buffer = draw(&mut ui, width);
-        assert!(tab_active(&ui, &buffer, "Work"));
+        assert!(tab_active(&ui, &buffer, "Session"));
     }
 }
 
@@ -145,19 +157,19 @@ async fn active_tab_closes_panel() {
         (DOCKED, true),
     ] {
         let mut ui = closed(width);
-        click_tab(&mut ui, width, "Work").await;
+        click_tab(&mut ui, width, "Session").await;
         if expanded {
             ui.side_panel.toggle_expanded();
         }
         assert!(ui.side_panel.visible());
-        click_tab(&mut ui, width, "Work").await;
+        click_tab(&mut ui, width, "Session").await;
         assert!(
             !ui.side_panel.visible(),
             "width {width}, expanded {expanded}"
         );
         assert!(!ui.side_panel.expanded());
         let buffer = draw(&mut ui, width);
-        assert!(!tab_active(&ui, &buffer, "Work"));
+        assert!(!tab_active(&ui, &buffer, "Session"));
     }
 }
 
@@ -176,8 +188,7 @@ fn long_title_keeps_tabs() {
     )
     .unwrap();
     let row = row_text(terminal.backend().buffer(), 0);
-    assert!(row.ends_with(" Work   Browser  "), "{row:?}");
-    assert!(row.starts_with(" xxxxxxxx"), "{row:?}");
+    assert!(row.ends_with(" Session   Files   Browser  "), "{row:?}");
     assert!(!row.contains('\u{1b}'));
     assert_eq!(row.chars().count(), 30);
 }

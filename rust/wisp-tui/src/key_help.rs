@@ -133,10 +133,10 @@ impl KeyHelp {
                 &["Up/Down/Page/Home/End scroll; r refreshes; Esc/Ctrl+C closes."]
             }
             Owner::Overlay(OverlayKind::SidePanel) => &[
-                "Side panel: the session, its context, cost, changed files, and turns.",
-                "Tab/Shift+Tab move between the queue, changed files, and MCP; Up/Down/Home/End select.",
-                "Enter opens the focused row: /queue, /diff at that file, or /mcp; a ◆ file jumps to its edit card.",
-                "On a background process, Enter opens its peek: Enter again opens its card, x then y stops it, Esc closes.",
+                "Side panel: Session (status, context, turns), Files (repo tree & preview), and Browser tabs.",
+                "Press [ or ] to switch tabs (b jumps to Browser); Tab/Shift+Tab move sections; Up/Down/Home/End select.",
+                "In Files: / filters, Enter previews, @ attaches path to prompt, d opens /diff, f expands, r refreshes.",
+                "In Session: Enter opens /queue, /diff, or /mcp; on a background process, Enter peeks and x then y stops it.",
                 "Ctrl+P or Esc closes it; on a wide terminal it stays docked beside the transcript.",
             ],
             Owner::Overlay(OverlayKind::Detail) => &[

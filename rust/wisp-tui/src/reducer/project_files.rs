@@ -22,6 +22,7 @@ pub(crate) struct ProjectFiles {
     pub error: Option<String>,
     generation: u64,
     open: bool,
+    panel: bool,
     refresh: bool,
     pending: Option<Pending>,
 }
@@ -29,6 +30,10 @@ pub(crate) struct ProjectFiles {
 impl ProjectFiles {
     pub fn is_open(&self) -> bool {
         self.open
+    }
+
+    pub fn wanted(&self) -> bool {
+        self.open || self.panel
     }
 
     pub fn loading(&self) -> bool {
@@ -40,16 +45,40 @@ impl ProjectFiles {
     }
 
     pub fn set_open(&mut self, open: bool) {
-        if self.open == open {
-            return;
+        self.set_readers(open, self.panel);
+    }
+
+    pub fn set_panel(&mut self, panel: bool) {
+        self.set_readers(self.open, panel);
+    }
+
+    pub fn refresh(&mut self) {
+        self.refresh = true;
+        self.retire_snapshot();
+    }
+
+    /// Refresh for the Files side-panel tab after a run, unless the `@` picker
+    /// is currently open so an active picker session keeps its snapshot.
+    pub fn refresh_for_panel(&mut self) {
+        if self.panel && !self.open {
+            self.refresh();
         }
+    }
+
+    fn set_readers(&mut self, open: bool, panel: bool) {
+        let was_wanted = self.wanted();
+        let opened_reader = (open && !self.open) || (panel && !self.panel);
         self.open = open;
-        self.refresh = open;
-        if open {
+        self.panel = panel;
+        if opened_reader || (self.wanted() && !was_wanted) {
+            self.refresh = true;
             self.retire_snapshot();
-        } else if let Some(pending) = &mut self.pending {
-            pending.superseded = true;
-            pending.report = None;
+        } else if was_wanted && !self.wanted() {
+            self.refresh = false;
+            if let Some(pending) = &mut self.pending {
+                pending.superseded = true;
+                pending.report = None;
+            }
         }
     }
 
@@ -63,7 +92,7 @@ impl ProjectFiles {
     }
 
     pub(super) fn close(&mut self) {
-        self.set_open(false);
+        self.set_readers(false, false);
         self.pending = None;
         self.snapshot = None;
     }
@@ -77,7 +106,7 @@ impl ProjectFiles {
                 self.generation = *generation;
                 // Nothing painted under the previous authority may remain selectable.
                 self.retire_snapshot();
-                self.refresh = self.open;
+                self.refresh = self.wanted();
             }
             BackendEvent::ProjectFilesReported {
                 command_id,
@@ -101,7 +130,7 @@ impl ProjectFiles {
                     return Some(Vec::new());
                 }
                 let pending = self.pending.take().expect("matched project discovery");
-                if !pending.superseded && self.open {
+                if !pending.superseded && self.wanted() {
                     let result = if !ok {
                         Err(super::bounded_session_text(
                             error.as_deref().unwrap_or("Project discovery failed."),
@@ -143,7 +172,7 @@ pub(super) fn refresh_if_ready(
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
     let files = &mut state.project_files;
-    if !files.open || !files.refresh || files.pending.is_some() || state.exit_requested {
+    if !files.wanted() || !files.refresh || files.pending.is_some() || state.exit_requested {
         return Ok(Vec::new());
     }
     let id = ids.next_id(CommandKind::GetProjectFiles);
@@ -376,5 +405,73 @@ mod tests {
             reduce(&mut state, UiAction::SetProjectFilesOpen(true), &mut ids).unwrap();
             assert_eq!(ids.0, 2, "explicit retry");
         }
+    }
+
+    #[test]
+    fn panel_and_picker_readers_share_snapshot_independently() {
+        let mut state = UiState::unconfigured();
+        let mut ids = Ids::default();
+
+        reduce(
+            &mut state,
+            UiAction::SetProjectFilesPanelOpen(true),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(ids.0, 1);
+        event(&mut state, &mut ids, report("get_project_files-1", 1));
+        event(&mut state, &mut ids, finished("get_project_files-1", true));
+        assert!(state.project_files.wanted());
+        assert_eq!(state.project_files.snapshot().unwrap().generation, 1);
+
+        // Opening and closing the `@` picker leaves the `Files` panel reader active.
+        reduce(&mut state, UiAction::SetProjectFilesOpen(true), &mut ids).unwrap();
+        assert_eq!(ids.0, 2);
+        reduce(&mut state, UiAction::SetProjectFilesOpen(false), &mut ids).unwrap();
+        assert!(state.project_files.wanted());
+        event(&mut state, &mut ids, report("get_project_files-2", 1));
+        event(&mut state, &mut ids, finished("get_project_files-2", true));
+        assert!(state.project_files.snapshot().is_some());
+
+        reduce(
+            &mut state,
+            UiAction::SetProjectFilesPanelOpen(false),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(!state.project_files.wanted());
+    }
+
+    #[test]
+    fn refresh_for_panel_updates_tab_unless_picker_is_open() {
+        let mut state = UiState::unconfigured();
+        let mut ids = Ids::default();
+
+        reduce(
+            &mut state,
+            UiAction::SetProjectFilesPanelOpen(true),
+            &mut ids,
+        )
+        .unwrap();
+        event(&mut state, &mut ids, report("get_project_files-1", 1));
+        event(&mut state, &mut ids, finished("get_project_files-1", true));
+        assert_eq!(ids.0, 1);
+
+        state.project_files.refresh_for_panel();
+        let _ = refresh_if_ready(&mut state, &mut ids).unwrap();
+        assert_eq!(ids.0, 2);
+        event(&mut state, &mut ids, report("get_project_files-2", 2));
+        event(&mut state, &mut ids, finished("get_project_files-2", true));
+        assert_eq!(state.project_files.snapshot().unwrap().generation, 2);
+
+        // With `@` picker also open, background panel refreshes leave it undisturbed.
+        reduce(&mut state, UiAction::SetProjectFilesOpen(true), &mut ids).unwrap();
+        event(&mut state, &mut ids, report("get_project_files-3", 3));
+        event(&mut state, &mut ids, finished("get_project_files-3", true));
+        assert_eq!(ids.0, 3);
+        state.project_files.refresh_for_panel();
+        let _ = refresh_if_ready(&mut state, &mut ids).unwrap();
+        assert_eq!(ids.0, 3);
+        assert_eq!(state.project_files.snapshot().unwrap().generation, 3);
     }
 }

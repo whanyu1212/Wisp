@@ -538,7 +538,7 @@ impl LiveUi {
                 return Ok(LoopControl::Continue);
             }
             if let Some(lines) = scroll_lines {
-                self.side_panel.scroll_by(lines);
+                self.side_panel.scroll_at(event.column, event.row, lines);
             } else if matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
                 if matches!(
                     self.state.view_status,
@@ -552,6 +552,17 @@ impl LiveUi {
                         self.clear_browser_takeover_buffers();
                         self.render_pending = true;
                         return self.open_from_panel(target, writer, limit).await;
+                    }
+                    crate::side_panel::OverlayKey::InsertFileReference(reference) => {
+                        self.side_panel.close_overlay();
+                        self.insert_panel_file_reference(&reference);
+                    }
+                    crate::side_panel::OverlayKey::RefreshFiles => {
+                        self.notice = None;
+                        self.render_pending = true;
+                        return self
+                            .dispatch(UiAction::RefreshProjectFiles, writer, limit)
+                            .await;
                     }
                     crate::side_panel::OverlayKey::BrowserControl(control) => {
                         return self.handle_browser_control(control, writer, limit).await;
