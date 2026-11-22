@@ -10,7 +10,29 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.16.4 — Unreleased
+## 0.16.5 — Unreleased
+
+- **Interactive `!` shell mode and optional output sharing (#1134):** Run local shell commands
+  from the Rust TUI composer (`!<command>`), attach or detach their output for the next prompt
+  with `Alt+S`, and handle local commands over the new `run_shell` live RPC command alongside
+  system prompt guidance telling the model when to ask the user to run local commands.
+- **Agent-aware `Files` side-panel tab and `Work` → `Session` rename (#1135):** Renamed the
+  first side-panel tab from `Work` to `Session` (`Session | Files | Browser`) and added the
+  `Files` tab with pinned `TOUCHED THIS SESSION` entries, single-child directory compaction, git
+  status/`+N -M` badges, `/` live filter, `@path` composer insertion, `/diff` handoff, and
+  guarded no-follow/nonblocking split code preview (`f` / `Enter`).
+- **Parallel turn & subagent swimlane waterfall timeline (#1136):** Added a horizontal
+  wall-clock Gantt timeline in the `Session` tab (`f` / `t`) that groups overlapping parallel
+  tool batches, expands nested subagent and codemode child spans, tracks live streaming reasoning
+  and `Instant`-aligned concurrent tool calls, keeps mid-run steering injections in their original
+  turn, and falls back to compact duration bars on narrow widths.
+- Adds the `run_shell` command to the `0.16.5` live RPC schema bundle (`schemas/live-rpc/`).
+  No saved session migration is needed; use the matching `0.16.5` backend and TUI together.
+
+<!-- Keeps links to the pre-release "0.16.4 — Unreleased" heading working. -->
+<a id="0164--unreleased"></a>
+
+## 0.16.4 — 2026-11-22
 
 - **Parallel `bash` polling and bounded same-process waits (#1132):** `bash(operation="poll")`
   calls now run concurrently across distinct managed processes under `asyncio.gather` and
