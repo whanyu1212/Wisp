@@ -364,8 +364,7 @@ def test_fresh_context_appends_extra_messages() -> None:
     )
 
     assert completions.calls[0]["messages"] == [
-        {"role": "user", "content": "hi"},
-        {"role": "user", "content": "steered"},
+        {"role": "user", "content": "hi\n\nsteered"},
     ]
 
 

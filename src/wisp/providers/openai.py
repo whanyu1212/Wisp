@@ -65,6 +65,7 @@ from wisp.providers.events import (
     ToolCall,
     parse_tool_call,
 )
+from wisp.providers.prompt_groups import prompt_parts, request_groups
 from wisp.retry import RetryDecision, RetryPolicy, http_retry_decision, retry_delay_seconds
 
 DEFAULT_OPENAI_MODEL = "gpt-5.6-sol"
@@ -551,7 +552,8 @@ def _messages_to_response_input(
 ) -> ResponseInputParam:
     response_input: ResponseInputParam = []
     boundary_written = False
-    for message in messages:
+    for group in request_groups(messages):
+        message = group[0]
         native_items = native_output(message) if native_output is not None else None
         if native_items is not None:
             response_input.extend(cast(list[ResponseInputItemParam], list(native_items)))
@@ -584,11 +586,11 @@ def _messages_to_response_input(
                     )
                 )
             continue
-        if message.images:
+        if len(group) > 1 or message.images:
             response_input.append(
                 cast(
                     EasyInputMessageParam,
-                    {"role": "user", "content": responses_user_content(message)},
+                    {"role": "user", "content": prompt_parts(group, responses_user_content)},
                 )
             )
             continue

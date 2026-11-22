@@ -45,6 +45,7 @@ from wisp.providers.events import (
     ProviderUsage,
     ToolCall,
 )
+from wisp.providers.prompt_groups import prompt_parts, request_groups
 from wisp.retry import RetryDecision, RetryPolicy, http_retry_decision, retry_delay_seconds
 
 DEFAULT_GOOGLE_MODEL = "gemini-3.6-flash"
@@ -706,18 +707,14 @@ def _messages_to_google(
     # cannot resolve against stale provider metadata.
     provider_call_ids: dict[str, str | None] = {}
     tool_names: dict[str, str] = {}
-    index = 0
-    while index < len(messages):
-        message = messages[index]
+    for group in request_groups(messages, group_tools=True):
+        message = group[0]
         if message.role == "system":
-            index += 1
             continue
         if message.role == "tool" and message.tool_call_id:
             responses: list[tuple[ToolCallResult, str | None, str]] = []
-            while index < len(messages):
-                result = messages[index]
-                if result.role != "tool" or not result.tool_call_id:
-                    break
+            for result in group:
+                assert result.tool_call_id is not None
                 call_id = result.tool_call_id
                 responses.append(
                     (
@@ -726,7 +723,6 @@ def _messages_to_google(
                         result.tool_name or tool_names.get(call_id) or call_id,
                     )
                 )
-                index += 1
             contents.append(_function_responses_content(responses, model=model))
             provider_call_ids.clear()
             tool_names.clear()
@@ -749,7 +745,6 @@ def _messages_to_google(
                     for tool_call, call_id in zip(message.tool_calls, issued, strict=True)
                 }
                 contents.append(saved_turn)
-                index += 1
                 continue
             parts = []
             if message.content:
@@ -765,19 +760,18 @@ def _messages_to_google(
                 for tool_call in message.tool_calls
             )
             contents.append(genai_types.Content(role="model", parts=parts))
-            index += 1
             continue
         provider_call_ids.clear()
         tool_names.clear()
-        if message.images:
-            contents.append(genai_types.Content(role="user", parts=_user_parts(message)))
-            index += 1
+        if len(group) > 1 or message.images:
+            contents.append(
+                genai_types.Content(role="user", parts=prompt_parts(group, _user_parts))
+            )
             continue
         role = "model" if message.role == "assistant" else "user"
         contents.append(
             genai_types.Content(role=role, parts=[genai_types.Part(text=message.content)])
         )
-        index += 1
     return contents
 
 
