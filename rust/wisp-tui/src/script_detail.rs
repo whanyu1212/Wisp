@@ -599,6 +599,12 @@ fn push_calls(lines: &mut Vec<DetailLine>, card: &ToolCardSnapshot, script: &Scr
             ],
             hang: width + 3,
         });
+        if let Some(target) = crate::tool_cards::mcp_target_of(&call.tool) {
+            lines.push(
+                DetailLine::new(Tone::Muted, format!("{indent}tool: {target}"))
+                    .hanging(indent.len() + 2),
+            );
+        }
         for (tone, text) in argument_lines(&call.arguments) {
             lines.push(DetailLine::new(tone, format!("{indent}{text}")).hanging(indent.len() + 2));
         }
@@ -805,6 +811,69 @@ mod tests {
         assert_eq!(lines.last().unwrap().1, "… 1 more argument not kept");
         assert!(lines.iter().all(|(_, line)| !line.contains('\0')));
         assert_eq!(argument_lines(&Value::Null)[0].1, "Arguments not kept.");
+    }
+
+    #[test]
+    fn nested_mcp_detail_lines_keep_exact_tool_identity() {
+        let script = ScriptCard {
+            host: NestedHost::Script,
+            title: Some("fetch".into()),
+            code: "pass".into(),
+            calls: vec![
+                crate::script_card::ScriptCall {
+                    call_id: "1".into(),
+                    tool: "mcp__exa__web_fetch_exa".into(),
+                    arguments: crate::tool_cards::bounded_tool_arguments(
+                        "mcp__exa__web_fetch_exa",
+                        &json!({"url": "https://example.org/a"}),
+                    ),
+                    state: ScriptCallState::Done,
+                    failure_code: None,
+                    auto_approved: false,
+                    approval_note: None,
+                    error: None,
+                    duration_ms: Some(15),
+                },
+                crate::script_card::ScriptCall {
+                    call_id: "2".into(),
+                    tool: "mcp__exa__crawling_exa".into(),
+                    arguments: crate::tool_cards::bounded_tool_arguments(
+                        "mcp__exa__crawling_exa",
+                        &json!({"urls": ["https://example.org/b"]}),
+                    ),
+                    state: ScriptCallState::Done,
+                    failure_code: None,
+                    auto_approved: false,
+                    approval_note: None,
+                    error: None,
+                    duration_ms: Some(20),
+                },
+            ],
+            omitted: 0,
+        };
+        let parent = ToolCardSnapshot::requested(
+            &crate::tool_cards::ToolCallInput {
+                call_id: "script".into(),
+                name: "codemode".into(),
+                arguments: json!({"code": "pass"}),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+            },
+            ToolStatus::Done,
+        );
+        let mut lines = Vec::new();
+        push_calls(&mut lines, &parent, &script);
+        let rendered: Vec<String> = lines.iter().map(|line| text(&line.segments)).collect();
+        let joined = rendered.join("\n");
+        assert!(
+            joined.contains("• Read https://example.org/a via Exa"),
+            "{joined}"
+        );
+        assert!(joined.contains("tool: exa/web_fetch_exa"), "{joined}");
+        assert!(
+            joined.contains("• Read https://example.org/b via Exa"),
+            "{joined}"
+        );
+        assert!(joined.contains("tool: exa/crawling_exa"), "{joined}");
     }
 
     /// A view of `lines` that is `width` × `height`, as `sync` would leave it.

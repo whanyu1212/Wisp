@@ -31,6 +31,7 @@ const GENERIC_MAX_ITEMS: usize = 8;
 const GENERIC_ITEMS_KEY: &str = "\0wisp.items";
 const GENERIC_OMITTED_KEY: &str = "\0wisp.omitted";
 const GENERIC_FIRST_URL_KEY: &str = "\0wisp.first_url";
+const GENERIC_NON_STRING_KEYS_KEY: &str = "\0wisp.non_strings";
 const PATH_MAX_CHARS: usize = 80;
 const REASON_MAX_BYTES: usize = 512;
 const TOOL_NAME_MAX_CHARS: usize = 128;
@@ -873,14 +874,7 @@ impl ToolCardSnapshot {
     /// `github/create_pull_request`. Wisp names MCP tools `mcp__{server}__{tool}`, and
     /// server names hold no `_`, so the first `__` after the prefix ends the server.
     pub fn mcp_target(&self) -> Option<String> {
-        let (server, tool) = self.name.strip_prefix("mcp__")?.split_once("__")?;
-        if server.is_empty() || tool.is_empty() {
-            return None;
-        }
-        Some(clip_chars(
-            &one_line(&format!("{server}/{tool}")),
-            TOOL_LABEL_MAX_CHARS * 2,
-        ))
+        mcp_target_of(&self.name)
     }
 
     /// How long a finished call ran, for its action line. Calls that were denied,
@@ -1501,10 +1495,15 @@ pub fn bounded_tool_arguments(name: &str, arguments: &Value) -> Value {
                     }
                 }
             }
+            let mut non_strings = Vec::new();
             for key in selected {
                 let value = arguments.get(key).expect("selected key exists");
+                let bounded_key = clip_chars(key, 64);
+                if matches!(value, Value::Array(_) | Value::Object(_)) {
+                    non_strings.push(Value::String(bounded_key.clone()));
+                }
                 bounded.insert(
-                    clip_chars(key, 64),
+                    bounded_key,
                     bounded_argument_value(value, GENERIC_VALUE_MAX_CHARS),
                 );
             }
@@ -1516,11 +1515,19 @@ pub fn bounded_tool_arguments(name: &str, arguments: &Value) -> Value {
                 .and_then(Value::as_str)
                 .filter(|url| !url.trim().is_empty())
                 .map(|url| clip_chars(url, GENERIC_VALUE_MAX_CHARS));
-            let mut wrapper = Map::with_capacity(2 + usize::from(first_url.is_some()));
+            let mut wrapper = Map::with_capacity(
+                2 + usize::from(first_url.is_some()) + usize::from(!non_strings.is_empty()),
+            );
             wrapper.insert(GENERIC_ITEMS_KEY.into(), Value::Object(bounded));
             wrapper.insert(GENERIC_OMITTED_KEY.into(), Value::from(omitted as u64));
             if let Some(first_url) = first_url {
                 wrapper.insert(GENERIC_FIRST_URL_KEY.into(), Value::String(first_url));
+            }
+            if !non_strings.is_empty() {
+                wrapper.insert(
+                    GENERIC_NON_STRING_KEYS_KEY.into(),
+                    Value::Array(non_strings),
+                );
             }
             return Value::Object(wrapper);
         }
@@ -1885,6 +1892,7 @@ fn mcp_subject(input: &ToolCallInput) -> Option<String> {
         return None;
     }
     let object = input.arguments.as_object()?;
+    let non_strings = generic_non_string_keys(object);
     let arguments = object
         .get(GENERIC_ITEMS_KEY)
         .and_then(Value::as_object)
@@ -1895,12 +1903,17 @@ fn mcp_subject(input: &ToolCallInput) -> Option<String> {
         "query", "id", "issueId", "issue_id", "number", "path", "url", "name",
     ]
     .into_iter()
-    .find_map(|key| match arguments.get(key)? {
-        Value::String(value) if !value.trim().is_empty() => {
-            Some(clip_chars(&one_line(value), GENERIC_VALUE_MAX_CHARS))
+    .find_map(|key| {
+        if non_strings.is_some_and(|keys| keys.iter().any(|item| item.as_str() == Some(key))) {
+            return None;
         }
-        Value::Number(value) => Some(value.to_string()),
-        _ => None,
+        match arguments.get(key)? {
+            Value::String(value) if !value.trim().is_empty() => {
+                Some(clip_chars(&one_line(value), GENERIC_VALUE_MAX_CHARS))
+            }
+            Value::Number(value) => Some(value.to_string()),
+            _ => None,
+        }
     })
 }
 
@@ -1914,15 +1927,32 @@ fn format_generic_value(arguments: &Value) -> String {
     format_generic(object, object.len().saturating_sub(GENERIC_MAX_ITEMS))
 }
 
+pub(crate) fn mcp_target_of(name: &str) -> Option<String> {
+    let (server, tool) = name.strip_prefix("mcp__")?.split_once("__")?;
+    if server.is_empty() || tool.is_empty() {
+        return None;
+    }
+    Some(clip_chars(
+        &one_line(&format!("{server}/{tool}")),
+        TOOL_LABEL_MAX_CHARS * 2,
+    ))
+}
+
 /// The arguments a generic tool's bounded record keeps, and how many it left out;
 /// `None` when `object` is not such a record.
 pub(crate) fn generic_argument_items(
     object: &Map<String, Value>,
 ) -> Option<(&Map<String, Value>, u64)> {
-    if !matches!(object.len(), 2 | 3) {
-        return None;
-    }
-    if object.len() == 3 && !object.contains_key(GENERIC_FIRST_URL_KEY) {
+    let has_unexpected_key = object
+        .keys()
+        .filter(|key| key.as_str() != GENERIC_ITEMS_KEY && key.as_str() != GENERIC_OMITTED_KEY)
+        .any(|key| {
+            !matches!(
+                key.as_str(),
+                GENERIC_FIRST_URL_KEY | GENERIC_NON_STRING_KEYS_KEY
+            )
+        });
+    if has_unexpected_key {
         return None;
     }
     let items = object.get(GENERIC_ITEMS_KEY)?.as_object()?;
@@ -1933,6 +1963,14 @@ pub(crate) fn generic_argument_items(
 pub(crate) fn generic_first_url(object: &Map<String, Value>) -> Option<&str> {
     generic_argument_items(object)?;
     object.get(GENERIC_FIRST_URL_KEY)?.as_str()
+}
+
+pub(crate) fn generic_non_string_keys(object: &Map<String, Value>) -> Option<&[Value]> {
+    generic_argument_items(object)?;
+    object
+        .get(GENERIC_NON_STRING_KEYS_KEY)?
+        .as_array()
+        .map(Vec::as_slice)
 }
 
 fn format_generic(arguments: &Map<String, Value>, omitted: usize) -> String {
@@ -2886,25 +2924,48 @@ mod tests {
                 "linear/get_issue",
                 "42",
             ),
+            (
+                "mcp__linear__list_issues",
+                json!({"query": ["astro"]}),
+                "Called",
+                "linear/list_issues",
+                "query=[1 items]",
+            ),
+            (
+                "mcp__linear__list_issues",
+                json!({"query": {"bad": 1}}),
+                "Called",
+                "linear/list_issues",
+                "query={1 fields}",
+            ),
+            (
+                "mcp__exa__crawling_exa",
+                json!({"urls": [123]}),
+                "Called",
+                "exa/crawling_exa",
+                "urls=[1 items]",
+            ),
         ] {
-            let card = ToolCardSnapshot::requested(
-                &ToolCallInput {
-                    call_id: "fallback".into(),
-                    name: name.into(),
-                    arguments: args,
-                    detail_source: ToolDetailSource::None,
-                },
-                ToolStatus::Done,
-            );
-            assert!(!card.has_friendly_action_label(), "{name}");
-            assert_eq!(card.mcp_group_label(), None, "{name}");
-            assert_eq!(card.action_verb(), expected_verb, "{name}");
-            assert_eq!(
-                card.mcp_target().as_deref(),
-                Some(expected_target),
-                "{name}"
-            );
-            assert_eq!(card.action_line_arguments(), expected_args, "{name}");
+            for arguments in [args.clone(), bounded_tool_arguments(name, &args)] {
+                let card = ToolCardSnapshot::requested(
+                    &ToolCallInput {
+                        call_id: "fallback".into(),
+                        name: name.into(),
+                        arguments,
+                        detail_source: ToolDetailSource::None,
+                    },
+                    ToolStatus::Done,
+                );
+                assert!(!card.has_friendly_action_label(), "{name}");
+                assert_eq!(card.mcp_group_label(), None, "{name}");
+                assert_eq!(card.action_verb(), expected_verb, "{name}");
+                assert_eq!(
+                    card.mcp_target().as_deref(),
+                    Some(expected_target),
+                    "{name}"
+                );
+                assert_eq!(card.action_line_arguments(), expected_args, "{name}");
+            }
         }
 
         // Bounded arguments that clipped away `query` do not claim an unfiltered list.

@@ -4,7 +4,7 @@ use serde_json::{Map, Value};
 
 use super::{
     GENERIC_VALUE_MAX_CHARS, ToolCallInput, clip_chars, generic_argument_items, generic_first_url,
-    mcp_subject, one_line,
+    generic_non_string_keys, mcp_subject, one_line,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -52,6 +52,7 @@ struct Args<'a> {
     items: Option<&'a Map<String, Value>>,
     omitted: bool,
     first_url: Option<&'a str>,
+    non_strings: Option<&'a [Value]>,
 }
 impl<'a> Args<'a> {
     fn new(value: &'a Value) -> Self {
@@ -61,16 +62,22 @@ impl<'a> Args<'a> {
                 items: Some(items),
                 omitted: omitted != 0,
                 first_url: object.and_then(generic_first_url),
+                non_strings: object.and_then(generic_non_string_keys),
             },
             None => Self {
                 items: object,
                 omitted: false,
                 first_url: None,
+                non_strings: None,
             },
         }
     }
     fn get(&self, key: &str) -> Option<&Value> {
         self.items?.get(key)
+    }
+    fn is_non_string(&self, key: &str) -> bool {
+        self.non_strings
+            .is_some_and(|keys| keys.iter().any(|item| item.as_str() == Some(key)))
     }
     fn sanitize(raw: &str) -> Option<String> {
         let safe: String = one_line(&clip_chars(raw, GENERIC_VALUE_MAX_CHARS))
@@ -80,6 +87,9 @@ impl<'a> Args<'a> {
         (!safe.is_empty()).then_some(safe)
     }
     fn text(&self, key: &str) -> Option<String> {
+        if self.is_non_string(key) {
+            return None;
+        }
         Self::sanitize(self.get(key)?.as_str()?)
     }
     /// Reads an optional string field, returning `Err(())` if present with a non-string
@@ -91,6 +101,9 @@ impl<'a> Args<'a> {
     /// Rejects visited keys with a non-string shape or ambiguous omission when none matched.
     fn optional_first_text(&self, keys: &[&str]) -> Result<Option<String>, ()> {
         for key in keys {
+            if self.is_non_string(key) {
+                return Err(());
+            }
             match self.get(key) {
                 None | Some(Value::Null) => continue,
                 Some(Value::String(raw)) => {
@@ -109,6 +122,9 @@ impl<'a> Args<'a> {
         string_key: &str,
         array_key: &str,
     ) -> Result<Option<String>, ()> {
+        if self.is_non_string(string_key) {
+            return Err(());
+        }
         match self.get(string_key) {
             None | Some(Value::Null) => {}
             Some(Value::String(raw)) => {
@@ -121,6 +137,9 @@ impl<'a> Args<'a> {
         if let Some(url) = self.first_url.and_then(Self::sanitize) {
             return Ok(Some(url));
         }
+        if self.is_non_string(array_key) {
+            return Err(());
+        }
         match self.get(array_key) {
             None => {
                 if self.omitted {
@@ -130,10 +149,11 @@ impl<'a> Args<'a> {
                 }
             }
             Some(Value::Null) => Ok(None),
-            Some(Value::Array(items)) => Ok(items
-                .first()
-                .and_then(Value::as_str)
-                .and_then(Self::sanitize)),
+            Some(Value::Array(items)) => match items.first() {
+                None => Ok(None),
+                Some(Value::String(raw)) => Ok(Self::sanitize(raw)),
+                Some(_) => Err(()),
+            },
             Some(_) => Err(()),
         }
     }
