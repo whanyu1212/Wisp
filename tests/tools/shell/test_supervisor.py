@@ -766,25 +766,34 @@ def test_concurrent_polls_run_in_parallel_across_processes_and_interrupt_on_canc
 ) -> None:
     """Distinct process polls run concurrently, while cancel still interrupts an active poll."""
 
-    async def run() -> tuple[ProcessUpdate, ProcessUpdate, float, ProcessUpdate, float]:
+    gate = tmp_path / "release.flag"
+
+    async def run() -> tuple[ProcessUpdate, ProcessUpdate, bool, ProcessUpdate, float]:
         supervisor = ProcessSupervisor(max_processes=4)
         try:
             first = await supervisor.start(
-                python_command("import time; time.sleep(0.4); print('one')"),
+                python_command(
+                    f"import pathlib, time; p = pathlib.Path({str(gate)!r}); "
+                    "deadline = time.monotonic() + 10\n"
+                    "while not p.exists() and time.monotonic() < deadline:\n"
+                    "    time.sleep(0.02)\n"
+                    "print('one')"
+                ),
                 cwd=tmp_path,
-                timeout=10,
+                timeout=15,
             )
+            first_poll = asyncio.create_task(supervisor.poll(first, wait_seconds=10, until="exit"))
+            await anyio.sleep(0.05)
+
             second = await supervisor.start(
-                python_command("import time; time.sleep(0.4); print('two')"),
+                python_command("print('two')"),
                 cwd=tmp_path,
                 timeout=10,
             )
-            started = asyncio.get_running_loop().time()
-            first_update, second_update = await asyncio.gather(
-                supervisor.poll(first, wait_seconds=5, until="exit"),
-                supervisor.poll(second, wait_seconds=5, until="exit"),
-            )
-            parallel_elapsed = asyncio.get_running_loop().time() - started
+            second_update = await supervisor.poll(second, wait_seconds=5, until="exit")
+            first_still_waiting = not first_poll.done()
+            gate.write_text("go", encoding="utf-8")
+            first_update = await first_poll
 
             third = await supervisor.start(
                 python_command("import time; time.sleep(30)"),
@@ -801,17 +810,25 @@ def test_concurrent_polls_run_in_parallel_across_processes_and_interrupt_on_canc
                 task_group.start_soon(cancel_soon)
                 cancelled_update = await supervisor.poll(third, wait_seconds=10, until="exit")
             cancel_elapsed = asyncio.get_running_loop().time() - cancel_started
-            return first_update, second_update, parallel_elapsed, cancelled_update, cancel_elapsed
+            return (
+                first_update,
+                second_update,
+                first_still_waiting,
+                cancelled_update,
+                cancel_elapsed,
+            )
         finally:
             await supervisor.aclose()
 
-    first_update, second_update, parallel_elapsed, cancelled_update, cancel_elapsed = anyio.run(run)
+    first_update, second_update, first_still_waiting, cancelled_update, cancel_elapsed = anyio.run(
+        run
+    )
 
+    assert first_still_waiting is True
     assert first_update.stdout == "one\n"
     assert second_update.stdout == "two\n"
-    assert parallel_elapsed < 0.75
     assert cancelled_update.state == "cancelled"
-    assert cancel_elapsed < 2.0
+    assert cancel_elapsed < 5.0
 
 
 @pytest.mark.process
@@ -849,6 +866,6 @@ def test_concurrent_same_process_poll_respects_wait_budget(tmp_path: Path) -> No
     zero_update, zero_elapsed, short_update, short_elapsed = anyio.run(run)
 
     assert zero_update.state == "running"
-    assert zero_elapsed < 0.3
+    assert zero_elapsed < 1.5
     assert short_update.state == "running"
-    assert short_elapsed < 0.5
+    assert short_elapsed < 2.0

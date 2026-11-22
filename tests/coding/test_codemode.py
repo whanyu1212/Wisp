@@ -1872,7 +1872,7 @@ def test_reader_collision_keeps_schemas(tmp_path: Path, reserved: str) -> None:
 def test_bash_polls_run_concurrently_in_codemode(tmp_path: Path) -> None:
     """`asyncio.gather` over `bash(operation='poll')` runs polls concurrently."""
 
-    import asyncio as stdlib_asyncio
+    import shlex
     import sys
 
     from wisp.tools.shell.supervisor import ProcessSupervisor
@@ -1882,17 +1882,31 @@ def test_bash_polls_run_concurrently_in_codemode(tmp_path: Path) -> None:
     bash = BashTool(supervisor)
     registry = ToolRegistry()
     registry.register(bash)
-    sleeper = f"{sys.executable} -c \"import time; time.sleep(0.45); print('done')\""
+    gate = tmp_path / "release.flag"
+    wait_script = (
+        f"import pathlib, time; p = pathlib.Path({str(gate)!r}); "
+        "deadline = time.monotonic() + 10\n"
+        "while not p.exists() and time.monotonic() < deadline:\n"
+        "    time.sleep(0.02)\n"
+        "print('one')"
+    )
+    cmd1 = f"{shlex.quote(sys.executable)} -c {shlex.quote(wait_script)}"
+    cmd2 = f"{shlex.quote(sys.executable)} -c \"print('two')\""
+    touch_script = f"import pathlib; pathlib.Path({str(gate)!r}).write_text('go')"
+    touch_cmd = f"{shlex.quote(sys.executable)} -c {shlex.quote(touch_script)}"
     code = (
         "import asyncio\n"
-        f"cmd = {sleeper!r}\n"
-        "p1_out = await bash(operation='start', command=cmd, yield_seconds=0)\n"
-        "p2_out = await bash(operation='start', command=cmd, yield_seconds=0)\n"
+        f"p1_out = await bash(operation='start', command={cmd1!r}, yield_seconds=0)\n"
+        f"p2_out = await bash(operation='start', command={cmd2!r}, yield_seconds=0)\n"
         "p1 = [line.split()[1] for line in p1_out.splitlines() if line.startswith('Process ')][0]\n"
         "p2 = [line.split()[1] for line in p2_out.splitlines() if line.startswith('Process ')][0]\n"
+        "async def poll_second_and_release():\n"
+        "    out = await bash(operation='poll', process_id=p2, until='exit', wait_seconds=5)\n"
+        f"    await bash(command={touch_cmd!r})\n"
+        "    return out\n"
         "r1, r2 = await asyncio.gather(\n"
         "    bash(operation='poll', process_id=p1, until='exit', wait_seconds=5),\n"
-        "    bash(operation='poll', process_id=p2, until='exit', wait_seconds=5),\n"
+        "    poll_second_and_release(),\n"
         ")\n"
         "print(r1)\n"
         "print(r2)\n"
@@ -1908,19 +1922,16 @@ def test_bash_polls_run_concurrently_in_codemode(tmp_path: Path) -> None:
         codemode=True,
     )
 
-    async def run() -> tuple[list[WispEvent], float]:
+    async def run() -> list[WispEvent]:
         try:
-            started = stdlib_asyncio.get_running_loop().time()
-            events = [event async for event in session.run("poll both")]
-            return events, stdlib_asyncio.get_running_loop().time() - started
+            return [event async for event in session.run("poll both")]
         finally:
             await supervisor.aclose()
 
-    events, elapsed = anyio.run(run)
-    result = _result(events)
+    result = _result(anyio.run(run))
     assert not result.is_error
-    assert result.output.count("done") >= 2
-    assert elapsed < 0.85
+    assert "one" in result.output
+    assert "two" in result.output
 
 
 def test_generator_expression_with_next_gives_actionable_hint(tmp_path: Path) -> None:

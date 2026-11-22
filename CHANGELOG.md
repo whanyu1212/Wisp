@@ -10,7 +10,27 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.16.3 — Unreleased
+## 0.16.4 — Unreleased
+
+- **Parallel `bash` polling and bounded same-process waits (#1132):** `bash(operation="poll")`
+  calls now run concurrently across distinct managed processes under `asyncio.gather` and
+  parallel tool batches. Concurrent polls on the same process respect their requested
+  `wait_seconds` (including immediate `wait_seconds=0` snapshots) and still wake on
+  `stop()`/`cancel()`.
+- **Separate `bash` exit-status line (#1132):** Completed `bash` output now puts a newline
+  after `Command exited with code N` instead of `: `, so line-oriented parsing in `codemode`
+  scripts preserves line 1 of stdout. The Rust TUI continues to accept both formats when
+  rendering saved sessions.
+- **Codemode Monty generator-expression guard (#1132):** Documented that Monty evaluates
+  generator expressions as lists (not iterators) and added an actionable runtime hint when
+  `next(x for ...)` raises `TypeError: 'list' object is not an iterator`.
+- No changes to the Python API, live RPC payloads, or session format since 0.16.3. Use the same
+  release for backend and frontend.
+
+<!-- Keeps links to the pre-release "0.16.3 — Unreleased" heading working. -->
+<a id="0163--unreleased"></a>
+
+## 0.16.3 — 2026-11-22
 
 - **Recover after an unanswered prompt (#1128):** If a request fails or is cancelled before a
   reply, you can continue the same session on endpoints that require alternating roles. Wisp joins
