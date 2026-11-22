@@ -681,6 +681,12 @@ def browser_prompt_guidance(
             "window=true, or /browser window) or a user takeover instead of retrying.",
             "- After a user takeover handoff note appears, call browser_read before acting "
             "because page state, focus, URL, or element refs may have changed.",
+            "- When visual mockups, UI layouts, interactive prototypes, or rich diagrams are "
+            "clearer in HTML than inline terminal text, write a self-contained HTML file in the "
+            "scratch folder, serve it locally on 127.0.0.1 (for example with a background "
+            "`python3 -m http.server` bound to 127.0.0.1, since browser_navigate requires "
+            "HTTP/HTTPS), and open it with browser_navigate so the user can view it live in the "
+            "/browser pane.",
         ]
         if connected_browser_servers and browser_default == "live":
             live_lines.insert(
@@ -714,6 +720,13 @@ def browser_prompt_guidance(
             "- After a user takeover handoff note appears, take a fresh snapshot before clicking "
             "or typing because URL, focus, or element refs may have changed.",
         ]
+        if not live_browser_available:
+            mcp_lines.append(
+                "- When visual mockups, UI layouts, interactive prototypes, or rich diagrams are "
+                "clearer in HTML than inline terminal text, write a self-contained HTML file in "
+                "the scratch folder (served locally on 127.0.0.1 if needed) and open it in the "
+                "connected browser so the user can view it in the /browser pane."
+            )
         sections.append("\n".join(mcp_lines))
     return "\n\n".join(sections)
 
