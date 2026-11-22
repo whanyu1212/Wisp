@@ -275,7 +275,7 @@ def test_bash_exit_code_reaches_provider(
     command = f"{python} -c \"import sys; print('evidence'); sys.exit({exit_code})\""
     provider, events = _run_bash_loop(tmp_path, command=command)
 
-    expected = f"Command exited with code {exit_code}: evidence"
+    expected = f"Command exited with code {exit_code}\nevidence"
     assert provider.calls[1].tool_results[0].output == expected
     result = next(event for event in events if isinstance(event, ToolResultReady))
     assert result.output == expected

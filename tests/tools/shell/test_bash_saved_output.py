@@ -110,7 +110,7 @@ def test_complete_output_saves_nothing(tmp_path: Path) -> None:
 
     result, files = with_shell(tmp_path, scenario)
 
-    assert result.text == "Command exited with code 0: fits"
+    assert result.text == "Command exited with code 0\nfits"
     assert "stdout_output_id" not in result.data
     assert files == []
     assert not (tmp_path / "tool-output").exists()

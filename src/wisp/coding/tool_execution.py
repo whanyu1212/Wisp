@@ -1229,11 +1229,7 @@ class ConfiguredToolExecutor:
                     if denied is not None:
                         return replace(denied, approval_note=automatic.note)
             name = target or tool_call.name
-            parallel_safe = (
-                tool.safety == "read" and self._registry.execution_metadata_for(name).parallel_safe
-                if self._registry is not None
-                else False
-            )
+            parallel_safe = self._is_parallel_safe_call(tool, arguments, name, nested=True)
             context = replace(
                 self._context,
                 command_sandbox=automatic.sandbox or self._context.command_sandbox,
@@ -1545,10 +1541,8 @@ class ConfiguredToolExecutor:
 
         # Scheduling follows the tool that runs: a proxied call is as parallel-safe
         # as its target, never as the proxy.
-        parallel_safe = (
-            self._registry.execution_metadata_for(target or tool_call.name).parallel_safe
-            if self._registry is not None
-            else False
+        parallel_safe = self._is_parallel_safe_call(
+            tool, arguments, target or tool_call.name, nested=False
         )
         return PreparedToolExecution(
             call_id=tool_call.call_id,
@@ -1557,6 +1551,28 @@ class ConfiguredToolExecutor:
             runner=run,
             cleanup=sandbox.cleanup if sandbox is not None else None,
         )
+
+    def _is_parallel_safe_call(
+        self,
+        tool: Tool,
+        arguments: Mapping[str, object],
+        name: str,
+        *,
+        nested: bool,
+    ) -> bool:
+        """Report whether this specific tool invocation may run concurrently."""
+
+        # ProcessSupervisor.poll locks per-process via poll_lock, so polling
+        # distinct managed jobs concurrently is safe even though BashTool is a command tool.
+        if isinstance(tool, BashTool) and arguments.get("operation") == "poll":
+            return True
+        if self._registry is None:
+            return False
+        if nested:
+            return (
+                tool.safety == "read" and self._registry.execution_metadata_for(name).parallel_safe
+            )
+        return self._registry.execution_metadata_for(name).parallel_safe
 
     @staticmethod
     def _prepare_outcome(
@@ -2007,7 +2023,7 @@ def _normalize_tool_result(
     truncated = result.truncated
     data = _snapshot_result_data(tool_name, result.data, context=context)
     has_exit_status = _promote_output_has_exit_status(tool_name, data)
-    status_overhead = len("Command exited with code -2147483648: ") if has_exit_status else 0
+    status_overhead = len("Command exited with code -2147483648\n") if has_exit_status else 0
     managed_text_overhead = _bash_managed_process_text_overhead(tool_name, data)
     metadata_overhead = max(status_overhead, managed_text_overhead)
     metadata_line_overhead = max(

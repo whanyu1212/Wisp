@@ -572,7 +572,7 @@ def test_executor_promotes_one_shot_bash_truncation() -> None:
         _ResultTool(
             name="bash",
             result=ToolResult(
-                text="Command exited with code 0: x\n[truncated]",
+                text="Command exited with code 0\nx\n[truncated]",
                 data={
                     "exit_code": 0,
                     "output_has_exit_status": True,
@@ -805,3 +805,44 @@ def test_promotes_only_valid_edit_locations(
 
     assert tuple((place.old_line, place.new_line) for place in ended.edit_locations) == expected
     assert ended.is_error is False
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_parallel_safe"),
+    [
+        ({"operation": "poll", "process_id": "proc-1"}, True),
+        ({"command": "echo hi"}, False),
+        ({"operation": "start", "command": "echo hi"}, False),
+        ({"operation": "cancel", "process_id": "proc-1"}, False),
+    ],
+    ids=["poll", "run", "start", "cancel"],
+)
+def test_executor_prepares_bash_poll_as_parallel_safe(
+    tmp_path: Path,
+    arguments: dict[str, object],
+    expected_parallel_safe: bool,
+) -> None:
+    from wisp.tools.shell.supervisor import ProcessSupervisor
+    from wisp.tools.shell.tool import BashTool
+
+    supervisor = ProcessSupervisor(max_processes=2)
+    registry = ToolRegistry()
+    registry.register(BashTool(supervisor))
+    executor = ConfiguredToolExecutor(
+        registry=registry,
+        context=ToolContext(cwd=tmp_path, protected_paths=()),
+        policy=ToolPolicy.allow_all_tools(),
+        approval_policy=ToolApprovalPolicy.approve_all(),
+    )
+    call = ToolCall(call_id="c1", name="bash", arguments=arguments)
+
+    async def prepare_only() -> PreparedToolExecution:
+        try:
+            events = [event async for event in executor.prepare(call)]
+            return next(event for event in events if isinstance(event, PreparedToolExecution))
+        finally:
+            await supervisor.aclose()
+
+    prepared = anyio.run(prepare_only)
+
+    assert prepared.parallel_safe is expected_parallel_safe

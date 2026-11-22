@@ -443,6 +443,7 @@ class _ManagedProcess:
     error_after_cleanup: str | None = None
     changed: asyncio.Event = field(default_factory=asyncio.Event)
     operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    poll_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     cleanup_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     stdout_task: asyncio.Task[None] | None = None
     stderr_task: asyncio.Task[None] | None = None
@@ -479,6 +480,33 @@ class _ManagedProcess:
             or self.stdout.dropped_bytes
             or self.stderr.dropped_bytes
         )
+
+
+async def _acquire_lock_within(lock: asyncio.Lock, timeout: float) -> bool:
+    """Acquire ``lock`` within ``timeout`` seconds without leaking it on timeout/cancel."""
+
+    acquire_task = asyncio.create_task(lock.acquire())
+    try:
+        await asyncio.wait_for(asyncio.shield(acquire_task), timeout=timeout)
+        return True
+    except TimeoutError:
+        acquire_task.cancel()
+        try:
+            await acquire_task
+        except asyncio.CancelledError:
+            return False
+        # Acquired on the same tick the timeout fired; release before returning.
+        lock.release()
+        return False
+    except BaseException:
+        acquire_task.cancel()
+        try:
+            await acquire_task
+        except asyncio.CancelledError:
+            pass
+        else:
+            lock.release()
+        raise
 
 
 def _completion_ended(managed: _ManagedProcess) -> bool:
@@ -1036,7 +1064,14 @@ class ProcessSupervisor:
             raise ValueError("wait_seconds must be non-negative")
         managed = await self._get(process_id)
         if wait_seconds > 0:
-            await self._wait_for_poll(managed, wait_seconds, until)
+            deadline = asyncio.get_running_loop().time() + wait_seconds
+            if await _acquire_lock_within(managed.poll_lock, wait_seconds):
+                try:
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining > 0:
+                        await self._wait_for_poll(managed, remaining, until)
+                finally:
+                    managed.poll_lock.release()
         async with managed.operation_lock:
             return self._snapshot(managed)
 

@@ -137,4 +137,4 @@ def test_scope_cancellation_with_progress_still_cleans_up(tmp_path: Path) -> Non
     (saved, after), _ = run_bash(tmp_path, scenario)
 
     assert saved == []
-    assert after == "Command exited with code 0: next"
+    assert after == "Command exited with code 0\nnext"
