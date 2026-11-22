@@ -64,6 +64,8 @@ pub(crate) enum Command {
     BrowserWindow(Option<String>),
     /// `/kill`: the process to stop, by `/ps` number or id.
     KillProcess(String),
+    /// `!<command>`: run one local shell command outside model history.
+    Shell(String),
     Quit,
     Model(ModelCommand),
     Session(SessionCommand),
@@ -113,11 +115,25 @@ fn usage(name: &str) -> Option<&'static str> {
     })
 }
 
+pub(crate) const MAX_SHELL_COMMAND_CHARS: usize = 32_768;
+
 pub(crate) fn classify(text: &str, catalog: Option<&[CommandDescriptor]>) -> Option<Command> {
     if text.contains(['\n', '\r']) {
         return None;
     }
     let trimmed = text.trim();
+    if let Some(shell) = trimmed.strip_prefix('!') {
+        let command = shell.trim();
+        return Some(if command.is_empty() {
+            Command::Invalid("Usage: !<command> (for example, !git status)".into())
+        } else if command.chars().count() > MAX_SHELL_COMMAND_CHARS {
+            Command::Invalid(format!(
+                "Shell commands may not exceed {MAX_SHELL_COMMAND_CHARS} characters."
+            ))
+        } else {
+            Command::Shell(command.to_owned())
+        });
+    }
     let token = trimmed.split_whitespace().next()?;
     if token.starts_with("/skill:") {
         return None;
@@ -1740,5 +1756,33 @@ pub(crate) mod tests {
             classify(&format!("/browser live {url}a"), None),
             Some(Command::Invalid(message)) if message.contains("2,048")
         ));
+    }
+
+    #[test]
+    fn shell_command_requires_single_line_nonempty_input() {
+        assert!(matches!(
+            classify("!git status", None),
+            Some(Command::Shell(cmd)) if cmd == "git status"
+        ));
+        assert!(matches!(
+            classify("  ! cargo test  ", None),
+            Some(Command::Shell(cmd)) if cmd == "cargo test"
+        ));
+        assert!(matches!(
+            classify("!   ", None),
+            Some(Command::Invalid(msg))
+                if msg == "Usage: !<command> (for example, !git status)"
+        ));
+        let max_cmd = "a".repeat(MAX_SHELL_COMMAND_CHARS);
+        assert!(matches!(
+            classify(&format!("!{max_cmd}"), None),
+            Some(Command::Shell(cmd)) if cmd == max_cmd
+        ));
+        let over_limit = format!("!{max_cmd}a");
+        assert!(matches!(
+            classify(&over_limit, None),
+            Some(Command::Invalid(msg)) if msg.contains("32768")
+        ));
+        assert!(classify("!git status\nmore", None).is_none());
     }
 }

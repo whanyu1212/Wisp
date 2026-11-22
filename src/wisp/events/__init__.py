@@ -123,6 +123,8 @@ from wisp.events.rpc import (
     RpcProjectFilesReported,
     RpcProviderId,
     RpcSettingsReloaded,
+    RpcShellCompleted,
+    RpcShellProgress,
     RpcSkillCatalogEntry,
     RpcSkillCatalogSnapshot,
     RpcSkillDiagnostic,
@@ -377,6 +379,8 @@ __all__ = [
     "RpcSessionTreeReported",
     "RpcSessionTreeUnreverted",
     "RpcSessionsReported",
+    "RpcShellCompleted",
+    "RpcShellProgress",
     "RpcSkillCatalogEntry",
     "RpcSkillCatalogSnapshot",
     "RpcSkillDiagnostic",
@@ -512,7 +516,9 @@ KnownWispEvent = TypeAliasType(
         | WarningEvent
         | ToolApprovalReviewed
         | BrowserViewportUpdated
-        | RpcBrowserAddressesReported,
+        | RpcBrowserAddressesReported
+        | RpcShellProgress
+        | RpcShellCompleted,
         Field(discriminator="type"),
     ],
 )

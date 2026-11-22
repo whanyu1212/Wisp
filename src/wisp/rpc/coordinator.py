@@ -21,7 +21,7 @@ from wisp.sessions.jsonl import JsonlSession
 _PROMPT_RUN_COMMAND_TYPES = frozenset({"prompt", "init", "process_wake"})
 # Runs a user starts, which cancel a wake run going when they arrive. A frontend that
 # sent one before seeing the wake start may rely on the wake not running on.
-_PREEMPTS_WAKE_COMMAND_TYPES = frozenset({"prompt", "init", "compact"})
+_PREEMPTS_WAKE_COMMAND_TYPES = frozenset({"prompt", "init", "compact", "run_shell"})
 
 
 _SequentialRpcCommandType = TypeAliasType(
@@ -52,6 +52,7 @@ _SequentialRpcCommandType = TypeAliasType(
         "login_mcp_server",
         "logout_mcp_server",
         "browser_interact",
+        "run_shell",
     ],
 )
 

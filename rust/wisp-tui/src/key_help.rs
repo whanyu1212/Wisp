@@ -84,7 +84,7 @@ impl KeyHelp {
             ],
             Owner::Browse => &[
                 "Browse: Tab/Shift+Tab or ↑↓/jk select messages, code blocks, and cards; y copies.",
-                "Right expands, Left collapses, Enter opens retained detail. Esc returns to the prompt.",
+                "Right expands, Left collapses, Enter opens retained detail, s attaches ! shell output. Esc returns to the prompt.",
             ],
             Owner::Overlay(OverlayKind::GitDiff) => &[
                 "Diff: Tab switches focus, Enter expands/opens, [] hunks across files, a turn/all filter, <> step turns.",
@@ -154,6 +154,7 @@ impl KeyHelp {
                 "Undo: Ctrl+Z. Redo: Ctrl+Y or Ctrl+Shift+Z.",
                 "Clipboard: Ctrl+C/X/V copy, cut, or paste; Ctrl+Insert, Shift+Insert, and Shift+Delete are alternatives.",
                 "Images: Ctrl+V attaches a clipboard image; pasting or dropping an image file attaches it; Backspace on an empty draft removes the last one.",
+                "Shell: !<command> runs locally without sending to the model; Alt+S attaches its output to your next prompt.",
                 "Typing, paste, Tab, newline and deletion replace selected text. Plain arrows collapse selection.",
                 "Large-paste markers expand on first cursor/edit interaction; an explicit selection replaces its raw text.",
                 "Esc cancels active work; Ctrl+C cancels or exits when no composer text is selected.",

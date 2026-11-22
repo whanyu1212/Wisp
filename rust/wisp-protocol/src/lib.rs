@@ -1674,6 +1674,15 @@ pub mod commands {
                 "action": action,
             }))
         }
+
+        /// Run one user-initiated `!` shell command without persisting it to model history.
+        pub fn run_shell(id: &str, command: &str) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({
+                "type": "run_shell",
+                "id": id,
+                "command": command,
+            }))
+        }
     }
 
     pub fn deserialize(

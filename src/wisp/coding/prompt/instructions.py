@@ -136,6 +136,17 @@ WEB_SEARCH_UNAVAILABLE_GUIDANCE = """Web search is turned on in Wisp's settings,
 provider has no built-in web search, so you cannot search the web. If a task needs information you
 do not have, say so rather than guessing."""
 
+USER_SHELL_MODE_GUIDANCE = """User shell mode (`!`): in the Wisp TUI, the user can run a local
+shell command directly by prefixing their prompt with `!` (for example, `!git status`). Its output
+appears inline in their transcript and stays local unless they attach it to a prompt.
+- When a step requires local shell execution by the user — for example in plan mode when `bash` is
+  unavailable, when a command needs interactive authentication, local credentials, or privileges you
+  do not have, or when the user should inspect output before sharing it — tell them they can run
+  the exact command in shell mode (prefix with `!`, e.g. `!git status`) and attach its output to
+  their next message.
+- When `bash` is already available to you, run routine commands yourself instead of asking the user
+  to run them with `!`."""
+
 PLAN_MODE_SYSTEM_PROMPT = """You are in plan mode. Inspect the project using available read-only
 tools.
 Do not modify files or execute shell commands. Identify the files inspected, distinguish confirmed

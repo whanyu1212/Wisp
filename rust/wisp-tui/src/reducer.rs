@@ -79,6 +79,60 @@ pub(crate) struct SavedSessionAttachment {
     pub(crate) label: String,
 }
 
+pub(crate) const MAX_RECENT_SHELL_OUTPUTS: usize = 16;
+pub(crate) const MAX_ATTACHED_SHELL_OUTPUTS: usize = 4;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShellOutputAttachment {
+    pub command_id: String,
+    pub entry_id: crate::transcript::TranscriptEntryId,
+    pub command: String,
+    pub exit_code: Option<i64>,
+    pub output: String,
+    pub truncated: bool,
+    pub timed_out: bool,
+    pub cancelled: bool,
+}
+
+impl ShellOutputAttachment {
+    pub(crate) fn chip_label(&self) -> String {
+        let short = crate::session_picker::terminal_row(&self.command, 14);
+        format!("! {short}")
+    }
+
+    pub(crate) fn format_for_prompt(&self) -> String {
+        let status = if self.timed_out {
+            "timed out".to_owned()
+        } else if self.cancelled {
+            "cancelled".to_owned()
+        } else if let Some(code) = self.exit_code {
+            format!("exit {code}")
+        } else {
+            "completed".to_owned()
+        };
+        let mut body = self.output.trim();
+        if let Some(code) = self.exit_code {
+            let prefix = format!("Command exited with code {code}");
+            if let Some(rest) = body.strip_prefix(&prefix) {
+                body = rest.trim_start_matches(['\n', '\r']);
+            }
+        }
+        if body.is_empty() {
+            format!("[User shell output: !{} ({status})]", self.command)
+        } else {
+            format!("[User shell output: !{} ({status})]\n{body}", self.command)
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ActiveUserShell {
+    command_id: String,
+    command: String,
+    entry_id: crate::transcript::TranscriptEntryId,
+    progress_sequence: u64,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CatalogNavigation {
     pub next_cursor: Option<String>,
@@ -555,6 +609,7 @@ pub enum ActiveCommandType {
     Wake,
     Init,
     Compact,
+    RunShell,
 }
 
 impl ActiveCommandType {
@@ -564,6 +619,7 @@ impl ActiveCommandType {
             Self::Wake => "process_wake",
             Self::Init => "init",
             Self::Compact => "compact",
+            Self::RunShell => "run_shell",
         }
     }
 }
@@ -1010,6 +1066,9 @@ pub struct UiState {
     pub last_session: Option<String>,
     pub selected_session: Option<SessionIdentity>,
     pub(crate) saved_session_attachment: Option<SavedSessionAttachment>,
+    active_user_shell: Option<ActiveUserShell>,
+    pub(crate) recent_shell_outputs: Vec<ShellOutputAttachment>,
+    pub(crate) attached_shell_outputs: Vec<ShellOutputAttachment>,
     pub session_operation: Option<SessionOperation>,
     pub connection_catalog: ConnectionCatalogSnapshot,
     pub model_catalog: Option<ModelCatalogSnapshot>,
@@ -1130,6 +1189,9 @@ impl UiState {
             last_session: None,
             selected_session: None,
             saved_session_attachment: None,
+            active_user_shell: None,
+            recent_shell_outputs: Vec::new(),
+            attached_shell_outputs: Vec::new(),
             session_operation: None,
             connection_catalog: ConnectionCatalogSnapshot {
                 providers: Vec::new(),
@@ -1369,6 +1431,104 @@ impl UiState {
     pub fn latest_assistant_text(&self) -> Option<&str> {
         self.transcript.latest_assistant_text()
     }
+
+    pub(crate) fn toggle_shell_output_attachment(
+        &mut self,
+        entry_id: Option<crate::transcript::TranscriptEntryId>,
+    ) -> Result<bool, &'static str> {
+        let target = match entry_id {
+            Some(id) => {
+                if let Some(pos) = self
+                    .attached_shell_outputs
+                    .iter()
+                    .position(|item| item.entry_id == id)
+                {
+                    let removed = self.attached_shell_outputs.remove(pos);
+                    self.transcript
+                        .set_user_shell_attached(removed.entry_id, false);
+                    return Ok(false);
+                }
+                self.recent_shell_outputs
+                    .iter()
+                    .find(|item| item.entry_id == id)
+                    .cloned()
+                    .ok_or("Select a completed ! shell command card to attach its output.")?
+            }
+            None => self
+                .recent_shell_outputs
+                .last()
+                .cloned()
+                .ok_or("Run a ! shell command first before attaching its output.")?,
+        };
+        if let Some(pos) = self
+            .attached_shell_outputs
+            .iter()
+            .position(|item| item.command_id == target.command_id)
+        {
+            self.attached_shell_outputs.remove(pos);
+            self.transcript
+                .set_user_shell_attached(target.entry_id, false);
+            return Ok(false);
+        }
+        if self.attached_shell_outputs.len() >= MAX_ATTACHED_SHELL_OUTPUTS {
+            return Err("At most 4 shell outputs can be attached to one prompt.");
+        }
+        self.transcript
+            .set_user_shell_attached(target.entry_id, true);
+        self.attached_shell_outputs.push(target);
+        Ok(true)
+    }
+
+    pub(crate) fn pop_last_attached_shell_output(&mut self) -> bool {
+        let Some(removed) = self.attached_shell_outputs.pop() else {
+            return false;
+        };
+        self.transcript
+            .set_user_shell_attached(removed.entry_id, false);
+        true
+    }
+
+    pub(crate) fn clear_attached_shell_outputs(&mut self) {
+        let attached = std::mem::take(&mut self.attached_shell_outputs);
+        for item in attached {
+            self.transcript
+                .set_user_shell_attached(item.entry_id, false);
+        }
+    }
+
+    pub(crate) fn compose_prompt_with_shell_outputs(
+        &self,
+        prompt: &str,
+        presentation: Option<&str>,
+    ) -> (String, Option<String>) {
+        if self.attached_shell_outputs.is_empty() {
+            return (prompt.to_owned(), presentation.map(str::to_owned));
+        }
+        let prefix = self
+            .attached_shell_outputs
+            .iter()
+            .map(ShellOutputAttachment::format_for_prompt)
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let wire = if prompt.trim().is_empty() {
+            prefix
+        } else {
+            format!("{prefix}\n\n{prompt}")
+        };
+        let chips = self
+            .attached_shell_outputs
+            .iter()
+            .map(|item| format!("[{}]", item.chip_label()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let shown = presentation.unwrap_or(prompt);
+        let display = if shown.trim().is_empty() {
+            chips
+        } else {
+            format!("{chips}\n{shown}")
+        };
+        (wire, Some(display))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1421,6 +1581,7 @@ pub enum CommandKind {
     StoreApiKey,
     DisconnectProvider,
     BeginDeviceCode,
+    RunShell,
 }
 
 impl CommandKind {
@@ -1474,6 +1635,7 @@ impl CommandKind {
             Self::StoreApiKey => "store_api_key",
             Self::DisconnectProvider => "disconnect_provider",
             Self::BeginDeviceCode => "begin_device_code",
+            Self::RunShell => "run_shell",
         }
     }
 }
@@ -1755,6 +1917,24 @@ pub enum BackendEvent {
         ok: bool,
         error: Option<String>,
     },
+    ShellProgress {
+        command_id: String,
+        stdout_tail: String,
+        stderr_tail: String,
+        stdout_bytes: u64,
+        stderr_bytes: u64,
+    },
+    ShellCompleted {
+        command_id: String,
+        command: String,
+        exit_code: Option<i64>,
+        output: String,
+        truncated: bool,
+        timed_out: bool,
+        cancelled: bool,
+        duration_ms: u64,
+        error: Option<String>,
+    },
     /// A run the backend started by itself, because a background process the agent
     /// asked to hear about stopped while the session was idle.
     WakeStarted {
@@ -1809,6 +1989,7 @@ pub enum UiAction {
     Search(Option<bool>),
     ChangeDirectory(String),
     ReloadSettings,
+    RunShell(String),
     /// `/kill`: stop a background process, by its `/ps` number or its id.
     StopBackgroundProcess(String),
     /// Move the newest running foreground shell command to the background.
@@ -2019,6 +2200,7 @@ pub fn reduce(
 ) -> Result<Vec<UiEffect>, ReduceError> {
     let mut effects = match action {
         UiAction::ReloadSettings => Ok(reload::start(state, ids)?),
+        UiAction::RunShell(command) => run_shell(state, command, ids),
         UiAction::LoadSkills => Ok(discovery::load_skills(state, ids)?),
         UiAction::LoadMcpStatus => Ok(discovery::load_mcp(state, ids)?),
         UiAction::PreviewMcpSnippet(snippet) => {
@@ -2250,6 +2432,9 @@ fn close_transport(state: &mut UiState) -> Vec<UiEffect> {
     state.directory_change = None;
     state.command_catalog_read = None;
     state.browser_interact_pending.clear();
+    state.active_user_shell = None;
+    state.clear_attached_shell_outputs();
+    state.recent_shell_outputs.clear();
     state.queue.clear_local_presentations();
     for pending in state.pending_queue_submissions.values_mut() {
         pending.local_display = None;
@@ -2284,7 +2469,7 @@ fn submit(
             UiEffect::RequestRender,
         ]);
     }
-    if content.trim().is_empty() && images.is_empty() {
+    if content.trim().is_empty() && images.is_empty() && state.attached_shell_outputs.is_empty() {
         return Ok(Vec::new());
     }
     if session_sync_pending(state) {
@@ -2305,10 +2490,12 @@ fn submit(
     if let Some(current) = &state.current_command {
         return Err(ReduceError::PromptAlreadyActive(current.id.clone()));
     }
+    let (wire_content, composed_display) =
+        state.compose_prompt_with_shell_outputs(&content, local_display.as_deref());
     let id = ids.next_id(CommandKind::Prompt);
     let command = WispTypedClientRpcCommands::prompt_with_attachments(
         &id,
-        &content,
+        &wire_content,
         &images.wire_images(),
         state
             .saved_session_attachment
@@ -2316,6 +2503,7 @@ fn submit(
             .map(|source| source.session_id.as_str()),
     )?;
     state.saved_session_attachment = None;
+    state.clear_attached_shell_outputs();
     state.last_command_error = None;
     state.last_command_failed = false;
     state.view_status = ViewStatus::Running;
@@ -2327,16 +2515,16 @@ fn submit(
     state.pending_approval = None;
     state.cancel_requested = false;
     state.context.operation_started();
-    let local_display = display_with_images(&content, local_display, images);
+    let local_display = display_with_images(&wire_content, composed_display, images);
     let prompt = state.transcript.append_prompt_with_images(
-        content.clone(),
+        wire_content,
         local_display,
         images.transcript_images(),
     );
     state.run_progress = Some(RunProgress::new(prompt));
     state.finished_run_cost = None;
     let mut effects = vec![UiEffect::SendCommand(command)];
-    // An image-only prompt has no text worth recalling from history.
+    // An image- or shell-only prompt has no typed text worth recalling from history.
     if !content.trim().is_empty() {
         effects.push(UiEffect::RecordPromptHistory(content));
     }
@@ -2381,6 +2569,73 @@ fn set_side_panel_visible(
     Ok(effects)
 }
 
+fn run_shell(
+    state: &mut UiState,
+    command_text: String,
+    ids: &mut impl CommandIdSource,
+) -> Result<Vec<UiEffect>, ReduceError> {
+    if state.mcp_sign_in.is_some() {
+        return Ok(vec![
+            UiEffect::Notice(
+                "Finish signing in to the MCP server first, or cancel it with Esc in /mcp.".into(),
+            ),
+            UiEffect::RequestRender,
+        ]);
+    }
+    if state.configuration_active() {
+        return Ok(vec![
+            UiEffect::Notice("Wait for configuration to finish.".into()),
+            UiEffect::RequestRender,
+        ]);
+    }
+    if session_sync_pending(state) {
+        return Ok(vec![
+            UiEffect::Notice("Wait for the current session metadata refresh to finish.".into()),
+            UiEffect::RequestRender,
+        ]);
+    }
+    if state.session_operation.is_some() {
+        return Err(ReduceError::SessionOperationActive);
+    }
+    if state.history_request.is_some() {
+        return Ok(vec![
+            UiEffect::Notice("Wait for the current history request to finish.".into()),
+            UiEffect::RequestRender,
+        ]);
+    }
+    if let Some(current) = &state.current_command {
+        return Err(ReduceError::PromptAlreadyActive(current.id.clone()));
+    }
+    let trimmed = command_text.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let id = ids.next_id(CommandKind::RunShell);
+    let rpc = WispTypedClientRpcCommands::run_shell(&id, trimmed)?;
+    state.last_command_error = None;
+    state.last_command_failed = false;
+    state.view_status = ViewStatus::Running;
+    state.interaction_status = InteractionStatus::Running;
+    state.current_command = Some(ActiveCommand {
+        id: id.clone(),
+        command_type: ActiveCommandType::RunShell,
+    });
+    state.pending_approval = None;
+    state.cancel_requested = false;
+    let entry_id = state.transcript.append_user_shell_command(&id, trimmed);
+    state.active_user_shell = Some(ActiveUserShell {
+        command_id: id,
+        command: trimmed.to_owned(),
+        entry_id,
+        progress_sequence: 0,
+    });
+    Ok(vec![
+        UiEffect::SendCommand(rpc),
+        UiEffect::RecordPromptHistory(format!("!{trimmed}")),
+        UiEffect::RequestRender,
+    ])
+}
+
 fn init_project(
     state: &mut UiState,
     ids: &mut impl CommandIdSource,
@@ -2423,7 +2678,9 @@ fn queue_submission(
     images: &ComposerImages,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ReduceError> {
-    if let Err(error) = state.queue_submission_preflight(&content, !images.is_empty()) {
+    let (wire_content, composed_display) =
+        state.compose_prompt_with_shell_outputs(&content, local_display.as_deref());
+    if let Err(error) = state.queue_submission_preflight(&wire_content, !images.is_empty()) {
         return Ok(vec![
             UiEffect::Notice(error.notice().into()),
             UiEffect::RequestRender,
@@ -2436,12 +2693,13 @@ fn queue_submission(
     let encoded = images.wire_images();
     let command = match kind {
         QueueKind::Steering => {
-            WispTypedClientRpcCommands::steer_with_images(&id, &content, &encoded)?
+            WispTypedClientRpcCommands::steer_with_images(&id, &wire_content, &encoded)?
         }
         QueueKind::FollowUp => {
-            WispTypedClientRpcCommands::follow_up_with_images(&id, &content, &encoded)?
+            WispTypedClientRpcCommands::follow_up_with_images(&id, &wire_content, &encoded)?
         }
     };
+    state.clear_attached_shell_outputs();
     let local_order = state.next_queue_order;
     state.next_queue_order = state
         .next_queue_order
@@ -2451,9 +2709,9 @@ fn queue_submission(
         id,
         PendingQueueSubmission {
             kind,
-            content,
+            content: wire_content,
             images: images.clone(),
-            local_display,
+            local_display: composed_display,
             local_order,
             observed_queue_update: false,
             completion: None,
@@ -3561,6 +3819,9 @@ fn commit_session_and_hydrate(
     state.context.invalidate();
     state.selected_session = Some(selected.clone());
     state.saved_session_attachment = None;
+    state.active_user_shell = None;
+    state.clear_attached_shell_outputs();
+    state.recent_shell_outputs.clear();
     state.last_session = Some(selected.session_id.clone());
     // Committing to another session (resume, clone, fork, tree navigation) drops the
     // previous session's failure; same-session history syncs keep it.
@@ -4711,6 +4972,9 @@ fn finish_new_session(
             state.finished_run_cost = None;
             state.selected_session = None;
             state.saved_session_attachment = None;
+            state.active_user_shell = None;
+            state.clear_attached_shell_outputs();
+            state.recent_shell_outputs.clear();
             clear_browser_viewport(state);
             state.last_session = None;
             state.history = HistoryWindow::default();
@@ -6155,6 +6419,84 @@ fn handle_backend_event(
             ok,
             error,
         } => finish_command(state, command_id, command_type, ok, error, ids),
+        BackendEvent::ShellProgress {
+            command_id,
+            stdout_tail,
+            stderr_tail,
+            stdout_bytes,
+            stderr_bytes,
+        } => {
+            let Some(active) = state.active_user_shell.as_mut() else {
+                return Ok(Vec::new());
+            };
+            if active.command_id != command_id {
+                return Ok(Vec::new());
+            }
+            active.progress_sequence = active.progress_sequence.saturating_add(1);
+            let changed = state.transcript.observe_user_shell_progress(
+                active.entry_id,
+                &ToolProgressInput {
+                    sequence: active.progress_sequence,
+                    stdout_tail,
+                    stderr_tail,
+                    stdout_bytes,
+                    stderr_bytes,
+                },
+            );
+            Ok(if changed {
+                vec![UiEffect::RequestRender]
+            } else {
+                Vec::new()
+            })
+        }
+        BackendEvent::ShellCompleted {
+            command_id,
+            command,
+            exit_code,
+            output,
+            truncated,
+            timed_out,
+            cancelled,
+            duration_ms,
+            error,
+        } => {
+            let Some(active) = state.active_user_shell.take() else {
+                return Ok(Vec::new());
+            };
+            if active.command_id != command_id {
+                state.active_user_shell = Some(active);
+                return Ok(Vec::new());
+            }
+            state.transcript.observe_user_shell_completed(
+                active.entry_id,
+                exit_code,
+                &output,
+                truncated,
+                timed_out,
+                cancelled,
+                duration_ms,
+                error.as_deref(),
+            );
+            let attachment = ShellOutputAttachment {
+                command_id,
+                entry_id: active.entry_id,
+                command: if command.is_empty() {
+                    active.command
+                } else {
+                    command
+                },
+                exit_code,
+                output,
+                truncated,
+                timed_out,
+                cancelled,
+            };
+            if state.recent_shell_outputs.len() >= MAX_RECENT_SHELL_OUTPUTS {
+                state.recent_shell_outputs.remove(0);
+            }
+            state.recent_shell_outputs.push(attachment);
+            Ok(vec![UiEffect::RequestRender])
+        }
         BackendEvent::WakeStarted { command_id } => Ok(adopt_wake_run(state, command_id)),
     }
 }
@@ -6735,6 +7077,33 @@ fn finish_current_command(
         run.streaming_bytes = 0;
     }
     state.transcript.finish_active_response();
+    if command_type == "run_shell" {
+        let mut effects = Vec::new();
+        if let Some(active) = state.active_user_shell.take() {
+            state.transcript.observe_user_shell_completed(
+                active.entry_id,
+                None,
+                "",
+                false,
+                false,
+                was_cancelled,
+                0,
+                error,
+            );
+            if !ok && !was_cancelled {
+                effects.push(UiEffect::Notice(bounded_session_text(
+                    error.unwrap_or("Shell command failed."),
+                    SESSION_NOTICE_MAX_BYTES,
+                )));
+            }
+        }
+        state.interaction_status = InteractionStatus::Idle;
+        state.view_status = ViewStatus::Idle;
+        state.last_command_failed = false;
+        state.git_diff.refresh_for_panel();
+        effects.push(UiEffect::RequestRender);
+        return Ok(effects);
+    }
     state.transcript.settle_unresolved_tools(if ok {
         "tool result missing"
     } else if was_cancelled {
@@ -14684,5 +15053,263 @@ mod tests {
         assert_eq!(finished.completed_output_tokens, 0);
         assert_eq!(finished.streaming_bytes, 0);
         assert_eq!(finished.streamed_tokens(), 0);
+    }
+
+    #[test]
+    fn run_shell_streams_completes_attaches_and_composes_prompt() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+
+        let effects = reduce(
+            &mut state,
+            UiAction::RunShell("git status".into()),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(
+            command_value(&effects[0]).unwrap(),
+            serde_json::json!({"type": "run_shell", "id": "run_shell-1", "command": "git status"})
+        );
+        assert!(matches!(
+            &effects[1],
+            UiEffect::RecordPromptHistory(entry) if entry == "!git status"
+        ));
+        assert_eq!(
+            state.current_command.as_ref().map(|cmd| cmd.command_type),
+            Some(ActiveCommandType::RunShell)
+        );
+        let entry_id = state.active_user_shell.as_ref().unwrap().entry_id;
+
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::ShellProgress {
+                command_id: "run_shell-1".into(),
+                stdout_tail: "On branch main\n".into(),
+                stderr_tail: String::new(),
+                stdout_bytes: 15,
+                stderr_bytes: 0,
+            }),
+            &mut ids,
+        )
+        .unwrap();
+
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::ShellCompleted {
+                command_id: "run_shell-1".into(),
+                command: "git status".into(),
+                exit_code: Some(0),
+                output: "On branch main\nnothing to commit".into(),
+                truncated: false,
+                timed_out: false,
+                cancelled: false,
+                duration_ms: 12,
+                error: None,
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("run_shell-1", "run_shell", true)),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(state.active_user_shell.is_none());
+        assert!(!state.post_prompt_session_sync_pending);
+        assert_eq!(state.recent_shell_outputs.len(), 1);
+
+        // Attach the latest shell output; empty prompt submission is allowed and
+        // prompt history records only what the user typed without the output prefix.
+        assert_eq!(
+            state.toggle_shell_output_attachment(Some(entry_id)),
+            Ok(true)
+        );
+        assert_eq!(state.attached_shell_outputs.len(), 1);
+        let submit_effects = reduce(&mut state, UiAction::Submit(String::new()), &mut ids).unwrap();
+        let prompt_cmd = command_value(&submit_effects[0]).unwrap();
+        let sent_prompt = prompt_cmd["prompt"].as_str().unwrap();
+        assert!(sent_prompt.contains("[User shell output: !git status (exit 0)]"));
+        assert!(sent_prompt.contains("nothing to commit"));
+        assert!(state.attached_shell_outputs.is_empty());
+        assert!(
+            !submit_effects
+                .iter()
+                .any(|effect| matches!(effect, UiEffect::RecordPromptHistory(_))),
+            "empty draft with attached shell output should not push a fake history entry"
+        );
+        assert_eq!(
+            state.transcript.latest_user_text(),
+            Some("[User shell output: !git status (exit 0)]\nOn branch main\nnothing to commit")
+        );
+        assert_eq!(
+            state
+                .transcript
+                .entries()
+                .last()
+                .map(|entry| entry.display_content()),
+            Some("[! git status]")
+        );
+
+        // Re-attaching then sending a typed prompt keeps only the typed text in history.
+        let finish_id = state.current_command.as_ref().unwrap().id.clone();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished(&finish_id, "prompt", true)),
+            &mut ids,
+        )
+        .unwrap();
+        state.post_prompt_session_sync_pending = false;
+        state.context = Default::default();
+        assert_eq!(state.toggle_shell_output_attachment(None), Ok(true));
+        let typed_effects = reduce(
+            &mut state,
+            UiAction::Submit("explain this".into()),
+            &mut ids,
+        )
+        .unwrap();
+        let typed_cmd = command_value(&typed_effects[0]).unwrap();
+        let typed_prompt = typed_cmd["prompt"].as_str().unwrap();
+        assert!(typed_prompt.contains("[User shell output: !git status (exit 0)]"));
+        assert!(typed_prompt.ends_with("explain this"));
+        assert!(typed_effects.iter().any(|effect| matches!(
+            effect,
+            UiEffect::RecordPromptHistory(text) if text == "explain this"
+        )));
+
+        // Starting a new session clears attached and recent shell outputs.
+        let finish_id2 = state.current_command.as_ref().unwrap().id.clone();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished(&finish_id2, "prompt", true)),
+            &mut ids,
+        )
+        .unwrap();
+        state.post_prompt_session_sync_pending = false;
+        state.context = Default::default();
+        assert_eq!(state.toggle_shell_output_attachment(None), Ok(true));
+        let new_session_effects = reduce(&mut state, UiAction::NewSession, &mut ids).unwrap();
+        let new_session_id = command_value(&new_session_effects[0]).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished(&new_session_id, "new_session", true)),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(state.attached_shell_outputs.is_empty());
+        assert!(state.recent_shell_outputs.is_empty());
+    }
+
+    #[test]
+    fn shell_card_stays_detachable_after_aging_out_of_recent_history() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+
+        reduce(&mut state, UiAction::RunShell("first".into()), &mut ids).unwrap();
+        let first_entry_id = state.active_user_shell.as_ref().unwrap().entry_id;
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::ShellCompleted {
+                command_id: "run_shell-1".into(),
+                command: "first".into(),
+                exit_code: Some(0),
+                output: "first output".into(),
+                truncated: false,
+                timed_out: false,
+                cancelled: false,
+                duration_ms: 5,
+                error: None,
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("run_shell-1", "run_shell", true)),
+            &mut ids,
+        )
+        .unwrap();
+        assert_eq!(
+            state.toggle_shell_output_attachment(Some(first_entry_id)),
+            Ok(true)
+        );
+
+        for n in 2..=18 {
+            reduce(&mut state, UiAction::RunShell(format!("cmd-{n}")), &mut ids).unwrap();
+            let cid = format!("run_shell-{n}");
+            reduce(
+                &mut state,
+                UiAction::BackendEvent(BackendEvent::ShellCompleted {
+                    command_id: cid.clone(),
+                    command: format!("cmd-{n}"),
+                    exit_code: Some(0),
+                    output: "ok".into(),
+                    truncated: false,
+                    timed_out: false,
+                    cancelled: false,
+                    duration_ms: 1,
+                    error: None,
+                }),
+                &mut ids,
+            )
+            .unwrap();
+            reduce(
+                &mut state,
+                UiAction::BackendEvent(finished(&cid, "run_shell", true)),
+                &mut ids,
+            )
+            .unwrap();
+        }
+
+        assert!(
+            state
+                .recent_shell_outputs
+                .iter()
+                .all(|item| item.entry_id != first_entry_id)
+        );
+        assert_eq!(
+            state.toggle_shell_output_attachment(Some(first_entry_id)),
+            Ok(false)
+        );
+        assert!(state.attached_shell_outputs.is_empty());
+    }
+
+    #[test]
+    fn run_shell_cancel_command_finished_settles_active_user_shell() {
+        let mut state = UiState::new("fake".into(), None, None);
+        let mut ids = DeterministicIds::default();
+        reduce(&mut state, UiAction::RunShell("sleep 30".into()), &mut ids).unwrap();
+        assert!(state.active_user_shell.is_some());
+
+        let cancel_effects = reduce(&mut state, UiAction::Cancel, &mut ids).unwrap();
+        assert!(command_value(&cancel_effects[0]).is_some());
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(BackendEvent::ShellCompleted {
+                command_id: "run_shell-1".into(),
+                command: "sleep 30".into(),
+                exit_code: None,
+                output: String::new(),
+                truncated: false,
+                timed_out: false,
+                cancelled: true,
+                duration_ms: 40,
+                error: Some("Shell command cancelled.".into()),
+            }),
+            &mut ids,
+        )
+        .unwrap();
+        reduce(
+            &mut state,
+            UiAction::BackendEvent(finished("run_shell-1", "run_shell", false)),
+            &mut ids,
+        )
+        .unwrap();
+        assert!(state.active_user_shell.is_none());
+        assert!(state.current_command.is_none());
+        assert_eq!(state.recent_shell_outputs.len(), 1);
     }
 }

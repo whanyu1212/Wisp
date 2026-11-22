@@ -1147,6 +1147,24 @@ impl BackendEvent {
                 ok: bool_field(value, &event_type, "ok")?,
                 error: optional_bounded_display_string_field(value, &event_type, "error", 1024)?,
             },
+            "rpc.shell.progress" => Self::ShellProgress {
+                command_id: exact_string_field(value, &event_type, "command_id", 256)?,
+                stdout_tail: string_field(value, &event_type, "stdout_tail")?,
+                stderr_tail: string_field(value, &event_type, "stderr_tail")?,
+                stdout_bytes: u64_field(value, &event_type, "stdout_bytes")?,
+                stderr_bytes: u64_field(value, &event_type, "stderr_bytes")?,
+            },
+            "rpc.shell.completed" => Self::ShellCompleted {
+                command_id: exact_string_field(value, &event_type, "command_id", 256)?,
+                command: bounded_display_string_field(value, &event_type, "command", 32_768)?,
+                exit_code: optional_i64_field(value, &event_type, "exit_code")?,
+                output: string_field(value, &event_type, "output")?,
+                truncated: bool_field_or(value, &event_type, "truncated", false)?,
+                timed_out: bool_field_or(value, &event_type, "timed_out", false)?,
+                cancelled: bool_field_or(value, &event_type, "cancelled", false)?,
+                duration_ms: u64_field_or(value, &event_type, "duration_ms", 0)?,
+                error: optional_bounded_display_string_field(value, &event_type, "error", 2_048)?,
+            },
             _ => Self::Other { event_type },
         };
         if let Some(entry_id) =

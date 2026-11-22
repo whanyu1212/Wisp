@@ -4561,7 +4561,10 @@ fn card_projection(
             }
             let tail_preview = card.status == ToolStatus::Error
                 || (matches!(card.status, ToolStatus::Done | ToolStatus::Running)
-                    && card.name == "bash");
+                    && card.name == "bash")
+                || (card.user_shell
+                    && card.status == ToolStatus::Cancelled
+                    && !card.retained_output.text.is_empty());
             let mut retained_preview = if tail_preview {
                 card.retained_output.preview_tail()
             } else {
@@ -4611,10 +4614,25 @@ fn card_projection(
             } else {
                 0
             };
-            let footer = card
-                .exit_code
-                .filter(|_| framed)
-                .map(|code| format!("exit {code}"));
+            let footer = if card.user_shell && card.status.terminal() {
+                if card.exit_code.is_some() || !card.retained_output.text.is_empty() {
+                    let tag = if card.attached_to_prompt {
+                        "attached to next prompt"
+                    } else {
+                        "local · Alt+S to attach"
+                    };
+                    Some(match card.exit_code {
+                        Some(code) => format!("exit {code} · {tag}"),
+                        None => tag.to_owned(),
+                    })
+                } else {
+                    None
+                }
+            } else {
+                card.exit_code
+                    .filter(|_| framed)
+                    .map(|code| format!("exit {code}"))
+            };
             if let Some(code) = card
                 .exit_code
                 .filter(|_| framed && retained_preview.base_offset == 0)
@@ -4660,7 +4678,7 @@ fn card_projection(
                 detail_gutters: Vec::new(),
                 action_suffix_start: note_start,
                 approval_tag_start,
-                inline_detail: false,
+                inline_detail: card.user_shell,
                 omission,
                 omission_before_detail: tail_preview,
                 output_toggle,
@@ -6752,7 +6770,7 @@ fn card_group_key(entry: &TranscriptEntry) -> Option<CardGroupKey> {
         return passed.then_some(CardGroupKey::Process);
     }
     let card = entry.tool_card()?;
-    if card.script.is_some() {
+    if card.script.is_some() || card.user_shell {
         None
     } else if matches!(card.name.as_str(), "read" | "grep" | "find" | "ls") {
         Some(CardGroupKey::Explore)

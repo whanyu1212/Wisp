@@ -346,6 +346,10 @@ pub struct ToolCardSnapshot {
     pub image_parts: Vec<crate::composer_images::TranscriptImage>,
     /// A codemode call's script and the calls it made; None for every other tool.
     pub script: Option<Box<crate::script_card::ScriptCard>>,
+    /// True for a user-initiated `!` shell command, kept local unless attached.
+    pub user_shell: bool,
+    /// True when this local `!` shell card's output is currently attached to the next prompt.
+    pub attached_to_prompt: bool,
 }
 
 /// The longest path a file reference keeps, the usual `PATH_MAX`.
@@ -430,7 +434,22 @@ impl ToolCardSnapshot {
             images: Vec::new(),
             image_parts: Vec::new(),
             script: script_of_call(input),
+            user_shell: false,
+            attached_to_prompt: false,
         }
+    }
+
+    /// Construct a running local `!` shell card (kept outside model history unless attached).
+    pub fn user_shell(command_id: &str, command: &str) -> Self {
+        let input = ToolCallInput {
+            call_id: command_id.to_owned(),
+            name: "bash".into(),
+            arguments: serde_json::json!({ "command": command }),
+            detail_source: ToolDetailSource::None,
+        };
+        let mut card = Self::requested(&input, ToolStatus::Running);
+        card.user_shell = true;
+        card
     }
 
     /// The file `file_reference` names, resolved as the card shows paths: against the
@@ -746,6 +765,66 @@ impl ToolCardSnapshot {
         true
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_user_shell_result(
+        &mut self,
+        exit_code: Option<i64>,
+        output: &str,
+        truncated: bool,
+        timed_out: bool,
+        cancelled: bool,
+        duration_ms: u64,
+        error: Option<&str>,
+    ) -> bool {
+        if !self.user_shell || self.status.terminal() {
+            return false;
+        }
+        self.live_line = None;
+        self.duration_ms = Some(u32::try_from(duration_ms).unwrap_or(u32::MAX));
+        self.exit_code = exit_code.and_then(|code| i32::try_from(code).ok());
+        self.backend_truncated = truncated;
+
+        let normalized = normalize_newlines(output);
+        let mut retained =
+            BoundedText::tail(&normalized, TOOL_OUTPUT_MAX_BYTES, TOOL_OUTPUT_MAX_LINES);
+        if retained.dropped_bytes > 0 {
+            retained.base_offset = retained.dropped_bytes;
+        }
+        self.retained_output = retained;
+
+        if cancelled {
+            self.status = ToolStatus::Cancelled;
+            self.failure_reason = None;
+            if self.retained_output.text.is_empty() {
+                self.detail = bounded_reason(error.unwrap_or("cancelled"));
+            } else {
+                self.detail.clear();
+            }
+        } else if timed_out {
+            self.status = ToolStatus::Error;
+            self.failure_reason = Some("timed out".into());
+            if self.retained_output.text.is_empty() {
+                self.detail = bounded_reason(error.unwrap_or("timed out"));
+            } else {
+                self.detail.clear();
+            }
+        } else if error.is_some() && exit_code.is_none() {
+            self.status = ToolStatus::Error;
+            self.failure_reason = None;
+            self.detail = bounded_reason(error.unwrap_or("shell command failed"));
+        } else if let Some(code) = exit_code.filter(|code| *code != 0) {
+            self.status = ToolStatus::Error;
+            self.command_exited_nonzero = true;
+            self.failure_reason = Some(format!("exit {code}"));
+            self.detail.clear();
+        } else {
+            self.status = ToolStatus::Done;
+            self.failure_reason = None;
+            self.detail.clear();
+        }
+        true
+    }
+
     pub(crate) fn reconcile_historical_result(
         &mut self,
         result: &ToolResultInput,
@@ -779,6 +858,9 @@ impl ToolCardSnapshot {
     /// status marker carries the state. An MCP tool is labelled `MCP`, with the server
     /// and tool it calls after the label; another unknown tool by its own name.
     pub fn action_label(&self) -> String {
+        if self.user_shell {
+            return "Shell".into();
+        }
         match self.name.as_str() {
             "bash" => "Bash".into(),
             "read" => "Read".into(),
@@ -818,6 +900,9 @@ impl ToolCardSnapshot {
     /// flight (`Running`), finished (`Ran`), or never run (`Run`, as in
     /// `Run cargo test · denied`). Another tool is named by its own name.
     pub fn action_verb(&self) -> String {
+        if self.user_shell {
+            return "!".into();
+        }
         if let Some(script) = &self.script {
             return script.action_verb(self.status);
         }

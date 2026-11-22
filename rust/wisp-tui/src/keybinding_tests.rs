@@ -907,3 +907,24 @@ async fn shortcuts_request_a_frame() {
         assert!(ui.render_pending, "{name}");
     }
 }
+
+#[test]
+fn attach_shell_output_default_binding_and_override() {
+    let alt_s = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT);
+    let defaults = Bindings::default();
+    assert_eq!(
+        defaults.action(alt_s),
+        Some(keybindings::Action::AttachShellOutput)
+    );
+    assert_eq!(
+        keybindings::Action::AttachShellOutput.id(),
+        "shell.attach_output"
+    );
+
+    let overridden = Bindings::from_json(r#"{"history.open":["alt+s"]}"#).unwrap();
+    assert_eq!(overridden.action(alt_s), Some(keybindings::Action::History));
+    assert_ne!(
+        overridden.action(alt_s),
+        Some(keybindings::Action::AttachShellOutput)
+    );
+}
