@@ -542,8 +542,10 @@ def _description(
         "classes with inheritance or third-party packages. Some builtins are missing: "
         "map(), filter(), ascii(), format(), getattr(), hasattr(), setattr(), callable(), "
         "dir() and vars(); use comprehensions, f-strings and plain attribute access. "
-        "json, re, collections, itertools and math are available. It is type-checked "
-        "against the tools' parameters before it runs.",
+        "Stdlib modules json, re, collections, itertools and math can be imported (they are "
+        "not pre-imported; write e.g. 'import json'). The entire script is statically "
+        "type-checked before running; annotate heterogeneous containers (e.g. "
+        "'rows: list[dict[str, object]] = []') so later appends do not fail type inference.",
         "",
         "State: `await store(key, value)`, `await load(key)` (KeyError if missing), "
         "and `await delete(key)` (whether it existed). Values are copied strict JSON. "

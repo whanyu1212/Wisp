@@ -96,6 +96,10 @@ def test_default_prompt_asks_for_action_oriented_workflow(tmp_path: Path) -> Non
     assert "perform the work rather than merely describing what could be done" in prompt
     assert "Continue until the task is complete or a concrete blocker" in prompt
     assert (
+        "When the user approves a proposed plan, design, or mockup" in prompt
+        and "start implementing the agreed work in the same turn" in prompt
+    )
+    assert (
         "implementation, relevant callers, tests, configuration, and nearby conventions" in prompt
     )
     assert "Search for existing helpers and patterns" in prompt
