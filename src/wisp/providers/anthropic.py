@@ -70,6 +70,7 @@ from wisp.providers.events import (
     parse_tool_arguments,
     parse_tool_call,
 )
+from wisp.providers.prompt_groups import prompt_parts, request_groups
 from wisp.retry import RetryDecision, RetryPolicy, http_retry_decision, retry_delay_seconds
 
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5"
@@ -1024,20 +1025,12 @@ def _messages_to_anthropic(
     """
 
     anthropic_messages: list[MessageParam] = []
-    index = 0
-    while index < len(messages):
-        message = messages[index]
+    for group in request_groups(messages, group_tools=True):
+        message = group[0]
         if message.role == "system":
-            index += 1
             continue
         if message.role == "tool" and message.tool_call_id:
-            results: list[ToolCallResult] = []
-            while index < len(messages):
-                result = messages[index]
-                if result.role != "tool" or not result.tool_call_id:
-                    break
-                results.append(tool_call_result_from_message(result))
-                index += 1
+            results = [tool_call_result_from_message(result) for result in group]
             anthropic_messages.append(_tool_results_to_message(results))
             continue
         if message.role == "assistant" and message.tool_calls:
@@ -1048,7 +1041,6 @@ def _messages_to_anthropic(
             )
             if saved_turn is not None:
                 anthropic_messages.append(saved_turn)
-                index += 1
                 continue
             blocks: list[_ReplayBlockParam] = []
             if message.content:
@@ -1063,16 +1055,15 @@ def _messages_to_anthropic(
                 for tool_call in message.tool_calls
             )
             anthropic_messages.append(cast(MessageParam, {"role": "assistant", "content": blocks}))
-            index += 1
             continue
-        if message.images:
-            anthropic_messages.append({"role": "user", "content": _user_content_blocks(message)})
-            index += 1
+        if len(group) > 1 or message.images:
+            anthropic_messages.append(
+                {"role": "user", "content": prompt_parts(group, _user_content_blocks)}
+            )
             continue
         role = "user" if message.role == "tool" else message.role
         content: TextBlockParam = {"type": "text", "text": message.content}
         anthropic_messages.append(cast(MessageParam, {"role": role, "content": [content]}))
-        index += 1
     return anthropic_messages
 
 

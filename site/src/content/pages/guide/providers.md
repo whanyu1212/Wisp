@@ -28,6 +28,10 @@ wisp -p "explain this repository" --provider xai --model grok-4.6
 wisp -p "review this change" --provider deepseek --model deepseek-v4-pro
 ```
 
+If a request fails or is cancelled before a reply, you can send another prompt in the same
+session. Wisp keeps both prompts in the transcript but sends consecutive prompts as one user
+message, so endpoints that require alternating roles can continue.
+
 ## DeepSeek Chat Completions
 
 The built-in `deepseek` provider uses DeepSeek's OpenAI-format Chat Completions API at

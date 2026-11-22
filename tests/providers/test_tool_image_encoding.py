@@ -22,7 +22,11 @@ from wisp.providers.base import (
 from wisp.providers.google import _function_responses_content, _messages_to_google
 from wisp.providers.openai import _messages_to_response_input, _tool_results_to_response_input
 from wisp.providers.openai_codex import _messages_to_codex_input, _tool_results_to_codex_input
-from wisp.providers.openai_compatible import _messages_to_chat, _tool_results_to_messages
+from wisp.providers.openai_compatible import (
+    _join_wire_users,
+    _messages_to_chat,
+    _tool_results_to_messages,
+)
 
 _FIXTURES = Path(__file__).parents[1] / "fixtures" / "images"
 PNG = (_FIXTURES / "pixel.png").read_bytes()
@@ -165,6 +169,12 @@ def test_chat_images_follow_tool_run() -> None:
     assert live == [*expected_tool_messages, expected_images]
     assert replayed[0]["role"] == "assistant"
     assert replayed[1:] == [*expected_tool_messages, expected_images]
+    wire = _join_wire_users([*replayed, {"role": "user", "content": "next"}])
+    assert wire[:-1] == replayed[:-1]
+    assert wire[-1] == {
+        "role": "user",
+        "content": [*expected_images["content"], {"type": "text", "text": "next"}],
+    }
 
 
 def test_chat_names_unsent_images() -> None:

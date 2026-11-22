@@ -57,6 +57,7 @@ from wisp.providers.events import (
     ProviderUsage,
     ToolCall,
 )
+from wisp.providers.prompt_groups import prompt_parts, request_groups
 from wisp.retry import RetryDecision, RetryPolicy, http_retry_decision, retry_delay_seconds
 
 OPENAI_COMPATIBLE_PROVIDER_NAME = "openai-compatible"
@@ -352,7 +353,7 @@ class OpenAICompatibleProvider:
         chat_messages.extend(_messages_to_chat(extra_messages))
         kwargs: dict[str, object] = {
             "model": model,
-            "messages": chat_messages,
+            "messages": _join_wire_users(chat_messages),
             "stream": True,
             "stream_options": {"include_usage": True},
         }
@@ -466,20 +467,11 @@ class OpenAICompatibleProvider:
 
 def _messages_to_chat(messages: Sequence[Message]) -> list[ChatPayload]:
     result: list[ChatPayload] = []
-    index = 0
-    while index < len(messages):
-        message = messages[index]
-        index += 1
+    for group in request_groups(messages, group_tools=True):
+        message = group[0]
         if message.role == "tool" and message.tool_call_id:
             # A run of results is encoded together, so their images follow the last.
-            results = [tool_call_result_from_message(message)]
-            while (
-                index < len(messages)
-                and messages[index].role == "tool"
-                and messages[index].tool_call_id
-            ):
-                results.append(tool_call_result_from_message(messages[index]))
-                index += 1
+            results = [tool_call_result_from_message(item) for item in group]
             result.extend(_tool_results_to_messages(results))
         elif message.role == "assistant" and message.tool_calls:
             # A structured tool-call row from the still-active turn (see
@@ -503,12 +495,32 @@ def _messages_to_chat(messages: Sequence[Message]) -> list[ChatPayload]:
                     ],
                 }
             )
-        elif message.images:
-            result.append({"role": "user", "content": _chat_user_content(message)})
+        elif len(group) > 1 or message.images:
+            result.append({"role": "user", "content": prompt_parts(group, _chat_user_content)})
         else:
             role = "user" if message.role == "tool" else message.role
             result.append({"role": role, "content": message.content})
     return result
+
+
+def _join_wire_users(messages: list[ChatPayload]) -> list[ChatPayload]:
+    """Join user rows that meet only after tool-image or continuation expansion."""
+    joined: list[ChatPayload] = []
+    for row in messages:
+        if row.get("role") == "user" and joined and joined[-1].get("role") == "user":
+            left, right = joined[-1]["content"], row["content"]
+            if isinstance(left, str) and isinstance(right, str):
+                content: object = f"{left}\n\n{right}"
+            else:
+                parts = list(left) if isinstance(left, list) else [{"type": "text", "text": left}]
+                parts.extend(
+                    right if isinstance(right, list) else [{"type": "text", "text": right}]
+                )
+                content = parts
+            joined[-1] = {"role": "user", "content": content}
+        else:
+            joined.append(row)
+    return joined
 
 
 def _chat_user_content(message: Message) -> list[ChatPayload]:

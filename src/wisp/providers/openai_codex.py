@@ -48,6 +48,7 @@ from wisp.providers.events import (
     parse_tool_call,
 )
 from wisp.providers.openai import responses_tool_output, responses_user_content
+from wisp.providers.prompt_groups import prompt_parts, request_groups
 from wisp.retry import RetryDecision, RetryPolicy, http_retry_decision, retry_delay_seconds
 
 DEFAULT_OPENAI_CODEX_MODEL = "gpt-5.6-sol"
@@ -734,7 +735,8 @@ def _messages_to_codex_input(
     native_output: _NativeOutputLookup | None = None,
 ) -> list[dict[str, object]]:
     result: list[dict[str, object]] = []
-    for message in messages:
+    for group in request_groups(messages):
+        message = group[0]
         if message.role in {"system", "developer"}:
             continue
         native_items = native_output(message) if native_output is not None else None
@@ -769,8 +771,8 @@ def _messages_to_codex_input(
                     }
                 )
             continue
-        if message.images:
-            result.append({"role": "user", "content": responses_user_content(message)})
+        if len(group) > 1 or message.images:
+            result.append({"role": "user", "content": prompt_parts(group, responses_user_content)})
             continue
         result.append({"role": _to_codex_role(message.role), "content": message.content})
     return result

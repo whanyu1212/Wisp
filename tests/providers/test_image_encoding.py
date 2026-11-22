@@ -196,6 +196,29 @@ def test_text_messages_unchanged() -> None:
     ]
 
 
+def test_adjacent_prompts_keep_image_order_and_placeholders() -> None:
+    older = _message("earlier", loaded=False)
+    newer = _message("later")
+    for encode in (
+        _messages_to_chat,
+        _messages_to_codex_input,
+        _messages_to_response_input,
+        _messages_to_anthropic,
+    ):
+        (first,) = encode([older.model_copy(update={"content": "earlier\n\n"})])
+        (last,) = encode([newer])
+        assert encode([older, newer]) == [
+            {"role": "user", "content": [*first["content"], *last["content"]]}
+        ]
+    first_g, last_g = (
+        _messages_to_google([m], model="test")[0]
+        for m in (older.model_copy(update={"content": "earlier\n\n"}), newer)
+    )
+    assert _messages_to_google([older, newer], model="test") == [
+        genai_types.Content(role="user", parts=[*(first_g.parts or []), *(last_g.parts or [])])
+    ]
+
+
 def test_capability_is_opt_in() -> None:
     """An adapter that never declares image input is treated as text-only."""
 
