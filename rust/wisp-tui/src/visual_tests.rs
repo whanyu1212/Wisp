@@ -3737,3 +3737,161 @@ async fn files_side_panel_tab_filters_previews_and_inserts_reference() {
     press(&mut ui, &writer, KeyCode::Char('d')).await;
     assert!(ui.git_diff_view.is_some());
 }
+
+#[tokio::test]
+async fn session_timeline_waterfall_shows_parallel_batches_and_subagents() {
+    let mut ui = LiveUi {
+        state: UiState::new("fake".into(), None, None),
+        ..LiveUi::default()
+    };
+    let (writer, _rx) = mpsc::channel(8);
+    ui.state
+        .transcript
+        .append_prompt("audit repo\x1b[31m!".into());
+
+    let push_tool = |state: &mut crate::reducer::UiState,
+                     call_id: &str,
+                     name: &str,
+                     args: serde_json::Value,
+                     started_at_ms: i64,
+                     duration_ms: u64,
+                     nested: Vec<crate::script_card::ScriptCall>| {
+        state
+            .transcript
+            .observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: call_id.into(),
+                name: name.into(),
+                arguments: args,
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+            });
+        state
+            .transcript
+            .observe_tool_result(crate::tool_cards::ToolResultInput {
+                nested: crate::script_card::ScriptResult {
+                    calls: nested,
+                    omitted: 0,
+                },
+                call_id: call_id.into(),
+                name: name.into(),
+                output_source_bytes: 2,
+                output_source_lines: 1,
+                output: "ok".into(),
+                output_tail: None,
+                output_projection_cut_mid_line: false,
+                is_error: false,
+                failure_code: None,
+                retryable: false,
+                recovery_hint: None,
+                exit_code: Some(0),
+                output_has_exit_status: false,
+                before_text: None,
+                created: false,
+                summary: None,
+                truncated: false,
+                process_id: None,
+                process_state: None,
+                process_error: None,
+                stdout: None,
+                stdout_source_bytes: 0,
+                stderr: None,
+                stderr_source_bytes: 0,
+                stdout_truncated: false,
+                stderr_truncated: false,
+                stdout_dropped_bytes: 0,
+                stderr_dropped_bytes: 0,
+                duration_ms: Some(duration_ms),
+                started_at_ms: Some(started_at_ms),
+                process_started_at_ms: None,
+                process_ended_at_ms: None,
+                edit_locations: Vec::new(),
+                images: Vec::new(),
+                image_parts: Vec::new(),
+            });
+    };
+
+    push_tool(
+        &mut ui.state,
+        "c-read",
+        "read",
+        serde_json::json!({"path": "src/lib.rs"}),
+        1_000,
+        700,
+        Vec::new(),
+    );
+    push_tool(
+        &mut ui.state,
+        "c-rg",
+        "rg",
+        serde_json::json!({"pattern": "SidePanel"}),
+        1_050,
+        1_400,
+        Vec::new(),
+    );
+    push_tool(
+        &mut ui.state,
+        "sub-1",
+        "spawn_agent",
+        serde_json::json!({"task": "Verify\x1b[2J timeline safety\nsecond line"}),
+        3_000,
+        4_000,
+        vec![crate::script_card::ScriptCall {
+            call_id: "nc-1".into(),
+            tool: "cargo_test".into(),
+            arguments: serde_json::json!({}),
+            state: crate::script_card::ScriptCallState::Done,
+            failure_code: None,
+            auto_approved: true,
+            approval_note: None,
+            error: None,
+            duration_ms: Some(2_500),
+        }],
+    );
+    let _ = ui.state.transcript.start_message(1);
+    let _ = ui.state.transcript.complete_message(1, "done".into());
+    ui.state
+        .transcript
+        .attach_run_summary(crate::transcript::RunTotals::finished(8_000, 3));
+
+    // Initial wide render establishes docked width and shows the compact Timeline summary row.
+    let docked = draw(&mut ui, 152, 26);
+    row_containing(&docked, "Timeline");
+    row_containing(&docked, "t timeline");
+
+    // Focus Session panel and expand (`F8` -> `f`) to open the full swimlane waterfall.
+    press(&mut ui, &writer, KeyCode::F(8)).await;
+    press(&mut ui, &writer, KeyCode::Char('f')).await;
+    assert!(ui.side_panel.expanded());
+    assert!(ui.side_panel.timeline_active());
+
+    let expanded = draw(&mut ui, 152, 26);
+    row_containing(&expanded, "TURN #1 TIMELINE");
+    row_containing(&expanded, "Batch 1 (×2)");
+    row_containing(&expanded, "Subagent #1");
+    row_containing(&expanded, "cargo_test");
+    row_containing(&expanded, "INSPECT ·");
+    assert!(
+        !(0..expanded.area().height).any(|y| buffer_row(&expanded, y).contains('\u{1b}')),
+        "timeline must sanitize escape sequences"
+    );
+
+    // Move down to `Subagent #1` (`Down` past Batch 1 + its 2 children = 3 steps), fold with Left,
+    // repaint so `activation_awaits_paint` sees the painted selection, and Enter jumps to its card.
+    for _ in 0..3 {
+        press(&mut ui, &writer, KeyCode::Down).await;
+    }
+    press(&mut ui, &writer, KeyCode::Left).await;
+    let collapsed = draw(&mut ui, 152, 26);
+    row_containing(&collapsed, "INSPECT · Subagent #1");
+    press(&mut ui, &writer, KeyCode::Enter).await;
+    assert!(!ui.side_panel.overlay_open());
+    let sub_entry = ui.state.transcript.tool_entry_for_call("sub-1").unwrap();
+    assert!(ui.transcript_row_cache.fold().is_expanded(sub_entry));
+
+    // Reopen timeline with `F8` -> `t` on a narrow terminal (`52` cols) to verify compact fallback.
+    let _ = draw(&mut ui, 52, 24);
+    press(&mut ui, &writer, KeyCode::F(8)).await;
+    press(&mut ui, &writer, KeyCode::Char('t')).await;
+    let narrow = draw(&mut ui, 52, 24);
+    row_containing(&narrow, "TURN #1 TIMELINE");
+    row_containing(&narrow, "Subagent #1");
+}

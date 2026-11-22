@@ -133,6 +133,10 @@ pub(crate) struct SidePanel {
     reported_files_tab: bool,
     /// State and cached previews for `PanelMode::Files`.
     files_view: RefCell<files::FilesState>,
+    /// Whether the inline `Session` turn timeline waterfall is toggled in the docked panel.
+    timeline_open: bool,
+    /// State for the parallel turn & subagent swimlane waterfall.
+    timeline_view: RefCell<timeline::TimelineState>,
     /// The width the user dragged the docked panel to, for this process only; `None`
     /// follows [`auto_width`]. Clamped to the terminal at layout, so it returns when a
     /// terminal that shrank grows back.
@@ -192,6 +196,7 @@ pub(crate) enum Disclosure {
 pub(crate) enum PanelAction {
     CloseBrowser,
     ToggleExpand,
+    OpenTimeline,
     Toggle(Disclosure),
     Open(Target),
     BrowserControl(BrowserControl),
@@ -234,6 +239,7 @@ enum Section {
     Attention,
     Context,
     Inventory,
+    Timeline,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -256,6 +262,8 @@ pub(crate) enum Target {
     Process(String),
     /// The transcript card of a subagent, by its tool call id.
     Subagent(String),
+    /// The transcript card of a tool call, by its call id.
+    ToolCall(String),
 }
 
 /// What a key in the overlay asks of the app.
@@ -293,8 +301,14 @@ impl SidePanel {
         self.expanded
     }
 
+    pub(crate) fn timeline_active(&self) -> bool {
+        self.mode == PanelMode::LiveWork && (self.expanded || self.timeline_open)
+    }
+
     pub(crate) fn toggle_expanded(&mut self) {
         self.expanded = !self.expanded;
+        self.scroll.set(0);
+        self.close_peek();
         if self.expanded {
             self.hidden = false;
             self.overlay = true;
@@ -319,6 +333,7 @@ impl SidePanel {
             self.browser_interacting = false;
         }
         self.mode = mode;
+        self.timeline_open = false;
         self.close_peek();
         self.cursor = None;
         self.scroll.set(0);
@@ -517,6 +532,7 @@ impl SidePanel {
     pub(crate) fn toggle(&mut self) {
         self.browser_interacting = false;
         self.expanded = false;
+        self.timeline_open = false;
         if docks(self.width) {
             self.rehide = false;
             self.hidden = !self.hidden;
@@ -547,6 +563,8 @@ impl SidePanel {
         let hidden = self.hidden;
         self.focus();
         self.mode = PanelMode::LiveWork;
+        self.expanded = false;
+        self.timeline_open = false;
         self.browser_interacting = false;
         self.rehide = hidden;
         self.cursor = Some(Cursor {
@@ -679,6 +697,7 @@ impl SidePanel {
         }
         if matches!(key, KeyCode::Char('[') | KeyCode::Char(']')) {
             self.browser_interacting = false;
+            self.timeline_open = false;
             self.mode = self.mode.cycle(key == KeyCode::Char(']'));
             self.cursor = None;
             self.scroll.set(0);
@@ -687,6 +706,7 @@ impl SidePanel {
         }
         if key == KeyCode::Char('b') {
             self.browser_interacting = false;
+            self.timeline_open = false;
             self.mode = match self.mode {
                 PanelMode::LiveWork | PanelMode::Files => PanelMode::Browser,
                 PanelMode::Browser => PanelMode::LiveWork,
@@ -695,6 +715,23 @@ impl SidePanel {
             self.scroll.set(0);
             self.close_peek();
             return OverlayKey::Moved;
+        }
+        if self.mode == PanelMode::LiveWork && key == KeyCode::Char('t') {
+            self.scroll.set(0);
+            self.close_peek();
+            if self.expanded {
+                self.expanded = false;
+                self.timeline_open = false;
+                if docks(self.width) {
+                    self.overlay = false;
+                }
+            } else {
+                self.timeline_open = !self.timeline_open;
+            }
+            return OverlayKey::Moved;
+        }
+        if self.timeline_active() {
+            return self.timeline_view.borrow_mut().handle_key(key, state);
         }
         if self.mode == PanelMode::Files {
             return self.handle_files_key(key, state);
@@ -849,6 +886,13 @@ impl SidePanel {
                 self.toggle_expanded();
                 OverlayKey::Moved
             }
+            PanelAction::OpenTimeline => {
+                self.timeline_open = true;
+                self.overlay = true;
+                self.scroll.set(0);
+                self.close_peek();
+                OverlayKey::Moved
+            }
             PanelAction::Open(target) => OverlayKey::Open(target),
             PanelAction::BrowserControl(control) => OverlayKey::BrowserControl(control),
             PanelAction::Toggle(Disclosure::Process(process_id)) => {
@@ -907,6 +951,13 @@ impl SidePanel {
             }
         };
         let Some((hit_index, hit)) = hit else {
+            if self.timeline_active() {
+                let outcome = self.timeline_view.borrow_mut().click(column, row);
+                if outcome == OverlayKey::Moved {
+                    self.overlay = true;
+                }
+                return outcome;
+            }
             if self.mode == PanelMode::Files {
                 let (outcome, toggle_expand) =
                     self.files_view
@@ -943,6 +994,10 @@ impl SidePanel {
     }
 
     pub(crate) fn scroll_at(&self, column: u16, row: u16, lines: i32) {
+        if self.timeline_active() {
+            self.timeline_view.borrow().scroll_by(lines);
+            return;
+        }
         if self.mode == PanelMode::Files {
             let files_view = self.files_view.borrow();
             if !files_view.preview_contains(column, row) || !files_view.scroll_preview_by(lines) {
@@ -979,6 +1034,7 @@ impl SidePanel {
         self.browser_interacting = false;
         self.overlay = false;
         self.expanded = false;
+        self.timeline_open = false;
         self.close_peek();
         if std::mem::take(&mut self.rehide) {
             self.hidden = true;
@@ -1142,6 +1198,11 @@ impl SidePanel {
 
     pub(crate) fn reset_files_view(&mut self) {
         self.files_view.borrow_mut().reset_for_workspace();
+    }
+
+    pub(crate) fn reset_timeline_view(&mut self) {
+        self.timeline_view.borrow_mut().reset_for_session();
+        self.timeline_open = false;
     }
 
     /// Count the changed files' lines once per snapshot. While a new snapshot loads,
@@ -1490,6 +1551,11 @@ pub(crate) fn render_with_preview(
         return;
     }
 
+    if panel.timeline_active() {
+        timeline::render(frame, inner, area, state, panel, palette);
+        return;
+    }
+
     let focus = Focus::of(state);
     let mut rows = PanelRows::default();
     if show_controls {
@@ -1540,6 +1606,27 @@ pub(crate) fn render_with_preview(
     reading::attention_rows(&mut rows, state, panel, width, palette);
     reading::context_line(&mut rows, state, width, palette);
     reading::inventory_summary(&mut rows, state, panel, width, palette);
+    if let Some(summary) = timeline::latest_turn_summary(state) {
+        let label_right = "t timeline";
+        rows.section(
+            Section::Timeline,
+            vec![
+                Line::from(heading("Timeline", palette)),
+                spread(
+                    vec![Span::styled(
+                        ui::clip_columns(&summary, width.saturating_sub(label_right.len() + 1)),
+                        Style::default().fg(palette.foreground),
+                    )],
+                    vec![Span::styled(
+                        label_right,
+                        Style::default().fg(palette.muted),
+                    )],
+                    width,
+                ),
+            ],
+        );
+        rows.action(1, PanelAction::OpenTimeline);
+    }
 
     // The bottom row stays anchored while the panel scrolls. A focused panel
     // names its keys there; otherwise the row appears only to show the scroll
@@ -2015,6 +2102,7 @@ mod peek;
 mod plan;
 mod reading;
 mod running;
+mod timeline;
 
 #[derive(Default)]
 struct PanelRows {
@@ -3411,11 +3499,14 @@ mod tests {
             Section::Queue,
             Section::Context,
             Section::Inventory,
+            Section::Timeline,
             Section::Header,
         ] {
             panel.key(KeyCode::Tab, &state);
             assert_eq!(panel.focused(&state).unwrap().section, section);
         }
+        panel.key(KeyCode::BackTab, &state);
+        assert_eq!(panel.focused(&state).unwrap().section, Section::Timeline);
         panel.key(KeyCode::BackTab, &state);
         assert_eq!(
             panel.key(KeyCode::Enter, &state),

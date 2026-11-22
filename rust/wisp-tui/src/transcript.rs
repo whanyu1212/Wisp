@@ -528,6 +528,11 @@ impl TranscriptEntry {
         ))
     }
 
+    /// Raw totals of the run ending on this entry, regardless of reveal progress.
+    pub(crate) fn run_totals(&self) -> Option<&RunTotals> {
+        self.run_summary.as_ref().map(|summary| &summary.totals)
+    }
+
     /// Per-turn edit totals attached to this summary row, when the turn edited at least one file.
     pub(crate) fn run_summary_changes(&self) -> Option<TurnChanges> {
         self.run_summary
