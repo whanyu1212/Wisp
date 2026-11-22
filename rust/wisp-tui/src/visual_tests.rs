@@ -3661,16 +3661,18 @@ async fn files_side_panel_tab_filters_previews_and_inserts_reference() {
 
     let docked = draw(&mut ui, 152, 24);
     assert!(buffer_row(&docked, 0).contains("Session   Files   Browser"));
-    row_containing(&docked, "PROJECT TREE · 2 files");
-    row_containing(&docked, "M lib.rs");
+    let header = row_containing(&docked, "Project tree");
+    assert!(buffer_row(&docked, header).trim_end().ends_with("2 files"));
+    row_containing(&docked, "▌├─ ▾ \u{f0770} src/");
+    row_containing(&docked, "│ └─ M \u{f1617} lib.rs");
 
     // Clicking a file row in the Files tab selects it on first click and expands preview on second click.
-    let readme_row = (0..docked.area().height)
-        .find(|&y| buffer_row(&docked, y).contains("README.md"))
-        .expect("README.md row");
-    let readme_col = buffer_row(&docked, readme_row)
-        .find("README.md")
-        .expect("README.md column") as u16;
+    let readme_row = row_containing(&docked, "└─ \u{f0354} README.md");
+    let readme_col = (0..docked.area().width.saturating_sub(1))
+        .find(|&x| {
+            docked[(x, readme_row)].symbol() == "R" && docked[(x + 1, readme_row)].symbol() == "E"
+        })
+        .expect("README.md column");
     assert_eq!(
         ui.side_panel.click(readme_col, readme_row),
         side_panel::OverlayKey::Moved

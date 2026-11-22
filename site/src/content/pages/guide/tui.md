@@ -286,8 +286,8 @@ historical replay displays raw content. Markers are never written into session h
 
 ### Side panel {#side-panel}
 
-A one-row top bar shows the session name at its left and the side panel's `Work` and `Browser`
-tabs at its right. The highlighted tab is the view the open panel shows; no tab is highlighted while
+A one-row top bar shows the session name at its left and the side panel's `Session`, `Files`, and
+`Browser` tabs at its right. The highlighted tab is the view the open panel shows; no tab is highlighted while
 the panel is closed. Click a tab to open the panel on that view, or click the highlighted tab to
 close the panel. The top bar stays in place at every terminal width. The `Browser` tab is also
 how you open the live browser: with no page open, it shows an address bar for an address or a
@@ -340,6 +340,13 @@ appears and after each run, except while `/diff` is open. The Recent turns headi
 `Ctrl+T` also opens the session tree. While working or awaiting approval, the current activity and
 queue lead the panel. On terminals at least 160 columns wide, Edit and Write cards still show old
 and new content side by side.
+
+#### File icons
+
+The `Files` tab shows files touched this session and a project tree with Git status and Material
+Design file and folder icons. Use a [Nerd Fonts](https://www.nerdfonts.com/) v3 Mono font in your
+terminal to display the icons correctly. Narrow rows omit icons when filenames or Git counts need
+the space.
 
 ## Themes and appearance
 
