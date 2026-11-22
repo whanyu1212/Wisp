@@ -47,7 +47,7 @@ the entire default keymap; other valid user settings still apply.
 | `theme.toggle` | Unbound (`/theme`) | Toggle Paper / last dark theme |
 | `panel.toggle` | Ctrl+P | Show or hide the side panel |
 | `run.background` | Ctrl+B | Move the running shell command to the background |
-| `panel.focus` | F8 | Focus the side panel; Esc returns to the composer |
+| `panel.focus` | F8 | Focus the side panel (`Session`, `Files`, `Browser`; `[` / `]` tabs, `t` turn timeline, `/` file filter); Esc returns to the composer |
 | `panel.background` | Unbound (`Down`, `/ps`) | Focus the side panel's background processes |
 | `session.tree` | Ctrl+T | Open the session tree to switch branches (`/tree`) |
 | `transcript.browse` | F6 | Browse and copy transcript messages, code blocks, and cards |

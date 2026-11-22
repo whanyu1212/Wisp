@@ -6387,7 +6387,7 @@ fn handle_backend_event(
             }
             state
                 .transcript
-                .append_prompt_with_images(content, local_display, image_parts);
+                .append_injected_prompt(content, local_display, image_parts);
             Ok(vec![UiEffect::RequestRender])
         }
         BackendEvent::GitDiffReported { .. }

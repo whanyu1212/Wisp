@@ -1291,6 +1291,7 @@ impl LiveUi {
                         self.session_picker = None;
                     }
                     self.side_panel.reset_files_view();
+                    self.side_panel.reset_timeline_view();
                     self.reset_transcript_presentation();
                 }
                 UiEffect::HistoryWindowChanged { .. } | UiEffect::ReanchorTranscript { .. } => {
@@ -5281,6 +5282,15 @@ impl LiveUi {
                 self.render_pending = true;
                 let Some(entry) = self.state.transcript.tool_entry_for_call(&call_id) else {
                     self.notice = Some("That subagent's card is not in the transcript.".into());
+                    return Ok(LoopControl::Continue);
+                };
+                self.reveal_card(entry);
+                Ok(LoopControl::Continue)
+            }
+            side_panel::Target::ToolCall(call_id) => {
+                self.render_pending = true;
+                let Some(entry) = self.state.transcript.tool_entry_for_call(&call_id) else {
+                    self.notice = Some("That tool's card is not in the transcript.".into());
                     return Ok(LoopControl::Continue);
                 };
                 self.reveal_card(entry);
