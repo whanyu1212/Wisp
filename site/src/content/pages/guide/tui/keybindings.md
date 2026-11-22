@@ -154,7 +154,7 @@ characters per chord.
 | `Ctrl+T` | Open the session tree to switch branches (`/tree`) |
 | `Ctrl+P` | Hide or show the side panel on a wide terminal; open or close it as an overlay otherwise |
 | `Ctrl+B` | While the agent runs a shell command in the foreground, move it to the background (in tmux, press it twice) |
-| `F8` | Focus the side panel for keyboard navigation (`f` expands/restores; `b` switches Work/Browser; `i` enters browser takeover; `r` refreshes) |
+| `F8` | Focus the side panel for keyboard navigation (`[`/`]` switches Session/Files/Browser; `f` expands/restores; `b` jumps Browser; `i` enters browser takeover; `r` refreshes) |
 | `F6` | Browse transcript messages, code blocks, and cards (`Tab`/`↑`/`↓`/`j`/`k` select, `y` copies, `Right` expands, `Left` collapses, `Enter` opens retained detail) |
 | `Alt+Y` | Copy the last assistant response as raw source Markdown (with OSC 52 fallback over SSH) |
 | `Alt+G` | Open `/diff` filtered to the latest turn that edited files (click or press `Enter` on any turn's change summary in Browse for that turn's diff) |

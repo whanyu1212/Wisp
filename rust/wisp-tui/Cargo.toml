@@ -32,6 +32,9 @@ unicode-segmentation.workspace = true
 unicode-width.workspace = true
 wisp-protocol = { path = "../wisp-protocol" }
 
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true, features = ["fs"] }
+
 [dev-dependencies]
 jsonschema.workspace = true
 proptest = { version = "=1.7.0", default-features = false, features = ["std"] }

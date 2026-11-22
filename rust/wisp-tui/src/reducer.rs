@@ -1980,6 +1980,8 @@ pub enum UiAction {
     /// Choose the model fresh subagents use; `None` clears the choice.
     SubagentModel(Option<String>),
     SetProjectFilesOpen(bool),
+    SetProjectFilesPanelOpen(bool),
+    RefreshProjectFiles,
     LoadContext,
     SetGitDiffOpen(bool),
     RefreshGitDiff,
@@ -2222,6 +2224,15 @@ pub fn reduce(
         }
         UiAction::SetProjectFilesOpen(open) => {
             state.project_files.set_open(open);
+            Ok(vec![UiEffect::ProjectFilesChanged, UiEffect::RequestRender])
+        }
+        UiAction::SetProjectFilesPanelOpen(panel) => {
+            state.project_files.set_panel(panel);
+            Ok(vec![UiEffect::ProjectFilesChanged, UiEffect::RequestRender])
+        }
+        UiAction::RefreshProjectFiles => {
+            state.project_files.refresh();
+            state.git_diff.refresh();
             Ok(vec![UiEffect::ProjectFilesChanged, UiEffect::RequestRender])
         }
         UiAction::SetGitDiffOpen(open) => {
@@ -7101,6 +7112,7 @@ fn finish_current_command(
         state.view_status = ViewStatus::Idle;
         state.last_command_failed = false;
         state.git_diff.refresh_for_panel();
+        state.project_files.refresh_for_panel();
         effects.push(UiEffect::RequestRender);
         return Ok(effects);
     }
@@ -7136,6 +7148,7 @@ fn finish_current_command(
     }
     // The run may have changed files; the panel's list catches up once it ends.
     state.git_diff.refresh_for_panel();
+    state.project_files.refresh_for_panel();
     let mut effects = context::start_refresh(state, history_sync_follows, ids)?;
     // A run can connect MCP servers, which changes whether the next one offers codemode.
     if discovery::codemode_followed(state) {

@@ -3590,3 +3590,150 @@ async fn user_shell_command_renders_inline_and_attaches_with_chip() {
             .any(|y| buffer_row(&after_queue, y).contains("[! git status]"))
     );
 }
+
+#[tokio::test]
+async fn files_side_panel_tab_filters_previews_and_inserts_reference() {
+    struct TempRoot(PathBuf);
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let unique = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let root = TempRoot(
+        std::env::temp_dir().join(format!("wisp-files-visual-{}-{unique}", std::process::id())),
+    );
+    fs::create_dir_all(root.0.join("src")).unwrap();
+    fs::write(
+        root.0.join("src/lib.rs"),
+        "pub fn greet() {\n    // \x1b]52;c;secret\x07safe\n}\n",
+    )
+    .unwrap();
+    fs::write(root.0.join("README.md"), "# Wisp\n").unwrap();
+
+    let mut ui = LiveUi {
+        state: UiState::new("fake".into(), None, None),
+        ..LiveUi::default()
+    };
+    ui.state.workspace_cwd = Some(root.0.to_string_lossy().into_owned());
+    ui.state.project_files.snapshot = Some(std::sync::Arc::new(
+        wisp_protocol::events::ProjectFileSnapshot {
+            generation: 1,
+            entries: vec![
+                wisp_protocol::events::ProjectFileEntry {
+                    path: "src/lib.rs".into(),
+                    kind: wisp_protocol::events::ProjectFileKind::File,
+                },
+                wisp_protocol::events::ProjectFileEntry {
+                    path: "README.md".into(),
+                    kind: wisp_protocol::events::ProjectFileKind::File,
+                },
+            ],
+            truncated: false,
+        },
+    ));
+    ui.state.git_diff.snapshot = Some(std::sync::Arc::new(
+        crate::reducer::git_diff::GitDiffSnapshot {
+            generation: 1,
+            head: "HEAD".into(),
+            files: vec![crate::reducer::git_diff::GitDiffFile {
+                path: "src/lib.rs".into(),
+                status: "M".into(),
+                before: "pub fn greet() {}\n".into(),
+                after: "pub fn greet() {\n    // safe\n}\n".into(),
+                notice: String::new(),
+                edits: Vec::new(),
+            }],
+            truncated: false,
+        },
+    ));
+    let (writer, _receiver) = mpsc::channel(8);
+
+    // Draw once at 152x24 so docked width is established before focusing with F8.
+    let initial = draw(&mut ui, 152, 24);
+    assert!(buffer_row(&initial, 0).contains("Session   Files   Browser"));
+
+    // F8 focuses the side panel, and `]` switches from Session -> Files.
+    press(&mut ui, &writer, KeyCode::F(8)).await;
+    press(&mut ui, &writer, KeyCode::Char(']')).await;
+    assert_eq!(ui.side_panel.mode(), side_panel::PanelMode::Files);
+
+    let docked = draw(&mut ui, 152, 24);
+    assert!(buffer_row(&docked, 0).contains("Session   Files   Browser"));
+    row_containing(&docked, "PROJECT TREE · 2 files");
+    row_containing(&docked, "M lib.rs");
+
+    // Clicking a file row in the Files tab selects it on first click and expands preview on second click.
+    let readme_row = (0..docked.area().height)
+        .find(|&y| buffer_row(&docked, y).contains("README.md"))
+        .expect("README.md row");
+    let readme_col = buffer_row(&docked, readme_row)
+        .find("README.md")
+        .expect("README.md column") as u16;
+    assert_eq!(
+        ui.side_panel.click(readme_col, readme_row),
+        side_panel::OverlayKey::Moved
+    );
+    assert!(!ui.side_panel.expanded());
+    assert_eq!(
+        ui.side_panel.click(readme_col, readme_row),
+        side_panel::OverlayKey::Moved
+    );
+    assert!(ui.side_panel.expanded());
+    press(&mut ui, &writer, KeyCode::Char('f')).await;
+    assert!(!ui.side_panel.expanded());
+
+    // Unfocus with Esc, then clicking the docked `/` filter bar focuses the panel
+    // so filter characters work immediately, and pressing `Enter` completes filtering
+    // without waiting for a repaint.
+    press(&mut ui, &writer, KeyCode::Esc).await;
+    assert!(!ui.side_panel.overlay_open());
+    let filter_row = (0..docked.area().height)
+        .find(|&y| buffer_row(&docked, y).contains("filter files"))
+        .expect("filter bar row");
+    let filter_col = buffer_row(&docked, filter_row)
+        .find("filter files")
+        .expect("filter bar column") as u16;
+    assert_eq!(
+        ui.side_panel.click(filter_col, filter_row),
+        side_panel::OverlayKey::Moved
+    );
+    assert!(ui.side_panel.overlay_open());
+    assert!(!ui.side_panel.key_activates(KeyCode::Enter.into()));
+    for ch in ['l', 'i', 'b'] {
+        press(&mut ui, &writer, KeyCode::Char(ch)).await;
+    }
+    press(&mut ui, &writer, KeyCode::Enter).await;
+    assert_eq!(ui.side_panel.mode(), side_panel::PanelMode::Files);
+    assert!(!ui.side_panel.expanded());
+    let filtered = draw(&mut ui, 152, 24);
+    row_containing(&filtered, "Esc clear");
+    row_containing(&filtered, "lib.rs");
+    assert!(
+        !(0..filtered.area().height).any(|y| buffer_row(&filtered, y).contains("README.md")),
+        "filter should hide non-matching README.md"
+    );
+
+    // Move to `lib.rs`, repaint, then `Enter` opens split preview.
+    press(&mut ui, &writer, KeyCode::Down).await;
+    let _ = draw(&mut ui, 152, 24);
+    press(&mut ui, &writer, KeyCode::Enter).await;
+    assert!(ui.side_panel.expanded());
+    let expanded = draw(&mut ui, 152, 26);
+    row_containing(&expanded, "1 │ pub fn greet() {");
+    assert!(
+        !(0..expanded.area().height).any(|y| buffer_row(&expanded, y).contains('\u{1b}')),
+        "preview must sanitize escape sequences"
+    );
+
+    // Pressing `@` inserts `@src/lib.rs ` into the composer draft and returns focus.
+    press(&mut ui, &writer, KeyCode::Char('@')).await;
+    assert_eq!(ui.editor.text(), "@src/lib.rs ");
+    assert!(!ui.side_panel.overlay_open());
+
+    // Focus Files again and press `d` to jump to `/diff` on that file.
+    press(&mut ui, &writer, KeyCode::F(8)).await;
+    press(&mut ui, &writer, KeyCode::Char('d')).await;
+    assert!(ui.git_diff_view.is_some());
+}

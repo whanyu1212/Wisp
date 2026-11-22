@@ -18,7 +18,7 @@ use crate::terminal_images::{CellSize, ImagePreviewMeta, PaintedImage};
 use crate::theme::Palette;
 use crate::transcript::TranscriptRole;
 use crate::ui::{self, sanitize_for_terminal};
-use crossterm::event::{KeyCode, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -71,19 +71,32 @@ pub(crate) fn docks(width: u16) -> bool {
 pub(crate) enum PanelMode {
     #[default]
     LiveWork,
+    Files,
     Browser,
 }
 
 impl PanelMode {
     /// Every view, in the order the top bar lists their tabs.
-    pub(crate) const ALL: [Self; 2] = [Self::LiveWork, Self::Browser];
+    pub(crate) const ALL: [Self; 3] = [Self::LiveWork, Self::Files, Self::Browser];
 
     /// The view's tab label.
     pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::LiveWork => "Work",
+            Self::LiveWork => "Session",
+            Self::Files => "Files",
             Self::Browser => "Browser",
         }
+    }
+
+    fn cycle(self, forward: bool) -> Self {
+        let idx = Self::ALL.iter().position(|mode| *mode == self).unwrap_or(0);
+        let len = Self::ALL.len();
+        let next = if forward {
+            (idx + 1) % len
+        } else {
+            (idx + len - 1) % len
+        };
+        Self::ALL[next]
     }
 }
 
@@ -116,6 +129,10 @@ pub(crate) struct SidePanel {
     width: u16,
     /// The visibility last reported to the reducer.
     reported_visible: bool,
+    /// Whether `PanelMode::Files` was on screen when last reported to the reducer.
+    reported_files_tab: bool,
+    /// State and cached previews for `PanelMode::Files`.
+    files_view: RefCell<files::FilesState>,
     /// The width the user dragged the docked panel to, for this process only; `None`
     /// follows [`auto_width`]. Clamped to the terminal at layout, so it returns when a
     /// terminal that shrank grows back.
@@ -256,6 +273,10 @@ pub(crate) enum OverlayKey {
     /// Trigger a manual browser screenshot refresh.
     RefreshBrowser,
     BrowserControl(BrowserControl),
+    /// Insert an `@path` file reference into the composer draft.
+    InsertFileReference(String),
+    /// Refresh project files and git status for the `Files` tab.
+    RefreshFiles,
     Ignored,
 }
 
@@ -617,8 +638,29 @@ impl SidePanel {
         }
     }
 
+    fn handle_files_key(&mut self, key: KeyCode, state: &UiState) -> OverlayKey {
+        let (outcome, toggle_expand) =
+            self.files_view
+                .borrow_mut()
+                .handle_key(key, self.expanded, state);
+        if toggle_expand {
+            self.toggle_expanded();
+        }
+        outcome
+    }
+
+    pub(crate) fn key_activates(&self, key: KeyEvent) -> bool {
+        if self.mode == PanelMode::Files && self.files_view.borrow().filter_active() {
+            return false;
+        }
+        key.code == KeyCode::Enter
+    }
+
     /// Keyboard navigation follows the same rows and disclosure controls as clicks.
     pub(crate) fn key(&mut self, key: KeyCode, state: &UiState) -> OverlayKey {
+        if self.mode == PanelMode::Files && self.files_view.borrow().filter_active() {
+            return self.handle_files_key(key, state);
+        }
         let focused = self
             .focused(state)
             .and_then(|cursor| self.targets(cursor.section, state).get(cursor.row).cloned());
@@ -626,22 +668,36 @@ impl SidePanel {
             return handled;
         }
         if key == KeyCode::Esc {
+            if self.mode == PanelMode::Files && self.files_view.borrow().has_filter() {
+                return self.handle_files_key(key, state);
+            }
             return OverlayKey::Close;
         }
         if key == KeyCode::Char('f') {
             self.toggle_expanded();
             return OverlayKey::Moved;
         }
+        if matches!(key, KeyCode::Char('[') | KeyCode::Char(']')) {
+            self.browser_interacting = false;
+            self.mode = self.mode.cycle(key == KeyCode::Char(']'));
+            self.cursor = None;
+            self.scroll.set(0);
+            self.close_peek();
+            return OverlayKey::Moved;
+        }
         if key == KeyCode::Char('b') {
             self.browser_interacting = false;
             self.mode = match self.mode {
-                PanelMode::LiveWork => PanelMode::Browser,
+                PanelMode::LiveWork | PanelMode::Files => PanelMode::Browser,
                 PanelMode::Browser => PanelMode::LiveWork,
             };
             self.cursor = None;
             self.scroll.set(0);
             self.close_peek();
             return OverlayKey::Moved;
+        }
+        if self.mode == PanelMode::Files {
+            return self.handle_files_key(key, state);
         }
         if self.mode == PanelMode::Browser {
             match key {
@@ -828,28 +884,47 @@ impl SidePanel {
         }
         let hit = {
             let painted = self.painted.borrow();
-            if row < painted.area.y
-                || row >= painted.area.bottom()
-                || column < painted.area.x
-                || column >= painted.area.right()
+            if row >= painted.area.y
+                && row < painted.area.bottom()
+                && column >= painted.area.x
+                && column < painted.area.right()
             {
-                return OverlayKey::Ignored;
+                let line = usize::from(row - painted.area.y) + self.scroll.get();
+                let rel_col = column - painted.area.x;
+                painted
+                    .actions
+                    .iter()
+                    .enumerate()
+                    .find(|(_, hit)| {
+                        hit.line == line
+                            && hit
+                                .columns
+                                .is_none_or(|(start, end)| rel_col >= start && rel_col < end)
+                    })
+                    .map(|(index, hit)| (index, hit.clone()))
+            } else {
+                None
             }
-            let line = usize::from(row - painted.area.y) + self.scroll.get();
-            let rel_col = column - painted.area.x;
-            painted
-                .actions
-                .iter()
-                .enumerate()
-                .find(|(_, hit)| {
-                    hit.line == line
-                        && hit
-                            .columns
-                            .is_none_or(|(start, end)| rel_col >= start && rel_col < end)
-                })
-                .map(|(index, hit)| (index, hit.clone()))
         };
         let Some((hit_index, hit)) = hit else {
+            if self.mode == PanelMode::Files {
+                let (outcome, toggle_expand) =
+                    self.files_view
+                        .borrow_mut()
+                        .click(column, row, self.expanded);
+                if self.files_view.borrow().filter_active()
+                    || toggle_expand
+                    || outcome == OverlayKey::Moved
+                {
+                    // Focus the docked panel so the filter caret, row highlight,
+                    // and Files shortcuts take effect immediately after clicking.
+                    self.overlay = true;
+                }
+                if toggle_expand {
+                    self.toggle_expanded();
+                }
+                return outcome;
+            }
             return OverlayKey::Ignored;
         };
         let row = self
@@ -865,6 +940,17 @@ impl SidePanel {
             row,
         });
         self.activate(hit.action)
+    }
+
+    pub(crate) fn scroll_at(&self, column: u16, row: u16, lines: i32) {
+        if self.mode == PanelMode::Files {
+            let files_view = self.files_view.borrow();
+            if !files_view.preview_contains(column, row) || !files_view.scroll_preview_by(lines) {
+                files_view.scroll_list_by(lines);
+            }
+            return;
+        }
+        self.scroll_by(lines);
     }
 
     pub(crate) fn scroll_by(&self, lines: i32) {
@@ -1043,6 +1129,19 @@ impl SidePanel {
             self.reported_visible = visible;
             visible
         })
+    }
+
+    /// Whether the `Files` tab needs project discovery snapshots loaded, once after it changes.
+    pub(crate) fn take_files_tab_change(&mut self) -> Option<bool> {
+        let wanted = self.visible() && self.mode == PanelMode::Files;
+        (wanted != self.reported_files_tab).then(|| {
+            self.reported_files_tab = wanted;
+            wanted
+        })
+    }
+
+    pub(crate) fn reset_files_view(&mut self) {
+        self.files_view.borrow_mut().reset_for_workspace();
     }
 
     /// Count the changed files' lines once per snapshot. While a new snapshot loads,
@@ -1377,12 +1476,17 @@ pub(crate) fn render_with_preview(
             } else if interacting {
                 "Esc exit · Click/Scroll · Type · Alt+← back · Ctrl+R reload"
             } else if panel.expanded {
-                "Esc close · b work · i interact · f restore · r refresh"
+                "Esc close · b session · i interact · f restore · r refresh"
             } else {
-                "Esc · b work · i interact · f size · r refresh"
+                "Esc · b session · i interact · f size · r refresh"
             };
             frame.render_widget(Paragraph::new(ui::keycap_hints(hints, palette)), footer);
         }
+        return;
+    }
+
+    if panel.mode == PanelMode::Files {
+        files::render(frame, inner, area, state, panel, palette);
         return;
     }
 
@@ -1906,6 +2010,7 @@ fn permission_mode(state: &UiState) -> Option<&'static str> {
 }
 
 mod browser;
+mod files;
 mod peek;
 mod plan;
 mod reading;
