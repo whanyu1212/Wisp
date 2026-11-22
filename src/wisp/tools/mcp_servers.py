@@ -408,7 +408,14 @@ class ProposeMcpServerChangeTool:
         "type": "object",
         "properties": {
             "name": {"type": "string", "description": "Saved server name"},
-            "action": {"type": "string", "enum": ["remove", "disable"]},
+            "action": {
+                "type": "string",
+                "enum": ["remove", "disable"],
+                "description": (
+                    "Change to propose: 'remove' deletes the saved server; "
+                    "'disable' keeps it saved but inactive."
+                ),
+            },
         },
         "required": ["name", "action"],
     }

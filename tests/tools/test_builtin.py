@@ -157,6 +157,12 @@ def test_builtin_tools_have_safety_metadata() -> None:
 
 
 def test_builtin_tool_schemas_document_all_properties_and_scope() -> None:
+    from wisp.tools.codemode.discovery import ToolCatalog, ToolDescribeTool, ToolSearchTool
+    from wisp.tools.mcp_servers import ProposeMcpServerChangeTool
+    from wisp.tools.output_store import OutputStore
+    from wisp.tools.read_output import ReadOutputTool
+
+    catalog = ToolCatalog()
     tools = (
         BashTool(),
         ReadTool(),
@@ -165,6 +171,10 @@ def test_builtin_tool_schemas_document_all_properties_and_scope() -> None:
         GrepTool(),
         FindTool(),
         LsTool(),
+        ToolSearchTool(catalog),
+        ToolDescribeTool(catalog),
+        ReadOutputTool(OutputStore()),
+        ProposeMcpServerChangeTool(),
     )
     for tool in tools:
         properties = tool.input_schema["properties"]

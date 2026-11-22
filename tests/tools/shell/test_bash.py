@@ -1400,3 +1400,55 @@ def test_direct_bash_timeout_includes_partial_output(tmp_path: Path) -> None:
     message = anyio.run(run)
     assert "Command timed out after 1 seconds" in message
     assert "Last output:\ndirect-partial-line" in message
+
+
+@pytest.mark.parametrize(
+    ("wait_seconds", "state", "stdout", "stderr", "expect_notice"),
+    [
+        pytest.param(0.1, "running", "", "", True, id="short-poll-100ms"),
+        pytest.param(1.0, "running", "", "", True, id="short-poll-1s"),
+        pytest.param(2.0, "running", "", "", True, id="short-poll-2s-boundary"),
+        pytest.param(0.0, "running", "", "", False, id="zero-wait-instant-check"),
+        pytest.param(30.0, "running", "", "", False, id="long-poll"),
+        pytest.param(1.0, "running", "progress\n", "", False, id="short-poll-with-stdout"),
+        pytest.param(1.0, "running", "", "warn\n", False, id="short-poll-with-stderr"),
+        pytest.param(1.0, "completed", "", "", False, id="short-poll-completed"),
+    ],
+)
+def test_bash_poll_short_wait_nudge(
+    tmp_path: Path,
+    wait_seconds: float,
+    state: str,
+    stdout: str,
+    stderr: str,
+    expect_notice: bool,
+) -> None:
+    """Short silent running polls nudge toward wait_seconds=30-120 with until=exit."""
+
+    class _StubSupervisor:
+        has_exit_listener = False
+
+        async def poll(
+            self,
+            process_id: str,
+            *,
+            wait_seconds: float,
+            until: str,
+        ) -> process_manager_module.ProcessUpdate:
+            del wait_seconds, until
+            return process_manager_module.ProcessUpdate(
+                process_id=process_id,
+                state=state,  # type: ignore[arg-type]
+                stdout=stdout,
+                stderr=stderr,
+                exit_code=0 if state == "completed" else None,
+            )
+
+    tool = BashTool(_StubSupervisor())  # type: ignore[arg-type]
+    result = run_tool(
+        tool,
+        {"operation": "poll", "process_id": "p1", "wait_seconds": wait_seconds},
+        ToolContext(cwd=tmp_path),
+    )
+
+    assert (shell_tools_module._SHORT_POLL_NOTICE in result.text) is expect_notice  # noqa: SLF001

@@ -162,9 +162,26 @@ class ToolSearchTool:
     input_schema: ToolInputSchema = {
         "type": "object",
         "properties": {
-            "query": {"type": "string"},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 8},
-            "offset": {"type": "integer", "minimum": 0, "default": 0},
+            "query": {
+                "type": "string",
+                "description": (
+                    "Search keywords matched against tool name, namespace, and description; "
+                    "empty string lists all."
+                ),
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20,
+                "default": 8,
+                "description": "Maximum number of tool summaries to return (1 through 20).",
+            },
+            "offset": {
+                "type": "integer",
+                "minimum": 0,
+                "default": 0,
+                "description": "0-based result offset for pagination.",
+            },
         },
         "required": ["query"],
         "additionalProperties": False,
@@ -239,10 +256,30 @@ class ToolDescribeTool:
     input_schema: ToolInputSchema = {
         "type": "object",
         "properties": {
-            "name": {"type": "string"},
-            "schema_path": {"type": "string"},
-            "offset": {"type": "integer", "minimum": 0, "default": 0},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 8},
+            "name": {
+                "type": "string",
+                "description": "Exact callable tool name to describe.",
+            },
+            "schema_path": {
+                "type": "string",
+                "description": (
+                    "Optional JSON Pointer rooted at /input_schema or /output_schema to inspect "
+                    "a large schema subtree."
+                ),
+            },
+            "offset": {
+                "type": "integer",
+                "minimum": 0,
+                "default": 0,
+                "description": "0-based child-path offset when paging an oversized schema subtree.",
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 20,
+                "default": 8,
+                "description": "Maximum number of child paths to return per page (1 through 20).",
+            },
         },
         "required": ["name"],
         "additionalProperties": False,

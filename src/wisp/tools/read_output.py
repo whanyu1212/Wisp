@@ -32,9 +32,26 @@ class ReadOutputTool:
     input_schema: ToolInputSchema = {
         "type": "object",
         "properties": {
-            "output_id": {"type": "string"},
-            "offset": {"type": "integer", "minimum": 1},
-            "limit": {"type": "integer", "minimum": 1},
+            "output_id": {
+                "type": "string",
+                "description": "Saved output identifier reported by a truncated tool result.",
+            },
+            "offset": {
+                "type": "integer",
+                "minimum": 1,
+                "description": (
+                    "1-based starting line number (do not mix with "
+                    "character_offset/character_limit)."
+                ),
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "description": (
+                    "Maximum number of lines to return (do not mix with "
+                    "character_offset/character_limit)."
+                ),
+            },
             "character_offset": {
                 "type": "integer",
                 "minimum": 0,
