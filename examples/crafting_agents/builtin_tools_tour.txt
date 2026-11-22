@@ -61,7 +61,8 @@ error: Access to protected path denied: .env
 
 # ANCHOR: bash-fail
 > bash {"command": "./run-tests.sh"}
-Command exited with code 1: FAILED (failures=1)
+Command exited with code 1
+FAILED (failures=1)
 # ANCHOR_END: bash-fail
 
 # ANCHOR: edit-unread
@@ -94,7 +95,8 @@ Applied 1 edit(s) to src/greeting.py
 
 # ANCHOR: bash-pass
 > bash {"command": "./run-tests.sh"}
-Command exited with code 0: OK
+Command exited with code 0
+OK
 # ANCHOR_END: bash-pass
 
 # ANCHOR: write
