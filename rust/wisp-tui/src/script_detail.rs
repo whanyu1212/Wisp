@@ -376,14 +376,18 @@ pub(crate) fn render(
     layout.controls
 }
 
-/// The card's own line: `• Scripted count TODOs  4 calls (1 failed) · read ×3 · 1.2s`.
+/// The card's own line: `• Ran codemode: count TODOs  4 calls (1 failed) · read ×3 · 1.2s`.
 fn heading(card: &ToolCardSnapshot, script: &ScriptCard) -> String {
-    let line = format!(
-        "{}{} {}",
+    let mut line = format!(
+        "{}{}",
         crate::transcript_view::status_marker(card.status),
-        card.action_verb(),
-        script.subject()
+        card.action_verb()
     );
+    let subject = script.subject();
+    if !subject.is_empty() {
+        line.push(' ');
+        line.push_str(&subject);
+    }
     let notes: Vec<String> = [
         Some(script.tally()).filter(|tally| !tally.is_empty()),
         card.status_note().map(str::to_owned),

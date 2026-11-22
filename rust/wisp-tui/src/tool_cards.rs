@@ -795,6 +795,9 @@ impl ToolCardSnapshot {
     /// flight (`Running`), finished (`Ran`), or never run (`Run`, as in
     /// `Run cargo test · denied`). Another tool is named by its own name.
     pub fn action_verb(&self) -> String {
+        if let Some(script) = &self.script {
+            return script.action_verb(self.status);
+        }
         let (in_flight, finished, never_ran) = if let Some(label) = &self.action_label {
             label.verb.forms()
         } else {
@@ -810,8 +813,6 @@ impl ToolCardSnapshot {
                 "ls" => ("Listing", "Listed", "List"),
                 "edit" => ("Editing", "Edited", "Edit"),
                 "write" => ("Writing", "Wrote", "Write"),
-                crate::script_card::CODEMODE => ("Scripting", "Scripted", "Script"),
-                crate::script_card::SPAWN_AGENT => ("Delegating", "Delegated", "Delegate"),
                 _ if self.mcp_target().is_some() => ("Calling", "Called", "Call"),
                 name => {
                     let name = clip_chars(&one_line(name), TOOL_LABEL_MAX_CHARS);
@@ -914,8 +915,6 @@ impl ToolCardSnapshot {
         if let Some(label) = &self.action_label {
             return label.subject.clone();
         }
-        // Worked out here rather than stored, so a script's line count never makes
-        // its live and reopened cards disagree about their arguments.
         if let Some(script) = &self.script {
             return script.subject();
         }
@@ -1695,11 +1694,11 @@ fn script_of_call(input: &ToolCallInput) -> Option<Box<crate::script_card::Scrip
 }
 
 fn format_tool_arguments(name: &str, arguments: &Value) -> String {
-    // A script's line shows its title, or how long it is (worked out when shown).
+    // An untitled codemode call names the tool alone.
     if name == crate::script_card::CODEMODE {
         return crate::script_card::ScriptCard::from_arguments(arguments)
             .title
-            .unwrap_or_else(|| "Python script".to_owned());
+            .unwrap_or_default();
     }
     // A subagent's line shows the start of its task.
     if name == crate::script_card::SPAWN_AGENT {
@@ -1743,13 +1742,21 @@ fn format_read(arguments: &Map<String, Value>) -> String {
 fn format_grep(arguments: &Map<String, Value>) -> String {
     let pattern = string_value(arguments, "pattern", "");
     let path = path_value(arguments, "path", ".");
-    format!("/{}/ in {path}", clip_chars(&one_line(&pattern), 64))
+    let pattern = clip_chars(&one_line(&pattern), 64);
+    if pattern.is_empty() {
+        format!("text in {path}")
+    } else {
+        format!("text for “{pattern}” in {path}")
+    }
 }
 
 fn format_find(arguments: &Map<String, Value>) -> String {
     let pattern = string_value(arguments, "pattern", "*");
     let path = path_value(arguments, "path", ".");
-    format!("{} in {path}", clip_chars(&one_line(&pattern), 64))
+    format!(
+        "filenames for {} in {path}",
+        clip_chars(&one_line(&pattern), 64)
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2277,12 +2284,15 @@ mod tests {
         };
         assert_eq!(
             card(format!("{cwd}/src")).display_arguments(),
-            "/todo/ in src"
+            "text for “todo” in src"
         );
-        assert_eq!(card(cwd.clone()).display_arguments(), "/todo/ in .");
+        assert_eq!(
+            card(cwd.clone()).display_arguments(),
+            "text for “todo” in ."
+        );
         assert_eq!(
             card("/elsewhere".into()).display_arguments(),
-            "/todo/ in /elsewhere"
+            "text for “todo” in /elsewhere"
         );
     }
 

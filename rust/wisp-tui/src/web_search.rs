@@ -14,6 +14,7 @@ fn text(value: &str, limit: usize) -> String {
 /// A provider-native web search, as the reply's tool row shows it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WebSearch {
+    pub label: &'static str,
     /// What was searched: the query, the page opened, or the pattern and its page.
     pub argument: String,
     /// The sites it returned, in order, each once.
@@ -30,16 +31,45 @@ pub(crate) fn search(value: &Value) -> WebSearch {
             hosts.push(host);
         }
     }
-    let argument = match value["action"].as_str().unwrap_or("search") {
-        // An opened page is named by its site; its own source lists nothing new.
-        "open_page" => format!("open {}", hosts.drain(..).next().unwrap_or(query)),
-        "find_in_page" if !hosts.is_empty() => format!("{query} in {}", hosts.remove(0)),
-        _ => query,
+    let failed = value["error"].as_str().is_some();
+    let query = query.trim();
+    let with_query = |scope: &str| {
+        if query.is_empty() {
+            scope.to_owned()
+        } else {
+            format!("{scope} for “{query}”")
+        }
+    };
+    let (label, argument) = match value["action"].as_str().unwrap_or("search") {
+        "open_page" => {
+            // A page open has a target, not a list of search hits. Never show raw URLs.
+            let target = hosts.drain(..).next().unwrap_or_else(|| "web page".into());
+            (if failed { "Open failed:" } else { "Opened" }, target)
+        }
+        "find_in_page" => {
+            let page = if hosts.is_empty() {
+                "page".to_owned()
+            } else {
+                hosts.remove(0)
+            };
+            (
+                if failed {
+                    "Page search failed:"
+                } else {
+                    "Searched"
+                },
+                with_query(&page),
+            )
+        }
+        _ if failed && query.is_empty() => ("Web search failed", String::new()),
+        _ if failed => ("Web search failed:", format!("“{query}”")),
+        _ => ("Searched", with_query("the web")),
     };
     WebSearch {
+        label,
         argument,
         hosts,
-        failed: value["error"].as_str().is_some(),
+        failed,
     }
 }
 
@@ -154,7 +184,7 @@ mod tests {
             "error":"\u{7}failed", "sources": vec![json!({"title":"x".repeat(10000),
             "url":"https://user:secret@example.com/path"}); 100]});
         let search = search(&value);
-        assert_eq!(search.argument, "[2J[click](javascript:bad)");
+        assert_eq!(search.argument, "“[2J[click](javascript:bad)”");
         assert_eq!(search.hosts, ["example.com"]);
         assert!(search.failed);
     }
@@ -166,10 +196,11 @@ mod tests {
                 "sources": [{"url": "https://docs.rs/serde"}, {"url": "https://serde.rs"}]}))
         };
         let opened = page("open_page", "https://docs.rs/serde");
-        assert_eq!(opened.argument, "open docs.rs");
+        assert_eq!(opened.label, "Opened");
+        assert_eq!(opened.argument, "docs.rs");
         assert!(opened.hosts.is_empty());
         let found = page("find_in_page", "derive");
-        assert_eq!(found.argument, "derive in docs.rs");
+        assert_eq!(found.argument, "docs.rs for “derive”");
         assert_eq!(found.hosts, ["serde.rs"]);
     }
 
