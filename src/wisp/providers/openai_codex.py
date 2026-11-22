@@ -554,11 +554,10 @@ class _CodexResponse:
     usage: ProviderUsage | None = None
     failure: ProviderResponseFailed | None = None
     completed: bool = False
-    output_items: OrderedDict[str, dict[str, object]] = field(default_factory=OrderedDict)
+    output_items: OrderedDict[object, dict[str, object]] = field(default_factory=OrderedDict)
     pending_tool_calls: dict[str, dict[str, object]] = field(default_factory=dict)
     completed_tool_arguments: dict[str, str] = field(default_factory=dict)
     emitted_tool_item_ids: set[str] = field(default_factory=set)
-    anonymous_items: int = 0
 
     @property
     def partial_content(self) -> str:
@@ -641,7 +640,7 @@ class _CodexResponse:
         item = event.get("item")
         if not isinstance(item, dict):
             return None
-        self._remember_output_item(item)
+        self._remember_output_item(item, event.get("output_index"))
         if item.get("type") == "function_call":
             self._function_call_item(item, done=done)
         if item.get("type") == "web_search_call" and done:
@@ -672,16 +671,17 @@ class _CodexResponse:
             self.usage = _usage_from_codex(response.get("usage"))
             output = response.get("output")
             if isinstance(output, list):
-                for item in output:
+                for index, item in enumerate(output):
                     if isinstance(item, dict):
-                        self._remember_output_item(item)
+                        self._remember_output_item(item, index)
         self.completed = True
 
-    def _remember_output_item(self, item: dict[str, object]) -> None:
-        key = _string_value(item.get("id")) or _string_value(item.get("call_id"))
+    def _remember_output_item(self, item: dict[str, object], output_index: object) -> None:
+        key: object = _string_value(item.get("id")) or _string_value(item.get("call_id"))
         if key is None:
-            key = f"anonymous-{self.anonymous_items}"
-            self.anonymous_items += 1
+            # An anonymous item's slot is stable from added through the final output list.
+            # Without either ID or position, keep the item rather than guessing by content.
+            key = output_index if type(output_index) is int and output_index >= 0 else object()
         self.output_items[key] = deepcopy(item)
 
 

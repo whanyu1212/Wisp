@@ -349,6 +349,35 @@ def test_tool_call_without_item_id_keeps_its_arguments(tmp_path: Path) -> None:
     assert [event.tool_call.arguments for event in completed] == [{"query": "wisp"}]
 
 
+@pytest.mark.parametrize("with_final_output", [False, True], ids=["stream-only", "final-output"])
+def test_anonymous_items_replay_once_per_output_position(
+    tmp_path: Path, with_final_output: bool
+) -> None:
+    partial = {"type": "reasoning"}
+    done = {**partial, "encrypted_content": "done"}
+    final = {**partial, "encrypted_content": "final"}
+    events = [
+        {"type": f"response.output_item.{phase}", "output_index": index, "item": item}
+        for index in range(2)
+        for phase, item in [("added", partial), ("done", done)]
+    ]
+    response: dict[str, object] = {"id": "response-id"}
+    if with_final_output:
+        response["output"] = [final, final]
+    provider = StubOpenAICodexProvider(
+        [*events, {"type": "response.completed", "response": response}],
+        auth_resolver=StoredProviderAuthResolver(store_with_oauth(tmp_path)),
+    )
+
+    _stream(provider)
+    _stream(provider, previous_response_id="response-id")
+
+    # Equal payloads at different positions are two items, not one.
+    expected = final if with_final_output else done
+    assert provider.seen_body is not None
+    assert provider.seen_body["input"] == [{"role": "user", "content": "hi"}, expected, expected]
+
+
 _ANONYMOUS_REASONING = [
     {"type": "reasoning", "encrypted_content": "first"},
     {"type": "reasoning", "encrypted_content": "second"},
