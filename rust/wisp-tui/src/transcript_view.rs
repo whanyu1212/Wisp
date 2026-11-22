@@ -1833,7 +1833,7 @@ impl TranscriptRowCache {
                 CardGroupKey::Explore if outcomes.is_open() => "Exploring".to_owned(),
                 CardGroupKey::Explore if outcomes.noteworthy() => "Explore".to_owned(),
                 CardGroupKey::Explore => "Explored".to_owned(),
-                CardGroupKey::Tool(_) => entry.tool_card()?.action_verb(),
+                CardGroupKey::Tool(_, _) => entry.tool_card()?.action_verb(),
                 CardGroupKey::Process => PROCESS_LABEL.to_owned(),
                 CardGroupKey::Mcp(_) => unreachable!("MCP has its own header"),
             };
@@ -3979,7 +3979,8 @@ fn tool_action_projection(
     let marker = status_marker(card.status);
     let label = card.action_verb();
     let label_end = marker.len() + label.len();
-    let argument_start = if card.mcp_target().is_some()
+    let argument_start = if card.action_label.is_some()
+        || card.mcp_target().is_some()
         || (card.arguments_available && !card.action_arguments.is_empty())
     {
         label_end.saturating_add(ACTION_GAP.len())
@@ -5125,12 +5126,12 @@ fn group_counts(
             .collect::<Vec<_>>()
             .join(", ")
         }
-        CardGroupKey::Tool(name) if name == "bash" => format!("{} commands", members.len()),
+        CardGroupKey::Tool(name, _) if name == "bash" => format!("{} commands", members.len()),
         CardGroupKey::Process => format!("{} commands", members.len()),
-        CardGroupKey::Tool(name) if matches!(name.as_str(), "edit" | "write") => {
+        CardGroupKey::Tool(name, _) if matches!(name.as_str(), "edit" | "write") => {
             counted(targets(&[name.as_str()]), "file", "files").unwrap_or_default()
         }
-        CardGroupKey::Tool(_) | CardGroupKey::Mcp(_) => format!("{} times", members.len()),
+        CardGroupKey::Tool(_, _) | CardGroupKey::Mcp(_) => format!("{} times", members.len()),
     }
 }
 
@@ -5149,7 +5150,7 @@ fn card_group_signature(transcript: &Transcript, entry: &TranscriptEntry) -> Opt
         return None;
     }
     let header = match card_group_key(entry)? {
-        CardGroupKey::Explore | CardGroupKey::Tool(_) | CardGroupKey::Process => {
+        CardGroupKey::Explore | CardGroupKey::Tool(_, _) | CardGroupKey::Process => {
             // A closed group counts and previews its members, so both key the row too.
             let key = card_group_key(entry)?;
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -6678,7 +6679,7 @@ enum CardGroupKey {
     /// Repeated calls to one MCP server's tool, keyed by the full tool name.
     Mcp(String),
     /// Consecutive successful calls to exactly the same tool.
-    Tool(String),
+    Tool(String, Option<crate::tool_cards::Verb>),
     /// Background processes that exited with code 0. A process in any other state keeps
     /// its own row, so a failure is never folded away.
     Process,
@@ -6699,7 +6700,10 @@ fn card_group_key(entry: &TranscriptEntry) -> Option<CardGroupKey> {
     } else if card.mcp_target().is_some() {
         Some(CardGroupKey::Mcp(card.name.clone()))
     } else if card.status == ToolStatus::Done {
-        Some(CardGroupKey::Tool(card.name.clone()))
+        Some(CardGroupKey::Tool(
+            card.name.clone(),
+            card.action_label.as_ref().map(|label| label.verb),
+        ))
     } else {
         None
     }
@@ -7412,6 +7416,67 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn proposal_labels_follow_execution_state_not_configuration_state() {
+        use crate::tool_cards::{ToolCallInput, ToolCardSnapshot};
+        let input = ToolCallInput {
+            call_id: "p".into(),
+            name: "propose_mcp_server_change".into(),
+            arguments: serde_json::json!({"name":"linear", "action":"disable"}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+        };
+        for (status, expected) in [
+            (ToolStatus::Running, "Proposing disabling MCP server linear"),
+            (
+                ToolStatus::AwaitingApproval,
+                "Propose disabling MCP server linear   awaiting approval",
+            ),
+            (
+                ToolStatus::Denied,
+                "Propose disabling MCP server linear · denied",
+            ),
+            (ToolStatus::Done, "Proposed disabling MCP server linear"),
+        ] {
+            let card = ToolCardSnapshot::requested(&input, status);
+            let mut line = tool_action_projection(&card).0;
+            push_tool_state(&mut line, &card);
+            assert_eq!(line.trim(), format!("{}{expected}", status_marker(status)));
+        }
+        let invalid = ToolCallInput {
+            arguments: serde_json::json!({"action":"disable"}),
+            ..input
+        };
+        let card = ToolCardSnapshot::requested(&invalid, ToolStatus::Error);
+        assert_eq!(
+            tool_action_projection(&card).0,
+            "✗ Proposal failed: MCP server change"
+        );
+    }
+
+    #[test]
+    fn listing_tools_does_not_fold_under_a_search_verb() {
+        let mut transcript = Transcript::default();
+        let mut ids = Vec::new();
+        for (id, query) in [("a", ""), ("b", "issue"), ("c", "docs")] {
+            ids.push(
+                transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+                    call_id: id.into(),
+                    name: "tool_search".into(),
+                    arguments: serde_json::json!({"query":query}),
+                    detail_source: crate::tool_detail::ToolDetailSource::None,
+                }),
+            );
+            let mut result = tool_result(id, "ok");
+            result.name = "tool_search".into();
+            transcript.observe_tool_result(result);
+        }
+        assert!(card_run(&transcript, ids[0]).is_none());
+        assert_eq!(
+            card_run(&transcript, ids[1]),
+            Some((ids[1], ids[1..].to_vec()))
+        );
     }
 
     #[test]

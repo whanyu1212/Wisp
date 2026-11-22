@@ -2341,6 +2341,27 @@ fn finished_script_folds_to_one_line() {
 }
 
 #[test]
+fn nested_discovery_and_proposals_use_plain_action_labels() {
+    let mut done = finished_script("ok", false);
+    done["nested_calls"] = json!([
+        nested("1", "tool_search", json!({"query":"issue"}), None),
+        nested(
+            "2",
+            "propose_mcp_server_change",
+            json!({"name":"docs","action":"remove"}),
+            None
+        ),
+    ]);
+    let text = screen_text(&script_card(
+        &[script_call(Some("inspect")), done],
+        true,
+        80,
+    ));
+    assert!(text.contains("Searched tools for “issue”"), "{text}");
+    assert!(text.contains("Proposed removing MCP server docs"), "{text}");
+}
+
+#[test]
 fn nested_edits_report_the_recorded_outcome() {
     let mut done = finished_script("ok", false);
     done["nested_calls"] = json!(["stale_input", "approval_denied"].map(|code| {

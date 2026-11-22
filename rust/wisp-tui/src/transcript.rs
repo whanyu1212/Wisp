@@ -615,7 +615,11 @@ impl TranscriptEntry {
                 .len()
                 .saturating_add(card.name.len())
                 .saturating_add(card.action_arguments.len())
-                .saturating_add(card.action_subject.as_ref().map_or(0, String::len))
+                .saturating_add(
+                    card.action_label
+                        .as_ref()
+                        .map_or(0, |label| label.subject.len()),
+                )
                 .saturating_add(card.process_id.as_ref().map_or(0, String::len))
                 .saturating_add(card.detail.len())
                 .saturating_add(card.retained_output.text.len())

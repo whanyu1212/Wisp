@@ -117,6 +117,13 @@ retains the output and recovery advice. A failed check remains a failed command 
 failure was useful during development. Select a line with `F6` and press `→`, or click it, to show
 its details.
 
+Discovery rows distinguish a search (`Searched tools for “issue lookup”`) from a listing
+(`Listed tools` or `Listed MCP servers`). A server proposal says `Proposed disabling MCP server linear`,
+not `Disabled`: the row describes the request, not the server’s current state. Browser typing names
+its target rather than the text entered. Skills name the skill or resource, and saved-output rows
+can show the requested range (`Requested lines 41–60 of saved output out-7a91`), not a count of
+lines returned. Expand the row to inspect its bounded arguments.
+
 A [codemode](tools-and-safety.md#scripting-tool-calls-with-codemode-experimental) script is one
 line that names what it does and counts the calls it makes as they finish, such as
 `• Scripted count TODOs per crate · 14 calls (1 failed) · read ×12, grep ×2`. Opening it shows
