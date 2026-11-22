@@ -3085,16 +3085,25 @@ impl LiveUi {
         let run = self.activity_elapsed();
         if !ui::run_in_status_line(&self.state) {
             self.phase_clock = None;
-            return ui::StatusTimers { run, phase: None };
+            return ui::StatusTimers {
+                run,
+                activity: None,
+            };
+        }
+        if let Some((entry, _)) = ui::active_tool(&self.state) {
+            self.phase_clock = None;
+            return ui::StatusTimers {
+                run,
+                activity: entry.running_elapsed(),
+            };
         }
         let Some(current) = self.state.current_command.as_ref() else {
             self.phase_clock = None;
-            return ui::StatusTimers { run, phase: None };
+            return ui::StatusTimers {
+                run,
+                activity: None,
+            };
         };
-        if ui::run_activity(&self.state).item.is_some() {
-            self.phase_clock = None;
-            return ui::StatusTimers { run, phase: None };
-        }
         let turn = if current.command_type == reducer::ActiveCommandType::Compact {
             0
         } else {
@@ -3119,7 +3128,10 @@ impl LiveUi {
             .phase_clock
             .as_ref()
             .map(|(_, _, _, started)| started.elapsed());
-        ui::StatusTimers { run, phase }
+        ui::StatusTimers {
+            run,
+            activity: phase,
+        }
     }
 
     fn pointer_hover_allowed(&self) -> bool {

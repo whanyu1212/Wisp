@@ -1349,7 +1349,8 @@ fn render_background_strip(
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct StatusTimers {
     pub run: Option<std::time::Duration>,
-    pub phase: Option<std::time::Duration>,
+    /// Elapsed for the displayed tool, or the non-tool phase when no tool is active.
+    pub activity: Option<std::time::Duration>,
 }
 
 /// Format streamed output tokens compactly for the live status row (`⇣420`, `⇣9.45k`,
@@ -1411,7 +1412,6 @@ fn render_status_line(
     let muted = Style::default().fg(palette.muted);
     let dim = muted.add_modifier(Modifier::DIM);
 
-    let activity = run_activity(state);
     // The indicator breathes beside its spinner; the label beside it stays solid,
     // so it keeps its contrast.
     let mut lead = vec![
@@ -1422,30 +1422,28 @@ fn render_status_line(
         Span::raw(" "),
     ];
     let mut detail = String::new();
-    let (mut timer_text, timer_style) = match activity.item {
-        Some(item) => {
-            lead.push(Span::styled(item.label.clone(), palette.chip(&item.label)));
-            if !item.detail.is_empty() {
-                lead.push(Span::raw(" "));
-                detail = item.detail;
-            }
-            let elapsed = item.elapsed.map(|elapsed| {
-                crate::tool_cards::format_duration(
-                    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
-                )
-            });
-            (elapsed, running)
+    let timer_style = if let Some((_, card)) = active_tool(state) {
+        let label = sanitize_for_terminal(&card.action_label());
+        let style = palette.chip(&label);
+        lead.push(Span::styled(label, style));
+        detail = sanitize_for_terminal(
+            &card
+                .display_arguments()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+        if !detail.is_empty() {
+            lead.push(Span::raw(" "));
         }
-        None => {
-            lead.push(Span::styled(activity_phase(state), running));
-            let elapsed = timers.phase.map(|elapsed| {
-                crate::tool_cards::format_duration(
-                    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
-                )
-            });
-            (elapsed, muted)
-        }
+        running
+    } else {
+        lead.push(Span::styled(activity_phase(state), running));
+        muted
     };
+    let mut timer_text = timers.activity.map(|elapsed| {
+        crate::tool_cards::format_duration(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+    });
 
     let mut telemetry: Vec<(u8, Span<'static>)> = Vec::new();
     if let Some(elapsed) = timers.run {
@@ -1603,24 +1601,23 @@ fn render_status_line(
     stop_rect
 }
 
-/// What the run in progress is doing, as the status line and the side panel show it.
-pub(crate) struct RunActivity {
-    /// The call that names the run, if one is going. A background process never
-    /// does: the side panel and the strip under the composer list those.
-    pub(crate) item: Option<RunningItem>,
-}
-
-pub(crate) fn run_activity(state: &UiState) -> RunActivity {
-    let turn = current_turn(state);
-    // Only calls after the latest reply name the run. Cancelling outranks everything,
-    // since that is what the user is waiting on.
-    let item = turn
+/// The tool that names and times the active status row. Only calls after the latest
+/// reply qualify; cancellation takes precedence over any tool still running.
+pub(crate) fn active_tool(
+    state: &UiState,
+) -> Option<(&TranscriptEntry, &crate::tool_cards::ToolCardSnapshot)> {
+    if state.cancel_requested {
+        return None;
+    }
+    current_turn(state)
         .iter()
         .rev()
         .take_while(|entry| !matches!(entry.kind, crate::transcript::TranscriptEntryKind::Message))
-        .find_map(running_item)
-        .filter(|_| !state.cancel_requested);
-    RunActivity { item }
+        .find_map(|entry| {
+            let card = entry.tool_card()?;
+            matches!(card.status, ToolStatus::Requested | ToolStatus::Running)
+                .then_some((entry, card))
+        })
 }
 
 /// The entries of the run in progress: everything after the prompt that started it,
@@ -1645,26 +1642,6 @@ fn run_prompt_index(state: &UiState) -> Option<usize> {
                 .iter()
                 .rposition(|entry| entry.role == TranscriptRole::User)
         })
-}
-
-/// A call still in progress, as the status line names it.
-pub(crate) struct RunningItem {
-    pub(crate) label: String,
-    pub(crate) detail: String,
-    pub(crate) elapsed: Option<std::time::Duration>,
-}
-
-fn running_item(entry: &TranscriptEntry) -> Option<RunningItem> {
-    let card = entry.tool_card()?;
-    if !matches!(card.status, ToolStatus::Requested | ToolStatus::Running) {
-        return None;
-    }
-    let detail = card.display_arguments();
-    Some(RunningItem {
-        label: sanitize_for_terminal(&card.action_label()),
-        detail: sanitize_for_terminal(&detail.split_whitespace().collect::<Vec<_>>().join(" ")),
-        elapsed: entry.running_elapsed(),
-    })
 }
 
 /// Why the last prompt failed, as up to three rows starting with `✗`, while nothing is
@@ -6323,7 +6300,7 @@ mod tests {
                     MotionMode::Still,
                     StatusTimers {
                         run: elapsed.map(std::time::Duration::from_secs),
-                        phase: None,
+                        activity: None,
                     },
                     panel_docked,
                     None,
@@ -10466,7 +10443,10 @@ mod tests {
                             mode,
                             ..Motion::default()
                         },
-                        StatusTimers::default(),
+                        StatusTimers {
+                            run: None,
+                            activity: Some(std::time::Duration::from_millis(100)),
+                        },
                         None,
                         None,
                     );
@@ -10477,30 +10457,20 @@ mod tests {
         let draw = |state: &UiState, tick, palette, selected| {
             draw_with_motion(state, tick, palette, selected, MotionMode::Smooth)
         };
-        // Spinner cells that turn between two ticks. Live timers read the wall clock and
-        // may also tick, but nothing else may change.
+        // Only the animation tick changes; even a change in timer text is a failure.
         let spinning = |first: &ratatui::buffer::Buffer, later: &ratatui::buffer::Buffer| {
-            let spinner = |cell: &ratatui::buffer::Cell| SPINNER_FRAMES.contains(&cell.symbol());
-            let timer = |cell: &ratatui::buffer::Cell| {
-                cell.symbol()
-                    .chars()
-                    .all(|character| character.is_ascii_digit() || "<.ms ".contains(character))
-            };
-            let changed = first
-                .content
-                .iter()
-                .zip(&later.content)
-                .filter(|(a, b)| a != b)
-                .collect::<Vec<_>>();
-            assert!(
-                changed
-                    .iter()
-                    .all(|(a, b)| (spinner(a) && spinner(b)) || (timer(a) && timer(b)))
-            );
-            changed
-                .iter()
-                .filter(|(a, b)| spinner(a) && spinner(b))
-                .count()
+            let mut count = 0;
+            for (a, b) in first.content.iter().zip(&later.content) {
+                if a != b {
+                    assert!(
+                        SPINNER_FRAMES.contains(&a.symbol())
+                            && SPINNER_FRAMES.contains(&b.symbol()),
+                        "non-spinner cell changed: {a:?} -> {b:?}"
+                    );
+                    count += 1;
+                }
+            }
+            count
         };
         for palette in [Palette::default(), crate::theme::themes()[0].palette(true)] {
             for tool in ["bash", "read"] {
@@ -10745,7 +10715,7 @@ mod tests {
             2,
             StatusTimers {
                 run: Some(std::time::Duration::from_secs(12)),
-                phase: Some(std::time::Duration::from_secs(3)),
+                activity: Some(std::time::Duration::from_secs(3)),
             },
         );
         assert!(stop.is_some());
@@ -10774,12 +10744,25 @@ mod tests {
             3,
             StatusTimers {
                 run: Some(std::time::Duration::from_secs(18)),
-                phase: None,
+                activity: None,
             },
         );
         assert!(tool_stop.is_some());
         assert!(tool_row.starts_with("⠸ Bash Rust tests "), "{tool_row}");
-        assert!(tool_row.contains("s "), "{tool_row}");
+        // At a fixed animation tick, the tool timer should follow the supplied
+        // frame snapshot, even across a change in label width.
+        for (ms, label) in [(99, "<0.1s"), (100, "0.1s")] {
+            let (row, _) = draw_row(
+                &state,
+                100,
+                3,
+                StatusTimers {
+                    run: None,
+                    activity: Some(std::time::Duration::from_millis(ms)),
+                },
+            );
+            assert!(row.split_whitespace().any(|word| word == label), "{row}");
+        }
         assert!(
             tool_row.contains("18s · ⇣9.45k · 55.5K / 400K  [stop]"),
             "{tool_row}"
@@ -10804,7 +10787,7 @@ mod tests {
             3,
             StatusTimers {
                 run: Some(std::time::Duration::from_secs(18)),
-                phase: None,
+                activity: None,
             },
         );
         assert!(clipped_stop.is_some());
@@ -10923,7 +10906,7 @@ mod tests {
                     MotionMode::Still,
                     StatusTimers {
                         run: Some(std::time::Duration::from_secs(4)),
-                        phase: Some(std::time::Duration::from_secs(4)),
+                        activity: Some(std::time::Duration::from_secs(4)),
                     },
                     false,
                     None,
