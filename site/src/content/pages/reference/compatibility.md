@@ -116,6 +116,14 @@ with `write_constraint`, under the exception below. Tool behavior changes are li
 `bash` runs commands in bash rather than `/bin/sh`, and that the read-only file tools follow
 symbolic links whose targets stay inside the workspace.
 
+## Wisp 0.16.2 compatibility
+
+0.16.2 improves TUI transcript tool labels, clarifies tool schemas and continuation guidance, and
+guides Wisp to preview HTML mockups in `/browser`. The supported Python API, live RPC payloads,
+settings, and session format are unchanged from 0.16.1 and 0.16.0. Sessions work in either
+direction across these patch versions. Install matching frontend and backend versions as usual.
+See the [0.16.2 release checklist](../maintainers/releases/0.16.2-release.md).
+
 ## Wisp 0.16.1 compatibility
 
 0.16.1 adds a close button to the Browser pane. The supported Python API, live RPC payloads,
