@@ -116,6 +116,12 @@ with `write_constraint`, under the exception below. Tool behavior changes are li
 `bash` runs commands in bash rather than `/bin/sh`, and that the read-only file tools follow
 symbolic links whose targets stay inside the workspace.
 
+## Wisp 0.16.3 compatibility
+
+0.16.3 changes how provider requests are assembled after an interrupted turn and how Codex replays
+anonymous output items. It does not rewrite saved sessions or change the Python API, live RPC
+payloads, or supported platforms. Use the 0.16.3 backend and TUI together; no migration is needed.
+
 ## Wisp 0.16.2 compatibility
 
 0.16.2 improves TUI transcript tool labels, clarifies tool schemas and continuation guidance, and
