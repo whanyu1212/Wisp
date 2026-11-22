@@ -812,3 +812,43 @@ def test_concurrent_polls_run_in_parallel_across_processes_and_interrupt_on_canc
     assert parallel_elapsed < 0.75
     assert cancelled_update.state == "cancelled"
     assert cancel_elapsed < 2.0
+
+
+@pytest.mark.process
+def test_concurrent_same_process_poll_respects_wait_budget(tmp_path: Path) -> None:
+    """Zero-wait and short polls on an actively polled process do not block behind its wait."""
+
+    async def run() -> tuple[ProcessUpdate, float, ProcessUpdate, float]:
+        supervisor = ProcessSupervisor(max_processes=2)
+        try:
+            process_id = await supervisor.start(
+                python_command("import time; time.sleep(30)"),
+                cwd=tmp_path,
+                timeout=30,
+            )
+            long_poll = asyncio.create_task(
+                supervisor.poll(process_id, wait_seconds=5, until="exit")
+            )
+            # Give the long poll a tick to enter its wait and hold poll_lock.
+            await anyio.sleep(0.05)
+
+            t0 = asyncio.get_running_loop().time()
+            zero_update = await supervisor.poll(process_id, wait_seconds=0)
+            zero_elapsed = asyncio.get_running_loop().time() - t0
+
+            t1 = asyncio.get_running_loop().time()
+            short_update = await supervisor.poll(process_id, wait_seconds=0.15, until="exit")
+            short_elapsed = asyncio.get_running_loop().time() - t1
+
+            await supervisor.cancel(process_id)
+            await long_poll
+            return zero_update, zero_elapsed, short_update, short_elapsed
+        finally:
+            await supervisor.aclose()
+
+    zero_update, zero_elapsed, short_update, short_elapsed = anyio.run(run)
+
+    assert zero_update.state == "running"
+    assert zero_elapsed < 0.3
+    assert short_update.state == "running"
+    assert short_elapsed < 0.5
