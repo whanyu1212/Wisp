@@ -61,6 +61,12 @@ _MOVED_NOTICE_UNAVAILABLE = (
 _EXIT_NOTICE_UNAVAILABLE = (
     "[Exit notices are not available here; poll this process to see when it stops.]"
 )
+_SHORT_POLL_MAX_SECONDS = 2.0
+_SHORT_POLL_NOTICE = (
+    "[Process is still running with no new output after a short poll. "
+    "Use wait_seconds=30-120 with until=exit to wait for completion instead of "
+    "repeating short polls.]"
+)
 
 BashOperation = Literal["run", "start", "poll", "cancel"]
 _BASH_OPERATIONS: Final = frozenset({"run", "start", "poll", "cancel"})
@@ -476,7 +482,15 @@ class BashTool:
         update = await supervisor.poll(
             process_id, wait_seconds=wait_seconds, until=_poll_until(arguments)
         )
-        return await _managed_update_result(update, context=context)
+        result = await _managed_update_result(update, context=context)
+        if (
+            update.state == "running"
+            and 0 < wait_seconds <= _SHORT_POLL_MAX_SECONDS
+            and not update.stdout
+            and not update.stderr
+        ):
+            return replace(result, text=f"{result.text}\n{_SHORT_POLL_NOTICE}")
+        return result
 
     async def _cancel(self, arguments: ToolArguments, context: ToolContext) -> ToolResult:
         supervisor = self._require_process_supervisor("cancel")
