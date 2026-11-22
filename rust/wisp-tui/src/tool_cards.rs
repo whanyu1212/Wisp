@@ -30,6 +30,8 @@ const GENERIC_VALUE_MAX_CHARS: usize = 64;
 const GENERIC_MAX_ITEMS: usize = 8;
 const GENERIC_ITEMS_KEY: &str = "\0wisp.items";
 const GENERIC_OMITTED_KEY: &str = "\0wisp.omitted";
+const GENERIC_FIRST_URL_KEY: &str = "\0wisp.first_url";
+const GENERIC_NON_STRING_KEYS_KEY: &str = "\0wisp.non_strings";
 const PATH_MAX_CHARS: usize = 80;
 const REASON_MAX_BYTES: usize = 512;
 const TOOL_NAME_MAX_CHARS: usize = 128;
@@ -452,6 +454,7 @@ impl ToolCardSnapshot {
         };
         let mut card = Self::requested(&call, ToolStatus::Requested);
         card.arguments_available = false;
+        card.action_label = None;
         card.apply_result(input);
         card
     }
@@ -791,6 +794,26 @@ impl ToolCardSnapshot {
         }
     }
 
+    pub(crate) fn has_friendly_action_label(&self) -> bool {
+        self.arguments_available
+            && self
+                .action_label
+                .as_ref()
+                .is_some_and(|label| label.verb != Verb::Call)
+    }
+
+    pub(crate) fn friendly_verb(&self) -> Option<Verb> {
+        self.has_friendly_action_label()
+            .then(|| self.action_label.as_ref().map(|label| label.verb))
+            .flatten()
+    }
+
+    pub(crate) fn mcp_group_label(&self) -> Option<&'static str> {
+        self.has_friendly_action_label()
+            .then(|| self.action_label.as_ref()?.group_target)
+            .flatten()
+    }
+
     /// The verb that opens the card's action line, in the form its status calls for: in
     /// flight (`Running`), finished (`Ran`), or never run (`Run`, as in
     /// `Run cargo test · denied`). Another tool is named by its own name.
@@ -798,7 +821,11 @@ impl ToolCardSnapshot {
         if let Some(script) = &self.script {
             return script.action_verb(self.status);
         }
-        let (in_flight, finished, never_ran) = if let Some(label) = &self.action_label {
+        let (in_flight, finished, never_ran) = if let Some(label) = self
+            .action_label
+            .as_ref()
+            .filter(|_| self.arguments_available || self.mcp_target().is_none())
+        {
             label.verb.forms()
         } else {
             match self.name.as_str() {
@@ -847,14 +874,7 @@ impl ToolCardSnapshot {
     /// `github/create_pull_request`. Wisp names MCP tools `mcp__{server}__{tool}`, and
     /// server names hold no `_`, so the first `__` after the prefix ends the server.
     pub fn mcp_target(&self) -> Option<String> {
-        let (server, tool) = self.name.strip_prefix("mcp__")?.split_once("__")?;
-        if server.is_empty() || tool.is_empty() {
-            return None;
-        }
-        Some(clip_chars(
-            &one_line(&format!("{server}/{tool}")),
-            TOOL_LABEL_MAX_CHARS * 2,
-        ))
+        mcp_target_of(&self.name)
     }
 
     /// How long a finished call ran, for its action line. Calls that were denied,
@@ -1475,17 +1495,40 @@ pub fn bounded_tool_arguments(name: &str, arguments: &Value) -> Value {
                     }
                 }
             }
+            let mut non_strings = Vec::new();
             for key in selected {
                 let value = arguments.get(key).expect("selected key exists");
+                let bounded_key = clip_chars(key, 64);
+                if matches!(value, Value::Array(_) | Value::Object(_)) {
+                    non_strings.push(Value::String(bounded_key.clone()));
+                }
                 bounded.insert(
-                    clip_chars(key, 64),
+                    bounded_key,
                     bounded_argument_value(value, GENERIC_VALUE_MAX_CHARS),
                 );
             }
             let omitted = arguments.len().saturating_sub(bounded.len());
-            let mut wrapper = Map::with_capacity(2);
+            let first_url = arguments
+                .get("urls")
+                .and_then(Value::as_array)
+                .and_then(|items| items.first())
+                .and_then(Value::as_str)
+                .filter(|url| !url.trim().is_empty())
+                .map(|url| clip_chars(url, GENERIC_VALUE_MAX_CHARS));
+            let mut wrapper = Map::with_capacity(
+                2 + usize::from(first_url.is_some()) + usize::from(!non_strings.is_empty()),
+            );
             wrapper.insert(GENERIC_ITEMS_KEY.into(), Value::Object(bounded));
             wrapper.insert(GENERIC_OMITTED_KEY.into(), Value::from(omitted as u64));
+            if let Some(first_url) = first_url {
+                wrapper.insert(GENERIC_FIRST_URL_KEY.into(), Value::String(first_url));
+            }
+            if !non_strings.is_empty() {
+                wrapper.insert(
+                    GENERIC_NON_STRING_KEYS_KEY.into(),
+                    Value::Array(non_strings),
+                );
+            }
             return Value::Object(wrapper);
         }
     };
@@ -1849,6 +1892,7 @@ fn mcp_subject(input: &ToolCallInput) -> Option<String> {
         return None;
     }
     let object = input.arguments.as_object()?;
+    let non_strings = generic_non_string_keys(object);
     let arguments = object
         .get(GENERIC_ITEMS_KEY)
         .and_then(Value::as_object)
@@ -1859,12 +1903,17 @@ fn mcp_subject(input: &ToolCallInput) -> Option<String> {
         "query", "id", "issueId", "issue_id", "number", "path", "url", "name",
     ]
     .into_iter()
-    .find_map(|key| match arguments.get(key)? {
-        Value::String(value) if !value.trim().is_empty() => {
-            Some(clip_chars(&one_line(value), GENERIC_VALUE_MAX_CHARS))
+    .find_map(|key| {
+        if non_strings.is_some_and(|keys| keys.iter().any(|item| item.as_str() == Some(key))) {
+            return None;
         }
-        Value::Number(value) => Some(value.to_string()),
-        _ => None,
+        match arguments.get(key)? {
+            Value::String(value) if !value.trim().is_empty() => {
+                Some(clip_chars(&one_line(value), GENERIC_VALUE_MAX_CHARS))
+            }
+            Value::Number(value) => Some(value.to_string()),
+            _ => None,
+        }
     })
 }
 
@@ -1878,17 +1927,50 @@ fn format_generic_value(arguments: &Value) -> String {
     format_generic(object, object.len().saturating_sub(GENERIC_MAX_ITEMS))
 }
 
+pub(crate) fn mcp_target_of(name: &str) -> Option<String> {
+    let (server, tool) = name.strip_prefix("mcp__")?.split_once("__")?;
+    if server.is_empty() || tool.is_empty() {
+        return None;
+    }
+    Some(clip_chars(
+        &one_line(&format!("{server}/{tool}")),
+        TOOL_LABEL_MAX_CHARS * 2,
+    ))
+}
+
 /// The arguments a generic tool's bounded record keeps, and how many it left out;
 /// `None` when `object` is not such a record.
 pub(crate) fn generic_argument_items(
     object: &Map<String, Value>,
 ) -> Option<(&Map<String, Value>, u64)> {
-    if object.len() != 2 {
+    let has_unexpected_key = object
+        .keys()
+        .filter(|key| key.as_str() != GENERIC_ITEMS_KEY && key.as_str() != GENERIC_OMITTED_KEY)
+        .any(|key| {
+            !matches!(
+                key.as_str(),
+                GENERIC_FIRST_URL_KEY | GENERIC_NON_STRING_KEYS_KEY
+            )
+        });
+    if has_unexpected_key {
         return None;
     }
     let items = object.get(GENERIC_ITEMS_KEY)?.as_object()?;
     let omitted = object.get(GENERIC_OMITTED_KEY)?.as_u64()?;
     Some((items, omitted))
+}
+
+pub(crate) fn generic_first_url(object: &Map<String, Value>) -> Option<&str> {
+    generic_argument_items(object)?;
+    object.get(GENERIC_FIRST_URL_KEY)?.as_str()
+}
+
+pub(crate) fn generic_non_string_keys(object: &Map<String, Value>) -> Option<&[Value]> {
+    generic_argument_items(object)?;
+    object
+        .get(GENERIC_NON_STRING_KEYS_KEY)?
+        .as_array()
+        .map(Vec::as_slice)
 }
 
 fn format_generic(arguments: &Map<String, Value>, omitted: usize) -> String {
@@ -2549,14 +2631,14 @@ mod tests {
         for arguments in [
             serde_json::json!({"query": "astro", "limit": 100}),
             bounded_tool_arguments(
-                "mcp__linear__list_issues",
+                "mcp__tracker__list_issues",
                 &serde_json::json!({"query": "astro", "limit": 100}),
             ),
         ] {
             let card = ToolCardSnapshot::requested(
                 &ToolCallInput {
                     call_id: "search".into(),
-                    name: "mcp__linear__list_issues".into(),
+                    name: "mcp__tracker__list_issues".into(),
                     arguments,
                     detail_source: ToolDetailSource::None,
                 },
@@ -2573,6 +2655,376 @@ mod tests {
         };
         let card = ToolCardSnapshot::requested(&input, ToolStatus::Requested);
         assert_eq!(card.display_arguments(), "unknown=true");
+    }
+
+    #[test]
+    fn mcp_action_labels_cover_common_operations_and_keep_exact_fallback() {
+        use serde_json::json;
+        for (name, args, expected, group_target) in [
+            (
+                "mcp__linear__list_issues",
+                json!({"query": "visual refresh", "limit": 20}),
+                "Searched Linear issues for “visual refresh”",
+                "Linear issues",
+            ),
+            (
+                "mcp__linear__list_issues",
+                json!({"limit": 20}),
+                "Listed Linear issues",
+                "Linear issues",
+            ),
+            (
+                "mcp__linear__list_issues",
+                json!({"query": "   "}),
+                "Listed Linear issues",
+                "Linear issues",
+            ),
+            (
+                "mcp__linear__get_issue",
+                json!({"id": "HY-489", "includeRelations": true}),
+                "Read Linear issue HY-489",
+                "Linear issue",
+            ),
+            (
+                "mcp__linear__get_issue",
+                json!({}),
+                "Read Linear issue",
+                "Linear issue",
+            ),
+            (
+                "mcp__linear__list_projects",
+                json!({"query": "wisp"}),
+                "Searched Linear projects for “wisp”",
+                "Linear projects",
+            ),
+            (
+                "mcp__linear__list_projects",
+                json!({}),
+                "Listed Linear projects",
+                "Linear projects",
+            ),
+            (
+                "mcp__linear__get_project",
+                json!({"id": "P-HY-2"}),
+                "Read Linear project P-HY-2",
+                "Linear project",
+            ),
+            (
+                "mcp__linear__list_comments",
+                json!({"issueId": "HY-489"}),
+                "Listed comments on Linear issue HY-489",
+                "Linear comments",
+            ),
+            (
+                "mcp__linear__list_documents",
+                json!({"query": "protocol"}),
+                "Searched Linear documents for “protocol”",
+                "Linear documents",
+            ),
+            (
+                "mcp__linear__get_document",
+                json!({"id": "doc-1"}),
+                "Read Linear document doc-1",
+                "Linear document",
+            ),
+            (
+                "mcp__linear__search_documentation",
+                json!({"query": "webhooks"}),
+                "Searched Linear docs for “webhooks”",
+                "Linear docs",
+            ),
+            (
+                "mcp__exa__web_search_exa",
+                json!({"query": "ratatui 0.30"}),
+                "Searched the web via Exa for “ratatui 0.30”",
+                "the web via Exa",
+            ),
+            (
+                "mcp__exa__web_search_exa",
+                json!({}),
+                "Searched the web via Exa",
+                "the web via Exa",
+            ),
+            (
+                "mcp__exa__web_fetch_exa",
+                json!({"url": "https://example.org/post"}),
+                "Read https://example.org/post via Exa",
+                "web page via Exa",
+            ),
+            (
+                "mcp__exa__crawling_exa",
+                json!({"urls": ["https://example.org/a"]}),
+                "Read https://example.org/a via Exa",
+                "web page via Exa",
+            ),
+            (
+                "mcp__openaiDeveloperDocs__search_openai_docs",
+                json!({"query": "responses api"}),
+                "Searched OpenAI docs for “responses api”",
+                "OpenAI docs",
+            ),
+            (
+                "mcp__openai-docs__fetch_openai_doc",
+                json!({"url": "https://platform.openai.com/docs/guides/responses"}),
+                "Read OpenAI doc https://platform.openai.com/docs/guides/responses",
+                "OpenAI doc",
+            ),
+            (
+                "mcp__playwright__browser_navigate",
+                json!({"url": "https://example.org"}),
+                "Opened https://example.org in Playwright",
+                "Playwright browser",
+            ),
+            (
+                "mcp__playwright__browser_snapshot",
+                json!({}),
+                "Read Playwright page snapshot",
+                "Playwright page snapshot",
+            ),
+            (
+                "mcp__playwright__browser_take_screenshot",
+                json!({"type": "png"}),
+                "Captured Playwright screenshot",
+                "Playwright screenshot",
+            ),
+            (
+                "mcp__playwright__browser_click",
+                json!({"element": "Submit button", "ref": "e12"}),
+                "Clicked Submit button in Playwright",
+                "Playwright page",
+            ),
+            (
+                "mcp__playwright__browser_type",
+                json!({"ref": "e3", "text": "secret"}),
+                "Typed into e3 in Playwright",
+                "Playwright page",
+            ),
+            (
+                "mcp__playwright__browser_console_messages",
+                json!({}),
+                "Read Playwright console messages",
+                "Playwright console messages",
+            ),
+            (
+                "mcp__playwright__browser_network_requests",
+                json!({}),
+                "Read Playwright network requests",
+                "Playwright network requests",
+            ),
+        ] {
+            for arguments in [args.clone(), bounded_tool_arguments(name, &args)] {
+                let card = ToolCardSnapshot::requested(
+                    &ToolCallInput {
+                        call_id: "call".into(),
+                        name: name.into(),
+                        arguments,
+                        detail_source: ToolDetailSource::None,
+                    },
+                    ToolStatus::Done,
+                );
+                assert!(card.has_friendly_action_label(), "{name}");
+                assert_eq!(card.mcp_group_label(), Some(group_target), "{name}");
+                assert_eq!(
+                    format!("{} {}", card.action_verb(), card.action_line_arguments()),
+                    expected,
+                    "{name}"
+                );
+                assert!(card.action().starts_with("MCP      "), "{name}");
+            }
+        }
+
+        // Playwright typed secret stays out of the friendly subject while preserved in detail.
+        let pw_type = ToolCardSnapshot::requested(
+            &ToolCallInput {
+                call_id: "pw".into(),
+                name: "mcp__playwright__browser_type".into(),
+                arguments: json!({"ref": "e3", "text": "secret"}),
+                detail_source: ToolDetailSource::None,
+            },
+            ToolStatus::Done,
+        );
+        assert!(pw_type.action_arguments.contains("text=secret"));
+
+        // Sanitize control and bidi characters in friendly MCP subjects.
+        let dirty = ToolCardSnapshot::requested(
+            &ToolCallInput {
+                call_id: "dirty".into(),
+                name: "mcp__linear__list_issues".into(),
+                arguments: json!({"query": "\u{202e}visual\nrefresh\u{1b}"}),
+                detail_source: ToolDetailSource::None,
+            },
+            ToolStatus::Done,
+        );
+        assert_eq!(
+            format!("{} {}", dirty.action_verb(), dirty.action_line_arguments()),
+            "Searched Linear issues for “visual refresh”"
+        );
+
+        // Status transitions use the friendly verb forms.
+        for (status, expected_verb) in [
+            (ToolStatus::Running, "Reading"),
+            (ToolStatus::AwaitingApproval, "Read"),
+            (ToolStatus::Denied, "Read"),
+            (ToolStatus::Error, "Read failed:"),
+        ] {
+            let card = ToolCardSnapshot::requested(
+                &ToolCallInput {
+                    call_id: "state".into(),
+                    name: "mcp__linear__get_issue".into(),
+                    arguments: json!({"id": "HY-489"}),
+                    detail_source: ToolDetailSource::None,
+                },
+                status,
+            );
+            assert_eq!(card.action_verb(), expected_verb);
+            assert_eq!(card.action_line_arguments(), "Linear issue HY-489");
+        }
+
+        // Ambiguous save_*, unknown tools/servers, unsupported shapes, and omitted keys keep the exact fallback.
+        for (name, args, expected_verb, expected_target, expected_args) in [
+            (
+                "mcp__linear__save_issue",
+                json!({"id": "HY-489", "title": "Fix"}),
+                "Called",
+                "linear/save_issue",
+                "HY-489",
+            ),
+            (
+                "mcp__linear__save_comment",
+                json!({"issueId": "HY-489", "body": "Done"}),
+                "Called",
+                "linear/save_comment",
+                "HY-489",
+            ),
+            (
+                "mcp__playwright__browser_evaluate",
+                json!({"function": "() => 1"}),
+                "Called",
+                "playwright/browser_evaluate",
+                "function=() => 1",
+            ),
+            (
+                "mcp__custom__lookup",
+                json!({"query": "test"}),
+                "Called",
+                "custom/lookup",
+                "test",
+            ),
+            (
+                "mcp__linear__list_issues",
+                json!({"query": 123}),
+                "Called",
+                "linear/list_issues",
+                "123",
+            ),
+            (
+                "mcp__linear__get_issue",
+                json!({"id": 42}),
+                "Called",
+                "linear/get_issue",
+                "42",
+            ),
+            (
+                "mcp__linear__list_issues",
+                json!({"query": ["astro"]}),
+                "Called",
+                "linear/list_issues",
+                "query=[1 items]",
+            ),
+            (
+                "mcp__linear__list_issues",
+                json!({"query": {"bad": 1}}),
+                "Called",
+                "linear/list_issues",
+                "query={1 fields}",
+            ),
+            (
+                "mcp__exa__crawling_exa",
+                json!({"urls": [123]}),
+                "Called",
+                "exa/crawling_exa",
+                "urls=[1 items]",
+            ),
+        ] {
+            for arguments in [args.clone(), bounded_tool_arguments(name, &args)] {
+                let card = ToolCardSnapshot::requested(
+                    &ToolCallInput {
+                        call_id: "fallback".into(),
+                        name: name.into(),
+                        arguments,
+                        detail_source: ToolDetailSource::None,
+                    },
+                    ToolStatus::Done,
+                );
+                assert!(!card.has_friendly_action_label(), "{name}");
+                assert_eq!(card.mcp_group_label(), None, "{name}");
+                assert_eq!(card.action_verb(), expected_verb, "{name}");
+                assert_eq!(
+                    card.mcp_target().as_deref(),
+                    Some(expected_target),
+                    "{name}"
+                );
+                assert_eq!(card.action_line_arguments(), expected_args, "{name}");
+            }
+        }
+
+        // Bounded arguments that clipped away `query` do not claim an unfiltered list.
+        let clipped = bounded_tool_arguments(
+            "mcp__linear__list_issues",
+            &json!({
+                "a": 1, "b": 2, "c": 3, "d": 4, "e": 5, "f": 6, "g": 7, "h": 8,
+                "query": "visual refresh"
+            }),
+        );
+        let clipped_card = ToolCardSnapshot::requested(
+            &ToolCallInput {
+                call_id: "clipped".into(),
+                name: "mcp__linear__list_issues".into(),
+                arguments: clipped,
+                detail_source: ToolDetailSource::None,
+            },
+            ToolStatus::Done,
+        );
+        assert!(!clipped_card.has_friendly_action_label());
+        assert_eq!(clipped_card.action_verb(), "Called");
+
+        // Primary key match succeeds even when a secondary key was clipped or non-string.
+        let primary_over_omitted = bounded_tool_arguments(
+            "mcp__playwright__browser_click",
+            &json!({
+                "a": 1, "b": 2, "c": 3, "d": 4, "e": 5,
+                "element": "Submit button",
+                "f": 6, "g": 7, "h": 8,
+                "ref": 123
+            }),
+        );
+        let click_card = ToolCardSnapshot::requested(
+            &ToolCallInput {
+                call_id: "click-primary".into(),
+                name: "mcp__playwright__browser_click".into(),
+                arguments: primary_over_omitted,
+                detail_source: ToolDetailSource::None,
+            },
+            ToolStatus::Done,
+        );
+        assert!(click_card.has_friendly_action_label());
+        assert_eq!(
+            format!(
+                "{} {}",
+                click_card.action_verb(),
+                click_card.action_line_arguments()
+            ),
+            "Clicked Submit button in Playwright"
+        );
+
+        // Missing request / unavailable arguments keep the exact fallback.
+        let mut missing_request_result = result("ok");
+        missing_request_result.call_id = "missing-req".into();
+        missing_request_result.name = "mcp__linear__list_issues".into();
+        let no_req = ToolCardSnapshot::result_without_request(&missing_request_result);
+        assert!(!no_req.arguments_available);
+        assert!(!no_req.has_friendly_action_label());
+        assert_eq!(no_req.action_verb(), "Called");
     }
 
     #[test]

@@ -8020,14 +8020,8 @@ mod tests {
         assert_eq!(screen.matches("cargo fmt").count(), 1, "{screen}");
         cache.fold_mut().expand_group(first);
         let screen = draw_cards(&state, &mut cache);
-        assert!(
-            screen.contains("• Called linear/list_issues · HY-0"),
-            "{screen}"
-        );
-        assert!(
-            screen.contains("• Called linear/get_issue · 3 times"),
-            "{screen}"
-        );
+        assert!(screen.contains("• Listed Linear issues"), "{screen}");
+        assert!(screen.contains("• Read Linear issue · 3 times"), "{screen}");
         assert!(
             screen.contains("• Called linear/save_issue · 2 times"),
             "{screen}"
@@ -8035,6 +8029,37 @@ mod tests {
         // Expanding the group reveals every command's individual row.
         assert!(
             screen.contains("cargo fmt") && screen.contains("cargo test"),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn list_issues_with_and_without_query_stay_separate_groups() {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_prompt("plan".into());
+        for (call_id, args) in [
+            ("q1", json!({"query": "astro"})),
+            ("q2", json!({"query": "tui"})),
+            ("l1", json!({})),
+            ("l2", json!({})),
+        ] {
+            state
+                .transcript
+                .observe_tool_call(crate::tool_cards::ToolCallInput {
+                    call_id: call_id.into(),
+                    name: "mcp__linear__list_issues".into(),
+                    detail_source: crate::tool_detail::ToolDetailSource::None,
+                    arguments: args,
+                });
+            finish_call(&mut state, call_id, "mcp__linear__list_issues");
+        }
+        let screen = draw_cards(&state, &mut TranscriptRowCache::default());
+        assert!(
+            screen.contains("• Searched Linear issues · 2 times"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("• Listed Linear issues · 2 times"),
             "{screen}"
         );
     }
@@ -8062,11 +8087,39 @@ mod tests {
             })
             .unwrap();
         let palette = Palette::default();
-        let (verb_fg, _, verb) = style_at_text(terminal.backend(), "Called ").unwrap();
+        let (verb_fg, _, verb) = style_at_text(terminal.backend(), "Read ").unwrap();
         assert_eq!(Some(verb_fg), palette.action_verb(false).fg);
         assert!(verb.contains(Modifier::BOLD));
         let (marker_fg, _, _) = style_at_text(terminal.backend(), "•").unwrap();
         assert_eq!(marker_fg, palette.success);
+    }
+
+    #[test]
+    fn mcp_fallback_group_draws_called_verb() {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_prompt("plan".into());
+        for (call_id, id) in [("s1", "HY-1"), ("s2", "HY-2")] {
+            observe_mcp_call(&mut state, call_id, "save_issue", id);
+            finish_call(&mut state, call_id, "mcp__linear__save_issue");
+        }
+        let mut terminal = Terminal::new(TestBackend::new(100, 12)).unwrap();
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &state,
+                    &mut TranscriptViewport::default(),
+                    &mut TranscriptRowCache::default(),
+                    &PromptEditor::default(),
+                    &connection(),
+                    None,
+                );
+            })
+            .unwrap();
+        let palette = Palette::default();
+        let (verb_fg, _, verb) = style_at_text(terminal.backend(), "Called ").unwrap();
+        assert_eq!(Some(verb_fg), palette.action_verb(false).fg);
+        assert!(verb.contains(Modifier::BOLD));
     }
 
     #[test]
@@ -8079,16 +8132,13 @@ mod tests {
         let mut cache = TranscriptRowCache::default();
         let screen = draw_cards(&state, &mut cache);
         assert!(
-            screen.contains("Calling linear/get_issue · HY-2 · 2 calls · 1 succeeded · 1 pending"),
+            screen.contains("Reading Linear issue HY-2 · 2 calls · 1 succeeded · 1 pending"),
             "{screen}"
         );
         // The cached header follows a later member's result.
         finish_call(&mut state, "g2", "mcp__linear__get_issue");
         let screen = draw_cards(&state, &mut cache);
-        assert!(
-            screen.contains("• Called linear/get_issue · 2 times"),
-            "{screen}"
-        );
+        assert!(screen.contains("• Read Linear issue · 2 times"), "{screen}");
         assert!(!screen.contains("pending"), "{screen}");
     }
 
@@ -8687,10 +8737,49 @@ mod tests {
         assert!(screen.contains("3 times"), "{screen}");
         for id in ["HY-1", "HY-2", "HY-3"] {
             assert!(
-                screen.contains(&format!("• Called linear/get_issue · {id}")),
+                screen.contains(&format!("• Read Linear issue {id}")),
                 "{screen}"
             );
         }
+    }
+
+    #[test]
+    fn expanding_friendly_mcp_card_preserves_exact_tool_identity_and_arguments() {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_prompt("plan".into());
+        let issue_entry = state
+            .transcript
+            .observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: "g1".into(),
+                name: "mcp__linear__get_issue".into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+                arguments: json!({"id": "HY-489", "includeRelations": true}),
+            });
+        finish_call(&mut state, "g1", "mcp__linear__get_issue");
+        let snapshot_entry = state
+            .transcript
+            .observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: "s1".into(),
+                name: "mcp__playwright__browser_snapshot".into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+                arguments: json!({}),
+            });
+        finish_call(&mut state, "s1", "mcp__playwright__browser_snapshot");
+
+        let mut cache = TranscriptRowCache::default();
+        cache.fold_mut().expand(issue_entry);
+        cache.fold_mut().expand(snapshot_entry);
+        let screen = draw_cards(&state, &mut cache);
+        assert!(screen.contains("• Read Linear issue HY-489"), "{screen}");
+        assert!(
+            screen.contains("linear/get_issue · id=HY-489 includeRelations=true"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("• Read Playwright page snapshot"),
+            "{screen}"
+        );
+        assert!(screen.contains("└ playwright/browser_snapshot"), "{screen}");
     }
 
     #[test]
