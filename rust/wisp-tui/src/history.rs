@@ -999,6 +999,25 @@ mod tests {
     }
 
     #[test]
+    fn reopened_server_proposal_names_the_proposed_change() {
+        let mut call = message("assistant", "");
+        call["tool_calls"] = json!([{"call_id":"p","name":"propose_mcp_server_change","arguments":{"name":"linear","action":"disable"}}]);
+        let mut result = message("tool", "confirmed");
+        result["tool_call_id"] = json!("p");
+        result["tool_name"] = json!("propose_mcp_server_change");
+        result["tool_result"] = json!({"status":"done"});
+        let history = project_rpc_messages(&[call, result]).unwrap();
+        let card = history
+            .entries()
+            .iter()
+            .find_map(|entry| entry.tool_card())
+            .unwrap();
+        assert_eq!(card.action_verb(), "Proposed");
+        assert_eq!(card.action_line_arguments(), "disabling MCP server linear");
+        assert!(card.action_arguments.contains("action=disable"));
+    }
+
+    #[test]
     fn history_restores_script_calls() {
         let mut result = message("tool", "12");
         let entry_id = result["entry_id"].as_str().unwrap().to_owned();

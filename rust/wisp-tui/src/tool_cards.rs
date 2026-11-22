@@ -1,5 +1,9 @@
 //! Terminal-independent, bounded tool and managed-process presentation state.
 
+mod action_label;
+use action_label::ActionLabel;
+pub(crate) use action_label::Verb;
+
 use std::fmt::Write as _;
 
 use serde_json::{Map, Value};
@@ -297,7 +301,7 @@ pub struct ToolCardSnapshot {
     pub action_arguments: String,
     pub command_summary: Option<CommandSummary>,
     /// The concise display subject; full bounded arguments remain in `action_arguments`.
-    pub action_subject: Option<String>,
+    pub(crate) action_label: Option<ActionLabel>,
     pub process_id: Option<String>,
     pub status: ToolStatus,
     /// A backend policy grant, independent of whether execution succeeded.
@@ -398,7 +402,7 @@ impl ToolCardSnapshot {
             name: bounded_tool_name(&input.name),
             action_arguments: format_tool_arguments(&input.name, &input.arguments),
             command_summary: command_summary(input),
-            action_subject: action_subject(input),
+            action_label: ActionLabel::from_call(input),
             process_id: None,
             status,
             auto_approved: false,
@@ -485,7 +489,7 @@ impl ToolCardSnapshot {
         self.name = name;
         self.action_arguments = action_arguments;
         self.command_summary = command_summary(input);
-        self.action_subject = action_subject(input);
+        self.action_label = ActionLabel::from_call(input);
         self.arguments_available = true;
         // A script's calls may already be on the card, from before its arguments.
         if let Some(arguments) = script_of_call(input) {
@@ -511,7 +515,7 @@ impl ToolCardSnapshot {
         self.name = bounded_tool_name(&resolved.name);
         self.action_arguments = format_tool_arguments(&resolved.name, &resolved.arguments);
         self.command_summary = command_summary(resolved);
-        self.action_subject = action_subject(resolved);
+        self.action_label = ActionLabel::from_call(resolved);
         self.detail_source = resolved.detail_source.clone();
         self.arguments_available = true;
         true
@@ -791,37 +795,44 @@ impl ToolCardSnapshot {
     /// flight (`Running`), finished (`Ran`), or never run (`Run`, as in
     /// `Run cargo test · denied`). Another tool is named by its own name.
     pub fn action_verb(&self) -> String {
-        let (in_flight, finished, never_ran) = match self.name.as_str() {
-            "browser_navigate" => ("Opening", "Opened", "Open"),
-            "browser_read" => ("Reading", "Read", "Read"),
-            "browser_click" => ("Clicking", "Clicked", "Click"),
-            "browser_type" => ("Typing", "Typed", "Type"),
-            "browser_screenshot" => ("Capturing", "Captured", "Capture"),
-            "bash" => ("Running", "Ran", "Run"),
-            "read" => ("Reading", "Read", "Read"),
-            "read_saved_session" => (
-                "Reading saved session",
-                "Read saved session",
-                "Read saved session",
-            ),
-            "grep" | "find" => ("Searching", "Searched", "Search"),
-            "ls" => ("Listing", "Listed", "List"),
-            "edit" => ("Editing", "Edited", "Edit"),
-            "write" => ("Writing", "Wrote", "Write"),
-            crate::script_card::CODEMODE => ("Scripting", "Scripted", "Script"),
-            crate::script_card::SPAWN_AGENT => ("Delegating", "Delegated", "Delegate"),
-            _ if self.mcp_target().is_some() => ("Calling", "Called", "Call"),
-            name => {
-                let name = clip_chars(&one_line(name), TOOL_LABEL_MAX_CHARS);
-                return if self.status == ToolStatus::Error {
-                    format!("{name} failed:")
-                } else {
-                    name
-                };
+        let (in_flight, finished, never_ran) = if let Some(label) = &self.action_label {
+            label.verb.forms()
+        } else {
+            match self.name.as_str() {
+                "bash" => ("Running", "Ran", "Run"),
+                "read" => ("Reading", "Read", "Read"),
+                "read_saved_session" => (
+                    "Reading saved session",
+                    "Read saved session",
+                    "Read saved session",
+                ),
+                "grep" | "find" => ("Searching", "Searched", "Search"),
+                "ls" => ("Listing", "Listed", "List"),
+                "edit" => ("Editing", "Edited", "Edit"),
+                "write" => ("Writing", "Wrote", "Write"),
+                crate::script_card::CODEMODE => ("Scripting", "Scripted", "Script"),
+                crate::script_card::SPAWN_AGENT => ("Delegating", "Delegated", "Delegate"),
+                _ if self.mcp_target().is_some() => ("Calling", "Called", "Call"),
+                name => {
+                    let name = clip_chars(&one_line(name), TOOL_LABEL_MAX_CHARS);
+                    return if self.status == ToolStatus::Error {
+                        format!("{name} failed:")
+                    } else {
+                        name
+                    };
+                }
             }
         };
         match self.status {
             ToolStatus::Requested | ToolStatus::Running => in_flight,
+            ToolStatus::Error
+                if self
+                    .action_label
+                    .as_ref()
+                    .is_some_and(|label| label.verb == Verb::Propose) =>
+            {
+                "Proposal failed:"
+            }
             ToolStatus::Error if !self.command_exited_nonzero => {
                 return format!("{never_ran} failed:");
             }
@@ -900,8 +911,8 @@ impl ToolCardSnapshot {
     /// The arguments as the action line shows them: like [`Self::display_arguments`], but
     /// a shell command is always shown as typed, so the line reads `Ran cargo test`.
     pub fn action_line_arguments(&self) -> String {
-        if let Some(subject) = &self.action_subject {
-            return subject.clone();
+        if let Some(label) = &self.action_label {
+            return label.subject.clone();
         }
         // Worked out here rather than stored, so a script's line count never makes
         // its live and reopened cards disagree about their arguments.
@@ -1825,61 +1836,6 @@ fn format_bash(arguments: &Map<String, Value>) -> String {
     }
 }
 
-/// Pick subjects from structured arguments, never by parsing the rendered detail.
-/// In particular, a browser typing row must not fall back to its text payload.
-fn action_subject(input: &ToolCallInput) -> Option<String> {
-    if !input.name.starts_with("browser_") {
-        return mcp_subject(input);
-    }
-    let object = input.arguments.as_object();
-    let args = object
-        .and_then(generic_argument_items)
-        .map(|(items, _)| items)
-        .or(object);
-    let get = |key: &str| args.and_then(|args| args.get(key));
-    let text = |key| {
-        let value = get(key)?.as_str()?;
-        let safe: String = one_line(&clip_chars(value, GENERIC_VALUE_MAX_CHARS))
-            .chars()
-            .filter(|c| !c.is_control() && !crate::is_bidi_control(*c))
-            .collect();
-        (!safe.is_empty()).then_some(safe)
-    };
-    let target = || text("ref").or_else(|| text("selector"));
-    Some(match input.name.as_str() {
-        "browser_navigate" => {
-            let place = get("window").and_then(Value::as_bool).map(|window| {
-                if window {
-                    "browser window"
-                } else {
-                    "browser pane"
-                }
-            });
-            match (text("url"), place) {
-                (Some(url), Some(place)) => format!("{url} in the {place}"),
-                (Some(url), None) => url,
-                (None, place) => place.unwrap_or("browser").to_owned(),
-            }
-        }
-        "browser_read" => "browser page".into(),
-        "browser_screenshot" => "browser screenshot".into(),
-        "browser_click" => target()
-            .or_else(|| {
-                Some(format!(
-                    "({}, {})",
-                    get("x")?.as_i64()?,
-                    get("y")?.as_i64()?
-                ))
-            })
-            .unwrap_or_else(|| "browser page".into()),
-        "browser_type" => format!(
-            "into {}",
-            target().unwrap_or_else(|| "focused element".into())
-        ),
-        _ => return None,
-    })
-}
-
 fn mcp_subject(input: &ToolCallInput) -> Option<String> {
     let (server, tool) = input.name.strip_prefix("mcp__")?.split_once("__")?;
     if server.is_empty() || tool.is_empty() {
@@ -2402,6 +2358,117 @@ mod tests {
             "npm test && npm run deploy",
         ] {
             assert!(summarize_command(command).is_none());
+        }
+    }
+
+    #[test]
+    fn built_in_labels_describe_the_subject_without_claiming_an_effect() {
+        use serde_json::json;
+        for (name, args, expected) in [
+            ("tool_search", json!({"query":"  "}), "Listed tools"),
+            (
+                "tool_search",
+                json!({"query":"issue lookup","limit":8}),
+                "Searched tools for “issue lookup”",
+            ),
+            ("mcp_search", json!({"query":""}), "Listed MCP servers"),
+            (
+                "mcp_search",
+                json!({"query":"linear"}),
+                "Searched MCP tools for “linear”",
+            ),
+            (
+                "tool_describe",
+                json!({"name":"read","schema_path":"/input_schema"}),
+                "Read tool schema for read",
+            ),
+            (
+                "mcp_describe",
+                json!({"name":"mcp__linear__get_issue"}),
+                "Read MCP tool description for mcp__linear__get_issue",
+            ),
+            ("list_mcp_servers", json!({}), "Listed saved MCP servers"),
+            (
+                "propose_mcp_server",
+                json!({"name":"docs","url":"https://example.org"}),
+                "Proposed adding MCP server docs",
+            ),
+            (
+                "propose_mcp_server",
+                json!({"name":"docs","replace":true}),
+                "Proposed replacing MCP server docs",
+            ),
+            (
+                "propose_mcp_server_change",
+                json!({"name":"linear","action":"disable"}),
+                "Proposed disabling MCP server linear",
+            ),
+            (
+                "propose_mcp_server_change",
+                json!({"name":"docs","action":"remove"}),
+                "Proposed removing MCP server docs",
+            ),
+            (
+                "propose_mcp_server_change",
+                json!({"action":"disable"}),
+                "Proposed MCP server change",
+            ),
+            (
+                "skill",
+                json!({"name":"wisp-development"}),
+                "Loaded skill wisp-development",
+            ),
+            (
+                "skill",
+                json!({"name":"wisp-development","resource":"references/verification.md"}),
+                "Read skill resource wisp-development / references/verification.md",
+            ),
+            (
+                "read_output",
+                json!({"output_id":"out-7a91"}),
+                "Read saved output out-7a91",
+            ),
+            (
+                "read_output",
+                json!({"output_id":"out-7a91","offset":41,"limit":20}),
+                "Requested lines 41–60 of saved output out-7a91",
+            ),
+            (
+                "read_output",
+                json!({"output_id":"out","character_limit":3}),
+                "Requested characters 0–2 of saved output out",
+            ),
+            (
+                "read_output",
+                json!({"output_id":"out","character_limit":3,"offset":2}),
+                "Read saved output out",
+            ),
+            (
+                "read_output",
+                json!({"output_id":"out","limit":3,"offset":u64::MAX}),
+                "Read saved output out",
+            ),
+            (
+                "tool_describe",
+                json!({"name":"\u{202e}read\npage\u{1b}"}),
+                "Read tool schema for read page",
+            ),
+        ] {
+            for arguments in [args.clone(), bounded_tool_arguments(name, &args)] {
+                let card = ToolCardSnapshot::requested(
+                    &ToolCallInput {
+                        call_id: "call".into(),
+                        name: name.into(),
+                        arguments,
+                        detail_source: ToolDetailSource::None,
+                    },
+                    ToolStatus::Done,
+                );
+                assert_eq!(
+                    format!("{} {}", card.action_verb(), card.action_line_arguments()),
+                    expected
+                );
+            }
         }
     }
 
