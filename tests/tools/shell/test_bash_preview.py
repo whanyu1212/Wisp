@@ -42,7 +42,7 @@ def test_early_error_and_summary_shown() -> None:
     output = _preview(ProcessResult(exit_code=1, stdout=log, stderr=""))
 
     assert output.truncated is True
-    assert output.text.startswith("Command exited with code 1: compiling module 1\n")
+    assert output.text.startswith("Command exited with code 1\ncompiling module 1\n")
     assert "error: missing output path" in output.text
     assert output.text.endswith("compiling module 3000\nbuild failed")
     assert "omitted after the first 64 lines]" in output.text
@@ -55,7 +55,7 @@ def test_output_within_preview_shown_whole() -> None:
     output = _preview(ProcessResult(exit_code=0, stdout=log, stderr=""))
 
     assert output.truncated is False
-    assert output.text == f"Command exited with code 0: {log.rstrip()}"
+    assert output.text == f"Command exited with code 0\n{log.rstrip()}"
 
 
 def test_progress_redraws_survive_result_bounding() -> None:
@@ -94,7 +94,7 @@ def test_dropped_middle_uses_captured_head() -> None:
     output = _preview(result)
 
     assert output.text == (
-        "Command exited with code 1: head 1\nerror: first\n"
+        "Command exited with code 1\nhead 1\nerror: first\n"
         "[truncated: 89,981 bytes omitted after the first 2 lines of stdout]\n"
         "tail 1\ntail 2\nTraceback: boom"
     )
@@ -115,7 +115,7 @@ def test_head_stays_in_first_stream() -> None:
     output = _preview(result)
 
     head, _, rest = output.text.partition("\n[truncated: ")
-    assert head == "Command exited with code 1: configured"
+    assert head == "Command exited with code 1\nconfigured"
     assert "omitted after the first 1 lines of stdout]\n" in rest
     assert "configured" not in rest and rest.endswith("warning 9999")
 
@@ -135,7 +135,7 @@ def test_both_streams_dropped() -> None:
 
     output = _preview(result)
 
-    assert output.text.startswith("Command exited with code 1: out head\n[truncated: 1")
+    assert output.text.startswith("Command exited with code 1\nout head\n[truncated: 1")
     assert "first 1 lines of stdout]" in output.text
     assert output.text.endswith("out tail\nerr tail") and "err head" not in output.text
 
@@ -149,7 +149,7 @@ def test_preview_within_small_budget(max_bytes: int, max_lines: int) -> None:
         result, max_bytes=max_bytes + len(notice) + 1, max_lines=max_lines + 1, notice=notice
     )
 
-    body = output.text.removeprefix("Command exited with code 1: ")
+    body = output.text.removeprefix("Command exited with code 1\n")
     assert "[truncated: " in body and body.endswith(notice)
     assert len(body.encode()) <= max_bytes + len(notice) + 1
     assert len(body.split("\n")) <= max_lines + 1
@@ -168,9 +168,9 @@ def test_small_budget_keeps_tail() -> None:
         ProcessResult(exit_code=0, stdout=_build_log(100), stderr=""), max_bytes=300, max_lines=50
     )
 
-    assert output.text.startswith("Command exited with code 0: [truncated] ")
+    assert output.text.startswith("Command exited with code 0\n[truncated] ")
     assert output.text.endswith("compiling module 100")
-    assert len(output.text.encode()) <= 300 + len("Command exited with code 0: ")
+    assert len(output.text.encode()) <= 300 + len("Command exited with code 0\n")
 
 
 def test_head_captured_only_when_middle_dropped() -> None:

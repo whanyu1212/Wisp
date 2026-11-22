@@ -1866,3 +1866,124 @@ def test_reader_collision_keeps_schemas(tmp_path: Path, reserved: str) -> None:
     prompt = "\n".join(message.content for message in provider.calls[0].messages)
     assert "Lookup guide." in prompt
     assert "Tool presentation is codemode-only" not in prompt
+
+
+@pytest.mark.process
+def test_bash_polls_run_concurrently_in_codemode(tmp_path: Path) -> None:
+    """`asyncio.gather` over `bash(operation='poll')` runs polls concurrently."""
+
+    import asyncio as stdlib_asyncio
+    import sys
+
+    from wisp.tools.shell.supervisor import ProcessSupervisor
+    from wisp.tools.shell.tool import BashTool
+
+    supervisor = ProcessSupervisor(max_processes=4)
+    bash = BashTool(supervisor)
+    registry = ToolRegistry()
+    registry.register(bash)
+    sleeper = f"{sys.executable} -c \"import time; time.sleep(0.45); print('done')\""
+    code = (
+        "import asyncio\n"
+        f"cmd = {sleeper!r}\n"
+        "p1_out = await bash(operation='start', command=cmd, yield_seconds=0)\n"
+        "p2_out = await bash(operation='start', command=cmd, yield_seconds=0)\n"
+        "p1 = [line.split()[1] for line in p1_out.splitlines() if line.startswith('Process ')][0]\n"
+        "p2 = [line.split()[1] for line in p2_out.splitlines() if line.startswith('Process ')][0]\n"
+        "r1, r2 = await asyncio.gather(\n"
+        "    bash(operation='poll', process_id=p1, until='exit', wait_seconds=5),\n"
+        "    bash(operation='poll', process_id=p2, until='exit', wait_seconds=5),\n"
+        ")\n"
+        "print(r1)\n"
+        "print(r2)\n"
+    )
+    provider = ScriptedProvider([_script(code), _done()])
+    session = CodingSession(
+        provider=provider,
+        sessions=JsonlSessionStore(tmp_path / "sessions"),
+        tool_registry=registry,
+        tool_context=ToolContext(cwd=tmp_path, protected_paths=()),
+        tool_policy=ToolPolicy.allow_all_tools(),
+        tool_approval_policy=ToolApprovalPolicy.approve_all(),
+        codemode=True,
+    )
+
+    async def run() -> tuple[list[WispEvent], float]:
+        try:
+            started = stdlib_asyncio.get_running_loop().time()
+            events = [event async for event in session.run("poll both")]
+            return events, stdlib_asyncio.get_running_loop().time() - started
+        finally:
+            await supervisor.aclose()
+
+    events, elapsed = anyio.run(run)
+    result = _result(events)
+    assert not result.is_error
+    assert result.output.count("done") >= 2
+    assert elapsed < 0.85
+
+
+def test_generator_expression_with_next_gives_actionable_hint(tmp_path: Path) -> None:
+    """`next(x for ...)` returns the Monty list hint while list indexing and `iter` succeed."""
+
+    bad_events, _ = _run(
+        tmp_path,
+        _Tools(),
+        [_script("next(x for x in [1, 2] if x == 2)")],
+    )
+    bad = _result(bad_events)
+    assert bad.is_error
+    assert "Script failed (runtime)" in bad.output
+    assert "generator expressions evaluate as lists" in bad.output
+    assert "[x for ...][0]" in bad.output
+
+    good_events, _ = _run(
+        tmp_path,
+        _Tools(),
+        [_script("([x for x in [1, 2] if x == 2][0], next(iter([x for x in [1, 2] if x == 2])))")],
+    )
+    good = _result(good_events)
+    assert not good.is_error
+    assert "[2, 2]" in good.output
+
+
+@pytest.mark.process
+def test_bash_output_keeps_first_stdout_line_separate_for_scripts(tmp_path: Path) -> None:
+    """The exit status header sits on its own line, so line 1 of stdout survives `splitlines()`."""
+
+    import sys
+
+    from wisp.tools.shell.supervisor import ProcessSupervisor
+    from wisp.tools.shell.tool import BashTool
+
+    supervisor = ProcessSupervisor(max_processes=2)
+    bash = BashTool(supervisor)
+    registry = ToolRegistry()
+    registry.register(bash)
+    cmd = f"{sys.executable} -c \"print('site/a.md'); print('site/b.md')\""
+    code = (
+        f"out = await bash(command={cmd!r})\n"
+        "lines = [line for line in out.splitlines() if line.startswith('site/')]\n"
+        "assert len(lines) == 2, out\n"
+        "print(len(lines))\n"
+    )
+    provider = ScriptedProvider([_script(code), _done()])
+    session = CodingSession(
+        provider=provider,
+        sessions=JsonlSessionStore(tmp_path / "sessions"),
+        tool_registry=registry,
+        tool_context=ToolContext(cwd=tmp_path, protected_paths=()),
+        tool_policy=ToolPolicy.allow_all_tools(),
+        tool_approval_policy=ToolApprovalPolicy.approve_all(),
+        codemode=True,
+    )
+
+    async def run() -> list[WispEvent]:
+        try:
+            return [event async for event in session.run("check lines")]
+        finally:
+            await supervisor.aclose()
+
+    result = _result(anyio.run(run))
+    assert not result.is_error
+    assert result.output.startswith("2\n")

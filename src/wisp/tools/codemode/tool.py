@@ -537,11 +537,15 @@ def _description(
         "`import asyncio`: one failed call ends it and loses the other results. "
         "`await gather_settled(...)` takes the same calls and returns every outcome in "
         "order, a failed call's RuntimeError in place of its result.",
+        "Read-only calls and `bash(operation='poll', ...)` run concurrently under "
+        "`asyncio.gather(...)`; mutating and other command calls serialize.",
         "",
         "The script runs in a sandbox with a subset of Python: no files, network, "
         "classes with inheritance or third-party packages. Some builtins are missing: "
         "map(), filter(), ascii(), format(), getattr(), hasattr(), setattr(), callable(), "
         "dir() and vars(); use comprehensions, f-strings and plain attribute access. "
+        "Generator expressions evaluate as lists (not iterators), so `next(x for ...)` "
+        "raises TypeError; use `[x for ...][0]` or `next(iter([...]))` instead. "
         "Stdlib modules json, re, collections, itertools and math can be imported (they are "
         "not pre-imported; write e.g. 'import json'). The entire script is statically "
         "type-checked before running; annotate heterogeneous containers (e.g. "

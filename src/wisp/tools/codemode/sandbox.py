@@ -153,7 +153,9 @@ async def run_script(
         reached = _reached_limit(str(exc), limits)
         if reached is not None:
             return ScriptRun(printed=printed.output, failure="limit", error=reached)
-        return ScriptRun(printed=printed.output, failure="runtime", error=str(exc))
+        return ScriptRun(
+            printed=printed.output, failure="runtime", error=_runtime_error_message(str(exc))
+        )
     finally:
         calls.end()
     return _bounded_output(printed.output, _as_text(value), limits.max_printed_bytes)
@@ -234,6 +236,17 @@ def _reached_limit(error: str, limits: ScriptLimits) -> str | None:
     if error.startswith("MemoryError: memory limit"):
         return f"The script used more than {limits.memory_bytes // (1024 * 1024)} MiB of memory."
     return None
+
+
+def _runtime_error_message(error: str) -> str:
+    """Attach actionable sandbox hints to known Monty runtime divergences."""
+
+    if "TypeError: 'list' object is not an iterator" in error:
+        return (
+            f"{error} (In codemode, generator expressions evaluate as lists rather than "
+            "iterators; use [x for ...][0] or next(iter([...])) instead of next(x for ...).)"
+        )
+    return error
 
 
 def _as_text(value: object) -> str | None:

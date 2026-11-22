@@ -443,6 +443,7 @@ class _ManagedProcess:
     error_after_cleanup: str | None = None
     changed: asyncio.Event = field(default_factory=asyncio.Event)
     operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    poll_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     cleanup_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     stdout_task: asyncio.Task[None] | None = None
     stderr_task: asyncio.Task[None] | None = None
@@ -1035,10 +1036,11 @@ class ProcessSupervisor:
         if wait_seconds < 0:
             raise ValueError("wait_seconds must be non-negative")
         managed = await self._get(process_id)
-        if wait_seconds > 0:
-            await self._wait_for_poll(managed, wait_seconds, until)
-        async with managed.operation_lock:
-            return self._snapshot(managed)
+        async with managed.poll_lock:
+            if wait_seconds > 0:
+                await self._wait_for_poll(managed, wait_seconds, until)
+            async with managed.operation_lock:
+                return self._snapshot(managed)
 
     async def _wait_for_poll(
         self, managed: _ManagedProcess, wait_seconds: float, until: PollUntil

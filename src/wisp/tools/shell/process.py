@@ -1967,9 +1967,9 @@ def _format_process_output_bounded(
         # Completion evidence is fixed-size metadata, not captured command output.
         # Keep it intact even when an embedding deliberately selects a tiny body
         # budget; otherwise the model cannot distinguish success from failure.
-        return TruncatedText(text=f"{status}: {notice}" if notice else status, truncated=False)
+        return TruncatedText(text=f"{status}\n{notice}" if notice else status, truncated=False)
 
-    prefix = f"{status}: "
+    prefix = f"{status}\n"
     if max_bytes <= 0 or max_lines <= 0:
         return TruncatedText(text=status, truncated=True)
 
@@ -2044,7 +2044,7 @@ def _format_process_output_preview(
     status = f"Command exited with code {result.exit_code}"
     parts = _process_output_parts(result.stdout, result.stderr)
     if not parts:
-        return TruncatedText(text=f"{status}: {notice}" if notice else status, truncated=False)
+        return TruncatedText(text=f"{status}\n{notice}" if notice else status, truncated=False)
     end = "\n".join(parts)
     head_bytes = min(PREVIEW_HEAD_BYTES, body_bytes // 3)
     head_lines = min(PREVIEW_HEAD_LINES, body_lines // 4)
@@ -2062,7 +2062,7 @@ def _format_process_output_preview(
     )
     notice_line = f"\n{notice}" if notice else ""
     body_text = body.text.rstrip("\n")
-    return TruncatedText(text=f"{status}: {body_text}{notice_line}", truncated=body.truncated)
+    return TruncatedText(text=f"{status}\n{body_text}{notice_line}", truncated=body.truncated)
 
 
 def _output_start(result: ProcessResult) -> tuple[str, str]:

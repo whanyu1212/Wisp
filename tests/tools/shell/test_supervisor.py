@@ -758,3 +758,57 @@ def test_user_stop_announced(tmp_path: Path) -> None:
     assert [(e.state, e.notify) for e in heard] == [("cancelled", True)]
     assert len(held) == 1
     assert polled.state == "cancelled"
+
+
+@pytest.mark.process
+def test_concurrent_polls_run_in_parallel_across_processes_and_interrupt_on_cancel(
+    tmp_path: Path,
+) -> None:
+    """Distinct process polls run concurrently, while cancel still interrupts an active poll."""
+
+    async def run() -> tuple[ProcessUpdate, ProcessUpdate, float, ProcessUpdate, float]:
+        supervisor = ProcessSupervisor(max_processes=4)
+        try:
+            first = await supervisor.start(
+                python_command("import time; time.sleep(0.4); print('one')"),
+                cwd=tmp_path,
+                timeout=10,
+            )
+            second = await supervisor.start(
+                python_command("import time; time.sleep(0.4); print('two')"),
+                cwd=tmp_path,
+                timeout=10,
+            )
+            started = asyncio.get_running_loop().time()
+            first_update, second_update = await asyncio.gather(
+                supervisor.poll(first, wait_seconds=5, until="exit"),
+                supervisor.poll(second, wait_seconds=5, until="exit"),
+            )
+            parallel_elapsed = asyncio.get_running_loop().time() - started
+
+            third = await supervisor.start(
+                python_command("import time; time.sleep(30)"),
+                cwd=tmp_path,
+                timeout=30,
+            )
+
+            async def cancel_soon() -> None:
+                await anyio.sleep(0.1)
+                await supervisor.cancel(third)
+
+            cancel_started = asyncio.get_running_loop().time()
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(cancel_soon)
+                cancelled_update = await supervisor.poll(third, wait_seconds=10, until="exit")
+            cancel_elapsed = asyncio.get_running_loop().time() - cancel_started
+            return first_update, second_update, parallel_elapsed, cancelled_update, cancel_elapsed
+        finally:
+            await supervisor.aclose()
+
+    first_update, second_update, parallel_elapsed, cancelled_update, cancel_elapsed = anyio.run(run)
+
+    assert first_update.stdout == "one\n"
+    assert second_update.stdout == "two\n"
+    assert parallel_elapsed < 0.75
+    assert cancelled_update.state == "cancelled"
+    assert cancel_elapsed < 2.0

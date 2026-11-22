@@ -750,7 +750,11 @@ impl ErrorPeek {
             .and_then(|code| {
                 let status = format!("Command exited with code {code}");
                 let rest = diagnostic.strip_prefix(&status)?;
-                Some(rest.strip_prefix(": ").unwrap_or(rest))
+                Some(
+                    rest.strip_prefix('\n')
+                        .or_else(|| rest.strip_prefix(": "))
+                        .unwrap_or(rest),
+                )
             })
             .unwrap_or(diagnostic);
         let lines = text.lines().count();
@@ -4619,7 +4623,14 @@ fn card_projection(
                 // output is dropped; offsets stay those of the retained output.
                 let status = format!("Command exited with code {code}");
                 if let Some(rest) = detail.strip_prefix(&status) {
-                    let stripped = status.len() + if rest.starts_with(": ") { 2 } else { 0 };
+                    let sep_len = if rest.starts_with('\n') {
+                        1
+                    } else if rest.starts_with(": ") {
+                        2
+                    } else {
+                        0
+                    };
+                    let stripped = status.len() + sep_len;
                     detail = detail[stripped..].to_owned();
                     detail_base += stripped;
                 }
@@ -10206,6 +10217,11 @@ mod tests {
     fn peek_skips_exit_status() {
         // The backend opens a failed command's output with its exit status.
         for (output, peek) in [
+            (
+                "Command exited with code 1\nchecking\nerror: foo",
+                vec!["error: foo", "+ 1 more line"],
+            ),
+            ("Command exited with code 1\nerror: foo", vec!["error: foo"]),
             (
                 "Command exited with code 1: checking\nerror: foo",
                 vec!["error: foo", "+ 1 more line"],

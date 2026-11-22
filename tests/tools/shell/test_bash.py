@@ -66,7 +66,7 @@ def test_bash_tool_schema_requires_operation_specific_arguments() -> None:
             3,
             "out\n",
             "err\n",
-            "Command exited with code 3: out\nerr",
+            "Command exited with code 3\nout\nerr",
             id="failure-with-both-streams",
         ),
         pytest.param(
@@ -74,7 +74,7 @@ def test_bash_tool_schema_requires_operation_specific_arguments() -> None:
             0,
             "verified\n",
             "",
-            "Command exited with code 0: verified",
+            "Command exited with code 0\nverified",
             id="success-with-output",
         ),
         pytest.param("pass", 0, "", "", "Command exited with code 0", id="success-silent"),
@@ -716,9 +716,9 @@ def test_bash_tool_retruncates_combined_stdout_and_stderr(tmp_path: Path) -> Non
 
     result = run_tool(BashTool(), {"command": command}, context)
 
-    status_overhead = len(f"Command exited with code {result.data['exit_code']}: ".encode())
+    status_overhead = len(f"Command exited with code {result.data['exit_code']}\n".encode())
     assert len(result.text.encode("utf-8")) <= context.max_output_bytes + status_overhead
-    assert result.text.startswith(f"Command exited with code {result.data['exit_code']}:")
+    assert result.text.startswith(f"Command exited with code {result.data['exit_code']}\n")
     assert result.truncated is True
 
 
@@ -739,9 +739,9 @@ def test_bash_tool_reserves_status_space_without_losing_diagnostic_tail(
 
     result = run_tool(BashTool(None), {"command": "ignored"}, context)
 
-    status_overhead = len(b"Command exited with code 2: ")
+    status_overhead = len(b"Command exited with code 2\n")
     assert len(result.text.encode("utf-8")) <= context.max_output_bytes + status_overhead
-    assert result.text.startswith("Command exited with code 2: [truncated] ")
+    assert result.text.startswith("Command exited with code 2\n[truncated] ")
     assert result.text.endswith("traceback final diagnostic 尾")
     assert "\ufffd" not in result.text
     assert result.truncated is True
@@ -883,7 +883,7 @@ def test_bash_tool_drains_output_past_capture_limit_and_allows_completion(
     result = run_tool(BashTool(), {"command": command, "timeout": 5}, context)
 
     assert result.data["exit_code"] == 0
-    assert result.text == "Command exited with code 0: [truncated] " + "x" * 68
+    assert result.text == "Command exited with code 0\n[truncated] " + "x" * 68
     assert result.data["stdout_truncated"] is True
     assert result.data["stderr_truncated"] is False
     retained_bytes = str(result.data["stdout"]).count("x")
@@ -920,7 +920,7 @@ def test_stderr_survives_noisy_stdout(tmp_path: Path) -> None:
 
     result = run_tool(BashTool(), {"command": command, "timeout": 5}, context)
 
-    assert result.text.startswith("Command exited with code 1: [truncated] ")
+    assert result.text.startswith("Command exited with code 1\n[truncated] ")
     body, notice = result.text.rsplit("\n", 1)
     assert body.endswith("4998\n4999\nfinal failure")
     assert notice.startswith("[Full output saved: stdout output_id=")
@@ -1041,7 +1041,7 @@ def test_background_pipe_holder_is_killed(tmp_path: Path) -> None:
     time.sleep(max(0.0, 3.5 - elapsed))
 
     assert result.text == (
-        "Command exited with code 0: started\n"
+        "Command exited with code 0\nstarted\n"
         "[Processes the command left running were stopped when it exited. "
         "To keep a process running, use operation=start and run it in the foreground.]"
     )
@@ -1083,7 +1083,7 @@ def test_stopped_daemon_gets_notice(tmp_path: Path) -> None:
     result = run_tool(BashTool(), {"command": command, "timeout": 30}, ToolContext(cwd=tmp_path))
 
     assert result.text == (
-        "Command exited with code 0: started\n"
+        "Command exited with code 0\nstarted\n"
         "[Processes the command left running were stopped when it exited. "
         "To keep a process running, use operation=start and run it in the foreground.]"
     )
@@ -1128,7 +1128,7 @@ def test_redirected_job_has_no_notice(tmp_path: Path) -> None:
 
     result = run_tool(BashTool(), {"command": command, "timeout": 10}, ToolContext(cwd=tmp_path))
 
-    assert result.text == "Command exited with code 0: started"
+    assert result.text == "Command exited with code 0\nstarted"
 
 
 def test_notice_fits_output_budget() -> None:
@@ -1138,7 +1138,7 @@ def test_notice_fits_output_budget() -> None:
         0, "a\nb\nc\n", "", max_bytes=25, max_lines=3, notice=notice
     )
 
-    assert output.text == "Command exited with code 0: [truncated] b\nc\n[stopped]"
+    assert output.text == "Command exited with code 0\n[truncated] b\nc\n[stopped]"
     assert output.truncated is True
 
 
@@ -1346,7 +1346,7 @@ def test_bash_syntax_works(tmp_path: Path) -> None:
 
     result = run_tool(BashTool(), {"command": command, "timeout": 5}, ToolContext(cwd=tmp_path))
 
-    assert result.text == "Command exited with code 0: match\ny"
+    assert result.text == "Command exited with code 0\nmatch\ny"
 
 
 @pytest.mark.parametrize(
