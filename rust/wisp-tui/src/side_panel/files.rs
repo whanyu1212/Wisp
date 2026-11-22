@@ -9,8 +9,6 @@ use crate::tool_detail::git_presentation;
 use crate::transcript::{TranscriptEntryKind, normalize_lexical_path};
 use crate::ui::sanitize_for_terminal;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::fs::File;
-use std::io::Read;
 use std::path::{Component, Path};
 use unicode_segmentation::UnicodeSegmentation;
 use wisp_protocol::events::{ProjectFileEntry, ProjectFileKind, ProjectFileSnapshot};
@@ -1037,6 +1035,126 @@ fn emit_dir_children(
     }
 }
 
+#[cfg(unix)]
+fn read_preview_bytes_safe(root: &Path, rel: &Path) -> Result<(u64, Vec<u8>), &'static str> {
+    use nix::errno::Errno;
+    use nix::fcntl::{OFlag, openat};
+    use nix::sys::stat::{Mode, SFlag, fstat};
+    use nix::unistd::{close, read};
+    use std::os::fd::RawFd;
+
+    struct Descriptor(RawFd);
+    impl Drop for Descriptor {
+        fn drop(&mut self) {
+            let _ = close(self.0);
+        }
+    }
+
+    let parts: Vec<_> = rel
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(seg) => Some(seg),
+            _ => None,
+        })
+        .collect();
+    if parts.is_empty() {
+        return Err("Unsafe file path refused.");
+    }
+
+    // Walk every component with O_NOFOLLOW so replacement symlinks (even pointing inside
+    // the workspace to protected files like .env) and special files are rejected atomically.
+    let root_fd = openat(
+        None::<RawFd>,
+        root,
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )
+    .map(Descriptor)
+    .map_err(|_| "Workspace root unavailable.")?;
+
+    let mut current = root_fd;
+    for dir_seg in &parts[..parts.len() - 1] {
+        current = openat(
+            Some(current.0),
+            *dir_seg,
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map(Descriptor)
+        .map_err(|err| match err {
+            Errno::ELOOP => "Symbolic links are refused.",
+            Errno::ENOTDIR => "Directory component is not a directory or is a symlink; refused.",
+            _ => "File could not be opened.",
+        })?;
+    }
+
+    let file_fd = openat(
+        Some(current.0),
+        parts[parts.len() - 1],
+        // O_NONBLOCK prevents replacement FIFOs or devices from blocking the render thread.
+        OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )
+    .map(Descriptor)
+    .map_err(|err| match err {
+        Errno::ELOOP => "Symbolic links are refused.",
+        _ => "File could not be read.",
+    })?;
+
+    let stat = fstat(file_fd.0).map_err(|_| "File metadata unavailable.")?;
+    if SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT != SFlag::S_IFREG {
+        return Err("Not a regular file.");
+    }
+
+    let limit = PREVIEW_MAX_BYTES + 1;
+    let mut raw = Vec::new();
+    let mut buf = [0_u8; 8192];
+    while raw.len() < limit {
+        let wanted = buf.len().min(limit - raw.len());
+        match read(file_fd.0, &mut buf[..wanted]) {
+            Ok(0) => break,
+            Ok(n) => raw.extend_from_slice(&buf[..n]),
+            Err(Errno::EINTR) => {}
+            Err(_) => return Err("Failed to read file."),
+        }
+    }
+    let file_len = u64::try_from(stat.st_size).unwrap_or(raw.len() as u64);
+    Ok((file_len, raw))
+}
+
+#[cfg(not(unix))]
+fn read_preview_bytes_safe(root: &Path, rel: &Path) -> Result<(u64, Vec<u8>), &'static str> {
+    use std::fs::File;
+    use std::io::Read as _;
+
+    let mut cur = root.to_path_buf();
+    for component in rel.components() {
+        let Component::Normal(seg) = component else {
+            return Err("Unsafe file path refused.");
+        };
+        cur.push(seg);
+        let sym_meta = std::fs::symlink_metadata(&cur).map_err(|_| "File could not be opened.")?;
+        if sym_meta.file_type().is_symlink() {
+            return Err("Symbolic links are refused.");
+        }
+    }
+    let target = std::fs::canonicalize(&cur).map_err(|_| "File could not be opened.")?;
+    if !target.starts_with(root) {
+        return Err("Path outside workspace root refused.");
+    }
+    let mut file = File::open(&target).map_err(|_| "File could not be read.")?;
+    let meta = file.metadata().map_err(|_| "File metadata unavailable.")?;
+    if !meta.is_file() {
+        return Err("Not a regular file.");
+    }
+    let mut raw = Vec::new();
+    file.by_ref()
+        .take((PREVIEW_MAX_BYTES + 1) as u64)
+        .read_to_end(&mut raw)
+        .map_err(|_| "Failed to read file.")?;
+    Ok((meta.len(), raw))
+}
+
 fn format_dir_line(
     depth: usize,
     label: &str,
@@ -1345,53 +1463,18 @@ fn build_preview(
             ..base
         };
     };
-    let Ok(canonical_target) = std::fs::canonicalize(canonical_root.join(rel)) else {
-        return CachedPreview {
-            body: PreviewBody::Notice("File could not be opened.".into()),
-            ..base
-        };
+    let (file_len, mut raw) = match read_preview_bytes_safe(&canonical_root, rel) {
+        Ok(result) => result,
+        Err(notice) => {
+            return CachedPreview {
+                body: PreviewBody::Notice(notice.into()),
+                ..base
+            };
+        }
     };
-    if !canonical_target.starts_with(&canonical_root) {
-        return CachedPreview {
-            body: PreviewBody::Notice("Path outside workspace root refused.".into()),
-            ..base
-        };
-    }
-
-    let Ok(mut file) = File::open(&canonical_target) else {
-        return CachedPreview {
-            body: PreviewBody::Notice("File could not be read.".into()),
-            ..base
-        };
-    };
-    let Ok(meta) = file.metadata() else {
-        return CachedPreview {
-            body: PreviewBody::Notice("File metadata unavailable.".into()),
-            ..base
-        };
-    };
-    if !meta.is_file() {
-        return CachedPreview {
-            body: PreviewBody::Notice("Not a regular file.".into()),
-            ..base
-        };
-    }
-
-    let mut raw = Vec::new();
-    if file
-        .by_ref()
-        .take((PREVIEW_MAX_BYTES + 1) as u64)
-        .read_to_end(&mut raw)
-        .is_err()
-    {
-        return CachedPreview {
-            body: PreviewBody::Notice("Failed to read file.".into()),
-            ..base
-        };
-    }
     if raw.contains(&0) {
         return CachedPreview {
-            body: PreviewBody::Binary(meta.len()),
+            body: PreviewBody::Binary(file_len),
             ..base
         };
     }
@@ -1743,12 +1826,57 @@ mod tests {
         let binary = build_preview("blob.bin", cwd, Some(&snap), 1, Palette::default());
         assert_eq!(binary.body, PreviewBody::Binary(4));
 
-        // Out-of-root symlinks are refused after canonicalization even if listed.
+        // Out-of-root symlinks and in-root replacement symlinks are both refused via O_NOFOLLOW.
         #[cfg(unix)]
         {
             let escaped = build_preview("src/escape.txt", cwd, Some(&snap), 1, Palette::default());
             assert!(
-                matches!(escaped.body, PreviewBody::Notice(ref msg) if msg.contains("outside"))
+                matches!(escaped.body, PreviewBody::Notice(ref msg) if msg.contains("refused")),
+                "{:?}",
+                escaped.body
+            );
+
+            // Replacement symlink pointing to protected in-workspace `.env` must also be refused.
+            let link_to_env = root.join("src/main.rs");
+            fs::remove_file(&link_to_env).unwrap();
+            std::os::unix::fs::symlink(root.join(".env"), &link_to_env).unwrap();
+            let linked = build_preview("src/main.rs", cwd, Some(&snap), 1, Palette::default());
+            assert!(
+                matches!(linked.body, PreviewBody::Notice(ref msg) if msg.contains("refused")),
+                "{:?}",
+                linked.body
+            );
+
+            // Intermediate directory replaced with symlink must also be refused.
+            let linked_dir = root.join("linked_dir");
+            std::os::unix::fs::symlink(root.join("src"), &linked_dir).unwrap();
+            let dir_snap = sample_snapshot(1, &["linked_dir/escape.txt"]);
+            let via_dir = build_preview(
+                "linked_dir/escape.txt",
+                cwd,
+                Some(&dir_snap),
+                1,
+                Palette::default(),
+            );
+            assert!(
+                matches!(via_dir.body, PreviewBody::Notice(ref msg) if msg.contains("refused")),
+                "{:?}",
+                via_dir.body
+            );
+
+            // Replacement FIFO (named pipe) must fail closed without blocking rendering.
+            let fifo_path = root.join("src/pipe.txt");
+            nix::unistd::mkfifo(
+                &fifo_path,
+                nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+            )
+            .unwrap();
+            let fifo_snap = sample_snapshot(1, &["src/pipe.txt"]);
+            let fifo = build_preview("src/pipe.txt", cwd, Some(&fifo_snap), 1, Palette::default());
+            assert!(
+                matches!(fifo.body, PreviewBody::Notice(ref msg) if msg.contains("regular file")),
+                "{:?}",
+                fifo.body
             );
         }
 
