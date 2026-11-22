@@ -259,17 +259,48 @@ class GrepTool:
 
     name = "grep"
     safety: ToolSafety = "read"
-    description = "Search UTF-8 text files. Symbolic links found while searching are skipped."
+    description = (
+        "Search UTF-8 text files within the workspace or scratch directory. "
+        "Symbolic links found while searching are skipped."
+    )
     input_schema: ToolInputSchema = {
         "type": "object",
         "properties": {
-            "pattern": {"type": "string"},
-            "path": {"type": "string", "default": "."},
-            "glob": {"type": "string"},
-            "ignore_case": {"type": "boolean", "default": False},
-            "literal": {"type": "boolean", "default": False},
-            "context": {"type": "integer", "minimum": 0, "default": 0},
-            "max_results": {"type": "integer", "minimum": 1, "default": 100},
+            "pattern": {
+                "type": "string",
+                "description": "Regex pattern to match (or literal string when literal=true).",
+            },
+            "path": {
+                "type": "string",
+                "default": ".",
+                "description": "File or directory within the workspace or scratch directory.",
+            },
+            "glob": {
+                "type": "string",
+                "description": "Optional filename glob filter (for example '*.py').",
+            },
+            "ignore_case": {
+                "type": "boolean",
+                "default": False,
+                "description": "Match case-insensitively when true.",
+            },
+            "literal": {
+                "type": "boolean",
+                "default": False,
+                "description": "Treat pattern as a literal string instead of a regex.",
+            },
+            "context": {
+                "type": "integer",
+                "minimum": 0,
+                "default": 0,
+                "description": "Lines of surrounding context to include around each match.",
+            },
+            "max_results": {
+                "type": "integer",
+                "minimum": 1,
+                "default": 100,
+                "description": "Maximum number of matching lines to return.",
+            },
         },
         "required": ["pattern"],
     }
@@ -337,13 +368,29 @@ class FindTool:
 
     name = "find"
     safety: ToolSafety = "read"
-    description = "Find files by glob. Symbolic links found while searching are skipped."
+    description = (
+        "Find files by glob within the workspace or scratch directory. "
+        "Symbolic links found while searching are skipped."
+    )
     input_schema: ToolInputSchema = {
         "type": "object",
         "properties": {
-            "path": {"type": "string", "default": "."},
-            "pattern": {"type": "string", "default": "*"},
-            "max_results": {"type": "integer", "minimum": 1, "default": 100},
+            "path": {
+                "type": "string",
+                "default": ".",
+                "description": "Directory within the workspace or scratch directory to search.",
+            },
+            "pattern": {
+                "type": "string",
+                "default": "*",
+                "description": "Filename or relative path glob pattern.",
+            },
+            "max_results": {
+                "type": "integer",
+                "minimum": 1,
+                "default": 100,
+                "description": "Maximum number of matching paths to return.",
+            },
         },
     }
 
@@ -376,12 +423,23 @@ class LsTool:
 
     name = "ls"
     safety: ToolSafety = "read"
-    description = "List a directory with sorted entries and '/' suffixes for directories."
+    description = (
+        "List a directory within the workspace or scratch directory with sorted entries and "
+        "'/' suffixes for directories."
+    )
     input_schema: ToolInputSchema = {
         "type": "object",
         "properties": {
-            "path": {"type": "string", "default": "."},
-            "all": {"type": "boolean", "default": False},
+            "path": {
+                "type": "string",
+                "default": ".",
+                "description": "Directory path within the workspace or scratch directory.",
+            },
+            "all": {
+                "type": "boolean",
+                "default": False,
+                "description": "Include hidden dotfiles and dotdirectories when true.",
+            },
         },
     }
 

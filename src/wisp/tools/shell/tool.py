@@ -82,10 +82,12 @@ class BashTool:
         "Use operation=start to launch a resumable command, operation=poll to read incremental "
         "output by process_id, and operation=cancel to terminate it. "
         "A poll with wait_seconds returns at the next output; pass until=exit to wait for the "
-        "process to finish instead, such as for a watcher that prints progress. "
+        "process to finish instead, such as for a watcher that prints progress. Use reasonable "
+        "wait_seconds (for example 30-120 with until=exit) for builds or tests rather than "
+        "0.1-1s busy-polling loops. "
         "For work whose result you need but need not wait on, such as CI checks or a long "
         "build, start it with notify_on_exit=true; the start result says whether you will be "
-        "told when it stops. "
+        "told when it stops, so you do not need to poll immediately when deferring the wait. "
         "Pass long text such as commit messages or pull request bodies as a file "
         "(git commit -F, gh pr create --body-file) rather than through $(cat <<EOF ...), "
         "which macOS's bash 3.2 misparses when the text has quotes."
@@ -97,8 +99,17 @@ class BashTool:
                 "type": "string",
                 "enum": ["run", "start", "poll", "cancel"],
                 "default": "run",
+                "description": (
+                    "Lifecycle action: run (blocking), start (background), poll (read/wait), "
+                    "or cancel."
+                ),
             },
-            "command": {"type": "string"},
+            "command": {
+                "type": "string",
+                "description": (
+                    "Shell command to execute (required for operation=run and operation=start)."
+                ),
+            },
             "cwd": {
                 "type": "string",
                 "description": "Run/start cwd within workspace, relative to session cwd.",
@@ -108,32 +119,58 @@ class BashTool:
                 "minimum": 1,
                 "maximum": _MAX_BASH_TIMEOUT_SECONDS,
                 "default": 30,
+                "description": "Maximum seconds to wait for operation=run before timing out.",
             },
-            "process_id": {"type": "string"},
+            "process_id": {
+                "type": "string",
+                "description": (
+                    "Exact managed process_id returned by operation=start "
+                    "(required for poll/cancel)."
+                ),
+            },
             "lifetime_seconds": {
                 "type": "number",
                 "exclusiveMinimum": 0,
                 "maximum": _MAX_MANAGED_LIFETIME_SECONDS,
                 "default": 300,
+                "description": "Maximum total runtime in seconds for an operation=start process.",
             },
             "yield_seconds": {
                 "type": "number",
                 "minimum": 0,
                 "maximum": _MAX_MANAGED_WAIT_SECONDS,
                 "default": 1,
+                "description": (
+                    "Seconds operation=start waits for initial output before returning process_id."
+                ),
             },
             "wait_seconds": {
                 "type": "number",
                 "minimum": 0,
                 "maximum": _MAX_MANAGED_WAIT_SECONDS,
                 "default": 0,
+                "description": (
+                    "Seconds operation=poll waits before returning. Use 30-120 with until=exit "
+                    "for builds or tests; avoid 0.1-1s polling loops."
+                ),
             },
             "until": {
                 "type": "string",
                 "enum": ["output", "exit"],
                 "default": "output",
+                "description": (
+                    "When operation=poll returns: 'output' (next output chunk) or 'exit' "
+                    "(wait until completion or wait_seconds elapses)."
+                ),
             },
-            "notify_on_exit": {"type": "boolean", "default": False},
+            "notify_on_exit": {
+                "type": "boolean",
+                "default": False,
+                "description": (
+                    "If true on operation=start, Wisp notifies you on the next prompt when the "
+                    "process stops; no immediate poll loop is needed."
+                ),
+            },
         },
         "oneOf": [
             {

@@ -74,16 +74,27 @@ class ReadTool:
     name = "read"
     safety: ToolSafety = "read"
     description = (
-        "Read a UTF-8 text file. Supports 1-indexed offset and line limit. "
-        "For a PNG, JPEG, GIF or WebP file, returns its format, size and dimensions, "
-        "with the image attached for models that accept images."
+        "Read a UTF-8 text file within the workspace or scratch directory. Supports 1-indexed "
+        "offset and line limit. For a PNG, JPEG, GIF or WebP file, returns its format, size "
+        "and dimensions, with the image attached for models that accept images."
     )
     input_schema: ToolInputSchema = {
         "type": "object",
         "properties": {
-            "path": {"type": "string"},
-            "offset": {"type": "integer", "minimum": 1},
-            "limit": {"type": "integer", "minimum": 1},
+            "path": {
+                "type": "string",
+                "description": "File path within the workspace or scratch directory.",
+            },
+            "offset": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "1-indexed starting line number.",
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Maximum number of lines to read.",
+            },
         },
         "required": ["path"],
     }
@@ -257,16 +268,27 @@ class WriteTool:
     name = "write"
     safety: ToolSafety = "mutating"
     description = (
-        "Create or overwrite a UTF-8 text file, creating parent directories. "
-        "Set overwrite=false to fail if the target already exists. Read an existing "
-        "file before overwriting it; a file changed since you read it must be read again."
+        "Create or overwrite a UTF-8 text file within the workspace or scratch directory, "
+        "creating parent directories. Set overwrite=false to fail if the target already exists. "
+        "Read an existing file before overwriting it; a file changed since you read it must be "
+        "read again."
     )
     input_schema: ToolInputSchema = {
         "type": "object",
         "properties": {
-            "path": {"type": "string"},
-            "content": {"type": "string"},
-            "overwrite": {"type": "boolean", "default": True},
+            "path": {
+                "type": "string",
+                "description": "File path within the workspace or scratch directory.",
+            },
+            "content": {
+                "type": "string",
+                "description": "Complete UTF-8 file contents to write.",
+            },
+            "overwrite": {
+                "type": "boolean",
+                "default": True,
+                "description": "Overwrite existing files when true; fail if false and file exists.",
+            },
         },
         "required": ["path", "content"],
     }
@@ -1256,21 +1278,33 @@ class EditTool:
     name = "edit"
     safety: ToolSafety = "mutating"
     description = (
-        "Apply unique, non-overlapping text replacements to a UTF-8 file. Each oldText "
-        "must match the file exactly, apart from line endings and trailing whitespace. "
-        "Read the file first; a file changed since you read it must be read again."
+        "Apply unique, non-overlapping text replacements to a UTF-8 file within the workspace "
+        "or scratch directory. Each oldText must match the file exactly, apart from line endings "
+        "and trailing whitespace. Read the file first; any modification — including commands run "
+        "via bash such as formatters like ruff format or cargo fmt — requires reading it again "
+        "before editing."
     )
     input_schema: ToolInputSchema = {
         "type": "object",
         "properties": {
-            "path": {"type": "string"},
+            "path": {
+                "type": "string",
+                "description": "File path within the workspace or scratch directory.",
+            },
             "edits": {
                 "type": "array",
+                "description": "Ordered list of unique, non-overlapping text replacements.",
                 "items": {
                     "type": "object",
                     "properties": {
-                        "oldText": {"type": "string"},
-                        "newText": {"type": "string"},
+                        "oldText": {
+                            "type": "string",
+                            "description": "Exact existing text to replace (must match once).",
+                        },
+                        "newText": {
+                            "type": "string",
+                            "description": "Replacement text.",
+                        },
                     },
                     "required": ["oldText", "newText"],
                 },

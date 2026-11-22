@@ -875,6 +875,9 @@ def test_description_explains_script_contract() -> None:
     description = _tool().description
     assert "`await gather_settled(...)`" in description
     assert "no tool import is needed" in description
+    assert "not pre-imported" in description
+    assert "statically type-checked before running" in description
+    assert "annotate heterogeneous containers" in description
     assert "text or typed structured data" in description
     assert "`mcp_call` returns text, which is not necessarily JSON" in description
     assert "resuming the same branch after restart" in description

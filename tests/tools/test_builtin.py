@@ -154,3 +154,36 @@ def test_builtin_tools_have_safety_metadata() -> None:
     assert WriteTool().safety == "mutating"
     assert EditTool().safety == "mutating"
     assert BashTool().safety == "command"
+
+
+def test_builtin_tool_schemas_document_all_properties_and_scope() -> None:
+    tools = (
+        BashTool(),
+        ReadTool(),
+        WriteTool(),
+        EditTool(),
+        GrepTool(),
+        FindTool(),
+        LsTool(),
+    )
+    for tool in tools:
+        properties = tool.input_schema["properties"]
+        assert isinstance(properties, dict)
+        for name, prop in properties.items():
+            assert isinstance(prop, dict)
+            desc = prop.get("description")
+            assert isinstance(desc, str) and desc.strip(), (
+                f"{tool.name}.input_schema.properties[{name!r}] missing description"
+            )
+
+    edit_items = EditTool().input_schema["properties"]["edits"]["items"]["properties"]
+    for key in ("oldText", "newText"):
+        desc = edit_items[key].get("description")
+        assert isinstance(desc, str) and desc.strip()
+
+    for tool in (ReadTool(), WriteTool(), EditTool(), GrepTool(), FindTool(), LsTool()):
+        assert "workspace or scratch directory" in tool.description
+
+    assert "ruff format" in EditTool().description
+    assert "30-120" in BashTool().description
+    assert "notify_on_exit=true" in BashTool().description
