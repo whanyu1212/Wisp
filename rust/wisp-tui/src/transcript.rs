@@ -447,6 +447,8 @@ pub struct TranscriptEntry {
     moved_from: Option<String>,
     /// How the run this prompt started ended, for the side panel's turn list.
     run_result: Option<RunResult>,
+    /// True when this user entry was injected mid-run via steering rather than starting a run.
+    injected_in_run: bool,
     pub state: TranscriptEntryState,
     pub kind: TranscriptEntryKind,
     revision: u64,
@@ -584,6 +586,24 @@ impl TranscriptEntry {
     /// never started.
     pub(crate) fn running_elapsed(&self) -> Option<std::time::Duration> {
         self.running_since.map(|started| started.elapsed())
+    }
+
+    pub(crate) fn running_since(&self) -> Option<Instant> {
+        self.running_since
+    }
+
+    /// How long live reasoning has been streaming on this entry, or `None` once finished.
+    pub(crate) fn thinking_elapsed(&self) -> Option<std::time::Duration> {
+        self.thinking_started.map(|started| started.elapsed())
+    }
+
+    /// Whether this user entry was injected into an active run (steering/follow-up)
+    /// rather than starting a new run.
+    pub(crate) fn is_injected_in_run(&self) -> bool {
+        self.injected_in_run
+            || self
+                .run_result
+                .is_some_and(|result| result.duration_ms.is_none())
     }
 
     /// Stop the reasoning clock once answer text arrives or the reply completes.
@@ -767,6 +787,18 @@ impl Transcript {
             images,
             TranscriptEntryState::Complete,
         )
+    }
+
+    /// Append an injected mid-run steering message without starting a new turn in timelines.
+    pub(crate) fn append_injected_prompt(
+        &mut self,
+        prompt: String,
+        display: Option<String>,
+        images: Vec<crate::composer_images::TranscriptImage>,
+    ) -> TranscriptEntryId {
+        let id = self.append_prompt_with_images(prompt, display, images);
+        self.entry_mut(id).injected_in_run = true;
+        id
     }
 
     /// Convenience used by presentation tests that explicitly exercise pending rows.
@@ -2544,6 +2576,7 @@ impl Transcript {
                 moved_to: None,
                 moved_from: None,
                 run_result: None,
+                injected_in_run: false,
                 thinking_started: None,
                 running_since: None,
                 thinking_ms: None,
@@ -3254,6 +3287,7 @@ impl Transcript {
             moved_to: None,
             moved_from: None,
             run_result: None,
+            injected_in_run: false,
             thinking_started: None,
             running_since: None,
             thinking_ms: None,
@@ -3353,6 +3387,7 @@ impl Transcript {
             moved_to: None,
             moved_from: None,
             run_result: None,
+            injected_in_run: false,
             thinking_started: None,
             running_since: None,
             thinking_ms: None,

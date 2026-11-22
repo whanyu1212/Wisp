@@ -83,6 +83,7 @@ struct TimelineSpan {
     start_ms: u64,
     duration_ms: u64,
     started_at_ms: Option<i64>,
+    live_batch: bool,
     status: SpanStatus,
     children: Vec<TimelineSpan>,
 }
@@ -1093,7 +1094,7 @@ fn collect_turns(entries: &[TranscriptEntry]) -> Vec<TurnTimeline> {
     let mut start = 0usize;
 
     for (idx, entry) in entries.iter().enumerate() {
-        if entry.role == TranscriptRole::User {
+        if entry.role == TranscriptRole::User && !entry.is_injected_in_run() {
             if idx > start {
                 let prompt = if entries[start].role == TranscriptRole::User {
                     sanitize_single_line(&entries[start].content)
@@ -1132,10 +1133,21 @@ fn build_turn(
         .iter()
         .filter_map(|entry| entry.tool_card().and_then(|card| card.started_at_ms))
         .min();
+    let live_anchor = segment
+        .iter()
+        .filter_map(|entry| {
+            let card = entry.tool_card()?;
+            card.started_at_ms
+                .is_none()
+                .then(|| entry.running_since())
+                .flatten()
+        })
+        .min();
 
     let mut raw_spans: Vec<TimelineSpan> = Vec::new();
     let mut cursor_ms = 0u64;
     let mut anchored_offset_ms: Option<u64> = None;
+    let mut live_offset_ms: Option<u64> = None;
     let mut subagent_counter = 0usize;
     let mut tool_calls = 0usize;
     let mut run_totals: Option<&RunTotals> = None;
@@ -1146,12 +1158,19 @@ fn build_turn(
         }
 
         if entry.role == TranscriptRole::Assistant
-            && (!entry.thinking().is_empty() || entry.thinking_ms().is_some())
+            && (!entry.thinking().is_empty()
+                || entry.thinking_ms().is_some()
+                || entry.is_thinking())
         {
             let dur = entry
                 .thinking_ms()
                 .map(u64::from)
-                .unwrap_or_else(|| if entry.is_thinking() { 1 } else { 0 });
+                .or_else(|| {
+                    entry
+                        .thinking_elapsed()
+                        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX).max(1))
+                })
+                .unwrap_or(0);
             let status = if entry.is_thinking() {
                 SpanStatus::Running
             } else {
@@ -1171,6 +1190,7 @@ fn build_turn(
                 start_ms: cursor_ms,
                 duration_ms: dur,
                 started_at_ms: None,
+                live_batch: false,
                 status,
                 children: Vec::new(),
             });
@@ -1188,18 +1208,26 @@ fn build_turn(
                         .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
                 })
                 .unwrap_or(0);
-            let start_ms = match (anchor_ms, card.started_at_ms) {
-                (Some(anchor), Some(started)) => {
-                    // Preserve any pre-tool Thinking time accumulated before the first anchored call.
-                    let offset = *anchored_offset_ms.get_or_insert(cursor_ms);
-                    offset
-                        .saturating_add(u64::try_from(started.saturating_sub(anchor)).unwrap_or(0))
-                }
-                _ => cursor_ms,
+            let mut live_batch = false;
+            let start_ms = if let (Some(anchor), Some(started)) = (anchor_ms, card.started_at_ms) {
+                // Preserve any pre-tool Thinking time accumulated before the first anchored call.
+                let offset = *anchored_offset_ms.get_or_insert(cursor_ms);
+                offset.saturating_add(u64::try_from(started.saturating_sub(anchor)).unwrap_or(0))
+            } else if let (Some(live_t0), Some(since)) = (live_anchor, entry.running_since()) {
+                // Concurrent unresolved live calls share an Instant-based timeline window
+                // instead of stacking sequentially behind earlier running calls.
+                live_batch = true;
+                let offset = *live_offset_ms.get_or_insert(cursor_ms);
+                let delta_ms = u64::try_from(since.saturating_duration_since(live_t0).as_millis())
+                    .unwrap_or(u64::MAX);
+                offset.saturating_add(delta_ms)
+            } else {
+                cursor_ms
             };
             cursor_ms = cursor_ms.max(start_ms.saturating_add(dur));
-            let span =
+            let mut span =
                 project_tool_span(turn_number, idx, card, start_ms, dur, &mut subagent_counter);
+            span.live_batch = live_batch;
             raw_spans.push(span);
         }
     }
@@ -1230,6 +1258,7 @@ fn build_turn(
                 start_ms: max_span_end,
                 duration_ms: reply_dur,
                 started_at_ms: None,
+                live_batch: false,
                 status: match totals.outcome.as_str() {
                     "completed" => SpanStatus::Done,
                     "cancelled" => SpanStatus::Cancelled,
@@ -1297,6 +1326,7 @@ fn project_tool_span(
                 start_ms,
                 duration_ms,
                 started_at_ms: card.started_at_ms,
+                live_batch: false,
                 status,
                 children,
             };
@@ -1322,6 +1352,7 @@ fn project_tool_span(
             start_ms,
             duration_ms,
             started_at_ms: card.started_at_ms,
+            live_batch: false,
             status,
             children,
         };
@@ -1340,6 +1371,7 @@ fn project_tool_span(
         start_ms,
         duration_ms,
         started_at_ms: card.started_at_ms,
+        live_batch: false,
         status,
         children: Vec::new(),
     }
@@ -1403,6 +1435,7 @@ fn project_nested_calls(
             start_ms: span_start,
             duration_ms: span_dur,
             started_at_ms: None,
+            live_batch: false,
             status,
             children: Vec::new(),
         });
@@ -1450,6 +1483,7 @@ fn group_parallel_batches(
                     start_ms: min_start,
                     duration_ms: max_end.saturating_sub(min_start),
                     started_at_ms: None,
+                    live_batch: false,
                     status,
                     children,
                 });
@@ -1467,8 +1501,9 @@ fn group_parallel_batches(
         }
         if let Some(first) = tool_run.first() {
             let group_end = tool_run.iter().map(TimelineSpan::end_ms).max().unwrap_or(0);
-            let same_start =
-                first.started_at_ms.is_some() && span.started_at_ms == first.started_at_ms;
+            let same_start = (first.started_at_ms.is_some()
+                && span.started_at_ms == first.started_at_ms)
+                || (first.live_batch && span.live_batch && span.start_ms == first.start_ms);
             let overlaps = span.start_ms < group_end || same_start;
             if overlaps {
                 tool_run.push(span);
@@ -1931,5 +1966,50 @@ mod tests {
         panel.show(PanelMode::Files);
         panel.show(PanelMode::LiveWork);
         assert!(!panel.timeline_active());
+    }
+
+    #[test]
+    fn live_parallel_tools_streaming_thinking_and_injected_steering_align_in_one_turn() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.transcript.append_prompt("initial run".into());
+        state.transcript.begin_message(1);
+        state.transcript.append_thinking_delta(1, "planning");
+        // Live concurrent tool calls without `started_at_ms` share one parallel batch.
+        state.transcript.observe_tool_call(ToolCallInput {
+            call_id: "live-1".into(),
+            name: "read".into(),
+            arguments: json!({"path": "a.rs"}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+        });
+        state.transcript.observe_tool_call(ToolCallInput {
+            call_id: "live-2".into(),
+            name: "rg".into(),
+            arguments: json!({"pattern": "x"}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+        });
+        // Steering injection stays inside the original turn instead of splitting into Turn 2.
+        state
+            .transcript
+            .append_injected_prompt("also check b.rs".into(), None, Vec::new());
+        state.transcript.observe_tool_call(ToolCallInput {
+            call_id: "live-3".into(),
+            name: "bash".into(),
+            arguments: json!({"command": "ls"}),
+            detail_source: crate::tool_detail::ToolDetailSource::None,
+        });
+
+        let turns = collect_turns(state.transcript.entries());
+        assert_eq!(turns.len(), 1, "steering message must stay in original run");
+        let turn = &turns[0];
+        assert!(matches!(turn.spans[0].kind, SpanKind::Thinking { .. }));
+        assert!(
+            turn.spans[0].duration_ms >= 1,
+            "streaming thinking reports active elapsed duration"
+        );
+        assert_eq!(turn.parallel_batches, 1);
+        assert!(matches!(
+            turn.spans[1].kind,
+            SpanKind::ParallelBatch { count: 3, .. }
+        ));
     }
 }
