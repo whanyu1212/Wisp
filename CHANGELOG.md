@@ -10,7 +10,27 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.16.1 — Unreleased
+## 0.16.2 — Unreleased
+
+- **Action-oriented transcript tool labels (#1119, #1120, #1121, #1122, #1125):** Updated TUI
+  transcript tool rows to show truthful outcome verbs and quiet approval tags, plus plain-language
+  verbs and subjects for built-in browser, discovery, server proposal, search, codemode, and common
+  MCP operations (Linear, Exa, OpenAI docs, Playwright) while retaining exact `server/tool`
+  identity in expanded details and falling back to `Calling/Called/Call server/tool` for ambiguous
+  or unknown calls.
+- **Tool schemas, codemode docs, and continuation (#1123, #1124):** Documented remaining tool
+  schemas and codemode guidance, added proactive continuation after approved plans or mockups, and
+  added a short-poll nudge.
+- **HTML mockup previews in the live browser (#1126):** Guided Wisp to write self-contained HTML
+  mockups in the scratch folder, serve them locally on `127.0.0.1`, and open them in `/browser`
+  when visual layouts are clearer in HTML than inline terminal text.
+- No changes to the Python API, live RPC payloads, or session format since 0.16.1. Use the same
+  release for backend and frontend.
+
+<!-- Keeps links to the pre-release "0.16.1 — Unreleased" heading working. -->
+<a id="0161--unreleased"></a>
+
+## 0.16.1 — 2026-11-21
 
 - **Close the Browser pane with one click (#1117):** Click `[Close]` beside `[Expand]` or
   `[Restore]` to dismiss the pane and close the live browser, even while interacting with the page.
