@@ -8889,6 +8889,30 @@ mod tests {
     }
 
     #[test]
+    fn resolved_proxied_call_uses_friendly_mcp_label_while_keeping_exact_detail() {
+        let card = approved_call_card(
+            "mcp_call",
+            Some("mcp__linear__get_issue"),
+            serde_json::json!({"name": "mcp__linear__get_issue", "arguments": {"id": "HY-489"}}),
+        );
+        assert_eq!(card.status.as_str(), "done");
+        assert!(card.has_friendly_action_label());
+        assert_eq!(card.action_verb(), "Read");
+        assert_eq!(card.action_line_arguments(), "Linear issue HY-489");
+        assert_eq!(card.action(), "MCP      linear/get_issue  id=HY-489");
+
+        let fallback = approved_call_card(
+            "mcp_call",
+            Some("mcp__linear__save_issue"),
+            serde_json::json!({"name": "mcp__linear__save_issue", "arguments": {"id": "HY-489"}}),
+        );
+        assert!(!fallback.has_friendly_action_label());
+        assert_eq!(fallback.action_verb(), "Called");
+        assert_eq!(fallback.mcp_target().as_deref(), Some("linear/save_issue"));
+        assert_eq!(fallback.action_line_arguments(), "HY-489");
+    }
+
+    #[test]
     fn tool_argument_projection_drops_payload_bodies_and_bounds_generic_maps() {
         let BackendEvent::ToolCall(write) =
             BackendEvent::from_projection_value(&serde_json::json!({

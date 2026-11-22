@@ -1249,6 +1249,42 @@ mod tests {
     }
 
     #[test]
+    fn replays_saved_proxy_target_with_friendly_mcp_label_and_exact_fallback() {
+        for (target, inner_args, expected_verb, expected_subject, expected_friendly) in [
+            (
+                "mcp__linear__list_issues",
+                json!({"query": "visual refresh"}),
+                "Searched",
+                "Linear issues for “visual refresh”",
+                true,
+            ),
+            (
+                "mcp__linear__save_issue",
+                json!({"id": "HY-489"}),
+                "Called",
+                "HY-489",
+                false,
+            ),
+        ] {
+            let mut assistant = message("assistant", "");
+            assistant["tool_calls"] = json!([{
+                "call_id": "issue",
+                "name": "mcp_call",
+                "arguments": {"name": target, "arguments": inner_args}
+            }]);
+            let mut result = message("tool", "ok");
+            result["tool_call_id"] = json!("issue");
+            result["tool_name"] = json!("mcp_call");
+            result["tool_result"] = json!({"status": "done", "target": target});
+            let transcript = project_rpc_messages(&[assistant, result]).unwrap();
+            let card = transcript.entries()[0].tool_card().unwrap();
+            assert_eq!(card.has_friendly_action_label(), expected_friendly);
+            assert_eq!(card.action_verb(), expected_verb);
+            assert_eq!(card.action_line_arguments(), expected_subject);
+        }
+    }
+
+    #[test]
     fn replays_saved_edit_lines() {
         let mut assistant = message("assistant", "");
         assistant["tool_calls"] = json!([{

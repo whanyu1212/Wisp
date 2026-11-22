@@ -824,8 +824,8 @@ fn tool_activity_matches_the_mockup_across_themes_and_resize() {
                 assert_eq!(buffer[(10, omission)].bg, ui.palette().surface);
                 assert!(!buffer[(10, tail)].modifier.contains(Modifier::DIM));
                 if width >= 80 {
-                    row_containing(&buffer, "linear/list_issues · astro");
-                    row_containing(&buffer, "linear/get_issue · 5 times");
+                    row_containing(&buffer, "Searched Linear issues for “astro”");
+                    row_containing(&buffer, "Read Linear issue · 5 times");
                     row_containing(&buffer, "npm test && npm run check");
                     row_containing(&buffer, "Browser tests · exit 0");
                 }
@@ -2359,6 +2359,84 @@ fn nested_discovery_and_proposals_use_plain_action_labels() {
     ));
     assert!(text.contains("Searched tools for “issue”"), "{text}");
     assert!(text.contains("Proposed removing MCP server docs"), "{text}");
+}
+
+#[test]
+fn nested_mcp_calls_use_friendly_labels_and_exact_fallback() {
+    let mut done = finished_script("ok", false);
+    let mut proxied_issue = nested(
+        "1",
+        "mcp_call",
+        json!({"name": "mcp__linear__get_issue", "arguments": {"id": "HY-489"}}),
+        None,
+    );
+    proxied_issue["target"] = json!("mcp__linear__get_issue");
+    let mut denied_save = nested(
+        "3",
+        "mcp__linear__save_issue",
+        json!({"id": "HY-489", "title": "Update"}),
+        Some("denied by user"),
+    );
+    denied_save["failure_code"] = json!("approval_denied");
+    let mut failed_issue = nested(
+        "4",
+        "mcp__linear__get_issue",
+        json!({"id": "HY-999"}),
+        Some("not found"),
+    );
+    failed_issue["failure_code"] = json!("tool_error");
+    let missing_args = nested("5", "mcp__linear__get_issue", Value::Null, None);
+    done["nested_calls"] = json!([
+        proxied_issue,
+        nested(
+            "2",
+            "mcp__exa__web_search_exa",
+            json!({"query": "ratatui"}),
+            None
+        ),
+        denied_save,
+        failed_issue,
+        missing_args,
+    ]);
+    let text = screen_text(&script_card(&[script_call(Some("sync")), done], true, 100));
+    for expected in [
+        "• Read Linear issue HY-489",
+        "• Searched the web via Exa for “ratatui”",
+        "⊘ Call linear/save_issue · HY-489 · denied · denied by user",
+        "✗ Read failed: Linear issue HY-999 · tool reported an error · not found",
+        "• Called linear/get_issue",
+    ] {
+        assert!(
+            text.contains(expected),
+            "{expected:?} missing from:\n{text}"
+        );
+    }
+
+    // Distinct operations on the same MCP tool do not collapse inside nested scripts.
+    let mut distinct = finished_script("ok", false);
+    distinct["nested_calls"] = json!([
+        nested(
+            "1",
+            "mcp__linear__list_issues",
+            json!({"query": "astro"}),
+            None
+        ),
+        nested("2", "mcp__linear__list_issues", json!({}), None),
+    ]);
+    let distinct_text = screen_text(&script_card(
+        &[script_call(Some("list")), distinct],
+        true,
+        100,
+    ));
+    assert!(
+        distinct_text.contains("• Searched Linear issues for “astro”"),
+        "{distinct_text}"
+    );
+    assert!(
+        distinct_text.contains("• Listed Linear issues"),
+        "{distinct_text}"
+    );
+    assert!(!distinct_text.contains("+1 more"), "{distinct_text}");
 }
 
 #[test]

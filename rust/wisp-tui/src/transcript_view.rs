@@ -1821,7 +1821,7 @@ impl TranscriptRowCache {
             self.fold.expand_hint()
         };
         let kind = card_group_key(entry)?;
-        if !matches!(kind, CardGroupKey::Mcp(_)) {
+        if !matches!(kind, CardGroupKey::Mcp(_, _)) {
             let outcomes = group_outcomes(transcript, &members);
             let tone = explore_group_tone(transcript, &members);
             let marker = status_marker(match tone {
@@ -1836,7 +1836,7 @@ impl TranscriptRowCache {
                 CardGroupKey::Explore => "Explored".to_owned(),
                 CardGroupKey::Tool(_, _) => entry.tool_card()?.action_verb(),
                 CardGroupKey::Process => PROCESS_LABEL.to_owned(),
-                CardGroupKey::Mcp(_) => unreachable!("MCP has its own header"),
+                CardGroupKey::Mcp(_, _) => unreachable!("MCP has its own header"),
             };
             let counts = group_counts(transcript, &kind, &members);
             let mut source = format!("{marker}{label}{ACTION_GAP}{counts}");
@@ -3993,7 +3993,10 @@ fn tool_action_projection(
         "read" | "ls" | "edit" | "write" => crate::markdown::InlineStyle::ToolPath,
         _ => crate::markdown::InlineStyle::ToolArgument,
     };
-    let mut rest = if let Some(target) = card.mcp_target().filter(|_| card.arguments_available) {
+    let mut rest = if let Some(target) = card
+        .mcp_target()
+        .filter(|_| card.arguments_available && !card.has_friendly_action_label())
+    {
         let subject = card.action_line_arguments();
         if subject.is_empty() {
             target
@@ -4221,15 +4224,17 @@ fn push_script_calls(
     let calls = &script.calls;
     while index < calls.len() {
         let call = &calls[index];
+        let call_verb = script_call_friendly_verb(call);
         let mut run = 1;
         if !matches!(
             call.state,
             ScriptCallState::Failed | ScriptCallState::Denied
         ) {
-            while calls
-                .get(index + run)
-                .is_some_and(|next| next.tool == call.tool && next.state == call.state)
-            {
+            while calls.get(index + run).is_some_and(|next| {
+                next.tool == call.tool
+                    && next.state == call.state
+                    && script_call_friendly_verb(next) == call_verb
+            }) {
                 run += 1;
             }
         }
@@ -4282,6 +4287,21 @@ fn push_script_calls(
     }
 }
 
+fn script_call_friendly_verb(
+    call: &crate::script_card::ScriptCall,
+) -> Option<crate::tool_cards::Verb> {
+    if !call.arguments.is_object() {
+        return None;
+    }
+    let input = crate::tool_cards::ToolCallInput {
+        call_id: call.call_id.clone(),
+        name: call.tool.clone(),
+        arguments: call.arguments.clone(),
+        detail_source: crate::tool_detail::ToolDetailSource::None,
+    };
+    crate::tool_cards::ToolCardSnapshot::requested(&input, ToolStatus::Done).friendly_verb()
+}
+
 /// A call's row as a direct call of the same tool would read: its mark, verb and
 /// what it acted on, relative to the script's own folder.
 pub(crate) fn script_call_action(
@@ -4310,6 +4330,10 @@ pub(crate) fn script_call_action(
     row_card.display_base.clone_from(&card.display_base);
     row_card.auto_approved = call.auto_approved;
     row_card.approval_note.clone_from(&call.approval_note);
+    if !call.arguments.is_object() {
+        row_card.arguments_available = false;
+        row_card.action_label = None;
+    }
     let mut action = if !call.arguments.is_object() {
         // Its arguments were too large to keep: name the tool alone.
         let target = row_card.mcp_target().map(|target| format!(" {target}"));
@@ -4431,6 +4455,20 @@ fn push_image_note(action: &mut String, images: &[String]) -> usize {
     start
 }
 
+fn expanded_action_metadata(card: &crate::tool_cards::ToolCardSnapshot) -> Option<String> {
+    if card.has_friendly_action_label()
+        && let Some(target) = card.mcp_target()
+    {
+        return Some(if card.action_arguments.is_empty() {
+            target
+        } else {
+            format!("{target} · {}", card.action_arguments)
+        });
+    }
+    (!card.action_arguments.is_empty() && card.action_line_arguments() != card.action_arguments)
+        .then(|| card.action_arguments.clone())
+}
+
 fn card_projection(
     entry: &TranscriptEntry,
     expanded_output: bool,
@@ -4530,11 +4568,11 @@ fn card_projection(
             } else {
                 card.detail.clone()
             };
-            if card.action_line_arguments() != card.action_arguments {
+            if let Some(action_meta) = expanded_action_metadata(card) {
                 metadata = if metadata.is_empty() {
-                    card.action_arguments.clone()
+                    action_meta
                 } else {
-                    format!("{}\n{metadata}", card.action_arguments)
+                    format!("{action_meta}\n{metadata}")
                 };
             }
             let shown_output_bytes = retained_preview.text.len() as u64;
@@ -4999,12 +5037,21 @@ impl McpGroupHeader {
         let mut source = format!("{marker}{verb}");
         let label_end = source.len();
         source.push_str(ACTION_GAP);
-        source.push_str(&first.mcp_target()?);
-        if let Some(card) = live.filter(|_| !compact) {
-            let subject = card.display_arguments();
-            if !subject.is_empty() {
-                source.push_str(" · ");
-                source.push_str(&subject);
+        let target = first.mcp_target()?;
+        if !mixed && first.has_friendly_action_label() {
+            if let Some(card) = live.filter(|_| !compact) {
+                source.push_str(&card.action_line_arguments());
+            } else {
+                source.push_str(first.mcp_group_label().unwrap_or(&target));
+            }
+        } else {
+            source.push_str(&target);
+            if let Some(card) = live.filter(|_| !compact) {
+                let subject = card.display_arguments();
+                if !subject.is_empty() {
+                    source.push_str(" · ");
+                    source.push_str(&subject);
+                }
             }
         }
         let suffix_start = source.len();
@@ -5132,7 +5179,7 @@ fn group_counts(
         CardGroupKey::Tool(name, _) if matches!(name.as_str(), "edit" | "write") => {
             counted(targets(&[name.as_str()]), "file", "files").unwrap_or_default()
         }
-        CardGroupKey::Tool(_, _) | CardGroupKey::Mcp(_) => format!("{} times", members.len()),
+        CardGroupKey::Tool(_, _) | CardGroupKey::Mcp(_, _) => format!("{} times", members.len()),
     }
 }
 
@@ -5160,7 +5207,7 @@ fn card_group_signature(transcript: &Transcript, entry: &TranscriptEntry) -> Opt
             group_preview_items(transcript, &members).hash(&mut hasher);
             Some(hasher.finish())
         }
-        CardGroupKey::Mcp(_) => {
+        CardGroupKey::Mcp(_, _) => {
             McpGroupHeader::new(transcript, &members, false).map(|header| header.signature())
         }
     }?;
@@ -5340,7 +5387,7 @@ fn card_header_cache_valid(
             }
             cached.group_signature.is_some()
                 && cached.group_signature == card_group_signature(transcript, entry)
-                && (matches!(card_group_key(entry), Some(CardGroupKey::Mcp(_)))
+                && (matches!(card_group_key(entry), Some(CardGroupKey::Mcp(_, _)))
                     || cached.row.tone == explore_group_tone(transcript, &members))
         }
         TranscriptRowKind::CardAction => {
@@ -6677,8 +6724,8 @@ fn spacer_next(transcript: &Transcript, entry: &TranscriptEntry) -> Option<RowAn
 enum CardGroupKey {
     /// Reads, searches and listings, mixed freely: `Explore N actions`.
     Explore,
-    /// Repeated calls to one MCP server's tool, keyed by the full tool name.
-    Mcp(String),
+    /// Repeated calls to one MCP server's tool, keyed by the full tool name and verb.
+    Mcp(String, Option<crate::tool_cards::Verb>),
     /// Consecutive successful calls to exactly the same tool.
     Tool(String, Option<crate::tool_cards::Verb>),
     /// Background processes that exited with code 0. A process in any other state keeps
@@ -6699,7 +6746,7 @@ fn card_group_key(entry: &TranscriptEntry) -> Option<CardGroupKey> {
     } else if matches!(card.name.as_str(), "read" | "grep" | "find" | "ls") {
         Some(CardGroupKey::Explore)
     } else if card.mcp_target().is_some() {
-        Some(CardGroupKey::Mcp(card.name.clone()))
+        Some(CardGroupKey::Mcp(card.name.clone(), card.friendly_verb()))
     } else if card.status == ToolStatus::Done {
         Some(CardGroupKey::Tool(
             card.name.clone(),
