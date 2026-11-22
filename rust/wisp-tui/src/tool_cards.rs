@@ -296,8 +296,8 @@ pub struct ToolCardSnapshot {
     pub name: String,
     pub action_arguments: String,
     pub command_summary: Option<CommandSummary>,
-    /// The primary MCP subject; full bounded arguments remain in `action_arguments`.
-    pub mcp_subject: Option<String>,
+    /// The concise display subject; full bounded arguments remain in `action_arguments`.
+    pub action_subject: Option<String>,
     pub process_id: Option<String>,
     pub status: ToolStatus,
     /// A backend policy grant, independent of whether execution succeeded.
@@ -398,7 +398,7 @@ impl ToolCardSnapshot {
             name: bounded_tool_name(&input.name),
             action_arguments: format_tool_arguments(&input.name, &input.arguments),
             command_summary: command_summary(input),
-            mcp_subject: mcp_subject(input),
+            action_subject: action_subject(input),
             process_id: None,
             status,
             auto_approved: false,
@@ -485,7 +485,7 @@ impl ToolCardSnapshot {
         self.name = name;
         self.action_arguments = action_arguments;
         self.command_summary = command_summary(input);
-        self.mcp_subject = mcp_subject(input);
+        self.action_subject = action_subject(input);
         self.arguments_available = true;
         // A script's calls may already be on the card, from before its arguments.
         if let Some(arguments) = script_of_call(input) {
@@ -511,7 +511,7 @@ impl ToolCardSnapshot {
         self.name = bounded_tool_name(&resolved.name);
         self.action_arguments = format_tool_arguments(&resolved.name, &resolved.arguments);
         self.command_summary = command_summary(resolved);
-        self.mcp_subject = mcp_subject(resolved);
+        self.action_subject = action_subject(resolved);
         self.detail_source = resolved.detail_source.clone();
         self.arguments_available = true;
         true
@@ -792,6 +792,11 @@ impl ToolCardSnapshot {
     /// `Run cargo test · denied`). Another tool is named by its own name.
     pub fn action_verb(&self) -> String {
         let (in_flight, finished, never_ran) = match self.name.as_str() {
+            "browser_navigate" => ("Opening", "Opened", "Open"),
+            "browser_read" => ("Reading", "Read", "Read"),
+            "browser_click" => ("Clicking", "Clicked", "Click"),
+            "browser_type" => ("Typing", "Typed", "Type"),
+            "browser_screenshot" => ("Capturing", "Captured", "Capture"),
             "bash" => ("Running", "Ran", "Run"),
             "read" => ("Reading", "Read", "Read"),
             "read_saved_session" => (
@@ -895,7 +900,7 @@ impl ToolCardSnapshot {
     /// The arguments as the action line shows them: like [`Self::display_arguments`], but
     /// a shell command is always shown as typed, so the line reads `Ran cargo test`.
     pub fn action_line_arguments(&self) -> String {
-        if let Some(subject) = &self.mcp_subject {
+        if let Some(subject) = &self.action_subject {
             return subject.clone();
         }
         // Worked out here rather than stored, so a script's line count never makes
@@ -1820,6 +1825,61 @@ fn format_bash(arguments: &Map<String, Value>) -> String {
     }
 }
 
+/// Pick subjects from structured arguments, never by parsing the rendered detail.
+/// In particular, a browser typing row must not fall back to its text payload.
+fn action_subject(input: &ToolCallInput) -> Option<String> {
+    if !input.name.starts_with("browser_") {
+        return mcp_subject(input);
+    }
+    let object = input.arguments.as_object();
+    let args = object
+        .and_then(generic_argument_items)
+        .map(|(items, _)| items)
+        .or(object);
+    let get = |key: &str| args.and_then(|args| args.get(key));
+    let text = |key| {
+        let value = get(key)?.as_str()?;
+        let safe: String = one_line(&clip_chars(value, GENERIC_VALUE_MAX_CHARS))
+            .chars()
+            .filter(|c| !c.is_control() && !crate::is_bidi_control(*c))
+            .collect();
+        (!safe.is_empty()).then_some(safe)
+    };
+    let target = || text("ref").or_else(|| text("selector"));
+    Some(match input.name.as_str() {
+        "browser_navigate" => {
+            let place = get("window").and_then(Value::as_bool).map(|window| {
+                if window {
+                    "browser window"
+                } else {
+                    "browser pane"
+                }
+            });
+            match (text("url"), place) {
+                (Some(url), Some(place)) => format!("{url} in the {place}"),
+                (Some(url), None) => url,
+                (None, place) => place.unwrap_or("browser").to_owned(),
+            }
+        }
+        "browser_read" => "browser page".into(),
+        "browser_screenshot" => "browser screenshot".into(),
+        "browser_click" => target()
+            .or_else(|| {
+                Some(format!(
+                    "({}, {})",
+                    get("x")?.as_i64()?,
+                    get("y")?.as_i64()?
+                ))
+            })
+            .unwrap_or_else(|| "browser page".into()),
+        "browser_type" => format!(
+            "into {}",
+            target().unwrap_or_else(|| "focused element".into())
+        ),
+        _ => return None,
+    })
+}
+
 fn mcp_subject(input: &ToolCallInput) -> Option<String> {
     let (server, tool) = input.name.strip_prefix("mcp__")?.split_once("__")?;
     if server.is_empty() || tool.is_empty() {
@@ -2342,6 +2402,68 @@ mod tests {
             "npm test && npm run deploy",
         ] {
             assert!(summarize_command(command).is_none());
+        }
+    }
+
+    #[test]
+    fn browser_action_labels_use_subjects_not_options_or_typed_text() {
+        use serde_json::json;
+        for (name, args, expected) in [
+            (
+                "browser_navigate",
+                json!({"url":"https://example.org", "window":true}),
+                "Opened https://example.org in the browser window",
+            ),
+            (
+                "browser_navigate",
+                json!({"window":false}),
+                "Opened browser pane",
+            ),
+            (
+                "browser_read",
+                json!({"max_chars":500}),
+                "Read browser page",
+            ),
+            (
+                "browser_screenshot",
+                json!({}),
+                "Captured browser screenshot",
+            ),
+            ("browser_click", json!({"x":2,"y":5}), "Clicked (2, 5)"),
+            (
+                "browser_type",
+                json!({"ref":"e2", "text":"private"}),
+                "Typed into e2",
+            ),
+            (
+                "browser_type",
+                json!({"text":"private"}),
+                "Typed into focused element",
+            ),
+            (
+                "browser_type",
+                json!({"selector":"#a\u{202e}\ninput", "text":"private"}),
+                "Typed into #a input",
+            ),
+        ] {
+            for arguments in [args.clone(), bounded_tool_arguments(name, &args)] {
+                let card = ToolCardSnapshot::requested(
+                    &ToolCallInput {
+                        call_id: "call".into(),
+                        name: name.into(),
+                        arguments,
+                        detail_source: ToolDetailSource::None,
+                    },
+                    ToolStatus::Done,
+                );
+                assert_eq!(
+                    format!("{} {}", card.action_verb(), card.action_line_arguments()),
+                    expected
+                );
+                if name == "browser_type" {
+                    assert!(card.action_arguments.contains("text=private"));
+                }
+            }
         }
     }
 
