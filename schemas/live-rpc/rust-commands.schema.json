@@ -2172,6 +2172,50 @@
       "minLength": 1,
       "type": "string"
     },
+    "RunShellCommand": {
+      "additionalProperties": false,
+      "description": "Run one user-initiated shell command without adding it to model history.",
+      "properties": {
+        "command": {
+          "maxLength": 32768,
+          "minLength": 1,
+          "title": "RunShellCommandCommand",
+          "type": "string"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "RunShellCommandId"
+        },
+        "timeout": {
+          "anyOf": [
+            {
+              "maximum": 3600,
+              "minimum": 1,
+              "type": "integer"
+            }
+          ],
+          "title": "RunShellCommandTimeout"
+        },
+        "type": {
+          "const": "run_shell",
+          "default": "run_shell",
+          "title": "RunShellCommandType",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "command"
+      ],
+      "title": "RunShellCommand",
+      "type": "object"
+    },
     "SelectSessionCommand": {
       "additionalProperties": false,
       "description": "Select a persisted session as the active RPC session.",
@@ -2746,6 +2790,7 @@
       "reload": "#/$defs/ReloadCommand",
       "remove_mcp_server": "#/$defs/RemoveMcpServerCommand",
       "revoke_command_rule": "#/$defs/RevokeCommandRuleCommand",
+      "run_shell": "#/$defs/RunShellCommand",
       "select_session": "#/$defs/SelectSessionCommand",
       "set_codemode": "#/$defs/SetCodemodeCommand",
       "set_mcp_server_enabled": "#/$defs/SetMcpServerEnabledCommand",
@@ -2942,6 +2987,9 @@
     },
     {
       "$ref": "#/$defs/ChangeDirectoryCommand"
+    },
+    {
+      "$ref": "#/$defs/RunShellCommand"
     }
   ],
   "title": "Wisp typed-client RPC commands"

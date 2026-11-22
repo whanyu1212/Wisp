@@ -1753,6 +1753,7 @@ impl LiveUi {
         let follow_after_update = matches!(
             &action,
             UiAction::Init
+                | UiAction::RunShell(_)
                 | UiAction::Submit(_)
                 | UiAction::SubmitPresented { .. }
                 | UiAction::SendWithImages {
@@ -1785,12 +1786,15 @@ impl LiveUi {
             _ => None,
         };
         let had_shared_session = self.state.saved_session_attachment.is_some();
+        let had_attached_shell = !self.state.attached_shell_outputs.is_empty();
         let effects = reducer::reduce(&mut self.state, action, &mut self.ids)?;
         if agent_opened_live_browser {
             self.side_panel.show(side_panel::PanelMode::Browser);
             self.render_pending = true;
         }
-        if had_shared_session && self.state.saved_session_attachment.is_none() {
+        if (had_shared_session && self.state.saved_session_attachment.is_none())
+            || (had_attached_shell && self.state.attached_shell_outputs.is_empty())
+        {
             self.sync_composer_chips();
         }
         if let Some(call_id) = finished_call {
@@ -3444,7 +3448,11 @@ impl LiveUi {
             _ if queued.is_some() => {
                 let (kind, content, images) = queued.expect("checked queued message");
                 let has_images = images.is_some_and(|images| !images.is_empty());
-                if let Err(error) = self.state.queue_submission_preflight(content, has_images) {
+                let (wire_content, _) = self.state.compose_prompt_with_shell_outputs(content, None);
+                if let Err(error) = self
+                    .state
+                    .queue_submission_preflight(&wire_content, has_images)
+                {
                     self.notice = Some(error.notice().into());
                     self.render_pending = true;
                     return Ok(LoopControl::Continue);
@@ -3457,7 +3465,7 @@ impl LiveUi {
                         "Steering",
                         WispTypedClientRpcCommands::steer_with_images(
                             &self.ids.peek_id(CommandKind::Steer),
-                            content,
+                            &wire_content,
                             &encoded,
                         )?,
                     ),
@@ -3465,7 +3473,7 @@ impl LiveUi {
                         "Follow-up",
                         WispTypedClientRpcCommands::follow_up_with_images(
                             &self.ids.peek_id(CommandKind::FollowUp),
-                            content,
+                            &wire_content,
                             &encoded,
                         )?,
                     ),
@@ -3586,6 +3594,7 @@ impl LiveUi {
         if clear_editor && self.notice.is_none() {
             self.editor.clear();
             self.clear_images();
+            self.sync_composer_chips();
             self.recovered_queue_recovery = false;
         }
         Ok(control)
@@ -3734,6 +3743,16 @@ impl LiveUi {
         true
     }
 
+    /// Detach the newest attached shell output when the draft has no text to delete.
+    fn remove_last_shell_output(&mut self) -> bool {
+        if !self.editor.text().is_empty() || !self.state.pop_last_attached_shell_output() {
+            return false;
+        }
+        self.notice = Some("Detached shell output.".into());
+        self.sync_composer_chips();
+        true
+    }
+
     /// Put restored images in front of the attached ones; the caller has checked
     /// that they fit with [`ComposerImages::fits_restored`].
     fn restore_images(&mut self, restored: &ComposerImages) {
@@ -3785,6 +3804,9 @@ impl LiveUi {
 
     fn sync_composer_chips(&mut self) {
         let mut chips = self.images.chip_labels();
+        for attachment in &self.state.attached_shell_outputs {
+            chips.push(attachment.chip_label());
+        }
         if let Some(source) = &self.state.saved_session_attachment {
             // Keep the share indicator visible in the narrow composer, even
             // when the saved session's title is long.
@@ -3793,6 +3815,26 @@ impl LiveUi {
         }
         self.composer_layout_cache.set_chips(chips);
         self.render_pending = true;
+    }
+
+    fn toggle_shell_attachment(&mut self, entry_id: Option<TranscriptEntryId>) {
+        match self.state.toggle_shell_output_attachment(entry_id) {
+            Ok(true) => {
+                self.sync_composer_chips();
+                self.notice = Some(
+                    "Attached shell output for your next prompt. Press Alt+S or Backspace on an empty draft to detach."
+                        .into(),
+                );
+            }
+            Ok(false) => {
+                self.sync_composer_chips();
+                self.notice = Some("Detached shell output.".into());
+            }
+            Err(message) => {
+                self.notice = Some(message.into());
+                self.render_pending = true;
+            }
+        }
     }
 
     fn update_edit_notice(&mut self, outcome: EditOutcome) -> bool {
@@ -3824,10 +3866,11 @@ impl LiveUi {
         prompt: &str,
         limit: usize,
     ) -> Result<Option<String>, Error> {
+        let (wire_prompt, _) = self.state.compose_prompt_with_shell_outputs(prompt, None);
         let id = self.ids.peek_id(CommandKind::Prompt);
         let command = WispTypedClientRpcCommands::prompt_with_attachments(
             &id,
-            prompt,
+            &wire_prompt,
             &self.images.wire_images(),
             self.state
                 .saved_session_attachment
@@ -4628,6 +4671,30 @@ impl LiveUi {
                 self.editor.clear();
                 self.dispatch(UiAction::StopBackgroundProcess(target), writer, limit)
                     .await
+            }
+            Command::Shell(command_text) => {
+                if !self.idle_prompt_editable() {
+                    self.notice = Some(
+                        "Wait for the current operation before running a shell command.".into(),
+                    );
+                    self.render_pending = true;
+                    return Ok(LoopControl::Continue);
+                }
+                let action = UiAction::RunShell(command_text);
+                if let Some(notice) =
+                    self.reduced_action_frame_limit_notice(&action, "shell command", limit)?
+                {
+                    self.notice = Some(notice);
+                    self.render_pending = true;
+                    return Ok(LoopControl::Continue);
+                }
+                self.dispatch_command_run(
+                    action,
+                    reducer::ActiveCommandType::RunShell,
+                    writer,
+                    limit,
+                )
+                .await
             }
             Command::AutoCompaction(enabled) => {
                 self.notice = None;
@@ -5559,6 +5626,11 @@ impl LiveUi {
                 self.copy_selected_browse_target();
                 return Ok(LoopControl::Continue);
             }
+            KeyCode::Char('s') if key.modifiers == KeyModifiers::NONE => {
+                let entry_id = self.browse_selected.map(BrowseTarget::entry_id);
+                self.toggle_shell_attachment(entry_id);
+                return Ok(LoopControl::Continue);
+            }
             KeyCode::Right => self.expand_selected_fold(),
             KeyCode::Left => self.collapse_selected_fold(),
             KeyCode::Enter | KeyCode::Char(' ') => {
@@ -6139,7 +6211,10 @@ impl LiveUi {
         limit: usize,
     ) -> Result<LoopControl, Error> {
         let prompt = self.editor.text().to_owned();
-        if prompt.trim().is_empty() && self.images.is_empty() {
+        if prompt.trim().is_empty()
+            && self.images.is_empty()
+            && self.state.attached_shell_outputs.is_empty()
+        {
             self.notice = Some("Enter a non-empty prompt before sending.".into());
             self.render_pending = true;
             return Ok(LoopControl::Continue);
@@ -6486,6 +6561,13 @@ impl LiveUi {
             }
             Some(KeyAction::TurnDiff) if self.active_overlay().is_none() && !decision_pending => {
                 self.open_latest_turn_diff(writer, limit).await.map(Some)
+            }
+            Some(KeyAction::AttachShellOutput)
+                if self.active_overlay().is_none() && !decision_pending =>
+            {
+                let target = self.browse_selected.map(BrowseTarget::entry_id);
+                self.toggle_shell_attachment(target);
+                Ok(Some(LoopControl::Continue))
             }
             _ => Ok(None),
         }
@@ -7765,7 +7847,7 @@ impl LiveUi {
             None => {
                 if key.code == KeyCode::Backspace
                     && key.modifiers == KeyModifiers::NONE
-                    && self.remove_last_image()
+                    && (self.remove_last_image() || self.remove_last_shell_output())
                 {
                     return Ok(LoopControl::Continue);
                 }

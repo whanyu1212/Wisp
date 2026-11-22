@@ -1393,6 +1393,98 @@ impl Transcript {
         changed
     }
 
+    pub fn append_user_shell_command(
+        &mut self,
+        command_id: &str,
+        command: &str,
+    ) -> TranscriptEntryId {
+        self.prepare_non_message_entry();
+        let entry_id = self.push_card(TranscriptEntryKind::Tool(Box::new(
+            ToolCardSnapshot::user_shell(command_id, command),
+        )));
+        self.entry_mut(entry_id).running_since = Some(Instant::now());
+        entry_id
+    }
+
+    pub fn observe_user_shell_progress(
+        &mut self,
+        entry_id: TranscriptEntryId,
+        progress: &ToolProgressInput,
+    ) -> bool {
+        if !self.entry_indexes.contains_key(&entry_id) {
+            return false;
+        }
+        let changed = {
+            let entry = self.entry_mut(entry_id);
+            let TranscriptEntryKind::Tool(card) = &mut entry.kind else {
+                return false;
+            };
+            card.apply_progress(progress)
+        };
+        if changed {
+            self.bump_card(entry_id);
+        }
+        changed
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn observe_user_shell_completed(
+        &mut self,
+        entry_id: TranscriptEntryId,
+        exit_code: Option<i64>,
+        output: &str,
+        truncated: bool,
+        timed_out: bool,
+        cancelled: bool,
+        duration_ms: u64,
+        error: Option<&str>,
+    ) -> bool {
+        if !self.entry_indexes.contains_key(&entry_id) {
+            return false;
+        }
+        let changed = {
+            let entry = self.entry_mut(entry_id);
+            let TranscriptEntryKind::Tool(card) = &mut entry.kind else {
+                return false;
+            };
+            card.apply_user_shell_result(
+                exit_code,
+                output,
+                truncated,
+                timed_out,
+                cancelled,
+                duration_ms,
+                error,
+            )
+        };
+        if changed {
+            self.bump_card(entry_id);
+        }
+        changed
+    }
+
+    pub fn set_user_shell_attached(&mut self, entry_id: TranscriptEntryId, attached: bool) -> bool {
+        if !self.entry_indexes.contains_key(&entry_id) {
+            return false;
+        }
+        let changed = {
+            let entry = self.entry_mut(entry_id);
+            let TranscriptEntryKind::Tool(card) = &mut entry.kind else {
+                return false;
+            };
+            if !card.user_shell || card.attached_to_prompt == attached {
+                false
+            } else {
+                card.attached_to_prompt = attached;
+                true
+            }
+        };
+        if changed {
+            self.bump_card(entry_id);
+        }
+        changed
+    }
+
     /// Apply a live update from a running codemode script to its card.
     ///
     /// `parent_call_id` names the script's own call; its child calls are displayed

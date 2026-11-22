@@ -13,11 +13,12 @@ const MAX_CHORD_CHARS: usize = 64;
 const MAX_DIAGNOSTIC_CHARS: usize = 512;
 /// Actions whose defaults were added or changed recently; user overrides take
 /// precedence over these defaults so existing configs never break on upgrade.
-const RECENT_DEFAULTS: [Action; 4] = [
+const RECENT_DEFAULTS: [Action; 5] = [
     Action::TogglePanel,
     Action::BackgroundCommand,
     Action::CopyLastResponse,
     Action::TurnDiff,
+    Action::AttachShellOutput,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -44,10 +45,11 @@ pub(crate) enum Action {
     ExternalEditor,
     BackgroundCommand,
     FocusBackground,
+    AttachShellOutput,
 }
 
 impl Action {
-    pub(crate) const ALL: [Self; 22] = [
+    pub(crate) const ALL: [Self; 23] = [
         Self::Submit,
         Self::AlternateSubmit,
         Self::Newline,
@@ -70,6 +72,7 @@ impl Action {
         Self::ExternalEditor,
         Self::BackgroundCommand,
         Self::FocusBackground,
+        Self::AttachShellOutput,
     ];
 
     pub(crate) const fn id(self) -> &'static str {
@@ -85,6 +88,7 @@ impl Action {
             Self::ExternalEditor => "prompt.external_editor",
             Self::BackgroundCommand => "run.background",
             Self::FocusBackground => "panel.background",
+            Self::AttachShellOutput => "shell.attach_output",
             Self::History => "history.open",
             Self::ToggleTheme => "theme.toggle",
             Self::Browse => "transcript.browse",
@@ -113,6 +117,9 @@ impl Action {
             Self::BackgroundCommand => "Move the running shell command to the background",
             Self::FocusBackground => {
                 "Focus the side panel's background processes (Down from an empty prompt)"
+            }
+            Self::AttachShellOutput => {
+                "Attach or detach the latest ! shell output to the next prompt"
             }
             Self::History => "Open prompt history",
             Self::ToggleTheme => "Toggle the theme",
@@ -306,6 +313,8 @@ impl Default for Bindings {
             KeyModifiers::CONTROL,
             "Ctrl+B",
         )];
+        chords[AttachShellOutput.index()] =
+            vec![Chord::exact(KeyCode::Char('s'), KeyModifiers::ALT, "Alt+S")];
         chords[PageUp.index()] = vec![Chord::exact(KeyCode::PageUp, KeyModifiers::NONE, "PgUp")];
         chords[PageDown.index()] =
             vec![Chord::exact(KeyCode::PageDown, KeyModifiers::NONE, "PgDn")];

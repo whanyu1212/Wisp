@@ -6316,6 +6316,182 @@
       "title": "RpcSettingsReloaded",
       "type": "object"
     },
+    "RpcShellCompleted": {
+      "additionalProperties": false,
+      "description": "Terminal result of a user-initiated `!` shell command, kept outside model history.",
+      "properties": {
+        "cancelled": {
+          "default": false,
+          "title": "Cancelled",
+          "type": "boolean"
+        },
+        "command": {
+          "maxLength": 32768,
+          "minLength": 1,
+          "title": "Command",
+          "type": "string"
+        },
+        "command_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Command Id",
+          "type": "string"
+        },
+        "duration_ms": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Duration Ms",
+          "type": "integer"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "maxLength": 2048,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        },
+        "exit_code": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exit Code"
+        },
+        "output": {
+          "default": "",
+          "maxLength": 65536,
+          "title": "Output",
+          "type": "string"
+        },
+        "stderr": {
+          "default": "",
+          "maxLength": 65536,
+          "title": "Stderr",
+          "type": "string"
+        },
+        "stdout": {
+          "default": "",
+          "maxLength": 65536,
+          "title": "Stdout",
+          "type": "string"
+        },
+        "timed_out": {
+          "default": false,
+          "title": "Timed Out",
+          "type": "boolean"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "truncated": {
+          "default": false,
+          "title": "Truncated",
+          "type": "boolean"
+        },
+        "type": {
+          "const": "rpc.shell.completed",
+          "default": "rpc.shell.completed",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "timestamp",
+        "command_id",
+        "command",
+        "exit_code",
+        "output",
+        "stdout",
+        "stderr",
+        "truncated",
+        "timed_out",
+        "cancelled",
+        "duration_ms",
+        "error"
+      ],
+      "title": "RpcShellCompleted",
+      "type": "object"
+    },
+    "RpcShellProgress": {
+      "additionalProperties": false,
+      "description": "Transient live output snapshot for a user-initiated `!` shell command.",
+      "properties": {
+        "command_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Command Id",
+          "type": "string"
+        },
+        "elapsed_ms": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Elapsed Ms",
+          "type": "integer"
+        },
+        "stderr_bytes": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Stderr Bytes",
+          "type": "integer"
+        },
+        "stderr_tail": {
+          "default": "",
+          "maxLength": 4096,
+          "title": "Stderr Tail",
+          "type": "string"
+        },
+        "stdout_bytes": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Stdout Bytes",
+          "type": "integer"
+        },
+        "stdout_tail": {
+          "default": "",
+          "maxLength": 4096,
+          "title": "Stdout Tail",
+          "type": "string"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "rpc.shell.progress",
+          "default": "rpc.shell.progress",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "timestamp",
+        "command_id",
+        "stdout_tail",
+        "stderr_tail",
+        "stdout_bytes",
+        "stderr_bytes",
+        "elapsed_ms"
+      ],
+      "title": "RpcShellProgress",
+      "type": "object"
+    },
     "RpcSkillCatalogEntry": {
       "additionalProperties": false,
       "description": "One model-free skill descriptor returned to RPC frontends.",
@@ -9563,6 +9739,8 @@
       "rpc.session.tree.unreverted": "#/$defs/RpcSessionTreeUnreverted",
       "rpc.sessions": "#/$defs/RpcSessionsReported",
       "rpc.settings.reloaded": "#/$defs/RpcSettingsReloaded",
+      "rpc.shell.completed": "#/$defs/RpcShellCompleted",
+      "rpc.shell.progress": "#/$defs/RpcShellProgress",
       "rpc.skills": "#/$defs/RpcSkillsReported",
       "rpc.state": "#/$defs/RpcStateReported",
       "rpc.subagents": "#/$defs/RpcSubagentsReported",
@@ -9810,6 +9988,12 @@
     },
     {
       "$ref": "#/$defs/RpcBrowserAddressesReported"
+    },
+    {
+      "$ref": "#/$defs/RpcShellProgress"
+    },
+    {
+      "$ref": "#/$defs/RpcShellCompleted"
     }
   ],
   "title": "Wisp current live event output",
@@ -10436,6 +10620,31 @@
       "timestamp": "2026-01-02T03:04:05Z",
       "type": "rpc.settings.reloaded",
       "unchanged": []
+    },
+    "rpc.shell.completed": {
+      "cancelled": false,
+      "command": "git status",
+      "command_id": "command-1",
+      "duration_ms": 12,
+      "error": null,
+      "exit_code": 0,
+      "output": "Command exited with code 0\nOn branch main",
+      "stderr": "",
+      "stdout": "On branch main",
+      "timed_out": false,
+      "timestamp": "2026-01-02T03:04:05Z",
+      "truncated": false,
+      "type": "rpc.shell.completed"
+    },
+    "rpc.shell.progress": {
+      "command_id": "command-1",
+      "elapsed_ms": 200,
+      "stderr_bytes": 0,
+      "stderr_tail": "",
+      "stdout_bytes": 15,
+      "stdout_tail": "On branch main\n",
+      "timestamp": "2026-01-02T03:04:05Z",
+      "type": "rpc.shell.progress"
     },
     "rpc.skills": {
       "catalog": {

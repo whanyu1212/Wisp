@@ -3483,3 +3483,110 @@ fn approval_dock_renders_inline_edit_diff_and_bash_prefix_choice() {
     let fn_col = unicode_width::UnicodeWidthStr::width(&fn_row[..fn_byte]) as u16;
     assert_eq!(write_buf[(fn_col, fn_y)].fg, palette.accent);
 }
+
+#[tokio::test]
+async fn user_shell_command_renders_inline_and_attaches_with_chip() {
+    let mut ui = LiveUi {
+        state: UiState::new("fake".into(), None, None),
+        ..LiveUi::default()
+    };
+    let (writer, mut receiver) = mpsc::channel(8);
+
+    ui.editor.insert_paste("!git status");
+    press(&mut ui, &writer, KeyCode::Enter).await;
+    let WriterMessage::Frame { payload, .. } = receiver.try_recv().unwrap() else {
+        panic!("expected run_shell frame");
+    };
+    let wire: Value = serde_json::from_slice(&payload).unwrap();
+    assert_eq!(wire["type"], "run_shell");
+    let command_id = wire["id"].as_str().unwrap().to_owned();
+
+    deliver(
+        &mut ui,
+        &writer,
+        json!({
+            "type": "rpc.shell.completed",
+            "command_id": command_id,
+            "command": "git status",
+            "exit_code": 0,
+            "output": "On branch main\nclean working tree",
+            "truncated": false,
+            "timed_out": false,
+            "cancelled": false,
+            "duration_ms": 15,
+            "error": null
+        }),
+    )
+    .await;
+    deliver(
+        &mut ui,
+        &writer,
+        json!({
+            "type": "rpc.command.finished",
+            "command_id": command_id,
+            "command_type": "run_shell",
+            "ok": true,
+            "error": null
+        }),
+    )
+    .await;
+
+    let rendered = draw(&mut ui, 96, 26);
+    row_containing(&rendered, "! git status");
+    row_containing(&rendered, "On branch main");
+    row_containing(&rendered, "exit 0 · local · Alt+S to attach");
+
+    // Alt+S attaches the local shell output and shows its composer chip.
+    ui.handle_input(
+        Input::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT)),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ui.state.attached_shell_outputs.len(), 1);
+    let attached = draw(&mut ui, 96, 26);
+    row_containing(&attached, "attached to next prompt");
+    row_containing(&attached, "[! git status]");
+
+    // Backspace on an empty composer draft detaches the shell output chip.
+    press(&mut ui, &writer, KeyCode::Backspace).await;
+    assert!(ui.state.attached_shell_outputs.is_empty());
+    let detached = draw(&mut ui, 96, 26);
+    row_containing(&detached, "Alt+S to attach");
+
+    // Re-attach, start a simulated prompt run, and queue with Enter on an empty draft:
+    // the wire `follow_up` payload includes the attached shell output and clears the chip.
+    ui.handle_input(
+        Input::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT)),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    ui.state.current_command = Some(reducer::ActiveCommand {
+        id: "prompt-running".into(),
+        command_type: reducer::ActiveCommandType::Prompt,
+    });
+    ui.state.view_status = ViewStatus::Running;
+    ui.state.interaction_status = reducer::InteractionStatus::Running;
+    let sent = tokio::spawn(async move {
+        let WriterMessage::Frame { payload, ack, .. } = receiver.recv().await.unwrap() else {
+            panic!("expected follow_up frame");
+        };
+        ack.unwrap().send(Ok(())).unwrap();
+        serde_json::from_slice::<Value>(&payload).unwrap()
+    });
+    press(&mut ui, &writer, KeyCode::Enter).await;
+    let queued_wire = sent.await.unwrap();
+    assert_eq!(queued_wire["type"], "follow_up");
+    let queued_prompt = queued_wire["content"].as_str().unwrap();
+    assert!(queued_prompt.contains("[User shell output: !git status (exit 0)]"));
+    assert!(queued_prompt.contains("clean working tree"));
+    assert!(ui.state.attached_shell_outputs.is_empty());
+    let after_queue = draw(&mut ui, 96, 26);
+    assert!(
+        !(0..after_queue.area().height)
+            .any(|y| buffer_row(&after_queue, y).contains("[! git status]"))
+    );
+}

@@ -4067,6 +4067,170 @@
    "accepted": false
   },
   {
+   "event": "rpc.shell.completed",
+   "operation": "remove",
+   "path": [
+    "cancelled"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.shell.completed",
+   "operation": "remove",
+   "path": [
+    "command"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.shell.completed",
+   "operation": "remove",
+   "path": [
+    "command_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.shell.completed",
+   "operation": "remove",
+   "path": [
+    "duration_ms"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.shell.completed",
+   "operation": "remove",
+   "path": [
+    "error"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.shell.completed",
+   "operation": "remove",
+   "path": [
+    "exit_code"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.shell.completed",
+   "operation": "remove",
+   "path": [
+    "output"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.shell.completed",
+   "operation": "remove",
+   "path": [
+    "stderr"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.shell.completed",
+   "operation": "remove",
+   "path": [
+    "stdout"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.shell.completed",
+   "operation": "remove",
+   "path": [
+    "timed_out"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.shell.completed",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.shell.completed",
+   "operation": "remove",
+   "path": [
+    "truncated"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.shell.completed",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
+   "event": "rpc.shell.progress",
+   "operation": "remove",
+   "path": [
+    "command_id"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.shell.progress",
+   "operation": "remove",
+   "path": [
+    "elapsed_ms"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.shell.progress",
+   "operation": "remove",
+   "path": [
+    "stderr_bytes"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.shell.progress",
+   "operation": "remove",
+   "path": [
+    "stderr_tail"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.shell.progress",
+   "operation": "remove",
+   "path": [
+    "stdout_bytes"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.shell.progress",
+   "operation": "remove",
+   "path": [
+    "stdout_tail"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.shell.progress",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.shell.progress",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
    "event": "rpc.skills",
    "operation": "remove",
    "path": [

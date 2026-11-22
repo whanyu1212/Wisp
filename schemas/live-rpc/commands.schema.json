@@ -2808,6 +2808,50 @@
       "minLength": 1,
       "type": "string"
     },
+    "RunShellCommand": {
+      "additionalProperties": false,
+      "description": "Run one user-initiated shell command without adding it to model history.",
+      "properties": {
+        "command": {
+          "maxLength": 32768,
+          "minLength": 1,
+          "title": "Command",
+          "type": "string"
+        },
+        "id": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Id"
+        },
+        "timeout": {
+          "anyOf": [
+            {
+              "maximum": 3600,
+              "minimum": 1,
+              "type": "integer"
+            }
+          ],
+          "title": "Timeout"
+        },
+        "type": {
+          "const": "run_shell",
+          "default": "run_shell",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "command"
+      ],
+      "title": "RunShellCommand",
+      "type": "object"
+    },
     "SelectSessionCommand": {
       "additionalProperties": false,
       "description": "Select a persisted session as the active RPC session.",
@@ -3378,6 +3422,7 @@
       "reload": "#/$defs/ReloadCommand",
       "remove_mcp_server": "#/$defs/RemoveMcpServerCommand",
       "revoke_command_rule": "#/$defs/RevokeCommandRuleCommand",
+      "run_shell": "#/$defs/RunShellCommand",
       "select_session": "#/$defs/SelectSessionCommand",
       "set_codemode": "#/$defs/SetCodemodeCommand",
       "set_mcp_server_enabled": "#/$defs/SetMcpServerEnabledCommand",
@@ -3574,6 +3619,9 @@
     },
     {
       "$ref": "#/$defs/ChangeDirectoryCommand"
+    },
+    {
+      "$ref": "#/$defs/RunShellCommand"
     }
   ],
   "title": "Wisp typed-client RPC commands",
@@ -3762,6 +3810,10 @@
     "revoke_command_rule": {
       "prefix": "cargo test",
       "type": "revoke_command_rule"
+    },
+    "run_shell": {
+      "command": "git status",
+      "type": "run_shell"
     },
     "select_session": {
       "session_id": "session-1",

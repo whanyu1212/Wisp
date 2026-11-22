@@ -130,6 +130,14 @@ pub(crate) fn line_highlights(
         let command_start = line[..scan_end]
             .find(|character: char| !character.is_whitespace())
             .unwrap_or(scan_end);
+        if line[command_start..scan_end].starts_with('!') {
+            highlights.push(Highlight {
+                columns: display_columns(line, command_start)
+                    ..display_columns(line, command_start + 1),
+                kind: Kind::Command,
+            });
+            return highlights;
+        }
         let token_end = line[command_start..scan_end]
             .find(char::is_whitespace)
             .map_or(scan_end, |offset| command_start + offset);
@@ -871,5 +879,18 @@ mod tests {
                 kind: Kind::UnresolvedPath
             }
         );
+    }
+
+    #[test]
+    fn leading_shell_bang_highlights_only_single_line_drafts() {
+        assert_eq!(
+            highlights("!git status", false, 0, 1, None, Some(&snapshot(false))),
+            vec![Highlight {
+                columns: 0..1,
+                kind: Kind::Command,
+            }]
+        );
+        assert!(highlights("!git status", false, 0, 2, None, Some(&snapshot(false))).is_empty());
+        assert!(highlights("hello !world", false, 0, 1, None, Some(&snapshot(false))).is_empty());
     }
 }

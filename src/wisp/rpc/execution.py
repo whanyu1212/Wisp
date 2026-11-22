@@ -66,6 +66,7 @@ from wisp.rpc.commands import (
     ReloadCommand,
     RemoveMcpServerCommand,
     RevokeCommandRuleCommand,
+    RunShellCommand,
     SelectSessionCommand,
     SetCodemodeCommand,
     SetMcpServerEnabledCommand,
@@ -99,6 +100,7 @@ from wisp.rpc.handlers.processes import (
 )
 from wisp.rpc.handlers.project_files import ProjectFilesPublisher, RpcProjectFiles
 from wisp.rpc.handlers.reload import RpcSettingsReloader
+from wisp.rpc.handlers.shell import start_rpc_shell_command
 from wisp.rpc.session.process_exits import background_processes
 from wisp.rpc.working_directory import DirectoryMove, directory_move_events
 from wisp.runtime.api import WispRuntime
@@ -423,6 +425,9 @@ class RpcCommandExecutor:
         if isinstance(known, ChangeDirectoryCommand):
             self.coordinator.running_command = running_command
             return await self._dispatch_change_directory(known, running_command)
+        if isinstance(known, RunShellCommand):
+            self.coordinator.running_command = running_command
+            return self._dispatch_run_shell(known, running_command)
         if known is not None:
             assert_never(known)
         self.coordinator.running_command = running_command
@@ -1022,6 +1027,30 @@ class RpcCommandExecutor:
                 sessions=self.sessions,
                 session_state=self.session_state,
                 mcp_servers=self.mcp_servers,
+                task_group=self.task_group,
+                send=self.send,
+                write_event=self.write_event,
+                running_command_factory=self.running_command_factory,
+                command_completed_factory=self.command_completed_factory,
+            )
+        )
+
+    def _dispatch_run_shell(
+        self,
+        command: RunShellCommand,
+        running_command: _RpcRunningCommand | None,
+    ) -> _RpcDispatchResult:
+        if running_command is not None:
+            RpcCommandLifecycle.for_command(command, write_event=self.write_event).fail(
+                "Cannot run a shell command while another RPC operation is active"
+            )
+            return _RpcDispatchResult(running_command=running_command)
+        return _RpcDispatchResult(
+            running_command=start_rpc_shell_command(
+                command,
+                agent=self.agent,
+                runtime=self.runtime,
+                session_state=self.session_state,
                 task_group=self.task_group,
                 send=self.send,
                 write_event=self.write_event,

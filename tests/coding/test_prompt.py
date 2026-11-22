@@ -615,3 +615,37 @@ def test_repository_status_is_read_once_and_reused_verbatim(
     assert snapshot in context
     # The supplied snapshot replaces the status read; Git is not asked again.
     assert status_reads == 1
+
+
+def test_session_includes_user_shell_mode_guidance_only_when_trusted(tmp_path: Path) -> None:
+    from tests.coding.session_support import CapturingProvider
+    from wisp.coding import CodingSession
+    from wisp.coding.prompt import USER_SHELL_MODE_GUIDANCE
+    from wisp.sessions.jsonl import JsonlSessionStore
+
+    sessions = JsonlSessionStore(tmp_path / "sessions")
+    trusted_session = CodingSession(
+        provider=CapturingProvider(),
+        sessions=sessions,
+        trusted=True,
+    )
+    build_prompt = trusted_session._prompt_messages()
+    assert any(USER_SHELL_MODE_GUIDANCE in msg.content for msg in build_prompt.messages)
+    assert len(build_prompt.messages) == 3
+    assert any(
+        part.source == "system_prompt" and part.label == "shell mode"
+        for message_parts in build_prompt.parts
+        for part in message_parts
+    )
+
+    trusted_session.mode = "plan"
+    plan_prompt = trusted_session._prompt_messages()
+    assert any(USER_SHELL_MODE_GUIDANCE in msg.content for msg in plan_prompt.messages)
+
+    untrusted_session = CodingSession(
+        provider=CapturingProvider(),
+        sessions=sessions,
+        trusted=False,
+    )
+    untrusted_prompt = untrusted_session._prompt_messages()
+    assert not any("User shell mode" in msg.content for msg in untrusted_prompt.messages)

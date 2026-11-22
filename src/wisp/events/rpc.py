@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from typing_extensions import TypeAliasType
 
 from wisp.events._base import ImagePart, ManagedProcessState, QueueMode, WispEvent
-from wisp.events.tools import PROCESS_COMMAND_SUMMARY_MAX_CHARS
+from wisp.events.tools import PROCESS_COMMAND_SUMMARY_MAX_CHARS, TOOL_PROGRESS_TAIL_MAX_BYTES
 from wisp.project_files import (
     MAX_PROJECT_FILES,
     MAX_PROJECT_PATH_CHARS,
@@ -862,3 +862,32 @@ class RpcBrowserAddressesReported(WispEvent):
     addresses: tuple[Annotated[str, Field(min_length=1, max_length=MAX_BROWSER_URL_CHARS)], ...] = (
         Field(max_length=MAX_RECENT_BROWSER_ADDRESSES)
     )
+
+
+class RpcShellProgress(WispEvent):
+    """Transient live output snapshot for a user-initiated `!` shell command."""
+
+    type: Literal["rpc.shell.progress"] = "rpc.shell.progress"
+    command_id: str = Field(min_length=1, max_length=256)
+    stdout_tail: str = Field(default="", max_length=TOOL_PROGRESS_TAIL_MAX_BYTES)
+    stderr_tail: str = Field(default="", max_length=TOOL_PROGRESS_TAIL_MAX_BYTES)
+    stdout_bytes: int = Field(default=0, ge=0, strict=True)
+    stderr_bytes: int = Field(default=0, ge=0, strict=True)
+    elapsed_ms: int = Field(default=0, ge=0, strict=True)
+
+
+class RpcShellCompleted(WispEvent):
+    """Terminal result of a user-initiated `!` shell command, kept outside model history."""
+
+    type: Literal["rpc.shell.completed"] = "rpc.shell.completed"
+    command_id: str = Field(min_length=1, max_length=256)
+    command: str = Field(min_length=1, max_length=32_768)
+    exit_code: int | None = Field(default=None, strict=True)
+    output: str = Field(default="", max_length=65_536)
+    stdout: str = Field(default="", max_length=65_536)
+    stderr: str = Field(default="", max_length=65_536)
+    truncated: bool = False
+    timed_out: bool = False
+    cancelled: bool = False
+    duration_ms: int = Field(default=0, ge=0, strict=True)
+    error: str | None = Field(default=None, min_length=1, max_length=2_048)

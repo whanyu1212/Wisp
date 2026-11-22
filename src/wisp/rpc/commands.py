@@ -55,6 +55,7 @@ RpcMcpToolName = TypeAliasType(
     Annotated[str, StringConstraints(min_length=1, max_length=MAX_RPC_MCP_TOOL_NAME_CHARS)],
 )
 MAX_RPC_COMMAND_TYPE_CHARS = 64
+MAX_RPC_SHELL_COMMAND_CHARS = 32_768
 MAX_RPC_API_KEY_CHARS = 8_192
 MAX_RPC_BROWSER_COORD = 16_384
 MAX_RPC_BROWSER_SCROLL_DELTA = 10_000
@@ -1036,6 +1037,20 @@ class BrowserInteractCommand(RpcCommandModel):
     __str__ = __repr__
 
 
+class RunShellCommand(RpcCommandModel):
+    """Run one user-initiated shell command without adding it to model history."""
+
+    type: Literal["run_shell"] = "run_shell"
+    command: str = Field(min_length=1, max_length=MAX_RPC_SHELL_COMMAND_CHARS)
+    timeout: int | None = Field(default=None, ge=1, le=3_600, strict=True)
+
+    @model_validator(mode="after")
+    def _validate_non_blank_command(self) -> Self:
+        if not self.command.strip():
+            raise ValueError("Shell command must not be blank")
+        return self
+
+
 RpcCommand = TypeAliasType(
     "RpcCommand",
     Annotated[
@@ -1098,7 +1113,8 @@ RpcCommand = TypeAliasType(
         | ShutdownCommand
         | ConfigureCommand
         | ReloadCommand
-        | ChangeDirectoryCommand,
+        | ChangeDirectoryCommand
+        | RunShellCommand,
         Field(discriminator="type"),
     ],
 )

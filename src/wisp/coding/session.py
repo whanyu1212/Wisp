@@ -85,6 +85,7 @@ from wisp.coding.persistence import PendingSessionEntry, RunPersistence
 from wisp.coding.prompt import (
     DEFAULT_CONTEXT_MAX_CHARS,
     PROJECT_CONTEXT_HEADER,
+    USER_SHELL_MODE_GUIDANCE,
     WEB_SEARCH_GUIDANCE,
     WEB_SEARCH_UNAVAILABLE_GUIDANCE,
     PromptPart,
@@ -3981,6 +3982,11 @@ class CodingSession:
                 "mcp_tools",
                 "browser",
                 self._browser_prompt_guidance(effective_registry, callable_names, mcp_catalog),
+            ),
+            PromptPart(
+                "system_prompt",
+                "shell mode",
+                USER_SHELL_MODE_GUIDANCE if self.trusted else "",
             ),
         )
         if self.prompt_messages is not None:
