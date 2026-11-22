@@ -10,7 +10,22 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.16.5 — Unreleased
+## 0.16.6 — Unreleased
+
+- **Easier-to-scan Files sidebar (#1138):** The Rust TUI adds tree guides, a selection rail,
+  a filter bar with match counts, and a scrollbar when the list overflows. Long names shorten
+  in the middle, session-touched files show parent folders when space allows, and Git line counts
+  align on the right.
+- **File and folder icons (#1138):** Material Design icons are on by default wherever they fit.
+  Use a Nerd Font v3 Mono terminal font to render them correctly. On narrow rows, filenames and
+  Git counts take priority over icons.
+- No changes to the live RPC contract, Python SDK, or saved-session format since 0.16.5. Use the
+  matching `0.16.6` backend and TUI together.
+
+<!-- Keeps links to the pre-release "0.16.5 — Unreleased" heading working. -->
+<a id="0165--unreleased"></a>
+
+## 0.16.5 — 2026-11-22
 
 - **Interactive `!` shell mode and optional output sharing (#1134):** Run local shell commands
   from the Rust TUI composer (`!<command>`), attach or detach their output for the next prompt
