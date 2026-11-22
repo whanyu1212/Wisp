@@ -8,6 +8,7 @@ use crate::syntax::{self, SyntaxClass};
 use crate::tool_detail::git_presentation;
 use crate::transcript::{TranscriptEntryKind, normalize_lexical_path};
 use crate::ui::sanitize_for_terminal;
+use ratatui::widgets::{Scrollbar, ScrollbarOrientation, ScrollbarState};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Component, Path};
 use unicode_segmentation::UnicodeSegmentation;
@@ -633,7 +634,7 @@ pub(super) fn render(
             ..content_area
         };
         render_tree_pane(
-            frame, tree_area, surface, state, panel, snapshot, &touched, &badges, palette, true,
+            frame, tree_area, surface, state, panel, snapshot, &touched, &badges, palette,
         );
         render_divider(frame, divider_area, palette);
         render_preview_pane(
@@ -661,7 +662,6 @@ pub(super) fn render(
             &touched,
             &badges,
             palette,
-            false,
         );
     }
 
@@ -672,18 +672,42 @@ pub(super) fn render(
             ..inner
         };
         let files_view = panel.files_view.borrow();
-        let hint_text = if files_view.filter_active {
-            "Type to filter · ↑↓ select · Enter keep · Esc clear"
+        let hints: &[&str] = if files_view.filter_active {
+            &["Enter keep", "Esc clear", "↑↓ select"]
         } else if split_expanded {
-            "↑↓ select · ←→ fold · PgUp/PgDn scroll · @ attach · d /diff · / filter · f restore · Esc"
+            &[
+                "/ filter",
+                "@ attach",
+                "d diff",
+                "PgUp/PgDn scroll",
+                "f restore",
+                "Esc",
+            ]
         } else if panel.expanded() {
-            "↑↓ select · ←→ fold · @ attach · d diff · / filter · f restore · Esc"
+            &["/ filter", "@ attach", "d diff", "f restore", "Esc"]
         } else if panel.overlay_open() {
-            "Enter preview · @ attach · d diff · / filter · [ ] tab · f expand · Esc"
+            &[
+                "/ filter",
+                "Enter preview",
+                "@ attach",
+                "d diff",
+                "f expand",
+                "Esc",
+            ]
         } else {
-            "F8 focus · / filter · @ attach · d diff · f expand"
+            &["F8 focus", "/ filter"]
         };
-        frame.render_widget(Paragraph::new(ui::keycap_hints(hint_text, palette)), footer);
+        let mut used = 0;
+        let text = hints
+            .iter()
+            .copied()
+            .take_while(|hint| {
+                used += hint.width() + if used == 0 { 0 } else { 3 };
+                used <= width
+            })
+            .collect::<Vec<_>>()
+            .join(" · ");
+        frame.render_widget(Paragraph::new(ui::keycap_hints(&text, palette)), footer);
     }
 }
 
@@ -698,11 +722,13 @@ fn render_tree_pane(
     touched: &[String],
     badges: &BTreeMap<String, GitBadge>,
     palette: Palette,
-    is_split: bool,
 ) {
     let width = usize::from(area.width);
     let height = usize::from(area.height);
     if width == 0 || height == 0 {
+        let files_view = panel.files_view.borrow();
+        files_view.painted_filter_rect.set(Rect::default());
+        files_view.painted_list_rect.set(Rect::default());
         return;
     }
 
@@ -728,11 +754,13 @@ fn render_tree_pane(
         height: u16::from(remaining_after_controls.height > 0),
         ..remaining_after_controls
     };
-    if filter_rect.height > 0 {
+    {
         let files_view = panel.files_view.borrow();
-        let line = filter_line(&files_view.filter, files_view.filter_active, width, palette);
-        frame.render_widget(Paragraph::new(line), filter_rect);
         files_view.painted_filter_rect.set(filter_rect);
+        if !filter_rect.is_empty() {
+            let line = filter_line(&files_view.filter, files_view.filter_active, width, palette);
+            frame.render_widget(Paragraph::new(line).style(palette.composer()), filter_rect);
+        }
     }
 
     let list_rect = Rect {
@@ -743,7 +771,14 @@ fn render_tree_pane(
         ..remaining_after_controls
     };
 
-    let (lines, rows) = {
+    // Keep a stable scrollbar gutter so filtering never shifts the text or badges.
+    let gutter = u16::from(list_rect.width > 1);
+    let row_rect = Rect {
+        width: list_rect.width - gutter,
+        ..list_rect
+    };
+    let row_width = usize::from(row_rect.width);
+    let (mut rendered_lines, rows) = {
         let files_view = panel.files_view.borrow();
         build_tree_rows(
             state,
@@ -751,17 +786,16 @@ fn render_tree_pane(
             touched,
             badges,
             &files_view,
-            width,
+            row_width,
             palette,
         )
     };
 
-    let mut rendered_lines = lines;
     let total = rendered_lines.len();
     let list_height = usize::from(list_rect.height);
     let selected_idx = {
         let mut files_view = panel.files_view.borrow_mut();
-        files_view.painted_list_rect.set(list_rect);
+        files_view.painted_list_rect.set(row_rect);
         files_view.painted_list_total.set(total);
         *files_view.painted_rows.borrow_mut() = rows;
         let prev_index = files_view.selected_index;
@@ -780,14 +814,14 @@ fn render_tree_pane(
     };
 
     if let Some(idx) = selected_idx
-        && (panel.overlay_open() || is_split)
+        && (panel.overlay_open() || panel.expanded())
     {
         let line_idx = panel.files_view.borrow().painted_rows.borrow()[idx].line;
-        if let Some(line) = rendered_lines.get_mut(line_idx) {
-            let padding = width.saturating_sub(line.width());
-            line.spans.push(Span::raw(" ".repeat(padding)));
-            *line = palette.selected_line(std::mem::take(line));
-        }
+        let line = &mut rendered_lines[line_idx];
+        line.spans[0] = Span::styled("▌", Style::default().fg(palette.primary));
+        let padding = row_width.saturating_sub(line.width());
+        line.spans.push(Span::raw(" ".repeat(padding)));
+        *line = palette.selected_line(std::mem::take(line));
     }
 
     let max_scroll = total.saturating_sub(list_height.max(1));
@@ -798,7 +832,20 @@ fn render_tree_pane(
         .skip(offset)
         .take(list_height)
         .collect();
-    frame.render_widget(Paragraph::new(visible), list_rect);
+    frame.render_widget(Paragraph::new(visible), row_rect);
+    if gutter > 0 && max_scroll > 0 && list_height > 0 {
+        let mut scrollbar_state = ScrollbarState::new(max_scroll + 1)
+            .position(offset)
+            .viewport_content_length(list_height);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(Some("│"))
+            .track_style(Style::default().fg(palette.dim()))
+            .thumb_symbol("┃")
+            .thumb_style(Style::default().fg(palette.muted));
+        frame.render_stateful_widget(scrollbar, list_rect, &mut scrollbar_state);
+    }
 
     *panel.painted.borrow_mut() = Painted {
         surface,
@@ -814,30 +861,40 @@ fn filter_line(filter: &str, active: bool, width: usize, palette: Palette) -> Li
     let accent = Style::default()
         .fg(palette.primary)
         .add_modifier(Modifier::BOLD);
+    if width < 4 {
+        return Line::from(Span::styled("/", accent));
+    }
+
+    let key = Span::styled(" / ", accent);
+    let query = sanitize_single_line(filter);
+    let text = Style::default().fg(palette.foreground);
     if active {
-        let query = sanitize_single_line(filter);
-        let text = format!("/ {query}▏");
-        return Line::styled(
-            ui::clip_columns(&text, width),
-            Style::default().fg(palette.foreground),
-        );
+        let tail = elide_start(&query, width - 4);
+        return Line::from(vec![
+            key,
+            Span::styled(tail, text),
+            Span::styled("▏", accent),
+        ]);
     }
     if filter.is_empty() {
         return Line::from(vec![
-            Span::styled("/ ", accent),
-            Span::styled(
-                ui::clip_columns("filter files…", width.saturating_sub(2)),
-                muted,
-            ),
+            key,
+            Span::styled(ui::clip_columns("filter files…", width - 3), muted),
         ]);
     }
-    let query = sanitize_single_line(filter);
+    let clear = "Esc clear ";
+    if width < 3 + 1 + clear.width() + 8 {
+        return Line::from(vec![
+            key,
+            Span::styled(elide_start(&query, width - 3), text),
+        ]);
+    }
     spread(
         vec![
-            Span::styled("/ ", accent),
-            Span::styled(query, Style::default().fg(palette.foreground)),
+            key,
+            Span::styled(elide_start(&query, width - 4 - clear.width()), text),
         ],
-        vec![Span::styled("Esc clear", muted)],
+        vec![Span::styled(clear, muted)],
         width,
     )
 }
@@ -862,16 +919,25 @@ fn build_tree_rows(
         .filter(|path| query.is_empty() || path.to_ascii_lowercase().contains(&query))
         .collect();
     if !filtered_touched.is_empty() {
-        lines.push(Line::from(heading(
-            &format!("TOUCHED THIS SESSION · {}", filtered_touched.len()),
+        lines.push(section_line(
+            "Touched this session",
+            filtered_touched.len().to_string(),
+            width,
             palette,
-        )));
+        ));
         for path in filtered_touched {
             let line_idx = lines.len();
-            let name = file_name(path);
-            let badge = badges.get(path.as_str()).copied();
+            let mut left = vec![Span::raw(" ")];
+            if width >= 10 {
+                left.push(Span::styled("◆ ", Style::default().fg(palette.primary)));
+            }
             lines.push(format_file_entry_line(
-                0, &name, badge, true, width, palette,
+                left,
+                &file_name(path),
+                parent_dir(path),
+                badges.get(path.as_str()).copied(),
+                width,
+                palette,
             ));
             rows.push(SelectableRow {
                 line: line_idx,
@@ -910,10 +976,18 @@ fn build_tree_rows(
         .filter(|entry| entry.kind == ProjectFileKind::File)
         .count();
     let suffix = if snapshot.truncated { "+" } else { "" };
-    lines.push(Line::from(heading(
-        &format!("PROJECT TREE · {total_files}{suffix} files"),
-        palette,
-    )));
+    let count = if !query.is_empty() {
+        format!(
+            "{total_files}{suffix} match{}",
+            if total_files == 1 { "" } else { "es" }
+        )
+    } else {
+        format!(
+            "{total_files}{suffix} file{}",
+            if total_files == 1 { "" } else { "s" }
+        )
+    };
+    lines.push(section_line("Project tree", count, width, palette));
 
     let root = build_dir_trie(&filtered_entries);
     if root.subdirs.is_empty() && root.files.is_empty() {
@@ -929,9 +1003,33 @@ fn build_tree_rows(
     }
 
     emit_dir_children(
-        &root, "", 0, files_view, badges, width, palette, &mut lines, &mut rows,
+        &root,
+        "",
+        &mut Vec::new(),
+        files_view,
+        badges,
+        width,
+        palette,
+        &mut lines,
+        &mut rows,
     );
     (lines, rows)
+}
+
+fn section_line(title: &str, count: String, width: usize, palette: Palette) -> Line<'static> {
+    let title = Span::styled(
+        format!(" {title}"),
+        Style::default()
+            .fg(palette.muted)
+            .add_modifier(Modifier::BOLD),
+    );
+    let count = Span::styled(format!("{count} "), Style::default().fg(palette.muted));
+    let right = if width > title.width() + count.width() {
+        vec![count]
+    } else {
+        Vec::new()
+    };
+    spread(vec![title], right, width)
 }
 
 fn build_dir_trie(entries: &[&ProjectFileEntry]) -> DirNode {
@@ -976,7 +1074,7 @@ fn sort_dir_files(node: &mut DirNode) {
 fn emit_dir_children(
     node: &DirNode,
     prefix: &str,
-    depth: usize,
+    ancestors: &mut Vec<bool>,
     files_view: &FilesState,
     badges: &BTreeMap<String, GitBadge>,
     width: usize,
@@ -984,7 +1082,8 @@ fn emit_dir_children(
     lines: &mut Vec<Line<'static>>,
     rows: &mut Vec<SelectableRow>,
 ) {
-    for (name, child) in &node.subdirs {
+    for (index, (name, child)) in node.subdirs.iter().enumerate() {
+        let has_next = index + 1 < node.subdirs.len() || !node.files.is_empty();
         let mut label = name.clone();
         let mut dir_path = join_rel(prefix, name);
         let mut target = child;
@@ -998,7 +1097,29 @@ fn emit_dir_children(
         }
         let expanded = files_view.is_dir_expanded(&dir_path);
         let line_idx = lines.len();
-        lines.push(format_dir_line(depth, &label, expanded, width, palette));
+        let mut left = tree_prefix(ancestors, has_next, width, palette);
+        if width.saturating_sub(spans_width(&left)) >= 4 {
+            left.push(Span::styled(
+                if expanded { "▾ " } else { "▸ " },
+                Style::default().fg(palette.primary),
+            ));
+        }
+        let label = format!("{}/", sanitize_single_line(&label));
+        let room = width.saturating_sub(spans_width(&left));
+        let icon = if expanded { "\u{f0770} " } else { "\u{f024b} " };
+        let room = if icon_fits(&label, room) {
+            left.push(Span::styled(icon, Style::default().fg(palette.primary)));
+            room - ICON_COLUMNS
+        } else {
+            room
+        };
+        left.push(Span::styled(
+            elide_middle(&label, room),
+            Style::default()
+                .fg(palette.foreground)
+                .add_modifier(Modifier::BOLD),
+        ));
+        lines.push(Line::from(left));
         rows.push(SelectableRow {
             line: line_idx,
             kind: SelectableRowKind::TreeDir {
@@ -1007,26 +1128,23 @@ fn emit_dir_children(
             },
         });
         if expanded {
+            ancestors.push(has_next);
             emit_dir_children(
-                target,
-                &dir_path,
-                depth + 1,
-                files_view,
-                badges,
-                width,
-                palette,
-                lines,
-                rows,
+                target, &dir_path, ancestors, files_view, badges, width, palette, lines, rows,
             );
+            ancestors.pop();
         }
     }
 
-    for path in &node.files {
+    for (index, path) in node.files.iter().enumerate() {
         let line_idx = lines.len();
-        let name = file_name(path);
-        let badge = badges.get(path.as_str()).copied();
         lines.push(format_file_entry_line(
-            depth, &name, badge, false, width, palette,
+            tree_prefix(ancestors, index + 1 < node.files.len(), width, palette),
+            &file_name(path),
+            None,
+            badges.get(path.as_str()).copied(),
+            width,
+            palette,
         ));
         rows.push(SelectableRow {
             line: line_idx,
@@ -1155,53 +1273,122 @@ fn read_preview_bytes_safe(root: &Path, rel: &Path) -> Result<(u64, Vec<u8>), &'
     Ok((meta.len(), raw))
 }
 
-fn format_dir_line(
-    depth: usize,
-    label: &str,
-    expanded: bool,
+fn tree_prefix(
+    ancestors: &[bool],
+    has_next: bool,
     width: usize,
     palette: Palette,
-) -> Line<'static> {
-    let indent = "  ".repeat(depth.min(6));
-    let arrow = if expanded { "▾ " } else { "▸ " };
-    let text = format!("{indent}{arrow}{}/", sanitize_single_line(label));
-    Line::from(vec![Span::styled(
-        ui::clip_columns(&text, width),
-        Style::default()
-            .fg(palette.foreground)
-            .add_modifier(Modifier::BOLD),
-    )])
+) -> Vec<Span<'static>> {
+    let mut spans = vec![Span::raw(" ")]; // Drawn as a rail when selected.
+    if width >= 10 {
+        let mut guides = String::new();
+        for &continues in ancestors.iter().take((width.saturating_sub(14) / 2).min(6)) {
+            guides.push_str(if continues { "│ " } else { "  " });
+        }
+        guides.push_str(if has_next { "├─ " } else { "└─ " });
+        spans.push(Span::styled(guides, Style::default().fg(palette.dim())));
+    }
+    spans
+}
+
+fn spans_width(spans: &[Span<'_>]) -> usize {
+    spans.iter().map(Span::width).sum()
+}
+
+/// Clip at whole graphemes. Keep the filename suffix (or the most recent part of a query).
+fn tail_columns(text: &str, mut columns: usize) -> &str {
+    let mut start = text.len();
+    for (index, grapheme) in text.grapheme_indices(true).rev() {
+        let width = grapheme.width();
+        if width > columns {
+            break;
+        }
+        columns -= width;
+        start = index;
+    }
+    &text[start..]
+}
+
+fn elide_start(text: &str, width: usize) -> String {
+    if width == 0 {
+        String::new()
+    } else if text.width() <= width {
+        text.to_owned()
+    } else {
+        format!("…{}", tail_columns(text, width - 1))
+    }
+}
+
+fn elide_middle(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    if text.width() <= width {
+        return text.to_owned();
+    }
+    let tail = tail_columns(text, width / 2);
+    let mut head_room = width - 1 - tail.width();
+    let mut clipped = String::new();
+    for grapheme in text.graphemes(true) {
+        if grapheme.width() > head_room {
+            break;
+        }
+        head_room -= grapheme.width();
+        clipped.push_str(grapheme);
+    }
+    clipped.push('…');
+    clipped.push_str(tail);
+    clipped
+}
+
+// Each Nerd Font Mono glyph is one cell; its separating space is the second.
+const ICON_COLUMNS: usize = 2;
+
+fn icon_fits(label: &str, room: usize) -> bool {
+    room >= label.width().min(10) + ICON_COLUMNS
+}
+
+/// Nerd Fonts v3 Material Design glyphs. Match special basenames before extensions.
+fn nerd_file_icon(name: &str, palette: Palette) -> Span<'static> {
+    let name = name.to_ascii_lowercase();
+    let (symbol, color) = match name.as_str() {
+        ".gitignore" | ".gitattributes" | ".gitmodules" => ("\u{f02a2} ", palette.code), // git
+        "dockerfile" | "containerfile" => ("\u{f0868} ", palette.primary),               // docker
+        "makefile" | "justfile" | ".env" => ("\u{f107c} ", palette.code), // file-cog-outline
+        name => match name.rsplit_once('.').map(|(_, extension)| extension) {
+            Some("rs") => ("\u{f1617} ", palette.code), // language-rust
+            Some("py" | "pyi") => ("\u{f0320} ", palette.primary), // language-python
+            Some("js" | "jsx" | "mjs" | "cjs") => ("\u{f031e} ", palette.warning), // language-javascript
+            Some("ts" | "tsx" | "mts" | "cts") => ("\u{f06e6} ", palette.primary), // language-typescript
+            Some("html" | "htm") => ("\u{f031d} ", palette.code),                  // language-html5
+            Some("css" | "scss") => ("\u{f031c} ", palette.primary),               // language-css3
+            Some("md" | "mdx") => ("\u{f0354} ", palette.accent), // language-markdown
+            Some("json" | "jsonc") => ("\u{f0626} ", palette.warning), // code-json
+            Some("toml" | "yaml" | "yml" | "ini" | "lock") => ("\u{f107c} ", palette.code), // file-cog-outline
+            Some("sh" | "bash" | "zsh" | "fish") => ("\u{f07b7} ", palette.accent), // console-line
+            Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "svg") => ("\u{f0eb0} ", palette.accent), // file-image-outline
+            _ => ("\u{f0224} ", palette.muted), // file-outline
+        },
+    };
+    Span::styled(symbol, Style::default().fg(color))
 }
 
 fn format_file_entry_line(
-    depth: usize,
+    mut left: Vec<Span<'static>>,
     name: &str,
+    parent: Option<&str>,
     badge: Option<GitBadge>,
-    is_touched: bool,
     width: usize,
     palette: Palette,
 ) -> Line<'static> {
-    let indent = "  ".repeat(depth.min(6));
-    let marker = if is_touched { "▸ " } else { "  " };
-    let mut left = vec![Span::styled(
-        format!("{indent}{marker}"),
-        Style::default().fg(palette.muted),
-    )];
-    if let Some(badge) = badge {
+    let mut right = Vec::new();
+    if let Some(badge) = badge.filter(|_| width.saturating_sub(spans_width(&left)) >= 4) {
         left.push(Span::styled(
             format!("{} ", badge.status),
             Style::default()
                 .fg(status_color(badge.status, palette))
                 .add_modifier(Modifier::BOLD),
         ));
-    }
-    left.push(Span::styled(
-        sanitize_single_line(name),
-        Style::default().fg(palette.foreground),
-    ));
-
-    let mut right = Vec::new();
-    if let Some(badge) = badge {
         if badge.added > 0 {
             right.push(Span::styled(
                 format!("+{}", badge.added),
@@ -1217,6 +1404,33 @@ fn format_file_entry_line(
                 Style::default().fg(palette.error),
             ));
         }
+    }
+    let label = sanitize_single_line(name);
+    let label_room = width.saturating_sub(spans_width(&left));
+    let delta_width = spans_width(&right) + usize::from(!right.is_empty());
+    // Prefer the filename and status to line counts in a narrow pane.
+    let mut room = if label_room >= delta_width + label.width().min(10) {
+        label_room - delta_width
+    } else {
+        right.clear();
+        label_room
+    };
+    // Icons are decorative: don't hide readable names or Git counts to fit one.
+    if icon_fits(&label, room) {
+        left.push(nerd_file_icon(name, palette));
+        room -= ICON_COLUMNS;
+    }
+    left.push(Span::styled(
+        elide_middle(&label, room),
+        Style::default().fg(palette.foreground),
+    ));
+    let context_room = room.saturating_sub(label.width() + 2);
+    if let Some(parent) = parent.filter(|_| context_room >= 4) {
+        let parent = sanitize_single_line(parent);
+        left.push(Span::styled(
+            format!("  {}", elide_start(&parent, context_room)),
+            Style::default().fg(palette.muted),
+        ));
     }
     spread(left, right, width)
 }
@@ -1794,7 +2008,74 @@ mod tests {
         .unwrap();
         let filtered = buffer_text(term.backend().buffer());
         assert!(filtered.contains("shell.py"), "{filtered}");
+        assert!(filtered.contains("1 match"), "{filtered}");
         assert!(!filtered.contains("session.py"), "{filtered}");
+    }
+
+    #[test]
+    fn narrow_rows_keep_the_filename_suffix_and_filter_caret() {
+        let palette = Palette::default();
+        let badge = GitBadge {
+            status: 'M',
+            added: u64::MAX,
+            deleted: 7,
+            edited_by_wisp: false,
+        };
+        let row = format_file_entry_line(
+            tree_prefix(&[true; 8], false, 22, palette),
+            "very-long-🧑‍💻-filename.rs",
+            None,
+            Some(badge),
+            22,
+            palette,
+        );
+        let text = row.to_string();
+        assert_eq!(row.width(), 22);
+        assert!(text.contains("M "), "{text}");
+        assert!(!text.contains('\u{f1617}'), "{text}");
+        assert!(text.trim_end().ends_with(".rs"), "{text}");
+        assert!(!text.contains('+'), "{text}");
+        assert_eq!(elide_middle("ab🧑‍💻vwxyz", 8), "ab…wxyz");
+
+        let filter = filter_line("a/long/path/🧑‍💻.rs", true, 10, palette);
+        assert_eq!(filter.width(), 10);
+        assert_eq!(filter.to_string(), " / …🧑‍💻.rs▏");
+    }
+
+    #[test]
+    fn nerd_file_icons_use_two_columns_and_yield_to_git_counts() {
+        let palette = Palette::default();
+        for (name, glyph) in [
+            ("LIB.RS", "\u{f1617} "),
+            ("README.md", "\u{f0354} "),
+            (".gitignore", "\u{f02a2} "),
+            ("Cargo.toml", "\u{f107c} "),
+            ("data.unknown", "\u{f0224} "),
+        ] {
+            let icon = nerd_file_icon(name, palette);
+            assert_eq!(icon.content, glyph, "{name}");
+            assert_eq!(icon.width(), ICON_COLUMNS, "{name}");
+        }
+
+        let badge = GitBadge {
+            status: 'M',
+            added: 4,
+            deleted: 2,
+            edited_by_wisp: false,
+        };
+        let row = |width| {
+            format_file_entry_line(
+                vec![Span::raw(" ")],
+                "a.rs",
+                None,
+                Some(badge),
+                width,
+                palette,
+            )
+            .to_string()
+        };
+        assert_eq!(row(13), " M a.rs +4 −2");
+        assert_eq!(row(15), " M \u{f1617} a.rs +4 −2");
     }
 
     #[test]
@@ -1970,9 +2251,18 @@ mod tests {
         })
         .unwrap();
         let text = buffer_text(term.backend().buffer());
-        assert!(text.contains("TOUCHED THIS SESSION · 1"), "{text}");
-        assert!(text.contains("M app.rs"), "{text}");
-        assert!(text.contains("+1"), "{text}");
+        assert!(text.lines().any(|line| line.contains("Touched this session") && line.trim_end().ends_with('1')), "{text}");
+        assert!(
+            text.lines()
+                .any(|line| line.contains("◆ M \u{f1617} app.rs  src")
+                    && line.trim_end().ends_with("+1")),
+            "{text}"
+        );
+        assert!(
+            text.lines()
+                .any(|line| line.contains("Project tree") && line.trim_end().ends_with("1 file")),
+            "{text}"
+        );
     }
 
     #[test]
@@ -2076,11 +2366,13 @@ mod tests {
         };
 
         draw_once(&mut term);
+        let top = panel.files_view.borrow().painted_list_rect.get().y;
+        assert_eq!(term.backend().buffer()[(47, top)].symbol(), "┃");
         assert_eq!(panel.files_view.borrow().list_scroll.get(), 0);
         panel.files_view.borrow().scroll_list_by(5);
-        assert_eq!(panel.files_view.borrow().list_scroll.get(), 5);
         draw_once(&mut term);
         assert_eq!(panel.files_view.borrow().list_scroll.get(), 5);
+        assert_eq!(term.backend().buffer()[(47, top)].symbol(), "│");
     }
 
     #[test]
