@@ -124,9 +124,14 @@ its target rather than the text entered. Skills name the skill or resource, and 
 can show the requested range (`Requested lines 41–60 of saved output out-7a91`), not a count of
 lines returned. Expand the row to inspect its bounded arguments.
 
+Filename searches say `Searched filenames for *.rs in src`; content searches say
+`Searched text for “TODO” in src`. Provider-native actions distinguish `Searched the web for …`,
+`Opened docs.rs`, and `Searched docs.rs for …`.
+
 A [codemode](tools-and-safety.md#scripting-tool-calls-with-codemode-experimental) script is one
 line that names what it does and counts the calls it makes as they finish, such as
-`• Scripted count TODOs per crate · 14 calls (1 failed) · read ×12, grep ×2`. Opening it shows
+`• Ran codemode: count TODOs per crate · 14 calls (1 failed) · read ×12, grep ×2`. Without a title the label is simply `Ran codemode`. Delegation keeps the task title,
+as in `Delegated: Review failing tests`. Opening a codemode row shows
 the script's first lines, numbered, then one `└` row per call (repeated calls to one tool share a
 row, and a failed one says why), then what the script returned. A failed script shows what
 stopped it under its line, like a failed command. Scripts are never folded into other groups.

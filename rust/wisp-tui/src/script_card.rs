@@ -192,8 +192,27 @@ impl ScriptCard {
         }
     }
 
-    /// What the card's action line says the script does: its title, or how long it
-    /// is. A subagent's line shows the start of its task.
+    /// Name the host even when a title is missing. A colon introduces a real title, not an inferred summary.
+    pub fn action_verb(&self, status: crate::tool_cards::ToolStatus) -> String {
+        use crate::tool_cards::ToolStatus::*;
+        let verb = match (self.host, status) {
+            (NestedHost::Script, Requested | Running) => "Running codemode",
+            (NestedHost::Script, Done) => "Ran codemode",
+            (NestedHost::Script, Error) => "Codemode failed",
+            (NestedHost::Script, _) => "Run codemode",
+            (NestedHost::Subagent, Requested | Running) => "Delegating",
+            (NestedHost::Subagent, Done) => "Delegated",
+            (NestedHost::Subagent, Error) => "Delegation failed",
+            (NestedHost::Subagent, _) => "Delegate",
+        };
+        if self.title.is_some() || (self.host == NestedHost::Subagent && !self.code.is_empty()) {
+            format!("{verb}:")
+        } else {
+            verb.into()
+        }
+    }
+
+    /// The bounded title, or a subagent's task when it has no separate title.
     pub fn subject(&self) -> String {
         if let Some(title) = &self.title {
             return title.clone();
@@ -206,11 +225,7 @@ impl ScriptCard {
                 task
             };
         }
-        match self.code.lines().count() {
-            0 => "Python script".to_owned(),
-            1 => "Python script, 1 line".to_owned(),
-            lines => format!("Python script, {lines} lines"),
-        }
+        String::new()
     }
 
     /// A call the script just made. Returns whether the card changed.
@@ -491,14 +506,14 @@ mod tests {
     }
 
     #[test]
-    fn subject_names_title_or_length() {
+    fn subject_does_not_invent_a_codemode_title() {
         let titled = ScriptCard::from_arguments(&json!({"title": " count\nTODOs ", "code": "x"}));
         let untitled = ScriptCard::from_arguments(&json!({"code": "a = 1\nb = 2\n"}));
         let empty = ScriptCard::from_arguments(&json!({}));
 
         assert_eq!(titled.subject(), "count TODOs");
-        assert_eq!(untitled.subject(), "Python script, 2 lines");
-        assert_eq!(empty.subject(), "Python script");
+        assert!(untitled.subject().is_empty());
+        assert!(empty.subject().is_empty());
     }
 
     #[test]

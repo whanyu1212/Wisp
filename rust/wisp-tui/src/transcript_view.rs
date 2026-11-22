@@ -1737,8 +1737,7 @@ impl TranscriptRowCache {
         }
     }
 
-    /// The tool row of one web search the reply ran: its marker, `Searched`, what it
-    /// searched, then the sites it returned, previewed like a closed group's members.
+    /// A provider action row: its outcome, verb and subject, then any returned sites.
     /// Searches stay apart from the reply's text, so the reply's Markdown source and
     /// offsets never shift when a search arrives mid-reply.
     fn build_evidence_row(
@@ -1756,9 +1755,12 @@ impl TranscriptRowCache {
             ToolStatus::Done
         };
         let marker = status_marker(status);
-        let label = "Searched";
-        let mut source = format!("{marker}{label}{ACTION_GAP}{}", search.argument);
-        let note_start = push_status_note(&mut source, search.failed.then_some("failed"));
+        let label = search.label;
+        let mut source = format!("{marker}{label}");
+        if !search.argument.is_empty() {
+            source.push_str(ACTION_GAP);
+            source.push_str(&search.argument);
+        }
         if !search.failed {
             let budget = width.saturating_sub(self.action_columns(&source));
             source.push_str(&self.preview_list(&search.hosts, search.hosts.len(), budget));
@@ -1771,7 +1773,6 @@ impl TranscriptRowCache {
                 label_end: marker.len() + label.len(),
                 argument_start: marker.len() + label.len() + ACTION_GAP.len(),
                 argument_style: crate::markdown::InlineStyle::ToolArgument,
-                suffix_start: note_start,
                 ..CardRowStyle::PLAIN
             },
             TranscriptRowKind::Evidence,
@@ -4033,7 +4034,7 @@ const SCRIPT_CALL_ROWS: usize = 12;
 /// Lines of what a script returned an opened card shows before `+ N more lines`.
 const SCRIPT_RETURN_LINES: usize = 8;
 
-/// A codemode script's card: `Scripted <title> · 9 calls · read ×7, grep ×2` on its
+/// A codemode script's card: `Ran codemode: <title> · 9 calls · read ×7, grep ×2` on its
 /// action line, and when opened, the start of the script, one row per call it made
 /// (a run of the same tool on one row), then what it returned or why it failed.
 fn script_projection(card: &crate::tool_cards::ToolCardSnapshot) -> CardProjection {
@@ -7217,11 +7218,6 @@ mod tests {
         ]})
     }
 
-    /// A web search's tool row: marker, `Searched`, then `rest`.
-    fn search_row(marker: &str, rest: &str) -> String {
-        format!("{marker} Searched {rest}")
-    }
-
     fn tail_rows(transcript: &Transcript) -> Vec<TranscriptRow> {
         let mut cache = TranscriptRowCache::default();
         let mut viewport = TranscriptViewport::default();
@@ -7268,8 +7264,8 @@ mod tests {
             assert_eq!(
                 text[header + 1..header + 3],
                 [
-                    search_row("•", "docs · example.com, docs.rs"),
-                    search_row("•", "open docs.rs"),
+                    "• Searched the web for “docs” · example.com, docs.rs".to_owned(),
+                    "• Opened docs.rs".to_owned(),
                 ],
                 "{text:#?}"
             );
@@ -7297,11 +7293,57 @@ mod tests {
                     entry_id: transcript.entries()[1].id,
                     position: RowPosition::Evidence(0),
                 },
-                36,
+                47,
             )
             .unwrap()
             .row;
-        assert_eq!(row.plain_text(), search_row("•", "docs · example.com +1"));
+        assert_eq!(
+            row.plain_text(),
+            "• Searched the web for “docs” · example.com +1"
+        );
+    }
+
+    #[test]
+    fn page_actions_name_the_target_and_do_not_claim_success_on_failure() {
+        for (action, query, source, error, expected) in [
+            (
+                "find_in_page",
+                "derive",
+                "https://docs.rs/serde",
+                None,
+                "• Searched docs.rs for “derive”",
+            ),
+            (
+                "find_in_page",
+                "derive",
+                "https://docs.rs/serde",
+                Some("timeout"),
+                "✗ Page search failed: docs.rs for “derive”",
+            ),
+            (
+                "open_page",
+                "",
+                "https://user:secret@docs.rs/private",
+                Some("timeout"),
+                "✗ Open failed: docs.rs",
+            ),
+            ("open_page", "", "", None, "• Opened web page"),
+            ("search", "", "", Some("timeout"), "✗ Web search failed"),
+        ] {
+            let sources = if source.is_empty() {
+                vec![]
+            } else {
+                vec![serde_json::json!({"url":source})]
+            };
+            let search =
+                serde_json::json!({"action":action,"query":query,"sources":sources,"error":error});
+            let rows = tail_rows(&searched_reply("done", None, &[search]));
+            let row = rows
+                .iter()
+                .find(|row| row.kind == TranscriptRowKind::Evidence)
+                .unwrap();
+            assert_eq!(row.plain_text(), expected);
+        }
     }
 
     #[test]
@@ -7312,7 +7354,7 @@ mod tests {
             .iter()
             .find(|row| row.kind == TranscriptRowKind::Evidence)
             .unwrap();
-        assert_eq!(row.plain_text(), search_row("✗", "docs · failed"));
+        assert_eq!(row.plain_text(), "✗ Web search failed: “docs”");
         assert_eq!(row.tone, TranscriptRowTone::Error);
     }
 
@@ -7378,7 +7420,7 @@ mod tests {
         assert_eq!(
             text[text.len() - 2..],
             [
-                search_row("•", "docs · example.com, docs.rs"),
+                "• Searched the web for “docs” · example.com, docs.rs".to_owned(),
                 "4.0s".into()
             ],
             "{text:#?}"
@@ -7675,6 +7717,35 @@ mod tests {
             rows[4..8],
             ["• Explored 2 files", "• Read a.rs", "• Read b.rs", ""]
         );
+    }
+
+    #[test]
+    fn expanded_explore_group_distinguishes_text_from_filenames() {
+        let mut transcript = Transcript::default();
+        let mut ids = Vec::new();
+        for (tool, pattern) in [("find", "*.rs"), ("grep", "TODO")] {
+            ids.push(
+                transcript.observe_tool_call(crate::tool_cards::ToolCallInput {
+                    call_id: tool.into(),
+                    name: tool.into(),
+                    arguments: serde_json::json!({"pattern":pattern,"path":"src"}),
+                    detail_source: crate::tool_detail::ToolDetailSource::None,
+                }),
+            );
+            let mut result = tool_result(tool, "ok");
+            result.name = tool.into();
+            transcript.observe_tool_result(result);
+        }
+        let mut cache = TranscriptRowCache::default();
+        cache.fold_mut().expand_group(ids[0]);
+        let rows = walked_rows(&transcript, &mut cache);
+        for expected in [
+            "• Explored 2 searches",
+            "• Searched filenames for *.rs in src",
+            "• Searched text for “TODO” in src",
+        ] {
+            assert!(rows.iter().any(|row| row == expected), "{rows:?}");
+        }
     }
 
     /// A group's line counts what its calls touched, each file and folder once.

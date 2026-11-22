@@ -954,7 +954,10 @@ mod tests {
                 restored.entries()[0].searches()
             );
             assert!(restored.entries()[0].content.is_empty());
-            assert_eq!(restored.entries()[0].searches()[0].argument, "docs");
+            assert_eq!(
+                restored.entries()[0].searches()[0].argument,
+                "the web for “docs”"
+            );
         }
     }
 

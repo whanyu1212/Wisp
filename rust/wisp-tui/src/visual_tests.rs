@@ -2262,9 +2262,9 @@ fn script_tallies_calls_while_running() {
         100,
     );
 
-    let row = buffer_row(&buffer, row_containing(&buffer, "Scripting"));
+    let row = buffer_row(&buffer, row_containing(&buffer, "Running codemode"));
     assert!(
-        row.contains("Scripting count TODOs · 2 calls · grep, read"),
+        row.contains("Running codemode: count TODOs · 2 calls · grep, read"),
         "{row:?}"
     );
     assert!(!screen_text(&buffer).contains("import asyncio"));
@@ -2332,9 +2332,9 @@ fn finished_script_folds_to_one_line() {
         100,
     );
 
-    let row = buffer_row(&buffer, row_containing(&buffer, "Scripted"));
+    let row = buffer_row(&buffer, row_containing(&buffer, "Ran codemode"));
     assert!(
-        row.contains("• Scripted count TODOs · 4 calls (1 failed) · read ×3, grep"),
+        row.contains("• Ran codemode: count TODOs · 4 calls (1 failed) · read ×3, grep"),
         "{row:?}"
     );
     assert!(!screen_text(&buffer).contains("Returned"));
@@ -2397,7 +2397,7 @@ fn opened_script_shows_code_calls_and_result() {
 
     let text = screen_text(&buffer);
     for expected in [
-        "Scripted Python script, 6 lines",
+        "Ran codemode",
         "1 import asyncio",
         "+ 2 more lines",
         "• Searched",
@@ -2426,8 +2426,8 @@ fn failed_script_peeks_at_its_cause() {
     );
 
     assert!(
-        buffer_row(&buffer, row_containing(&buffer, "✗ Script failed:"))
-            .contains("✗ Script failed: scan")
+        buffer_row(&buffer, row_containing(&buffer, "✗ Codemode failed:"))
+            .contains("✗ Codemode failed: scan")
     );
     let peek = buffer_row(&buffer, row_containing(&buffer, "more than 200"));
     assert!(
@@ -2449,7 +2449,7 @@ fn script_text_is_sanitized() {
     );
 
     let text = screen_text(&buffer);
-    assert!(text.contains("Scripted evil[31mtitle"), "{text}");
+    assert!(text.contains("Ran codemode: evil[31mtitle"), "{text}");
     assert!(!text.contains('\u{1b}') && !text.contains('\u{202e}'));
 }
 
@@ -2470,7 +2470,7 @@ fn scripts_never_group() {
     let text = screen_text(&script_card(&events, false, 100));
 
     assert!(
-        text.contains("Scripted script-1") && text.contains("Scripted script-2"),
+        text.contains("Ran codemode: script-1") && text.contains("Ran codemode: script-2"),
         "{text}"
     );
     assert!(!text.contains("2 calls"), "{text}");
@@ -2496,7 +2496,7 @@ fn subagent_tallies_calls_while_running() {
     let row = buffer_row(&buffer, row_containing(&buffer, "Delegating"));
     // The action line keeps the start of the task; opening the card shows the rest.
     assert!(
-        row.contains("Delegating Find where users are stored. Report the … · 1 call · grep"),
+        row.contains("Delegating: Find where users are stored. Report the … · 1 call · grep"),
         "{row:?}"
     );
 }
@@ -2521,7 +2521,7 @@ fn opened_subagent_shows_task_calls_and_report() {
 
     let text = screen_text(&buffer);
     for expected in [
-        "• Delegated Find where users are stored.",
+        "• Delegated: Find where users are stored.",
         "Report the file and table.",
         "• Read db/users.sql",
         "Read db/old.sql · subagent ended first",
@@ -2556,7 +2556,7 @@ fn several_tasks_are_numbered() {
 
     let text = screen_text(&buffer);
     for expected in [
-        "Delegating 2 tasks: Map the Rust side. · 2 calls · grep, read",
+        "Delegating: 2 tasks: Map the Rust side. · 2 calls · grep, read",
         "1. Map the Rust side.",
         "2. Map the Python side.",
     ] {
@@ -2572,11 +2572,11 @@ fn forked_subagents_say_so() {
     for (tasks, expected) in [
         (
             json!(["Check the plan."]),
-            "Delegating forked: Check the plan.",
+            "Delegating: forked: Check the plan.",
         ),
         (
             json!(["Check the plan.", "Check the tests."]),
-            "Delegating forked, 2 tasks: Check the plan.",
+            "Delegating: forked, 2 tasks: Check the plan.",
         ),
     ] {
         let buffer = script_card(
@@ -2608,7 +2608,7 @@ fn subagent_task_is_sanitized() {
     );
 
     let text = screen_text(&buffer);
-    assert!(text.contains("Delegating evil[31mtask"), "{text}");
+    assert!(text.contains("Delegating: evil[31mtask"), "{text}");
     assert!(text.contains("second"), "{text}");
     assert!(
         !text.contains(['\u{1b}', '\u{7}', '\u{202e}']),
@@ -2721,7 +2721,7 @@ fn cancelled_script_says_why() {
     ui.transcript_row_cache.fold_mut().expand(card);
 
     let text = screen_text(&draw(&mut ui, 100, 24));
-    assert!(text.contains("⊘ Script scan · cancelled"), "{text}");
+    assert!(text.contains("⊘ Run codemode: scan · cancelled"), "{text}");
     assert!(text.contains("Agent run cancelled"), "{text}");
 }
 
@@ -2819,7 +2819,7 @@ async fn running_script_details_update() {
     assert_shows(
         &text,
         &[
-            "Scripting count TODOs  1 call · grep",
+            "Running codemode: count TODOs  1 call · grep",
             "Script · 6 lines",
             "1 import asyncio",
             "6 texts",
@@ -2862,7 +2862,7 @@ async fn running_script_details_update() {
     assert_shows(
         &text,
         &[
-            "Scripted count TODOs",
+            "Ran codemode: count TODOs",
             "Calls · 4, 1 failed",
             "Output · 2 lines",
         ],
@@ -2884,7 +2884,7 @@ async fn finished_script_details() {
     assert_shows(
         &text,
         &[
-            "• Scripted Python script, 6 lines  4 calls (1 failed) · read ×3, grep",
+            "• Ran codemode  4 calls (1 failed) · read ×3, grep",
             "1 import asyncio",
             "6 texts",
             "Calls · 4, 1 failed",
@@ -2923,7 +2923,7 @@ async fn failed_script_details() {
     assert_shows(
         &text,
         &[
-            "✗ Script failed: scan",
+            "✗ Codemode failed: scan",
             "4 ✗ Read failed: ../vendor/c.rs",
             "error: path outside the project",
             "Output · 2 lines",
@@ -2963,7 +2963,7 @@ async fn reopened_script_details() {
     assert_shows(
         &text,
         &[
-            "Scripted count TODOs",
+            "Ran codemode: count TODOs",
             "1 import asyncio",
             "Calls · 5, 1 failed",
             "path: \"src/a.rs\"",
@@ -3029,7 +3029,7 @@ async fn reopened_subagent_details() {
     assert_shows(
         &text,
         &[
-            "Delegated Find where users are stored.",
+            "Delegated: Find where users are stored.",
             "Task",
             "Calls · 1",
             "path: \"db/users.sql\"",
