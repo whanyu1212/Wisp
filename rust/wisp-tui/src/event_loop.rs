@@ -759,7 +759,12 @@ pub(super) async fn run_editor<B: FrameBackend>(
     if let Some(stopped) = stopped {
         return stopped;
     }
+    let refresh_diff = matches!(&outcome, crate::external_editor::EditorOutcome::File(..))
+        && ui.side_panel.active_tab() == Some(crate::side_panel::PanelMode::Files);
     ui.apply_editor_outcome(outcome);
+    if refresh_diff {
+        return ui.dispatch(UiAction::RefreshGitDiff, writer, limit).await;
+    }
     Ok(LoopControl::Continue)
 }
 

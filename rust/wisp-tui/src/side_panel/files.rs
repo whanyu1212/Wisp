@@ -123,8 +123,12 @@ impl FilesState {
         self.collapsed_dirs.clear();
         self.expanded_dirs.clear();
         *self.diff_cache.borrow_mut() = None;
-        *self.preview_cache.borrow_mut() = None;
+        self.invalidate_preview();
         self.painted_rows.borrow_mut().clear();
+    }
+
+    pub(super) fn invalidate_preview(&self) {
+        *self.preview_cache.borrow_mut() = None;
     }
 
     fn sync_workspace_cwd(&mut self, cwd: Option<&str>) {
@@ -354,6 +358,10 @@ impl FilesState {
             KeyCode::Left => (self.collapse_or_parent(), false),
             KeyCode::Right => (self.expand_selected(), false),
             KeyCode::Enter | KeyCode::Char(' ') => self.activate_selected(expanded),
+            KeyCode::Char('e') => match self.selected_file_path() {
+                Some(path) => (OverlayKey::EditFile(path), false),
+                None => (OverlayKey::Ignored, false),
+            },
             KeyCode::Char('@') => match self.selected_reference_path() {
                 Some(path) => (
                     OverlayKey::InsertFileReference(format_reference(&path)),
@@ -370,7 +378,7 @@ impl FilesState {
                 (OverlayKey::Open(Target::Diff(target)), false)
             }
             KeyCode::Char('r') => {
-                *self.preview_cache.borrow_mut() = None;
+                self.invalidate_preview();
                 (OverlayKey::RefreshFiles, false)
             }
             KeyCode::PageUp => {
@@ -419,29 +427,9 @@ impl FilesState {
         let Some(idx) = found else {
             return (OverlayKey::Ignored, false);
         };
-        let was_selected = self.selected_row().as_ref().is_some_and(|cur| {
-            self.painted_rows
-                .borrow()
-                .get(idx)
-                .is_some_and(|next| cur.key() == next.key())
-        });
         self.filter_active = false;
         self.select_index(idx);
-        let Some(selected) = self.painted_rows.borrow().get(idx).cloned() else {
-            return (OverlayKey::Moved, false);
-        };
-        match selected.kind {
-            SelectableRowKind::TreeDir {
-                dir_path,
-                expanded: dir_expanded,
-            } => {
-                self.set_dir_expanded(&dir_path, !dir_expanded);
-                (OverlayKey::Moved, false)
-            }
-            SelectableRowKind::TouchedFile { .. } | SelectableRowKind::TreeFile { .. } => {
-                (OverlayKey::Moved, was_selected && !expanded)
-            }
-        }
+        self.activate_selected(expanded)
     }
 
     pub(super) fn scroll_list_by(&self, delta: i32) {
@@ -606,14 +594,13 @@ pub(super) fn render(
         files_view.sync_snapshot_defaults(snapshot, &touched, &badges);
     }
 
-    let split_expanded = panel.expanded() && width >= EXPANDED_SPLIT_MIN_WIDTH;
-    let footer_height = usize::from(panel.overlay_open() || split_expanded || height >= 6);
+    let footer_height = usize::from(panel.overlay_open() || panel.expanded() || height >= 6);
     let content_area = Rect {
         height: inner.height.saturating_sub(footer_height as u16),
         ..inner
     };
 
-    if split_expanded {
+    let preview_layout = if panel.expanded() && width >= EXPANDED_SPLIT_MIN_WIDTH {
         let tree_width = (width / 3)
             .clamp(EXPANDED_TREE_MIN_WIDTH, EXPANDED_TREE_MAX_WIDTH)
             .min(width.saturating_sub(20)) as u16;
@@ -633,10 +620,29 @@ pub(super) fn render(
                 .saturating_sub(tree_width.saturating_add(1)),
             ..content_area
         };
+        Some((tree_area, preview_area, Some(divider_area)))
+    } else if panel.expanded() && content_area.height >= 4 {
+        // Keep both the tree and the preview on terminals too narrow to split side by side.
+        let tree_area = Rect {
+            height: content_area.height / 2,
+            ..content_area
+        };
+        let preview_area = Rect {
+            y: tree_area.bottom(),
+            height: content_area.height - tree_area.height,
+            ..content_area
+        };
+        Some((tree_area, preview_area, None))
+    } else {
+        None
+    };
+    if let Some((tree_area, preview_area, divider)) = preview_layout {
         render_tree_pane(
             frame, tree_area, surface, state, panel, snapshot, &touched, &badges, palette,
         );
-        render_divider(frame, divider_area, palette);
+        if let Some(divider) = divider {
+            render_divider(frame, divider, palette);
+        }
         render_preview_pane(
             frame,
             preview_area,
@@ -674,21 +680,30 @@ pub(super) fn render(
         let files_view = panel.files_view.borrow();
         let hints: &[&str] = if files_view.filter_active {
             &["Enter keep", "Esc clear", "↑↓ select"]
-        } else if split_expanded {
+        } else if preview_layout.is_some() {
             &[
+                "e edit",
                 "/ filter",
                 "@ attach",
                 "d diff",
-                "PgUp/PgDn scroll",
                 "f restore",
+                "PgUp/PgDn scroll",
                 "Esc",
             ]
         } else if panel.expanded() {
-            &["/ filter", "@ attach", "d diff", "f restore", "Esc"]
+            &[
+                "e edit",
+                "/ filter",
+                "@ attach",
+                "d diff",
+                "f restore",
+                "Esc",
+            ]
         } else if panel.overlay_open() {
             &[
                 "/ filter",
                 "Enter preview",
+                "e edit",
                 "@ attach",
                 "d diff",
                 "f expand",
@@ -1613,6 +1628,50 @@ fn load_cached_preview(
     loaded
 }
 
+/// The relative path must still be listed by the backend, whose snapshot excludes
+/// protected and unindexed paths. Both previewing and editing use this check.
+fn indexed_file<'a>(
+    path: &'a str,
+    snapshot: Option<&ProjectFileSnapshot>,
+) -> Result<&'a Path, &'static str> {
+    let snapshot = snapshot.ok_or("Waiting for project file snapshot…")?;
+    if !snapshot
+        .entries
+        .iter()
+        .any(|entry| entry.kind == ProjectFileKind::File && entry.path == path)
+    {
+        return Err("File is not in the active project snapshot.");
+    }
+    let rel = Path::new(path);
+    if rel.as_os_str().is_empty()
+        || !rel
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+    {
+        return Err("Unsafe file path refused.");
+    }
+    Ok(rel)
+}
+
+pub(super) fn edit_target(
+    path: &str,
+    state: &UiState,
+) -> Result<crate::external_editor::FileTarget, &'static str> {
+    let rel = indexed_file(path, state.project_files.snapshot())?;
+    let root = state
+        .workspace_cwd
+        .as_deref()
+        .ok_or("Workspace root is unknown.")?;
+    let root = std::fs::canonicalize(root).map_err(|_| "Workspace root unavailable.")?;
+    let target = root.join(rel);
+    // The editor takes a pathname, not the preview's already-open descriptor. Reject
+    // symlink replacements (including links inside the workspace) before handoff.
+    if std::fs::canonicalize(&target).map_err(|_| "File could not be opened.")? != target {
+        return Err("Symbolic links are refused.");
+    }
+    crate::external_editor::FileTarget::resolve(&target, None).ok_or("Not a regular file.")
+}
+
 fn build_preview(
     path: &str,
     workspace_cwd: Option<&str>,
@@ -1632,24 +1691,15 @@ fn build_preview(
         body: PreviewBody::Notice(String::new()),
     };
 
-    // Fail closed: only read files explicitly exposed by the backend's current snapshot,
-    // which already excludes protected_paths and unindexed private locations.
-    let Some(snapshot) = snapshot else {
-        return CachedPreview {
-            body: PreviewBody::Notice("Waiting for project file snapshot…".into()),
-            ..base
-        };
+    let rel = match indexed_file(path, snapshot) {
+        Ok(rel) => rel,
+        Err(notice) => {
+            return CachedPreview {
+                body: PreviewBody::Notice(notice.into()),
+                ..base
+            };
+        }
     };
-    let in_snapshot = snapshot
-        .entries
-        .iter()
-        .any(|entry| entry.kind == ProjectFileKind::File && entry.path == path);
-    if !in_snapshot {
-        return CachedPreview {
-            body: PreviewBody::Notice("File is not in the active project snapshot.".into()),
-            ..base
-        };
-    }
 
     let Some(root_str) = workspace_cwd else {
         return CachedPreview {
@@ -1657,19 +1707,6 @@ fn build_preview(
             ..base
         };
     };
-
-    let rel = Path::new(path);
-    if rel.as_os_str().is_empty()
-        || rel.is_absolute()
-        || !rel
-            .components()
-            .all(|component| matches!(component, Component::Normal(_)))
-    {
-        return CachedPreview {
-            body: PreviewBody::Notice("Unsafe file path refused.".into()),
-            ..base
-        };
-    }
 
     let Ok(canonical_root) = std::fs::canonicalize(root_str) else {
         return CachedPreview {
@@ -2171,6 +2208,38 @@ mod tests {
             Palette::default(),
         );
         assert!(matches!(dotdot.body, PreviewBody::Notice(_)));
+    }
+
+    #[test]
+    fn edit_target_requires_a_current_indexed_regular_file() {
+        let dir = TempDir::new("edit-target");
+        let root = dir.path().join("repo");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/main.rs"), "fn main() {}\n").unwrap();
+        fs::write(root.join(".env"), "unindexed\n").unwrap();
+        std::os::unix::fs::symlink(root.join(".env"), root.join("src/link.rs")).unwrap();
+        std::os::unix::fs::symlink(root.join("src"), root.join("linked")).unwrap();
+        let mut state = UiState::new("fake".into(), None, None);
+        state.workspace_cwd = Some(root.to_string_lossy().into_owned());
+        state.project_files.snapshot = Some(Arc::new(sample_snapshot(
+            1,
+            &[
+                "src/main.rs",
+                "src/link.rs",
+                "linked/main.rs",
+                "../out",
+                "src",
+            ],
+        )));
+        assert_eq!(
+            edit_target("src/main.rs", &state).unwrap().path(),
+            root.canonicalize().unwrap().join("src/main.rs"),
+        );
+        for refused in [".env", "src/link.rs", "linked/main.rs", "../out", "src"] {
+            assert!(edit_target(refused, &state).is_err(), "{refused}");
+        }
+        state.project_files.refresh();
+        assert!(edit_target("src/main.rs", &state).is_err());
     }
 
     #[test]

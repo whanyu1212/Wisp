@@ -1,4 +1,4 @@
-//! Running the user's own editor: on the composer draft, or on a file a tool card names.
+//! Running the user's own editor: on the composer draft or on a workspace file.
 //!
 //! The draft is written to a private temporary file, the editor runs on the real
 //! terminal while the TUI steps aside, and the saved text comes back as the new draft.
@@ -67,7 +67,7 @@ impl fmt::Display for EditFailure {
 pub(crate) enum EditorRequest {
     /// The composer draft, which comes back as the new draft.
     Draft,
-    /// A file a tool card names, opened in place.
+    /// A file opened in place, optionally at a tool card's line.
     File(FileTarget),
 }
 
@@ -125,18 +125,17 @@ pub(crate) struct FileTarget {
     /// Always absolute, so it can never be read as an editor option such as vim's
     /// `+cmd`, which runs a command.
     path: PathBuf,
-    /// 1-based.
-    line: u64,
+    /// 1-based when the caller wants to jump to a specific line.
+    line: Option<u64>,
 }
 
 impl FileTarget {
-    /// A target for `path` at `line`, or `None` unless `path` is absolute and names a
-    /// regular file, so a model-chosen relative path like `+:!cmd` never reaches the
-    /// editor's arguments.
-    pub(crate) fn resolve(path: &Path, line: u64) -> Option<Self> {
+    /// A target for an absolute, regular file with an optional line. Requiring an
+    /// absolute path keeps values like `+:!cmd` from becoming editor options.
+    pub(crate) fn resolve(path: &Path, line: Option<u64>) -> Option<Self> {
         (path.is_absolute() && path.is_file()).then(|| Self {
             path: path.to_owned(),
-            line: line.max(1),
+            line: line.map(|line| line.max(1)),
         })
     }
 
@@ -170,20 +169,23 @@ pub(crate) fn open_file(command: &str, target: &FileTarget) -> Result<(), EditFa
 /// take `--goto path:line`; Zed, Helix and Sublime Text take `path:line`, and would
 /// open a file named `+LINE` instead.
 fn line_arguments(command: &str, target: &FileTarget) -> Vec<OsString> {
+    let Some(line) = target.line else {
+        return vec![target.path.as_os_str().to_owned()];
+    };
     let program = command
         .split_whitespace()
         .next()
         .map(|word| word.rsplit('/').next().unwrap_or(word))
         .unwrap_or_default();
     let mut located = target.path.as_os_str().to_owned();
-    located.push(format!(":{}", target.line));
+    located.push(format!(":{line}"));
     match program {
         "code" | "code-insiders" | "codium" | "cursor" | "windsurf" => {
             vec!["--goto".into(), located]
         }
         "zed" | "zeditor" | "hx" | "helix" | "subl" => vec![located],
         _ => vec![
-            format!("+{}", target.line).into(),
+            format!("+{line}").into(),
             target.path.as_os_str().to_owned(),
         ],
     }
@@ -497,7 +499,7 @@ mod tests {
     fn line_argument_forms() {
         let target = FileTarget {
             path: PathBuf::from("/work/src/main.rs"),
-            line: 12,
+            line: Some(12),
         };
         let cases: [(&str, &[&str]); 5] = [
             ("vim", &["+12", "/work/src/main.rs"]),
@@ -519,14 +521,14 @@ mod tests {
             .join(format!("wisp-resolve-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("present.rs"), "").unwrap();
-        let target = FileTarget::resolve(&dir.join("present.rs"), 0).unwrap();
+        let target = FileTarget::resolve(&dir.join("present.rs"), Some(0)).unwrap();
         assert_eq!(target.path(), dir.join("present.rs"));
         // Line 0 is not a line; the top of the file is.
-        assert_eq!(target.line, 1);
-        assert_eq!(FileTarget::resolve(&dir.join("absent.rs"), 1), None);
-        assert_eq!(FileTarget::resolve(&dir, 1), None);
+        assert_eq!(target.line, Some(1));
+        assert_eq!(FileTarget::resolve(&dir.join("absent.rs"), None), None);
+        assert_eq!(FileTarget::resolve(&dir, None), None);
         // A relative path, where `+cmd` would be an option, is refused.
-        assert_eq!(FileTarget::resolve(Path::new("+:!cmd"), 1), None);
+        assert_eq!(FileTarget::resolve(Path::new("+:!cmd"), None), None);
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -540,7 +542,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let name = "a $(touch pwned) b;`x`.rs";
         fs::write(dir.join(name), "").unwrap();
-        let target = FileTarget::resolve(&dir.join(name), 5).unwrap();
+        let target = FileTarget::resolve(&dir.join(name), Some(5)).unwrap();
         let record = dir.join("args");
         let command = format!(r#"printf '%s\n' >'{}'"#, record.display());
         open_file(&command, &target).unwrap();

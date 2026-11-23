@@ -3614,6 +3614,7 @@ async fn files_side_panel_tab_filters_previews_and_inserts_reference() {
 
     let mut ui = LiveUi {
         state: UiState::new("fake".into(), None, None),
+        mouse_enabled: true,
         ..LiveUi::default()
     };
     ui.state.workspace_cwd = Some(root.0.to_string_lossy().into_owned());
@@ -3666,23 +3667,33 @@ async fn files_side_panel_tab_filters_previews_and_inserts_reference() {
     row_containing(&docked, "▌├─ ▾ \u{f0770} src/");
     row_containing(&docked, "│ └─ M \u{f1617} lib.rs");
 
-    // Clicking a file row in the Files tab selects it on first click and expands preview on second click.
+    // One click on a different file selects it and opens the read-only preview.
     let readme_row = row_containing(&docked, "└─ \u{f0354} README.md");
     let readme_col = (0..docked.area().width.saturating_sub(1))
         .find(|&x| {
             docked[(x, readme_row)].symbol() == "R" && docked[(x + 1, readme_row)].symbol() == "E"
         })
         .expect("README.md column");
-    assert_eq!(
-        ui.side_panel.click(readme_col, readme_row),
-        side_panel::OverlayKey::Moved
-    );
-    assert!(!ui.side_panel.expanded());
-    assert_eq!(
-        ui.side_panel.click(readme_col, readme_row),
-        side_panel::OverlayKey::Moved
-    );
+    ui.handle_input(
+        Input::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: readme_col,
+            row: readme_row,
+            modifiers: KeyModifiers::NONE,
+        }),
+        &writer,
+        MAX_APPLICATION_FRAME_BYTES,
+    )
+    .await
+    .unwrap();
     assert!(ui.side_panel.expanded());
+    assert!(ui.editor_request.is_none());
+    let expanded = draw(&mut ui, 152, 24);
+    row_containing(&expanded, "1 │ # Wisp");
+    let narrow = draw(&mut ui, 72, 24);
+    row_containing(&narrow, "1 │ # Wisp");
+    row_containing(&narrow, "e edit");
+    draw(&mut ui, 152, 24);
     press(&mut ui, &writer, KeyCode::Char('f')).await;
     assert!(!ui.side_panel.expanded());
 
@@ -3691,12 +3702,15 @@ async fn files_side_panel_tab_filters_previews_and_inserts_reference() {
     // without waiting for a repaint.
     press(&mut ui, &writer, KeyCode::Esc).await;
     assert!(!ui.side_panel.overlay_open());
+    let docked = draw(&mut ui, 152, 24);
     let filter_row = (0..docked.area().height)
         .find(|&y| buffer_row(&docked, y).contains("filter files"))
         .expect("filter bar row");
-    let filter_col = buffer_row(&docked, filter_row)
-        .find("filter files")
-        .expect("filter bar column") as u16;
+    let filter_col = (0..docked.area().width - 1)
+        .find(|&x| {
+            docked[(x, filter_row)].symbol() == "f" && docked[(x + 1, filter_row)].symbol() == "i"
+        })
+        .expect("filter bar column");
     assert_eq!(
         ui.side_panel.click(filter_col, filter_row),
         side_panel::OverlayKey::Moved
