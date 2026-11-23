@@ -274,7 +274,11 @@ def _mode_messages(mode: AgentMode) -> tuple[_LabelledMessage, ...]:
     if mode == "plan":
         return (
             (
-                Message(role="system", content=PLAN_MODE_SYSTEM_PROMPT),
+                Message(
+                    role="system",
+                    content=PLAN_MODE_SYSTEM_PROMPT,
+                    turn_scoped_instructions=True,
+                ),
                 (PromptPart("system_prompt", "plan mode", PLAN_MODE_SYSTEM_PROMPT),),
             ),
         )

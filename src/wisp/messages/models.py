@@ -121,6 +121,8 @@ class Message(BaseModel):
     # images whose bytes are absent.
     image_bytes: tuple[bytes, ...] | None = Field(default=None, exclude=True, repr=False)
     prompt_cache_boundary: bool = Field(default=False, exclude=True, repr=False)
+    # Provider hint for instructions that may change without changing conversation history.
+    turn_scoped_instructions: bool = Field(default=False, exclude=True, repr=False)
     tool_call_id: str | None = None
     tool_name: str | None = None
     tool_calls: tuple[ToolCallSnapshot, ...] | None = None

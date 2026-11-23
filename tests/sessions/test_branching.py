@@ -181,18 +181,20 @@ def test_fork_drops_selected_user_message_and_returns_it(tmp_path: Path) -> None
     assert forked.read_active_leaf_id() == source_leaf_id
 
 
-def test_clone_and_fork_work_with_cache_boundary_in_process(
+def test_branching_drops_provider_hints(
     tmp_path: Path,
 ) -> None:
-    # A run's first system message carries the transient `prompt_cache_boundary`
-    # flag, which is never persisted. Branching right after the run must still
-    # validate its projected copy against what the new file reads back as.
+    # Branching must validate its projected copy against what the new file
+    # reads back as, even for prompt messages with runtime-only hints.
     store = JsonlSessionStore(tmp_path)
     source = store.create()
 
     async def branch() -> tuple[JsonlSession, JsonlSession, MessageSessionEntry]:
         marked = await source.append_message(
             Message(role="system", content="stable", prompt_cache_boundary=True)
+        )
+        turn = await source.append_message(
+            Message(role="system", content="turn only", turn_scoped_instructions=True)
         )
         await source.append_message(Message(role="user", content="first"))
         await source.append_message(Message(role="assistant", content="answer"))
@@ -204,6 +206,7 @@ def test_clone_and_fork_work_with_cache_boundary_in_process(
         )
         # A retried append of the same entry is still recognized as persisted.
         assert (await source.append_entry(marked)).id == marked.id
+        assert (await source.append_entry(turn)).id == turn.id
         assert isinstance(marked, MessageSessionEntry)
         return cloned, forked.session, marked
 
@@ -212,13 +215,16 @@ def test_clone_and_fork_work_with_cache_boundary_in_process(
     assert marked.message.prompt_cache_boundary is True
     assert [m.content for m in cloned.read_messages()] == [
         "stable",
+        "turn only",
         "first",
         "answer",
         "edit me",
         "old answer",
     ]
-    assert [m.content for m in forked.read_messages()] == ["stable", "first", "answer"]
-    assert not any(m.prompt_cache_boundary for m in source.read_messages())
+    assert [m.content for m in forked.read_messages()] == ["stable", "turn only", "first", "answer"]
+    assert not any(
+        m.prompt_cache_boundary or m.turn_scoped_instructions for m in source.read_messages()
+    )
 
 
 def test_forking_first_message_waits_to_create_file(

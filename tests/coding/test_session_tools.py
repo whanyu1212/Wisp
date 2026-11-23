@@ -286,6 +286,7 @@ def test_keeps_operation_instructions_out_of_user_prompt(
         ("system", "Inspect and initialize the repository."),
         ("user", "/init"),
     ]
+    assert provider_messages[-2].turn_scoped_instructions
     persisted = session.read_context_messages()
     assert [message.content for message in persisted if message.role == "user"] == ["/init"]
 

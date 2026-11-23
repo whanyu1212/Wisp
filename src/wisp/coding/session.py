@@ -1739,7 +1739,11 @@ class CodingSession:
         if operation_instructions:
             prompt_messages = (
                 *prompt_messages,
-                Message(role="system", content=operation_instructions),
+                Message(
+                    role="system",
+                    content=operation_instructions,
+                    turn_scoped_instructions=True,
+                ),
             )
         harness.replace_messages((*prompt_messages, *self._conversation_history(history)))
         await self._repair_and_flush(session, harness)
