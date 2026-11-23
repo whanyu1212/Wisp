@@ -135,7 +135,8 @@ impl KeyHelp {
             Owner::Overlay(OverlayKind::SidePanel) => &[
                 "Side panel: Session (status, context, turns), Files (repo tree & preview), and Browser tabs.",
                 "Press [ or ] to switch tabs (b jumps to Browser); Tab/Shift+Tab move sections; Up/Down/Home/End select.",
-                "In Files: / filters, Enter previews, @ attaches path to prompt, d opens /diff, f expands, r refreshes.",
+                "In Files: click or Enter previews, e opens your editor, / filters, @ attaches path to prompt.",
+                "Files: d opens /diff, f expands/restores, r refreshes.",
                 "In Session: f/t open turn waterfall (< > turns, ←/→ fold, Enter inspects); Enter opens /queue, /diff, or /mcp.",
                 "Ctrl+P or Esc closes it; on a wide terminal it stays docked beside the transcript.",
             ],

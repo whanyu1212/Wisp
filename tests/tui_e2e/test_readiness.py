@@ -18,10 +18,12 @@ from pathlib import Path
 import pytest
 
 from tests.tui_e2e.support import (
+    complete_frames,
     context_stats_ready,
     full_repaint_after,
     rendered_without_spacing,
     run_settled,
+    screen_rows,
     screen_shows,
     welcome_ready,
 )
@@ -400,6 +402,70 @@ def test_external_editor_replaces_the_draft(tmp_path: Path) -> None:
 
     messages = _conversation_messages(session_dir)
     assert messages[0] == ("user", "from the editor and more")
+
+
+@pytest.mark.process
+def test_files_sidebar_previews_and_edits_in_place(tmp_path: Path) -> None:
+    """One click previews, and the explicit edit key saves the real file."""
+    home = tmp_path / "home"
+    _write_user_settings(home, provider="fake")
+    project = tmp_path / "project"
+    project.mkdir()
+    path = project / "notes here.txt"
+    path.write_text("original file text\n", encoding="utf-8")
+    editor = _editor_script(
+        tmp_path,
+        'test "$#" -eq 1 || exit 1\n'
+        'grep -q "original file text" "$1" || exit 1\n'
+        'printf "edited file text\\n" >"$1"',
+    )
+    tui, _ = _launch(tmp_path, home=home, cwd=project, env={"VISUAL": str(editor)})
+    try:
+        tui.wait_ready()
+        tui.resize(width=72)
+        tui.send(b"a draft to keep")
+        tui.wait_until(
+            lambda output: screen_shows(output, "a draft to keep"), failure="draft not painted"
+        )
+        # Open Session first so its initial Git read finishes before Files asks for
+        # the separate tree snapshot; the backend admits one project read at a time.
+        tui.send(b"\x10")
+        tui.wait_until(
+            lambda output: (
+                screen_shows(output, "No changes") or screen_shows(output, "Unavailable · /diff")
+            ),
+            failure="the sidebar's initial Git read did not settle",
+        )
+        top = screen_rows(complete_frames(tui.output))[0]
+        column = top.rindex(" Files") + 2
+        tui.send(f"\x1b[<0;{column};1M\x1b[<0;{column};1m".encode())
+        tui.wait_until(
+            lambda output: screen_shows(output, path.name), failure="project file not painted"
+        )
+        row, column = next(
+            (y, line.index(path.name) + 1)
+            for y, line in enumerate(screen_rows(complete_frames(tui.output)), 1)
+            if path.name in line
+        )
+        tui.send(f"\x1b[<0;{column};{row}M\x1b[<0;{column};{row}m".encode())
+        tui.wait_until(
+            lambda output: screen_shows(output, "1 │ original file text"),
+            failure="one click did not open the preview",
+        )
+        assert path.read_text(encoding="utf-8") == "original file text\n"
+
+        tui.send(b"e")
+        tui.wait_until(
+            lambda output: screen_shows(output, "1 │ edited file text"),
+            failure="the editor's saved text did not refresh the preview",
+        )
+        assert path.read_text(encoding="utf-8") == "edited file text\n"
+        tui.send(b"\x1b")
+        tui.wait_until(
+            lambda output: screen_shows(output, "a draft to keep"), failure="the draft was lost"
+        )
+    finally:
+        tui.close()
 
 
 @pytest.mark.process

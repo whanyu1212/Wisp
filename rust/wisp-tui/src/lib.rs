@@ -1506,13 +1506,15 @@ impl LiveUi {
         self.render_pending = true;
         match outcome {
             external_editor::EditorOutcome::Draft(edited) => self.apply_edited_draft(edited),
-            external_editor::EditorOutcome::File(target, Err(failure)) => {
-                self.notice = Some(format!(
-                    "Could not open {}: {failure}.",
-                    target.path().display()
-                ));
+            external_editor::EditorOutcome::File(target, result) => {
+                self.side_panel.invalidate_file_preview();
+                if let Err(failure) = result {
+                    self.notice = Some(format!(
+                        "Could not open {}: {failure}.",
+                        target.path().display()
+                    ));
+                }
             }
-            external_editor::EditorOutcome::File(_, Ok(())) => {}
         }
     }
 
@@ -1557,7 +1559,7 @@ impl LiveUi {
             .and_then(|entry| entry.tool_card())
             .and_then(|card| {
                 let line = card.file_reference.as_ref()?.line;
-                external_editor::FileTarget::resolve(&card.referenced_path()?, line)
+                external_editor::FileTarget::resolve(&card.referenced_path()?, Some(line))
             });
         match target {
             Some(target) => {
@@ -6969,6 +6971,15 @@ impl LiveUi {
                 self.side_panel.close_overlay();
                 self.insert_panel_file_reference(&reference);
                 return Ok(LoopControl::Continue);
+            }
+            side_panel::OverlayKey::EditFile(path) => {
+                match side_panel::SidePanel::file_edit_target(&path, &self.state) {
+                    Ok(target) => {
+                        self.notice = None;
+                        self.editor_request = Some(external_editor::EditorRequest::File(target));
+                    }
+                    Err(notice) => self.notice = Some(notice.into()),
+                }
             }
             side_panel::OverlayKey::RefreshFiles => {
                 self.notice = None;

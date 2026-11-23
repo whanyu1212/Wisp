@@ -283,6 +283,8 @@ pub(crate) enum OverlayKey {
     BrowserControl(BrowserControl),
     /// Insert an `@path` file reference into the composer draft.
     InsertFileReference(String),
+    /// Open a selected project file in the user's external editor.
+    EditFile(String),
     /// Refresh project files and git status for the `Files` tab.
     RefreshFiles,
     Ignored,
@@ -668,8 +670,9 @@ impl SidePanel {
     }
 
     pub(crate) fn key_activates(&self, key: KeyEvent) -> bool {
-        if self.mode == PanelMode::Files && self.files_view.borrow().filter_active() {
-            return false;
+        if self.mode == PanelMode::Files {
+            return !self.files_view.borrow().filter_active()
+                && matches!(key.code, KeyCode::Enter | KeyCode::Char('e'));
         }
         key.code == KeyCode::Enter
     }
@@ -1194,6 +1197,17 @@ impl SidePanel {
             self.reported_files_tab = wanted;
             wanted
         })
+    }
+
+    pub(crate) fn file_edit_target(
+        path: &str,
+        state: &UiState,
+    ) -> Result<crate::external_editor::FileTarget, &'static str> {
+        files::edit_target(path, state)
+    }
+
+    pub(crate) fn invalidate_file_preview(&self) {
+        self.files_view.borrow().invalidate_preview();
     }
 
     pub(crate) fn reset_files_view(&mut self) {

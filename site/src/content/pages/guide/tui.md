@@ -294,6 +294,11 @@ how you open the live browser: with no page open, it shows an address bar for an
 search, and your recent addresses. See
 [Browser viewport and interactive takeover](./tui/commands.md#browser-viewport-and-interactive-takeover).
 
+In **Files**, click a file once (or select it with the arrow keys and press `Enter`) to open a
+read-only preview. Click another file to switch the preview, or click a folder to expand or fold
+it. Press `e` with a file selected to edit it in `$VISUAL`, `$EDITOR`, or `vi`, in that order.
+Save and exit the editor to return to Wisp with the updated preview.
+
 On a terminal at least 148 columns wide, the Reading sidebar shows the session name and status,
 folder and branch, compact context usage, MCP servers, skills, changed files, and up to three
 earlier turns. The latest turn is left out because its prompt stays pinned above its reply, so a
