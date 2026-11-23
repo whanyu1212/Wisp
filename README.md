@@ -25,6 +25,12 @@ WISP_RUST_TUI_BINARY="$(pwd)/target/debug/wisp-tui" uv run wisp tui
 
 Supports OpenAI (including ChatGPT Plus/Pro via `/connect`), Anthropic, Google, xAI, DeepSeek, and the offline `fake` provider.
 
+## Benchmark result
+
+Wisp passed **all 32 attempts on an eight-task SWE-bench Pro V2 pilot**, including two Hard-51
+issues. GPT-6.2 Sol (high effort) and GPT-6.2 Astra (medium effort) each resolved all eight tasks
+with both prompt versions. [Method and per-task results](evals/tool_use/reports/2026-11-23-swe-bench-pro-v2.md)
+
 ## Links
 
 - **[Docs & quickstart](https://whanyu1212.github.io/Wisp/)** — install, TUI guide, safety & permissions, SDK, and reference
