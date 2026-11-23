@@ -116,6 +116,13 @@ with `write_constraint`, under the exception below. Tool behavior changes are li
 `bash` runs commands in bash rather than `/bin/sh`, and that the read-only file tools follow
 symbolic links whose targets stay inside the workspace.
 
+## Wisp 0.16.7 compatibility
+
+0.16.7 adds click-to-preview and edit-from-sidebar in `Files`, plus context usage and turn-growth
+visualizations in `Session` and `/context`. The Python SDK API, live RPC payloads, saved sessions,
+and supported platforms are unchanged. Use the `0.16.7` backend and TUI together; no migration is
+needed.
+
 ## Wisp 0.16.6 compatibility
 
 0.16.6 refreshes the Rust TUI's `Files` side panel and shows Material Design file and folder
