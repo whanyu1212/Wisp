@@ -8,14 +8,16 @@ on:
     branches:
       - main
       - develop
+  schedule:
+    - cron: "17 6 * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 env:
   # Debug and test builds keep only line tables, so panics still report file and
@@ -31,8 +33,10 @@ jobs:
     outputs:
       quality: ${{ steps.select.outputs.quality }}
       python: ${{ steps.select.outputs.python }}
+      macos_smoke: ${{ steps.select.outputs.macos_smoke }}
       python_oldest: ${{ steps.select.outputs.python_oldest }}
       rust: ${{ steps.select.outputs.rust }}
+      rust_macos: ${{ steps.select.outputs.rust_macos }}
       handoff: ${{ steps.select.outputs.handoff }}
       package: ${{ steps.select.outputs.package }}
       contracts: ${{ steps.select.outputs.contracts }}
@@ -125,7 +129,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: ${{ needs.changes.outputs.rust_macos == 'true' && fromJSON('["ubuntu-latest", "macos-latest"]') || fromJSON('["ubuntu-latest"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     env:
@@ -172,8 +176,9 @@ jobs:
         run: cargo test --workspace --all-features
 
   # The PTY handoff tests run beside lint and unit tests rather than after them.
-  # macOS runs them only on main and manual runs, so pull requests skip its slower
-  # runners; a macOS failure there still fails the run.
+  # macOS runs them on nightly schedule and manual runs, so pull requests and
+  # routine main pushes skip its slower runners; a macOS failure there still
+  # fails the run.
   tui-handoff:
     needs: changes
     if: needs.changes.outputs.handoff == 'true'
@@ -181,7 +186,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-latest"]') || fromJSON('["ubuntu-latest", "macos-latest"]') }}
+        os: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && fromJSON('["ubuntu-latest", "macos-latest"]') || fromJSON('["ubuntu-latest"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
 
@@ -365,8 +370,8 @@ jobs:
           if-no-files-found: error
 
   # The development Python is pinned in .python-version; this job runs on the oldest
-  # supported Python (requires-python in pyproject.toml) on main, manual runs, and
-  # pull requests touching dependency, Python, or CI configuration.
+  # supported Python (requires-python in pyproject.toml) on nightly schedules, manual runs,
+  # shared-input pushes, and changes touching dependency, Python, or CI configuration.
   python-tests-oldest:
     needs: changes
     if: needs.changes.outputs.python_oldest == 'true'
@@ -424,7 +429,7 @@ jobs:
 
   macos-smoke:
     needs: changes
-    if: needs.changes.outputs.python == 'true'
+    if: needs.changes.outputs.macos_smoke == 'true'
     name: Platform smoke (macOS)
     runs-on: macos-latest
     timeout-minutes: 20

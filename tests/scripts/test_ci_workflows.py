@@ -19,7 +19,8 @@ def test_required_status_accounts_for_every_workflow_job() -> None:
     assert set(jobs) == {"changes", "ci-passed"} | {
         job for group in GROUP_JOBS.values() for job in group
     }
-    assert set(jobs["changes"]["outputs"]) == set(GROUP_JOBS)
+    assert set(jobs["changes"]["outputs"]) == set(GROUP_JOBS) | {"rust_macos"}
+    assert jobs["changes"]["outputs"]["rust_macos"] == "${{ steps.select.outputs.rust_macos }}"
     for group, names in GROUP_JOBS.items():
         assert jobs["changes"]["outputs"][group] == f"${{{{ steps.select.outputs.{group} }}}}"
         for name in names:
@@ -228,7 +229,11 @@ def test_rust_lint_splits_from_workspace() -> None:
     assert "cargo clippy --workspace --all-targets --all-features -- -D warnings" in lint_commands
 
     workspace = jobs["rust-workspace"]
-    assert workspace["strategy"]["matrix"]["os"] == ["ubuntu-latest", "macos-latest"]
+    assert workspace["strategy"]["matrix"]["os"] == (
+        "${{ needs.changes.outputs.rust_macos == 'true' "
+        '&& fromJSON(\'["ubuntu-latest", "macos-latest"]\') '
+        "|| fromJSON('[\"ubuntu-latest\"]') }}"
+    )
     assert workspace["env"]["PYO3_NO_PYTHON"] == "1"
     ws_steps = workspace["steps"]
     assert not any(
@@ -350,3 +355,22 @@ def test_release_runs_checks_in_parallel() -> None:
         'uv run wisp -p "hello" --provider fake',
     ):
         assert expected_path in macos_cmds
+
+
+def test_nightly_schedules_and_isolated_concurrency() -> None:
+    ci = yaml.safe_load((REPO_ROOT / ".github/workflows/ci.yml").read_text())
+    ci_triggers = ci.get("on") or ci[True]
+    assert "schedule" in ci_triggers
+    assert "${{ github.event_name }}" in ci["concurrency"]["group"]
+    assert ci["concurrency"]["cancel-in-progress"] == "${{ github.event_name != 'schedule' }}"
+    assert ci["jobs"]["tui-handoff"]["strategy"]["matrix"]["os"] == (
+        "${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') "
+        '&& fromJSON(\'["ubuntu-latest", "macos-latest"]\') '
+        "|| fromJSON('[\"ubuntu-latest\"]') }}"
+    )
+
+    wheels = yaml.safe_load((REPO_ROOT / ".github/workflows/rust-tui-wheels.yml").read_text())
+    wheels_triggers = wheels.get("on") or wheels[True]
+    assert "schedule" in wheels_triggers
+    assert "push" not in wheels_triggers
+    assert "${{ github.event_name }}" in wheels["concurrency"]["group"]

@@ -8,7 +8,15 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.ci_jobs import FULL, FULL_PR, GROUP_JOBS, changed_paths, select_groups, verify_results
+from scripts.ci_jobs import (
+    FULL,
+    FULL_PR,
+    GROUP_JOBS,
+    changed_paths,
+    select_groups,
+    select_rust_macos,
+    verify_results,
+)
 
 
 class CheckSelectionTests(unittest.TestCase):
@@ -37,11 +45,11 @@ class CheckSelectionTests(unittest.TestCase):
     def test_python_runtime_keeps_both_platforms_and_handoff(self) -> None:
         self.assertEqual(
             select_groups(["src/wisp/agent/loop/runner.py"], event_name="pull_request"),
-            {"quality", "python", "package", "handoff"},
+            {"quality", "python", "macos_smoke", "package", "handoff"},
         )
         self.assertEqual(
             select_groups(["src/wisp/agent/loop/runner.py"], event_name="push"),
-            {"quality", "python", "python_oldest", "package", "handoff"},
+            {"quality", "python", "package", "handoff"},
         )
 
     def test_shared_and_unknown_inputs_keep_all_checks(self) -> None:
@@ -88,8 +96,30 @@ class CheckSelectionTests(unittest.TestCase):
                 ["rust/wisp-tui/src/ui.rs", "src/wisp/config/runtime.py"],
                 event_name="push",
             ),
-            FULL,
+            FULL_PR - {"macos_smoke"},
         )
+
+    def test_macos_smoke_and_rust_macos_selection(self) -> None:
+        for path in ("tests/tools/test_seatbelt.py", "tests/tools/shell/supervisor_support.py"):
+            with self.subTest(path=path):
+                self.assertEqual(
+                    select_groups([path], event_name="pull_request"),
+                    {"quality", "python", "macos_smoke", "package"},
+                )
+        self.assertEqual(
+            select_groups(["tests/benchmarks/test_session_loading.py"], event_name="pull_request"),
+            {"quality", "python", "package"},
+        )
+        self.assertFalse(select_rust_macos(["rust/wisp-tui/src/ui.rs"], event_name="pull_request"))
+        self.assertFalse(select_rust_macos(["rust/wisp-tui/src/ui.rs"], event_name="push"))
+        self.assertTrue(
+            select_rust_macos(["rust/wisp-search/src/lib.rs"], event_name="pull_request")
+        )
+        self.assertTrue(select_rust_macos(["Cargo.lock"], event_name="pull_request"))
+        self.assertTrue(
+            select_rust_macos(["rust/wisp-tui/src/ui.rs"], event_name="workflow_dispatch")
+        )
+        self.assertTrue(select_rust_macos([], event_name="schedule"))
 
     def test_handoff_and_benchmark_test_changes_run_with_binary(self) -> None:
         for path in ("tests/tui_e2e/test_input.py", "tests/benchmarks/test_tui_hydration.py"):
@@ -156,6 +186,7 @@ class CheckSelectionTests(unittest.TestCase):
 
     def test_manual_and_unavailable_base_run_all_checks(self) -> None:
         self.assertEqual(select_groups(changed_paths("workflow_dispatch", {})), FULL)
+        self.assertEqual(select_groups(changed_paths("schedule", {}), event_name="schedule"), FULL)
         with patch(
             "scripts.ci_jobs.subprocess.run", side_effect=subprocess.CalledProcessError(128, "git")
         ):
@@ -189,6 +220,9 @@ class RequiredCheckTests(unittest.TestCase):
                 needs = self.needs(set(FULL))
                 needs["rust-workspace"]["result"] = result
                 self.assertTrue(verify_results(needs))
+        needs = self.needs(set(FULL))
+        needs["macos-smoke"]["result"] = "skipped"
+        self.assertTrue(verify_results(needs))
 
     def test_failed_plan_or_missing_output_blocks(self) -> None:
         for result in ("failure", "cancelled", "skipped"):

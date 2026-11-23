@@ -12,15 +12,38 @@ from typing import Any
 
 GROUP_JOBS = {
     "quality": ("quality",),
-    "python": ("python-tests", "macos-smoke"),
+    "python": ("python-tests",),
+    "macos_smoke": ("macos-smoke",),
     "python_oldest": ("python-tests-oldest",),
     "rust": ("rust-lint", "rust-workspace"),
     "handoff": ("tui-handoff",),
     "package": ("package",),
     "contracts": ("contracts",),
 }
+MACOS_SMOKE_TEST_PREFIXES = (
+    "tests/auth/test_storage.py",
+    "tests/cli/test_rpc_transport.py",
+    "tests/coding/test_sandbox_process_approvals.py",
+    "tests/mcp/test_runtime_process.py",
+    "tests/sessions/",
+    "tests/tools/files/test_secure_fs.py",
+    "tests/tools/shell/supervisor_support.py",
+    "tests/tools/shell/test_supervisor",
+    "tests/tools/shell/test_working_directory.py",
+    "tests/tools/test_seatbelt.py",
+    "tests/tools/test_shell_auto_workflows.py",
+)
+RUST_MACOS_PATHS = frozenset(
+    {
+        "Cargo.lock",
+        "Cargo.toml",
+        "rust-toolchain.toml",
+        ".github/workflows/ci.yml",
+        "scripts/ci_jobs.py",
+    }
+)
 PYTHON_PR = frozenset({"quality", "python", "package"})
-FULL_PR = frozenset({"quality", "python", "rust", "handoff", "package"})
+FULL_PR = frozenset({"quality", "python", "macos_smoke", "rust", "handoff", "package"})
 FULL = FULL_PR | {"python_oldest"}
 
 
@@ -29,7 +52,8 @@ def select_groups(paths: list[str], *, event_name: str = "push") -> set[str]:
 
     Args:
         paths (list[str]): Both old and new paths for renames, including deletions.
-        event_name (str): GitHub event name; routine PRs defer ``python_oldest`` to ``main``.
+        event_name (str): GitHub event name; routine PRs defer ``python_oldest`` and
+            routine pushes defer duplicate ``macos_smoke`` and ``python_oldest`` to nightly.
 
     Returns:
         set[str]: Groups to run. Full Python tests already include the contracts.
@@ -41,7 +65,7 @@ def select_groups(paths: list[str], *, event_name: str = "push") -> set[str]:
         if path.startswith(
             ("schemas/", "tests/fixtures/", "tests/support/", "src/wisp/events/", "src/wisp/rpc/")
         ):
-            selected.update(FULL_PR)
+            selected.update(FULL_PR if event_name == "pull_request" else FULL)
         elif path.startswith("rust/wisp-tui/src/") and path.endswith(".rs"):
             selected.update({"rust", "handoff", "contracts"})
         elif path.startswith("tests/tui_e2e/") or (
@@ -50,8 +74,12 @@ def select_groups(paths: list[str], *, event_name: str = "push") -> set[str]:
             selected.update({"quality", "handoff", "contracts"})
         elif path.startswith("src/wisp/"):
             selected.update(PYTHON_PR | {"handoff"})
+            if event_name == "pull_request":
+                selected.add("macos_smoke")
         elif path.startswith(("tests/", "examples/")) and path != "tests/conftest.py":
             selected.update(PYTHON_PR)
+            if event_name == "pull_request" and path.startswith(MACOS_SMOKE_TEST_PREFIXES):
+                selected.add("macos_smoke")
         elif path == "README.md":
             # The README is also distribution metadata.
             selected.update({"contracts", "package"})
@@ -68,11 +96,28 @@ def select_groups(paths: list[str], *, event_name: str = "push") -> set[str]:
             selected.update(FULL)
     if not paths:
         selected.update(FULL)
-    if event_name != "pull_request" and "python" in selected:
-        selected.add("python_oldest")
     if "python" in selected:
         selected.discard("contracts")
     return selected
+
+
+def select_rust_macos(paths: list[str], *, event_name: str = "push") -> bool:
+    """Return whether ``rust-workspace`` should include ``macos-latest``.
+
+    Args:
+        paths (list[str]): Changed repository paths.
+        event_name (str): GitHub event name.
+
+    Returns:
+        bool: True for scheduled/manual runs, empty diffs, macOS-conditional search code,
+        and Rust toolchain/manifest/CI changes.
+    """
+    if event_name in {"schedule", "workflow_dispatch"} or not paths:
+        return True
+    return any(
+        path.startswith(("rust/wisp-search/", ".cargo/")) or path in RUST_MACOS_PATHS
+        for path in paths
+    )
 
 
 def changed_paths(event_name: str, event: dict[str, Any]) -> list[str]:
@@ -149,8 +194,10 @@ def main() -> int:
         raise SystemExit("usage: ci_jobs.py select|verify")
     event_name = os.environ["GITHUB_EVENT_NAME"]
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
-    selected = select_groups(changed_paths(event_name, event), event_name=event_name)
+    paths = changed_paths(event_name, event)
+    selected = select_groups(paths, event_name=event_name)
     output = "".join(f"{group}={str(group in selected).lower()}\n" for group in GROUP_JOBS)
+    output += f"rust_macos={str(select_rust_macos(paths, event_name=event_name)).lower()}\n"
     print(output, end="")
     with Path(os.environ["GITHUB_OUTPUT"]).open("a") as destination:
         destination.write(output)
