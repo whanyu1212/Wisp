@@ -117,8 +117,8 @@ pub(super) fn attention_rows(
     }
 }
 
-/// Context as one compact text line (`55.5K · 14% context`) that turns amber, then
-/// red, as it fills. Hidden until context stats are known.
+/// Context summary, segmented gauge, and compact turn sparkline + cache/latency
+/// telemetry. Hidden until context stats are known.
 pub(super) fn context_line(rows: &mut PanelRows, state: &UiState, width: usize, palette: Palette) {
     let Some(split) = Split::of(state) else {
         return;
@@ -147,6 +147,74 @@ pub(super) fn context_line(rows: &mut PanelRows, state: &UiState, width: usize, 
         )],
     );
     rows.action(0, PanelAction::Open(Target::Context));
+    if split.window.is_some() && width > 0 {
+        rows.push(crate::context_split::bar(&split, width, palette), None);
+    }
+
+    let mut telemetry = Vec::new();
+    if let Some(hit_pct) = cache_hit_percent(state) {
+        telemetry.push(format!("cache {hit_pct}%"));
+    }
+    if let Some(duration_ms) = latest_run_duration_ms(state) {
+        telemetry.push(crate::tool_cards::format_duration(duration_ms));
+    }
+    let right_text = telemetry.join(" · ");
+    let turn_tokens: Vec<u64> = split
+        .breakdown
+        .map(|breakdown| breakdown.turns.iter().map(|turn| turn.tokens).collect())
+        .unwrap_or_default();
+    let spark_label = "turns ";
+    let reserved = spark_label.width() + right_text.width() + usize::from(!right_text.is_empty());
+    let max_spark_cols = width.saturating_sub(reserved).min(16);
+    let spark_spans =
+        crate::context_split::turn_sparkline_spans(&turn_tokens, max_spark_cols, palette);
+
+    if !spark_spans.is_empty() || !right_text.is_empty() {
+        let mut left = Vec::new();
+        if !spark_spans.is_empty() {
+            left.push(Span::styled(spark_label, muted));
+            left.extend(spark_spans);
+        }
+        let right = if right_text.is_empty() {
+            Vec::new()
+        } else {
+            vec![Span::styled(right_text, muted)]
+        };
+        rows.push(spread(left, right, width), None);
+    }
+}
+
+/// Share of input tokens served from prompt cache, accounting for providers whose
+/// `input_tokens` excludes cache tokens (Anthropic) vs includes them.
+fn cache_hit_percent(state: &UiState) -> Option<u64> {
+    let usage = &state.context.stats.as_ref()?.usage;
+    let read = usage.cache_read_input_tokens?;
+    let write = usage.cache_write_input_tokens.unwrap_or(0);
+    let total_input = if state.provider.as_deref() == Some("anthropic")
+        || usage.input_tokens < read.saturating_add(write)
+    {
+        usage
+            .input_tokens
+            .saturating_add(read)
+            .saturating_add(write)
+    } else {
+        usage.input_tokens
+    };
+    if total_input == 0 {
+        return None;
+    }
+    let pct = ((read as f64 / total_input as f64) * 100.0).round() as u64;
+    Some(pct.min(100))
+}
+
+/// Duration of the newest finished run in the transcript, when reported.
+fn latest_run_duration_ms(state: &UiState) -> Option<u64> {
+    state
+        .transcript
+        .entries()
+        .iter()
+        .rev()
+        .find_map(|entry| entry.run_totals().and_then(|totals| totals.duration_ms))
 }
 
 /// Inventories condensed onto one summary line (`7 MCP · 12 skills · 2 changed`),

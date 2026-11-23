@@ -738,7 +738,8 @@ fn largest_lines(
     lines
 }
 
-/// Each turn's growth with a block scaled to the largest; the latest in the
+/// Each turn's growth as a vertical `BarChart` when wide enough, falling back to
+/// a compact 1-row-per-turn list on narrow terminals; the latest turn uses the
 /// warning colour.
 fn growth_lines(
     breakdown: &ContextBreakdown,
@@ -748,6 +749,34 @@ fn growth_lines(
     if breakdown.turns.is_empty() {
         return Vec::new();
     }
+    if width >= 52 {
+        let (chart_lines, shown) =
+            context_split::turn_barchart_lines(&breakdown.turns, width, palette);
+        if !chart_lines.is_empty() {
+            let visible = &breakdown.turns[breakdown.turns.len().saturating_sub(shown)..];
+            let peak = visible.iter().map(|turn| turn.tokens).max().unwrap_or(0);
+            let heading = if shown < breakdown.turns.len() {
+                format!(
+                    "Growth per turn (last {shown} · peak +{})",
+                    abbreviated(peak)
+                )
+            } else {
+                format!("Growth per turn · peak +{}", abbreviated(peak))
+            };
+            let mut lines = vec![
+                Line::default(),
+                Line::styled(
+                    heading,
+                    Style::default()
+                        .fg(palette.muted)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ];
+            lines.extend(chart_lines);
+            return lines;
+        }
+    }
+
     let mut lines = vec![
         Line::default(),
         Line::styled(
@@ -1013,13 +1042,78 @@ mod tests {
             // Free space is taken from the estimated total, so it is estimated too.
             "  ■ Free space                                    ~6.0k   60.0%",
             "1 bash gh pr checks 766 output · turn 2",
-            "  2 █",
+            "Growth per turn · peak +1.6k",
+            "1.6k",
+            "T2",
             "Session tokens: 2900 input",
         ] {
             assert!(text.contains(expected), "{expected}\n{text}");
         }
         // The split replaces the budget's text rows.
         assert!(!text.contains("Compaction trigger"), "{text}");
+    }
+
+    #[test]
+    fn growth_renders_barchart_when_wide_and_list_when_narrow() {
+        let mut state = state();
+        let turns = (1..=4)
+            .map(|n| wisp_protocol::events::ContextTurnGrowth {
+                turn: n,
+                tokens: n * 2_500,
+            })
+            .collect();
+        state
+            .context
+            .stats
+            .as_mut()
+            .unwrap()
+            .context_breakdown
+            .as_mut()
+            .unwrap()
+            .turns = turns;
+
+        let wide = screen(&mut ContextView::default(), &state, 100, 50);
+        assert!(wide.contains("Growth per turn · peak +10.0k"), "{wide}");
+        assert!(wide.contains("T1"), "{wide}");
+        assert!(wide.contains("T4"), "{wide}");
+        assert!(wide.contains("10.0k"), "{wide}");
+
+        // Narrow terminal (<52 inner width) falls back to compact 1-row-per-turn list.
+        let narrow = screen(&mut ContextView::default(), &state, 46, 40);
+        assert!(narrow.contains("Growth per turn"), "{narrow}");
+        assert!(!narrow.contains("peak +10.0k"), "{narrow}");
+        assert!(narrow.contains("+10.0k"), "{narrow}");
+    }
+
+    #[test]
+    fn sliced_barchart_heading_reports_visible_window_peak() {
+        let mut state = state();
+        let mut turns = vec![wisp_protocol::events::ContextTurnGrowth {
+            turn: 1,
+            tokens: 50_000,
+        }];
+        turns.extend(
+            (2..=12).map(|turn| wisp_protocol::events::ContextTurnGrowth {
+                turn,
+                tokens: 2_000,
+            }),
+        );
+        state
+            .context
+            .stats
+            .as_mut()
+            .unwrap()
+            .context_breakdown
+            .as_mut()
+            .unwrap()
+            .turns = turns;
+
+        // Width 60 has inner width < 60, fitting fewer than 12 bars so Turn 1 is sliced off.
+        let text = screen(&mut ContextView::default(), &state, 60, 50);
+        assert!(text.contains("Growth per turn (last "), "{text}");
+        assert!(text.contains("peak +2.0k)"), "{text}");
+        assert!(!text.contains("peak +50.0k"), "{text}");
+        assert!(!text.contains("T1 "), "{text}");
     }
 
     #[test]

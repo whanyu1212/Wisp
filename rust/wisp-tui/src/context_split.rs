@@ -8,11 +8,16 @@
 use crate::reducer::UiState;
 use crate::theme::Palette;
 use ratatui::{
-    style::{Color, Style},
+    buffer::Buffer,
+    layout::Rect,
+    style::{Color, Modifier, Style},
+    symbols,
     text::{Line, Span},
+    widgets::{Bar, BarChart, Sparkline, SparklineBar, Widget},
 };
 use wisp_protocol::events::{
     ContextAccountingMethod, ContextBreakdown, ContextBudget, ContextSource, ContextSourceUsage,
+    ContextTurnGrowth,
 };
 
 /// Bar cells between the start of the compaction reserve and the window's end: a
@@ -371,6 +376,168 @@ pub(crate) fn spark(tokens: &[u64]) -> Vec<&'static str> {
         .collect()
 }
 
+/// Render a Ratatui widget into a scratch `Buffer` and convert each row into a
+/// `Line<'static>`, coalescing adjacent cells with identical styles and trimming
+/// trailing unstyled spaces.
+fn render_widget_lines(widget: impl Widget, width: u16, height: u16) -> Vec<Line<'static>> {
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+    let area = Rect::new(0, 0, width, height);
+    let mut buf = Buffer::empty(area);
+    widget.render(area, &mut buf);
+
+    let default_style = Style::default();
+    let mut lines = Vec::with_capacity(usize::from(height));
+    for y in 0..height {
+        let end_x = (0..width)
+            .rev()
+            .find(|&x| {
+                let cell = &buf[(x, y)];
+                cell.symbol() != " " || cell.style() != default_style
+            })
+            .map_or(0, |x| x + 1);
+        let mut spans = Vec::new();
+        let mut run = String::new();
+        let mut run_style: Option<Style> = None;
+        for x in 0..end_x {
+            let cell = &buf[(x, y)];
+            let style = cell.style();
+            if run_style != Some(style) && !run.is_empty() {
+                spans.push(Span::styled(
+                    std::mem::take(&mut run),
+                    run_style.expect("run has a style"),
+                ));
+            }
+            run_style = Some(style);
+            run.push_str(cell.symbol());
+        }
+        if let Some(style) = run_style.filter(|_| !run.is_empty()) {
+            spans.push(Span::styled(run, style));
+        }
+        lines.push(Line::from(spans));
+    }
+    lines
+}
+
+/// Compact per-turn sparkline spans using Ratatui's `Sparkline` widget, sliced to
+/// the newest `max_width` turns with the latest turn highlighted in `palette.warning`.
+pub(crate) fn turn_sparkline_spans(
+    tokens: &[u64],
+    max_width: usize,
+    palette: Palette,
+) -> Vec<Span<'static>> {
+    if tokens.is_empty() || max_width == 0 {
+        return Vec::new();
+    }
+    let visible = &tokens[tokens.len().saturating_sub(max_width)..];
+    let len = visible.len();
+    let bars: Vec<SparklineBar> = visible
+        .iter()
+        .enumerate()
+        .map(|(index, &value)| {
+            let color = if index + 1 == len {
+                palette.warning
+            } else {
+                palette.secondary
+            };
+            SparklineBar::from(Some(value)).style(Some(Style::default().fg(color)))
+        })
+        .collect();
+    let max = visible.iter().copied().max().unwrap_or(0).max(1);
+    let bar_set = symbols::bar::Set {
+        empty: "▁",
+        ..symbols::bar::NINE_LEVELS
+    };
+    let sparkline = Sparkline::default().data(bars).max(max).bar_set(bar_set);
+    let width = u16::try_from(len).unwrap_or(u16::MAX);
+    render_widget_lines(sparkline, width, 1)
+        .into_iter()
+        .next()
+        .map(|line| line.spans)
+        .unwrap_or_default()
+}
+
+/// Bar value label guaranteed to stay at most 5 columns wide (`BAR_WIDTH`) so
+/// `BarChart` never omits labels on `100k`–`999.9k` turns.
+fn bar_value(tokens: u64) -> String {
+    if tokens < 1_000 {
+        tokens.to_string()
+    } else if tokens < 99_950 {
+        format!("{:.1}k", tokens as f64 / 1_000.0)
+    } else if tokens < 999_500 {
+        format!("{}k", (tokens + 500) / 1_000)
+    } else if tokens < 99_950_000 {
+        format!("{:.1}m", tokens as f64 / 1_000_000.0)
+    } else {
+        format!("{}m", (tokens + 500_000) / 1_000_000)
+    }
+}
+
+/// Vertical `BarChart` lines for per-turn token growth (`height = 6`: 5 bar rows + 1
+/// label row), sliced to the newest turns that fit in `width`. Returns the rendered
+/// lines and the number of turns shown.
+pub(crate) fn turn_barchart_lines(
+    turns: &[ContextTurnGrowth],
+    width: usize,
+    palette: Palette,
+) -> (Vec<Line<'static>>, usize) {
+    const BAR_WIDTH: u16 = 5;
+    const BAR_GAP: u16 = 1;
+    const CHART_HEIGHT: u16 = 6;
+
+    if turns.is_empty() || width < usize::from(BAR_WIDTH) {
+        return (Vec::new(), 0);
+    }
+    let step = usize::from(BAR_WIDTH + BAR_GAP);
+    let max_bars = (width + usize::from(BAR_GAP)) / step;
+    if max_bars == 0 {
+        return (Vec::new(), 0);
+    }
+    let visible = &turns[turns.len().saturating_sub(max_bars)..];
+    let shown = visible.len();
+    let bars: Vec<Bar<'static>> = visible
+        .iter()
+        .enumerate()
+        .map(|(index, turn)| {
+            let latest = index + 1 == shown;
+            let bar_color = if latest {
+                palette.warning
+            } else {
+                palette.secondary
+            };
+            let label_style = Style::default().fg(if latest {
+                palette.warning
+            } else {
+                palette.rail()
+            });
+            Bar::with_label(
+                Line::styled(format!("T{}", turn.turn), label_style),
+                turn.tokens,
+            )
+            .text_value(bar_value(turn.tokens))
+            .style(Style::default().fg(bar_color))
+            .value_style(
+                Style::default()
+                    .fg(palette.foreground)
+                    .add_modifier(Modifier::BOLD),
+            )
+        })
+        .collect();
+
+    let chart_width = (shown * step - usize::from(BAR_GAP)).min(width);
+    let chart = BarChart::vertical(bars)
+        .bar_width(BAR_WIDTH)
+        .bar_gap(BAR_GAP)
+        .label_style(Style::default().fg(palette.rail()));
+    let lines = render_widget_lines(
+        chart,
+        u16::try_from(chart_width).unwrap_or(u16::MAX),
+        CHART_HEIGHT,
+    );
+    (lines, shown)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -424,5 +591,77 @@ mod tests {
     fn spark_scales_to_largest() {
         assert_eq!(spark(&[1, 4, 8]), vec!["▁", "▄", "█"]);
         assert_eq!(spark(&[0, 0]), vec!["▁", "▁"]);
+    }
+
+    #[test]
+    fn turn_sparkline_handles_empty_zeroes_slicing_and_latest_highlight() {
+        let palette = Palette::default();
+        assert!(turn_sparkline_spans(&[], 8, palette).is_empty());
+        assert!(turn_sparkline_spans(&[100, 200], 0, palette).is_empty());
+
+        let zero_spans = turn_sparkline_spans(&[0, 0], 8, palette);
+        let zero_text: String = zero_spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(zero_text, "▁▁");
+
+        let spans = turn_sparkline_spans(&[100, 200, 800, 400], 3, palette);
+        let rendered: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(rendered.chars().count(), 3);
+        // Sliced to [200, 800, 400]; latest (400) uses warning color.
+        assert_eq!(spans[0].style.fg, Some(palette.secondary));
+        assert_eq!(spans.last().unwrap().style.fg, Some(palette.warning));
+    }
+
+    #[test]
+    fn turn_barchart_slices_to_width_and_handles_zero_tokens() {
+        let palette = Palette::default();
+        let turns: Vec<ContextTurnGrowth> = (1..=6)
+            .map(|n| ContextTurnGrowth {
+                turn: n,
+                tokens: if n == 1 { 0 } else { n * 1_000 },
+            })
+            .collect();
+        // Width 17 fits 3 bars of width 5 with gap 1 (5 + 1 + 5 + 1 + 5 = 17).
+        let (lines, shown) = turn_barchart_lines(&turns, 17, palette);
+        assert_eq!(shown, 3);
+        assert_eq!(lines.len(), 6);
+        let text: String = lines
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!text.contains("T3"), "{text}");
+        assert!(text.contains("T4"), "{text}");
+        assert!(text.contains("T6"), "{text}");
+        assert!(text.contains("6.0k"), "{text}");
+
+        // Zero-only turns still render cleanly without panicking.
+        let (zero_lines, zero_shown) =
+            turn_barchart_lines(&[ContextTurnGrowth { turn: 1, tokens: 0 }], 20, palette);
+        assert_eq!(zero_shown, 1);
+        assert_eq!(zero_lines.len(), 6);
+    }
+
+    #[test]
+    fn turn_barchart_keeps_large_value_labels_within_bar_width() {
+        let palette = Palette::default();
+        let turns = vec![
+            ContextTurnGrowth {
+                turn: 1,
+                tokens: 120_000,
+            },
+            ContextTurnGrowth {
+                turn: 2,
+                tokens: 999_950,
+            },
+        ];
+        let (lines, shown) = turn_barchart_lines(&turns, 20, palette);
+        assert_eq!(shown, 2);
+        let text: String = lines
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("120k"), "{text}");
+        assert!(text.contains("1.0m"), "{text}");
     }
 }

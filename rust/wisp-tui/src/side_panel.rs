@@ -2621,6 +2621,72 @@ mod tests {
     }
 
     #[test]
+    fn context_section_renders_bar_sparkline_and_telemetry() {
+        let mut state = session();
+        state.context.budget.as_mut().unwrap().reserve_tokens = 20_000;
+        // Without turns, cache read, or run totals, only summary + segmented bar render.
+        let basic = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
+        assert!(basic.contains("198.8K · 73% context"), "{basic}");
+        assert!(basic.contains('━'), "{basic}");
+        assert!(basic.contains('┃'), "{basic}");
+        assert!(basic.contains('╍'), "{basic}");
+        assert!(!basic.contains("turns "), "{basic}");
+        assert!(!basic.contains("cache "), "{basic}");
+
+        // With turns, cache reads, and finished run duration, the 3-line layout appears.
+        let stats = state.context.stats.as_mut().unwrap();
+        stats.usage.input_tokens = 1_000;
+        stats.usage.cache_read_input_tokens = Some(740);
+        stats.context_breakdown = Some(ContextBreakdown {
+            sources: vec![ContextSourceUsage {
+                source: ContextSource::Messages,
+                tokens: 150_000,
+                count: Some(6),
+                children: Vec::new(),
+            }],
+            scaled: false,
+            turns: vec![
+                ContextTurnGrowth {
+                    turn: 1,
+                    tokens: 10_000,
+                },
+                ContextTurnGrowth {
+                    turn: 2,
+                    tokens: 25_000,
+                },
+                ContextTurnGrowth {
+                    turn: 3,
+                    tokens: 15_000,
+                },
+            ],
+            largest: Vec::new(),
+        });
+        state
+            .transcript
+            .attach_run_summary(crate::transcript::RunTotals::finished(1_400, 2));
+
+        let rich = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
+        assert!(rich.contains("turns "), "{rich}");
+        assert!(rich.contains("cache 74% · 1.4s"), "{rich}");
+
+        // Anthropic excludes cache tokens from `input_tokens`; cache % stays <= 100%.
+        state.provider = Some("anthropic".into());
+        let anthropic = state.context.stats.as_mut().unwrap();
+        anthropic.usage.input_tokens = 260;
+        anthropic.usage.cache_read_input_tokens = Some(740);
+        let anth_text = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
+        assert!(anth_text.contains("cache 74% · 1.4s"), "{anth_text}");
+
+        // Row 0 still holds focus and opens `/context` on Enter.
+        let mut panel = overlay(&state);
+        focus_section(&mut panel, &state, Section::Context);
+        assert_eq!(
+            panel.key(KeyCode::Enter, &state),
+            OverlayKey::Open(Target::Context)
+        );
+    }
+
+    #[test]
     fn inventory_summary_links_open_dialogs() {
         let state = reading_session();
         let text = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
