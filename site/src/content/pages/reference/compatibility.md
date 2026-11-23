@@ -116,6 +116,13 @@ with `write_constraint`, under the exception below. Tool behavior changes are li
 `bash` runs commands in bash rather than `/bin/sh`, and that the read-only file tools follow
 symbolic links whose targets stay inside the workspace.
 
+## Wisp 0.16.8 compatibility
+
+Use the `0.16.8` backend and TUI together. The Files sidebar uses the new optional directory and
+progressive modes of [project-file discovery](project-files.md). Existing SDK callers can still
+use `get_project_files` without those options. External RPC clients should use the schema bundle
+from their installed Wisp release. Existing saved sessions open without migration.
+
 ## Wisp 0.16.7 compatibility
 
 0.16.7 adds click-to-preview and edit-from-sidebar in `Files`, plus context usage and turn-growth

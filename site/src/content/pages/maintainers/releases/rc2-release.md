@@ -3,7 +3,7 @@ title: Wisp 0.2.0rc2 release decision and checklist
 description: Release decision, Rust-default trial checklist, and verification record for Wisp 0.2.0rc2.
 route: maintainers/releases/rc2-release.html
 section: maintainers
-order: 45
+order: 46
 layout: archive
 listed: false
 searchable: false

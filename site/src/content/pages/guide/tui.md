@@ -255,13 +255,12 @@ references. `Escape` dismisses the picker first without cancelling the run or ch
 `Tab` at a dismissed reference reopens it and refreshes discovery.
 
 Only reference text is inserted: `@"src/example file.py"` for paths requiring JSON quoting,
-otherwise `@src/main.rs`. Wisp does not inline file contents. Python supplies one bounded,
-protected-path-aware snapshot per opening (`protected_paths` secrets are never offered); typing and
-tree navigation use that snapshot locally. A policy change clears the old choices before refresh,
-and late responses cannot reopen a dismissed picker. A visible limit cue means paths were omitted
-rather than proving a folder is empty. Fuzzy results are capped at 30; matching is smart-case and
-deterministic. Queries over 4096 bytes must be shortened. Discovery failures preserve the draft;
-close and reopen to retry.
+otherwise `@src/main.rs`. Wisp does not inline file contents. The picker and the Files filter share
+a bounded background index that respects `protected_paths`. The picker updates matches locally
+as paths arrive and indicates when results are incomplete. A policy change clears the old choices
+before refresh, and late responses cannot reopen a dismissed picker. Fuzzy results are capped at
+30, with deterministic smart-case matching. Shorten queries over 4096 bytes. Discovery failures
+preserve the draft. Close and reopen the picker to retry.
 
 The file popup is painted over the transcript, capped at 100 columns and 12 rows. In short terminals
 it can cover the header or upper composer rows rather than rearranging the conversation. Approval
@@ -357,6 +356,10 @@ The `Files` tab shows files touched this session and a project tree with Git sta
 Design file and folder icons. Use a [Nerd Fonts](https://www.nerdfonts.com/) v3 Mono font in your
 terminal to display the icons correctly. Narrow rows omit icons when filenames or Git counts need
 the space.
+
+Expand a folder to load its contents. Press `r` to refresh the tree while keeping your selection
+and expanded folders. If a folder fails to load, select it and press `Enter` to retry. Press `/`
+for project-wide matches, including folders you have yet to expand.
 
 ## Themes and appearance
 
