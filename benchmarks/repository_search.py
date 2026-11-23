@@ -13,7 +13,7 @@ from typing import Literal
 
 import anyio
 
-from benchmarks.support import Measurement, environment, measure_async
+from benchmarks.support import Measurement, environment, measure_stable_tool
 from wisp.tools.context import ToolContext
 from wisp.tools.files.secure_fs import secure_tool_path
 from wisp.tools.result import ToolResult
@@ -120,21 +120,17 @@ async def run_benchmark_async(config: BenchmarkConfig | None = None) -> Benchmar
     )
     samples: list[BenchmarkSample] = []
     for name, tool, arguments in scenarios:
-        warmup = await tool.run(arguments, context)
-        if name == "grep_literal_miss" and _result_count(warmup) != 0:
-            raise RuntimeError("literal-miss workload unexpectedly found a match")
-        result, measurement = await measure_async(
-            partial(tool.run, arguments, context), iterations=selected.iterations
+        result, count, measurement = await measure_stable_tool(
+            partial(tool.run, arguments, context),
+            scenario=name,
+            iterations=selected.iterations,
+            result_count=_result_count,
+            expected_count=0 if name == "grep_literal_miss" else None,
         )
-        if (_result_count(result), result.truncated) != (
-            _result_count(warmup),
-            warmup.truncated,
-        ):
-            raise RuntimeError(f"search results changed during {name}")
         samples.append(
             BenchmarkSample(
                 scenario=name,
-                result_count=_result_count(result),
+                result_count=count,
                 truncated=result.truncated,
                 output_bytes=len(result.text.encode("utf-8")),
                 measurement=measurement,

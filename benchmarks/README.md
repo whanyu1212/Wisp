@@ -200,8 +200,8 @@ comparison results and the integration boundary are recorded in
 
 ## Built-in Tools
 
-To compare search changes on an existing checkout, run the public direct `find` and
-`grep` paths on the same project root before and after the change:
+Use `repository_search` for a Python-only comparison of the public `find` and `grep`
+paths. Run it on the same checkout before and after a search change:
 
 ```bash
 uv run python -m benchmarks.repository_search --root . --iterations 3 \
@@ -219,10 +219,11 @@ ignore, and symlink rules apply. The report records the observed Python-file cou
 at 10,001), result counts and truncation, and wall/CPU time per iteration. It contains no
 matched source text. `--common-token` (default `def `) and `--max-results` (default 100)
 select the capped literal-grep workload; keep these and the output bounds identical between
-runs. Warmup and file discovery are outside the measured intervals.
+runs. Warmup and file discovery are outside the measured intervals. The literal miss
+uses NUL, which the search tools exclude from searchable text.
 
-Measure deterministic read, directory listing, find, and grep workloads through both the public
-`tool.run` interface and `ConfiguredToolExecutor`:
+Use `builtin_tools` for deterministic read, directory listing, find, and grep workloads,
+or to compare the public `tool.run` interface with `ConfiguredToolExecutor`:
 
 ```bash
 uv run python -m benchmarks.builtin_tools
@@ -236,9 +237,9 @@ cases compare a first page with a page near end-of-file; `ls` and `find` retain 
 grep covers full-tree literal, regular-expression, and case-insensitive misses plus result-capped
 literal and regular-expression searches.
 Use `--grep-backend python|native` for a controlled scanner comparison when the native extension is
-installed. All files live in a temporary directory. Every direct result is checked against the
-fixture; executor samples also reject tool errors and unexpected truncation before they are
-reported.
+installed. Synthetic files live in a temporary directory. Every direct result is checked against
+the fixture. Both runners verify that the final direct result count and truncation match the warmup.
+Executor samples also reject tool errors and unexpected truncation before they are reported.
 
 The executor layer includes registry lookup, policy, approval bypass for pre-approved read tools,
 result copying, normalization, promotion, summary generation, and construction of the terminal
@@ -253,8 +254,9 @@ uv run python -m benchmarks.builtin_tools --root src --iterations 5 \
   --output profiles/builtin-tools-src-python.json
 ```
 
-- `--root DIR` searches an existing tree inside the working directory instead of synthetic
-  fixtures, with the default protected paths. Only misses have an oracle (zero matches).
+- `--root DIR` searches an existing tree inside the working directory with the default protected
+  paths. It measures a read page when a UTF-8 file is available, `find` over Python files, and
+  `grep` over the whole searchable tree. Misses must return zero matches.
 - `--batch-size N` runs each scenario as one model tool batch of N identical calls through the
   production `ToolBatch` scheduler twice: `batch` with the runtime's parallel-safe metadata, and
   `batch.serial` with it removed so the same scheduler runs the calls one at a time. Their ratio

@@ -93,12 +93,10 @@ def test_default_prompt_asks_for_action_oriented_workflow(tmp_path: Path) -> Non
     messages = build_prompt_messages(cwd=tmp_path)
 
     prompt = " ".join(messages[0].content.split())
-    assert "perform the work rather than merely describing what could be done" in prompt
-    assert "Continue until the task is complete or a concrete blocker" in prompt
-    assert (
-        "When the user approves a proposed plan, design, or mockup" in prompt
-        and "start implementing the agreed work in the same turn" in prompt
-    )
+    assert "inspection, explanation, comparison, review, or plan" in prompt
+    assert "Approval to implement a proposed plan is enough to start" in prompt
+    assert "complete that step within its stated scope" in prompt
+    assert "Follow the user's latest correction or pause" in prompt
     assert (
         "implementation, relevant callers, tests, configuration, and nearby conventions" in prompt
     )
@@ -150,8 +148,17 @@ def test_default_prompt_asks_for_evidence_backed_verification(
     assert "A successful status query is not proof that its reported checks passed" in prompt
     assert "Pending checks are not passes" in prompt
     assert "A timeout or interrupted command is inconclusive, never a pass" in prompt
-    assert "checks that passed, failed, timed out, or were not run" in prompt
-    assert "remaining blockers, assumptions, or uncertainty" in prompt
+    assert (
+        "each replacement is a fragment of one line copied from a current read "
+        "and those edits are the only writes" in prompt
+    )
+    assert (
+        "Inspect separately for whole-line or multiline replacements, formatting changes, "
+        "or possible outside writes" in prompt
+    )
+    assert "Verify behavior changes and run every required check" in prompt
+    assert "checks passed, failed, timed out, or were not run" in prompt
+    assert "decisions, assumptions, blockers, and verification limits" in prompt
     assert "Do not claim completion while required work remains" in prompt
 
 
@@ -219,6 +226,8 @@ def test_prompt_orders_guidance_before_boundary_and_mode(
     assert "runtime-enforced tool restrictions and approvals" in messages[-2].content
     assert "Identify the files inspected" in messages[-1].content
     assert "distinguish confirmed" in messages[-1].content
+    assert messages[-1].turn_scoped_instructions
+    assert all(not message.turn_scoped_instructions for message in messages[:-1])
 
 
 def test_project_context_reports_no_allowed_tools(tmp_path: Path) -> None:

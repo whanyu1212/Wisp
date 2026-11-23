@@ -36,6 +36,8 @@ def _run(
         "timed_out": False,
         "seconds": 10.0,
         "turns": 3,
+        "model_requests": None,
+        "tool_rounds": None,
         "tool_calls": {"read": calls},
         "tool_errors": {},
         "reruns": 0,
@@ -70,6 +72,8 @@ def _run(
         "scenario_steps_completed": None,
         "scenario_steps_expected": None,
         "project_guidance_sha256": None,
+        "project_guidance_transport": None,
+        "core_prompt_sha256": None,
     }
 
 
@@ -171,10 +175,42 @@ def test_uncounted_cache_writes_marked() -> None:
     assert not compare_runs([older], [older]).pairs[0].cache_writes_uncounted
 
 
+def test_compares_rounds_per_pass() -> None:
+    before = [
+        _run("a", 4) | {"model_requests": 5, "tool_rounds": 4},
+        _run("a", 4, status="failed", rep=2) | {"model_requests": 2, "tool_rounds": 1},
+        _run("a", 4, status="errored", rep=3),
+    ]
+    after = [_run("a", 4) | {"model_requests": 1, "tool_rounds": 0}]
+
+    table = render_comparison(compare_runs(before, after))
+
+    assert "Model requests / pass | Tool rounds / pass" in table
+    assert "| 7.0 → 1.0 (-6.0) | 5.0 → 0.0 (-5.0) |" in table
+
+
+@pytest.mark.parametrize("missing", [None, "omitted", "failed"])
+def test_marks_undefined_round_rates(missing: str | None) -> None:
+    current = _run("a", 4) | {"model_requests": 3, "tool_rounds": 2}
+    if missing == "failed":
+        before = [current | {"status": "failed"}]
+    else:
+        partial = _run("a", 4, rep=2)
+        if missing == "omitted":
+            del partial["model_requests"], partial["tool_rounds"]
+        before = [current, partial]
+
+    table = render_comparison(compare_runs(before, [current]))
+
+    assert "| — → 3.0 | — → 2.0 |" in table
+
+
 @pytest.mark.parametrize("guidance_hash", [None, "a" * 64])
 def test_baseline_keeps_listed_fields(tmp_path: Path, guidance_hash: str | None) -> None:
     row = _run("a", 4)
     row["project_guidance_sha256"] = guidance_hash
+    row.update(project_guidance_transport="prompt", core_prompt_sha256="b" * 64)
+    row.update(model_requests=5, tool_rounds=4)
     document = baseline_document(
         [row],
         label="current-tools",
@@ -183,6 +219,8 @@ def test_baseline_keeps_listed_fields(tmp_path: Path, guidance_hash: str | None)
             "reps": 3,
             "credential_sources": {"openai": "environment"},
             "project_guidance_sha256": guidance_hash,
+            "project_guidance_transport": "prompt",
+            "core_prompt_sha256": "b" * 64,
         },
     )
     path = tmp_path / "baselines" / "2026-11-08-current-tools.json"
@@ -192,9 +230,13 @@ def test_baseline_keeps_listed_fields(tmp_path: Path, guidance_hash: str | None)
     (run,) = load_rows(path)
     assert tuple(sorted(run)) == tuple(sorted(BASELINE_FIELDS))
     assert run["project_guidance_sha256"] == guidance_hash
+    assert (run["project_guidance_transport"], run["core_prompt_sha256"]) == ("prompt", "b" * 64)
+    assert (run["model_requests"], run["tool_rounds"]) == (5, 4)
     assert json.loads(path.read_text(encoding="utf-8"))["suite"] == {
         "reps": 3,
         "project_guidance_sha256": guidance_hash,
+        "project_guidance_transport": "prompt",
+        "core_prompt_sha256": "b" * 64,
     }
     with pytest.raises(FileExistsError):
         write_baseline(path, document)

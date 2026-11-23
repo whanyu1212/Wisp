@@ -21,7 +21,14 @@ from statistics import fmean, median, variance
 
 from typing_extensions import TypeAliasType
 
-from evals.tool_use.report import count_sum, token_split
+from evals.tool_use.report import (
+    ROUND_RATE_COLUMNS,
+    ROUND_RATE_LEGEND,
+    RoundRates,
+    count_sum,
+    round_rates,
+    token_split,
+)
 
 # The fields a baseline keeps from each run, and from the suite's settings.
 # Folders, error text and credential sources stay out of the repository.
@@ -34,6 +41,8 @@ BASELINE_FIELDS = (
     "timed_out",
     "seconds",
     "turns",
+    "model_requests",
+    "tool_rounds",
     "tool_calls",
     "tool_errors",
     "reruns",
@@ -65,6 +74,8 @@ BASELINE_FIELDS = (
     "scenario_steps_completed",
     "scenario_steps_expected",
     "project_guidance_sha256",
+    "project_guidance_transport",
+    "core_prompt_sha256",
 )
 SUITE_FIELDS = (
     "models",
@@ -81,6 +92,8 @@ SUITE_FIELDS = (
     "mcp_results",
     "effort",
     "project_guidance_sha256",
+    "project_guidance_transport",
+    "core_prompt_sha256",
 )
 
 # Two-sided 95% critical values of Student's t for 1 to 30 degrees of freedom.
@@ -176,6 +189,10 @@ class PairComparison:
         cache_writes_uncounted (bool): Whether one side was recorded before cache
             writes were counted while the other side has some, so that side's
             tokens are too low and the tokens change is overstated.
+        rounds_before (RoundRates): Completed model requests and tool rounds per
+            pass before.
+        rounds_after (RoundRates): Completed model requests and tool rounds per
+            pass after.
     """
 
     task: str
@@ -186,6 +203,8 @@ class PairComparison:
     changes: tuple[MetricChange, ...]
     tools_differ: bool
     cache_writes_uncounted: bool
+    rounds_before: RoundRates = RoundRates()
+    rounds_after: RoundRates = RoundRates()
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,12 +254,13 @@ def compare_runs(before: Sequence[Row], after: Sequence[Row]) -> Comparison:
     pairs: list[PairComparison] = []
     for key in sorted(scored_before & scored_after):
         old, new = _scored(earlier[key]), _scored(later[key])
+        old_passed, new_passed = _passed(old), _passed(new)
         pairs.append(
             PairComparison(
                 task=key[0],
                 model=key[1],
-                passed_before=(_passed(old), len(old)),
-                passed_after=(_passed(new), len(new)),
+                passed_before=(old_passed, len(old)),
+                passed_after=(new_passed, len(new)),
                 errored=(len(earlier[key]) - len(old), len(later[key]) - len(new)),
                 changes=tuple(
                     _change(
@@ -252,6 +272,8 @@ def compare_runs(before: Sequence[Row], after: Sequence[Row]) -> Comparison:
                 ),
                 tools_differ=_tool_sets(old) != _tool_sets(new),
                 cache_writes_uncounted=_cache_writes_uncounted(old, new),
+                rounds_before=round_rates(old, passed=old_passed),
+                rounds_after=round_rates(new, passed=new_passed),
             )
         )
     return Comparison(
@@ -266,17 +288,28 @@ def compare_runs(before: Sequence[Row], after: Sequence[Row]) -> Comparison:
 def render_comparison(comparison: Comparison) -> str:
     """Render a comparison as Markdown; changes beyond noise are marked `*`."""
 
+    show_rounds = any(
+        pair.rounds_before.recorded or pair.rounds_after.recorded for pair in comparison.pairs
+    )
     lines = [
         "| Task | Model | Passed | "
         + " | ".join(f"{metric.name} (95% interval)" for metric in METRICS)
-        + " |",
-        "|---|---|---|" + "---|" * len(METRICS),
+        + " |"
+        + (ROUND_RATE_COLUMNS if show_rounds else ""),
+        "|---|---|---|" + "---|" * (len(METRICS) + (2 if show_rounds else 0)),
     ]
     for pair in comparison.pairs:
         cells = [
             _change_cell(change, metric.digits)
             for change, metric in zip(pair.changes, METRICS, strict=True)
         ]
+        if show_rounds:
+            cells += [
+                _round_rate_cell(
+                    pair.rounds_before.model_requests, pair.rounds_after.model_requests
+                ),
+                _round_rate_cell(pair.rounds_before.tool_rounds, pair.rounds_after.tool_rounds),
+            ]
         task = pair.task
         if pair.tools_differ:
             task += " (tools differ)"
@@ -300,6 +333,8 @@ def render_comparison(comparison: Comparison) -> str:
             f"Noise floor at these run counts (median interval half-width over the earlier "
             f"mean): {floors}. Read smaller changes as no change."
         )
+    if show_rounds:
+        lines += ["", ROUND_RATE_LEGEND]
     for title, entries in (
         ("Scored only before:", comparison.only_before),
         ("Scored only after:", comparison.only_after),
@@ -452,3 +487,12 @@ def _change_cell(change: MetricChange, digits: int) -> str:
     low, high = change.interval
     marker = " *" if change.beyond_noise else ""
     return f"{moved}; {low:+{f}} to {high:+{f}}){marker}"
+
+
+def _round_rate_cell(before: float | None, after: float | None) -> str:
+    earlier = "—" if before is None else f"{before:,.1f}"
+    later = "—" if after is None else f"{after:,.1f}"
+    cell = f"{earlier} → {later}"
+    if before is not None and after is not None:
+        cell += f" ({after - before:+,.1f})"
+    return cell

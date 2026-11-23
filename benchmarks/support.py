@@ -7,9 +7,10 @@ import time
 import tracemalloc
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
-T = TypeVar("T")
+if TYPE_CHECKING:
+    from wisp.tools.result import ToolResult
 
 T = TypeVar("T")
 
@@ -89,6 +90,32 @@ async def measure_async(
     return result, _measurement(iterations, wall_ns, cpu_ns, peak_memory)
 
 
+async def measure_stable_tool(
+    operation: Callable[[], Awaitable[ToolResult]],
+    *,
+    scenario: str,
+    iterations: int,
+    result_count: Callable[[ToolResult], int],
+    expected_count: int | None = None,
+    track_memory: bool = False,
+) -> tuple[ToolResult, int, Measurement]:
+    """Warm up a direct tool call, then compare the final result with warmup."""
+
+    warmup = await operation()
+    warmup_count = result_count(warmup)
+    if expected_count is not None and warmup_count != expected_count:
+        raise RuntimeError(
+            f"unexpected result count for {scenario}: {warmup_count} != {expected_count}"
+        )
+    result, measurement = await measure_async(
+        operation, iterations=iterations, track_memory=track_memory
+    )
+    count = result_count(result)
+    if (count, result.truncated) != (warmup_count, warmup.truncated):
+        raise RuntimeError(f"tool results changed during {scenario}")
+    return result, count, measurement
+
+
 def _measurement(
     iterations: int,
     wall_ns: int,
@@ -107,4 +134,4 @@ def _measurement(
     )
 
 
-__all__ = ["Measurement", "environment", "measure", "measure_async"]
+__all__ = ["Measurement", "environment", "measure", "measure_async", "measure_stable_tool"]

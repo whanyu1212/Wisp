@@ -207,6 +207,105 @@ def test_openai_codex_provider_appends_user_messages_in_fresh_request(tmp_path: 
     ]
 
 
+@pytest.mark.parametrize(
+    ("model", "prefix", "instructions"),
+    [
+        (
+            "gpt-6.2-sol",
+            [{"role": "developer", "content": "Core policy\n\nProject guidance"}],
+            "Plan mode\n\nLater guidance",
+        ),
+        ("gpt-6.1-sol", [], "Core policy\n\nProject guidance\n\nPlan mode\n\nLater guidance"),
+    ],
+)
+def test_codex_instruction_placement(
+    tmp_path: Path, model: str, prefix: list[dict[str, str]], instructions: str
+) -> None:
+    provider = StubOpenAICodexProvider(
+        [completed_event("response-id")],
+        auth_resolver=StoredProviderAuthResolver(store_with_oauth(tmp_path)),
+    )
+    messages = [
+        Message(role="system", content="Core policy"),
+        Message(role="system", content="Project guidance"),
+        Message(role="system", content="Plan mode", turn_scoped_instructions=True),
+        Message(role="user", content="Inspect the code"),
+        Message(role="system", content="Later guidance"),
+    ]
+
+    async def run() -> None:
+        async for _event in provider.stream(messages, model=model):
+            pass
+
+    anyio.run(run)
+
+    assert provider.seen_body is not None
+    assert provider.seen_body["input"] == [*prefix, {"role": "user", "content": "Inspect the code"}]
+    assert provider.seen_body["instructions"] == instructions
+
+
+def test_codex_keeps_prefix_on_continuation(tmp_path: Path) -> None:
+    provider = StubOpenAICodexProvider(
+        [completed_event("first-response")],
+        auth_resolver=StoredProviderAuthResolver(store_with_oauth(tmp_path)),
+    )
+    messages = [
+        Message(role="system", content="Core policy"),
+        Message(role="user", content="Inspect the code"),
+    ]
+
+    async def run() -> None:
+        async for _event in provider.stream(messages, model="gpt-6.2-astra"):
+            pass
+        provider.events = [completed_event("second-response")]
+        async for _event in provider.stream(
+            messages,
+            model="gpt-6.2-astra",
+            previous_response_id="first-response",
+            extra_messages=[Message(role="user", content="Focus on tests")],
+        ):
+            pass
+
+    anyio.run(run)
+
+    first, second = provider.seen_bodies
+    assert first["input"] == [
+        {"role": "developer", "content": "Core policy"},
+        {"role": "user", "content": "Inspect the code"},
+    ]
+    assert second["input"] == [
+        {"role": "developer", "content": "Core policy"},
+        {"role": "user", "content": "Inspect the code"},
+        {"role": "user", "content": "Focus on tests"},
+    ]
+    assert all("instructions" not in body for body in (first, second))
+
+
+def test_codex_only_caches_leading_instructions(tmp_path: Path) -> None:
+    provider = StubOpenAICodexProvider(
+        [completed_event("response-id")],
+        auth_resolver=StoredProviderAuthResolver(store_with_oauth(tmp_path)),
+    )
+    messages = [
+        Message(role="system", content="Core policy"),
+        Message(role="user", content="Inspect the code"),
+        Message(role="system", content="Later guidance"),
+    ]
+
+    async def run() -> None:
+        async for _event in provider.stream(messages, model="gpt-6.2-sol"):
+            pass
+
+    anyio.run(run)
+
+    assert provider.seen_body is not None
+    assert provider.seen_body["input"] == [
+        {"role": "developer", "content": "Core policy"},
+        {"role": "user", "content": "Inspect the code"},
+    ]
+    assert provider.seen_body["instructions"] == "Later guidance"
+
+
 def test_openai_codex_provider_serializes_tools_and_tool_results(tmp_path: Path) -> None:
     store = store_with_oauth(tmp_path)
     provider = StubOpenAICodexProvider(

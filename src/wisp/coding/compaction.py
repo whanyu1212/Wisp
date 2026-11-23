@@ -428,6 +428,7 @@ def _compaction_prompt_messages(*, instructions: str | None) -> tuple[Message, .
             Message(
                 role="system",
                 content=f"## Additional focus\n{instructions.strip()}",
+                turn_scoped_instructions=True,
             )
         )
     return tuple(messages)

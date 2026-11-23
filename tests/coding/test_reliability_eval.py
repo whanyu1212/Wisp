@@ -218,7 +218,7 @@ def test_workflow_handles_branch_timeout_and_completion(
     system_prompt = " ".join(provider.calls[0].messages[0].content.split())
     assert "fetch the relevant remote and compare refs" in system_prompt
     assert "A timeout or interrupted command is inconclusive, never a pass" in system_prompt
-    assert "remaining blockers, assumptions, or uncertainty" in system_prompt
+    assert "decisions, assumptions, blockers, and verification limits" in system_prompt
     assert provider.calls[0].messages[-1].content == _USER_PROMPT
     assert provider.calls[0].tools == (_BASH_TOOL,)
     assert executor.calls == list(tool_calls)

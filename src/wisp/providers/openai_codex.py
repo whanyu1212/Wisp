@@ -510,20 +510,20 @@ def _codex_request_body(
     web_search: bool = False,
     native_output: _NativeOutputLookup | None = None,
 ) -> dict[str, object]:
+    cached_instructions, instructions = _codex_instructions(messages, model=model)
+    input_items = _messages_to_codex_input(messages, native_output=native_output)
+    if cached_instructions is not None:
+        input_items.insert(0, {"role": "developer", "content": cached_instructions})
     body: dict[str, object] = {
         "model": model,
         "store": False,
         "stream": True,
-        "input": [
-            *_messages_to_codex_input(messages, native_output=native_output),
-            *continuation_input,
-        ],
+        "input": [*input_items, *continuation_input],
         "text": {"verbosity": "medium"},
         "include": ["reasoning.encrypted_content"],
         "tool_choice": "auto",
         "parallel_tool_calls": True,
     }
-    instructions = _instructions_from_messages(messages)
     if instructions:
         body["instructions"] = instructions
     codex_tools: list[dict[str, object]] = [_tool_spec_to_codex_tool(tool) for tool in tools]
@@ -722,11 +722,34 @@ def _web_search_from_codex(item: Mapping[str, object]) -> ProviderWebSearch:
     )
 
 
-def _instructions_from_messages(messages: Sequence[Message]) -> str | None:
-    instructions = [
-        message.content for message in messages if message.role in {"system", "developer"}
-    ]
-    return "\n\n".join(instructions) or None
+def _codex_instructions(
+    messages: Sequence[Message], *, model: str
+) -> tuple[str | None, str | None]:
+    """Return the stable input prefix and the per-request instructions.
+
+    GPT-6.2 places top-level instructions after the cacheable input. Move only
+    the leading, stable instructions into input. Keep the remaining guidance in
+    its original order so a mode change can update it without rewriting history.
+
+    Args:
+        messages (Sequence[Message]): The instructions and conversation to encode.
+        model (str): The resolved Codex model name.
+
+    Returns:
+        tuple[str | None, str | None]: The developer prefix and top-level text.
+    """
+
+    in_prefix = model == "gpt-6.2" or model.startswith("gpt-6.2-")
+    prefix: list[str] = []
+    suffix: list[str] = []
+    for message in messages:
+        if message.role not in {"system", "developer"}:
+            in_prefix = False
+            continue
+        if message.turn_scoped_instructions:
+            in_prefix = False
+        (prefix if in_prefix else suffix).append(message.content)
+    return "\n\n".join(prefix) or None, "\n\n".join(suffix) or None
 
 
 def _messages_to_codex_input(

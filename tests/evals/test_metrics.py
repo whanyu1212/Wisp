@@ -22,6 +22,7 @@ from wisp.events import (
     ProviderRetrying,
     RunSetup,
     TokenUsage,
+    ToolCallSnapshot,
     ToolExecutionEnded,
     ToolExecutionStarted,
     ToolNestedCallStarted,
@@ -113,6 +114,29 @@ def test_measures_run() -> None:
     assert (metrics.input_tokens, metrics.output_tokens, metrics.cache_read_tokens) == (150, 20, 10)
     assert (metrics.known_usd, metrics.unpriced_responses) == (Decimal("0.25"), 1)
     assert (metrics.retries, metrics.last_error) == (1, "last")
+
+
+def test_counts_completed_model_rounds() -> None:
+    calls = tuple(ToolCallSnapshot(call_id=name, name="bash", arguments={}) for name in ("1", "2"))
+    events: list[WispEvent] = [
+        AgentStarted(session_id="a"),
+        MessageCompleted(turn=1, content="", finish_reason="tool_calls", tool_calls=calls),
+        _bash("1", "true"),
+        _bash("2", "true"),
+        ToolNestedCallStarted(parent_call_id="1", call_id="nested", name="read"),
+        MessageCompleted(turn=2, content="", finish_reason="stop"),
+        AgentCompleted(session_id="a", turns=2, outcome="completed"),
+        AgentStarted(session_id="a"),
+        MessageCompleted(turn=1, content="", finish_reason="stop", role="user"),
+        MessageCompleted(turn=1, content="partial", finish_reason="error"),
+        MessageCompleted(turn=2, content="partial", finish_reason="cancelled"),
+        MessageCompleted(turn=3, content="truncated", finish_reason="length"),
+        AgentCompleted(session_id="a", turns=3, outcome="completed"),
+    ]
+
+    metrics = measure(parse_events(_lines(events)))
+
+    assert (metrics.model_requests, metrics.tool_rounds) == (3, 1)
 
 
 def test_unended_run_has_no_outcome() -> None:

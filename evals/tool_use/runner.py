@@ -35,6 +35,7 @@ from evals.tool_use.scenario import ScenarioResult
 from evals.tool_use.scenario_driver import ScenarioConfig
 from evals.tool_use.servers.catalogs import CATALOGS
 from evals.tool_use.task_definitions import Task, TaskChecks
+from wisp.coding.prompt.instructions import DEFAULT_SYSTEM_PROMPT
 from wisp.events import AgentCompleted, CodemodePresentation
 from wisp.mcp.config import McpToolExposure
 from wisp.mcp.discovery import DISCOVERY_TOOL_NAMES
@@ -166,8 +167,8 @@ class RunContext:
         mcp_results (McpResults): Whether the synthetic MCP servers' task tools
             return only text (`text`) or their structured result too (`structured`).
         effort (str | None): Explicit provider effort; None keeps the provider default.
-        project_guidance (str | None): Experimental instructions appended to the isolated
-            fixture's root AGENTS.md, never to the checkout or user settings.
+        project_guidance (str | None): Experimental guidance added to the trusted project prompt.
+        core_prompt (str | None): Replacement for the built-in core instructions in this eval.
     """
 
     build: Build
@@ -180,6 +181,7 @@ class RunContext:
     mcp_results: McpResults = "text"
     effort: str | None = None
     project_guidance: str | None = None
+    core_prompt: str | None = None
 
     @property
     def project_guidance_sha256(self) -> str | None:
@@ -189,6 +191,19 @@ class RunContext:
             if self.project_guidance is not None
             else None
         )
+
+    @property
+    def project_guidance_transport(self) -> Literal["prompt"] | None:
+        """Identify guidance injected by the evaluator's prompt launcher."""
+
+        return "prompt" if self.project_guidance is not None else None
+
+    @property
+    def core_prompt_sha256(self) -> str:
+        """Fingerprint the exact built-in or experimental core prompt."""
+
+        prompt = DEFAULT_SYSTEM_PROMPT if self.core_prompt is None else self.core_prompt
+        return hashlib.sha256(prompt.encode()).hexdigest()
 
 
 @dataclass(slots=True)
@@ -249,6 +264,10 @@ class RunRow:
     scenario_steps_completed: int | None = None
     scenario_steps_expected: int | None = None
     project_guidance_sha256: str | None = None
+    project_guidance_transport: Literal["prompt"] | None = None
+    core_prompt_sha256: str | None = None
+    model_requests: int | None = None
+    tool_rounds: int | None = None
 
 
 @dataclass(slots=True)
@@ -413,13 +432,6 @@ def run_one(task: Task, model: ModelSpec, rep: int, context: RunContext) -> RunR
         home = Path(scratch) / "home"
         home.mkdir()
         shutil.copytree(task.fixture, work)
-        if context.project_guidance is not None:
-            instructions = work / "AGENTS.md"
-            original = instructions.read_text(encoding="utf-8") if instructions.exists() else ""
-            instructions.write_text(
-                original + ("\n\n" if original else "") + context.project_guidance,
-                encoding="utf-8",
-            )
         commands = command_environment(home, os.environ)
         setup_error = _prepare(task, work, run_dir, commands, context.python)
         if setup_error is not None:
@@ -427,7 +439,8 @@ def run_one(task: Task, model: ModelSpec, rep: int, context: RunContext) -> RunR
                 task, model, rep, context, run_dir, started, status="errored", error=setup_error
             )
         exit_code, runner_error = _run_wisp(task, model, work, home, run_dir, context)
-        events_text = (run_dir / "events.jsonl").read_text(encoding="utf-8")
+        events_path = run_dir / "events.jsonl"
+        events_text = events_path.read_text(encoding="utf-8")
         try:
             events = parse_events(events_text.splitlines())
             metrics = measure(events)
@@ -469,7 +482,7 @@ def run_one(task: Task, model: ModelSpec, rep: int, context: RunContext) -> RunR
         verify_exit = run_task_command(
             task.definition.verify,
             work,
-            commands,
+            {**commands, "WISP_EVAL_EVENTS": str(events_path.resolve())},
             context.python,
             task.folder,
             run_dir / "verify.txt",
@@ -685,6 +698,16 @@ def _run_wisp(
     environment = run_environment(home, context.credentials, os.environ)
     if context.effort is not None:
         environment["WISP_EFFORT"] = context.effort
+    if context.project_guidance is not None or context.core_prompt is not None:
+        prompt_file = home / "prompt-overrides.json"
+        prompt_file.write_text(
+            json.dumps(
+                {"project_guidance": context.project_guidance, "core_prompt": context.core_prompt}
+            ),
+            encoding="utf-8",
+        )
+        launcher = Path(__file__).with_name("_prompt_cli.py")
+        command[:0] = [context.python, str(launcher), str(prompt_file)]
     if definition.scenario is not None:
         config_path = (run_dir / "scenario-config.json").resolve()
         config = ScenarioConfig(
@@ -891,6 +914,10 @@ def _row(
         mcp_results=context.mcp_results,
         effort=context.effort,
         project_guidance_sha256=context.project_guidance_sha256,
+        project_guidance_transport=context.project_guidance_transport,
+        core_prompt_sha256=context.core_prompt_sha256,
+        model_requests=metrics.model_requests if metrics is not None else None,
+        tool_rounds=metrics.tool_rounds if metrics is not None else None,
         task_sha256=hashlib.sha256((task.folder / "task.toml").read_bytes()).hexdigest(),
         fixture_sha256=_directory_digest(task.fixture),
         catalog_sha256=(

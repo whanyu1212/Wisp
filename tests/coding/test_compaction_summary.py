@@ -133,6 +133,7 @@ def test_summary_request_has_no_tools_and_captures_usage() -> None:
     assert request.messages[1].role == "system"
     assert request.messages[1].content == "## Additional focus\nFocus on tests"
     assert request.messages[1].prompt_cache_boundary is False
+    assert request.messages[1].turn_scoped_instructions is True
     assert request.messages[2].role == "user"
     assert "<historical_transcript>" in request.messages[2].content
 
