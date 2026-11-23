@@ -96,6 +96,42 @@ def test_differing_tools_warned() -> None:
     assert build_report(rows).warnings == ["a with openai::m: runs offered 2 different tool sets"]
 
 
+def test_round_rates_include_failures() -> None:
+    rows = [
+        _row("a", "passed", rep=1) | {"model_requests": 3, "tool_rounds": 2},
+        _row("a", "passed", rep=2) | {"model_requests": 1, "tool_rounds": 0},
+        _row("a", "errored", rep=3) | {"model_requests": 40, "tool_rounds": 30},
+        _row("a", "errored", rep=4),
+        _row("b", "failed", rep=1) | {"model_requests": 5, "tool_rounds": 4},
+    ]
+
+    table = render_markdown(build_report(rows))
+
+    assert table.count("Model requests / pass | Tool rounds / pass") == 2
+    task_a, task_b = [line for line in table.splitlines() if line.startswith(("| a |", "| b |"))]
+    assert task_a.endswith("| 2.0 | 1.0 |")
+    assert task_b.endswith("| — | — |")
+    assert next(line for line in table.splitlines() if line.startswith("| openai::m |")).endswith(
+        "| 4.5 | 3.0 |"
+    )
+
+
+def test_round_rates_require_coverage() -> None:
+    legacy = _row("a", "passed", rep=1)
+    measured = _row("a", "passed", rep=2) | {"model_requests": 1, "tool_rounds": 0}
+    missing = _row("b", "passed", rep=1) | {"model_requests": None, "tool_rounds": None}
+
+    table = render_markdown(build_report([legacy, measured, missing]))
+
+    assert "Model requests / pass" in table
+    rate_rows = [
+        line for line in table.splitlines() if line.startswith(("| a |", "| b |", "| openai::m |"))
+    ]
+    assert len(rate_rows) == 3
+    assert all(line.endswith("| — | — |") for line in rate_rows)
+    assert "Model requests / pass" not in render_markdown(build_report([legacy, missing]))
+
+
 def test_reports_proxied_calls() -> None:
     rows = [_row("a", "passed", rep=1), _row("a", "passed", rep=2)]
     rows[0].update(proxied_calls=4, proxied_errors=1)

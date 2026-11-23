@@ -37,6 +37,13 @@ LIST_PRICE_PROVIDERS: Mapping[str, str] = {"openai-codex": "openai"}
 # into the parts it bills, which is what counting tokens alike needs.
 _billable_parts = CostEstimator(None)
 
+ROUND_RATE_COLUMNS = " Model requests / pass | Tool rounds / pass |"
+ROUND_RATE_LEGEND = (
+    "Round rates divide the completed model requests or tool rounds across all scored "
+    "runs by the number of passes. A tool round is a request that returned tool calls. "
+    "A rate is undefined (—) if there were no passes or any scored run lacks the count."
+)
+
 
 @dataclass(frozen=True, slots=True)
 class TokenSplit:
@@ -56,6 +63,21 @@ class TokenSplit:
     @property
     def total(self) -> int:
         return self.input + self.output
+
+
+@dataclass(frozen=True, slots=True)
+class RoundRates:
+    """Work per pass, with coverage across the scored runs.
+
+    Attributes:
+        model_requests (float | None): Completed model requests per pass.
+        tool_rounds (float | None): Requests that returned tool calls per pass.
+        recorded (bool): Whether any scored run recorded either count.
+    """
+
+    model_requests: float | None = None
+    tool_rounds: float | None = None
+    recorded: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +102,7 @@ class TaskScore:
         known_usd (Decimal): Cost of the runs that had a price when they ran.
         estimated_usd (Decimal | None): `estimated_usd` summed over the runs that
             had none, or None when no run has an estimate.
+        rounds (RoundRates): Model requests and tool rounds per pass.
     """
 
     task: str
@@ -97,6 +120,7 @@ class TaskScore:
     mean_output_tokens: float | None
     known_usd: Decimal
     estimated_usd: Decimal | None
+    rounds: RoundRates = RoundRates()
 
     @property
     def mean_tokens(self) -> float | None:
@@ -114,6 +138,7 @@ class ModelScore:
     The 95% interval on pass^1 resamples tasks, so it reflects how much the
     result depends on which tasks happened to be in the suite. Mean calls and
     tokens weigh each task equally; compare them only across the same tasks.
+    Round rates divide total work by total passes across the model's runs.
     """
 
     model: str
@@ -123,6 +148,7 @@ class ModelScore:
     high: float | None
     mean_calls: float | None
     mean_tokens: float | None
+    rounds: RoundRates = RoundRates()
 
 
 @dataclass(slots=True)
@@ -294,8 +320,12 @@ def build_report(
     models = models or ModelRegistry(builtin_catalog())
     report = Report(k=k)
     groups: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
+    model_runs: dict[str, list[dict[str, object]]] = defaultdict(list)
     for row in rows:
-        groups[(str(row["task"]), f"{row['provider']}::{row['model']}")].append(row)
+        model = f"{row['provider']}::{row['model']}"
+        groups[(str(row["task"]), model)].append(row)
+        if row["status"] != "errored":
+            model_runs[model].append(row)
     for (task, model), runs in sorted(groups.items()):
         report.task_scores.append(_score_task(task, model, runs, k, models))
     rng = random.Random(seed)
@@ -305,7 +335,8 @@ def build_report(
             for score in report.task_scores
             if score.model == model and score.pass_1 is not None
         ]
-        report.model_scores.append(_score_model(model, scored, rng))
+        rounds = round_rates(model_runs[model], passed=sum(score.passed for score in scored))
+        report.model_scores.append(_score_model(model, scored, rng, rounds))
     report.warnings.extend(_setup_warnings(rows))
     report.warnings.extend(_cache_write_warnings(rows))
     for row in rows:
@@ -334,10 +365,13 @@ def build_report(
 def render_markdown(report: Report) -> str:
     """Render a report as Markdown tables."""
 
+    show_rounds = any(score.rounds.recorded for score in report.task_scores)
+    round_headers = ROUND_RATE_COLUMNS if show_rounds else ""
+    round_rules = "---|---|" if show_rounds else ""
     lines = [
         "| Task | Model | Mean calls | Tool errors | Mean input | Cached | Mean output | Passed "
-        f"| pass^1 | pass^{report.k} | Errored | Timed out | Known USD | Est. USD |",
-        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        f"| pass^1 | pass^{report.k} | Errored | Timed out | Known USD | Est. USD |{round_headers}",
+        f"|---|---|---|---|---|---|---|---|---|---|---|---|---|---|{round_rules}",
     ]
     for score in report.task_scores:
         estimate = "—" if score.estimated_usd is None else f"~{score.estimated_usd:.4f}"
@@ -348,6 +382,7 @@ def render_markdown(report: Report) -> str:
             f"| {score.passed}/{score.scored} | {_percent(score.pass_1)} "
             f"| {_percent(score.pass_k)} | {score.errored} | {score.timed_out} "
             f"| {score.known_usd} | {estimate} |"
+            + (_round_rate_cells(score.rounds) if show_rounds else "")
         )
     if any(score.estimated_usd is not None for score in report.task_scores):
         mapped = ", ".join(f"{name} at {priced}'s" for name, priced in LIST_PRICE_PROVIDERS.items())
@@ -358,8 +393,8 @@ def render_markdown(report: Report) -> str:
         ]
     lines += [
         "",
-        "| Model | Tasks | Mean calls | Mean tokens | Mean pass^1 | 95% interval |",
-        "|---|---|---|---|---|---|",
+        f"| Model | Tasks | Mean calls | Mean tokens | Mean pass^1 | 95% interval |{round_headers}",
+        f"|---|---|---|---|---|---|{round_rules}",
     ]
     for model in report.model_scores:
         interval = (
@@ -368,7 +403,10 @@ def render_markdown(report: Report) -> str:
         lines.append(
             f"| {model.model} | {model.tasks} | {_number(model.mean_calls, 1)} "
             f"| {_number(model.mean_tokens)} | {_percent(model.pass_1)} | {interval} |"
+            + (_round_rate_cells(model.rounds) if show_rounds else "")
         )
+    if show_rounds:
+        lines += ["", ROUND_RATE_LEGEND]
     if report.proxied:
         lines += ["", "| Model | Proxied MCP calls | Failed |", "|---|---|---|"]
         for label, (calls, errors) in sorted(report.proxied.items()):
@@ -414,10 +452,13 @@ def _score_task(
         mean_output_tokens=fmean(split.output for split in tokens) if tokens else None,
         known_usd=sum((Decimal(str(run["known_usd"])) for run in runs), Decimal(0)),
         estimated_usd=sum(estimates, Decimal(0)) if estimates else None,
+        rounds=round_rates(scored, passed=passed),
     )
 
 
-def _score_model(model: str, scores: Sequence[TaskScore], rng: random.Random) -> ModelScore:
+def _score_model(
+    model: str, scores: Sequence[TaskScore], rng: random.Random, rounds: RoundRates
+) -> ModelScore:
     """Average one model's task scores; ``scores`` holds only tasks with scored runs."""
 
     if not scores:
@@ -440,6 +481,25 @@ def _score_model(model: str, scores: Sequence[TaskScore], rng: random.Random) ->
         high=means[int(0.975 * len(means)) - 1],
         mean_calls=fmean(score.mean_calls for score in scores if score.mean_calls is not None),
         mean_tokens=fmean(score.mean_tokens for score in scores if score.mean_tokens is not None),
+        rounds=rounds,
+    )
+
+
+def round_rates(scored: Sequence[Mapping[str, object]], *, passed: int) -> RoundRates:
+    """Compute rates when every scored run recorded the corresponding count."""
+
+    requests = [row.get("model_requests") for row in scored]
+    rounds = [row.get("tool_rounds") for row in scored]
+
+    def rate(counts: Sequence[object]) -> float | None:
+        if passed == 0 or any(count is None for count in counts):
+            return None
+        return sum(_int(count) for count in counts) / passed
+
+    return RoundRates(
+        model_requests=rate(requests),
+        tool_rounds=rate(rounds),
+        recorded=any(count is not None for count in (*requests, *rounds)),
     )
 
 
@@ -533,6 +593,10 @@ def _percent(value: float | None) -> str:
 
 def _number(value: float | None, digits: int = 0) -> str:
     return "—" if value is None else f"{value:,.{digits}f}"
+
+
+def _round_rate_cells(rates: RoundRates) -> str:
+    return f" {_number(rates.model_requests, 1)} | {_number(rates.tool_rounds, 1)} |"
 
 
 def count_sum(counts: object) -> int:

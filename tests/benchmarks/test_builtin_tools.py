@@ -156,7 +156,8 @@ def test_builtin_tools_benchmark_searches_an_existing_root(
     package = tmp_path / "project" / "package"
     package.mkdir(parents=True)
     (package / "module.py").write_text("def first():\n    pass\n\ndef second():\n    pass\n")
-    (package / "notes.txt").write_text("plain text\n")
+    notes = "def plain_text\n"
+    (package / "notes.txt").write_text(notes)
     # Protected by default, so the searches skip it and it must not inflate the counts.
     (package / ".env").write_text("SECRET=" + "x" * 10_000 + "\n")
 
@@ -175,10 +176,11 @@ def test_builtin_tools_benchmark_searches_an_existing_root(
         "grep_literal_capped",
     }
     assert all(sample.file_count == 2 for sample in report.samples)
-    module_and_notes = len("def first():\n    pass\n\ndef second():\n    pass\n") + 11
+    module_and_notes = len("def first():\n    pass\n\ndef second():\n    pass\n") + len(notes)
     assert direct["grep_literal_miss"].input_bytes == module_and_notes
     assert direct["find_sorted_prefix"].result_count == 1
-    assert direct["grep_regex_capped"].result_count == 2
+    assert direct["grep_regex_capped"].result_count == 3
+    assert direct["grep_literal_capped"].result_count == 3
     assert direct["grep_literal_miss"].result_count == 0
 
 

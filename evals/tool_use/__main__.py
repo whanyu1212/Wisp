@@ -54,7 +54,12 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument(
         "--project-guidance",
         type=Path,
-        help="append this instruction file to each isolated fixture's AGENTS.md for an experiment",
+        help="add this file as trusted project guidance without changing the fixture",
+    )
+    run.add_argument(
+        "--core-prompt",
+        type=Path,
+        help="replace the built-in core prompt with this file for the experiment",
     )
     run.add_argument("--reps", type=int, default=3, help="repetitions of each task and model")
     run.add_argument("--tasks", default="", help="comma-separated task ids (default: all)")
@@ -160,10 +165,13 @@ def _run(args: argparse.Namespace) -> int:
         models = [ModelSpec.parse(text) for text in _split(args.models)]
         tasks = select_tasks(ids=_split(args.tasks), tags=_split(args.tags))
         project_guidance = (
-            args.project_guidance.read_text(encoding="utf-8") if args.project_guidance else None
+            args.project_guidance.read_bytes().decode("utf-8") if args.project_guidance else None
         )
         if project_guidance is not None and not project_guidance.strip():
             raise ValueError("--project-guidance must contain instructions")
+        core_prompt = args.core_prompt.read_bytes().decode("utf-8") if args.core_prompt else None
+        if core_prompt is not None and not core_prompt.strip():
+            raise ValueError("--core-prompt must contain instructions")
         credentials = resolve_credentials(
             {model.provider for model in models},
             env_file=args.env_file,
@@ -188,6 +196,7 @@ def _run(args: argparse.Namespace) -> int:
         mcp_results=args.mcp_results,
         effort=args.effort,
         project_guidance=project_guidance,
+        core_prompt=core_prompt,
     )
     runs_path = results_dir / "runs.jsonl"
     print(
@@ -221,6 +230,8 @@ def _run(args: argparse.Namespace) -> int:
         "mcp_results": args.mcp_results,
         "effort": args.effort,
         "project_guidance_sha256": context.project_guidance_sha256,
+        "project_guidance_transport": context.project_guidance_transport,
+        "core_prompt_sha256": context.core_prompt_sha256,
         "stopped_for_budget": result.stopped_for_budget,
         "skipped_runs": result.skipped_runs,
         "finished_at": datetime.now(UTC).isoformat(),

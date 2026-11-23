@@ -33,7 +33,8 @@ uv run python -m evals.tool_use report evals/tool_use/results/<timestamp>
 | `--reps` | Repetitions of each task and model (default 3) |
 | `--tasks`, `--tags` | Run only these task ids, or tasks with any of these tags |
 | `--workers` | Runs in flight at once (default 2) |
-| `--project-guidance FILE` | Append experimental instructions to each isolated fixture's root `AGENTS.md`; record their SHA-256 in rows and suite metadata without changing checkout instructions or user settings |
+| `--project-guidance FILE` | Add experimental guidance to the trusted project prompt without writing to the fixture. Rows and suite metadata record its SHA-256 and the prompt transport. |
+| `--core-prompt FILE` | Replace the built-in core instructions with an exact prompt snapshot for a controlled comparison. Rows and suite metadata record the core prompt SHA-256. |
 | `--budget-usd` | Stop starting rounds once priced runs (OpenAI API) cost this much |
 | `--budget-tokens` | Stop starting rounds once unpriced runs (Codex subscription) used this many tokens |
 | `--env-file`, `--auth-file` | Credential sources (default: the repo's `.env` and `~/.wisp/auth.json`) |
@@ -71,7 +72,8 @@ the value. The runner stops before any run if a requested provider has no creden
 2. Runs the checkout's own `wisp` (next to the `uv run` interpreter, not one on `PATH`):
    `wisp -p PROMPT --mode json --provider P --model M --yes --timeout T --max-tool-iterations N`
    with only the task's tools allowed, a private `HOME` and `WISP_TRUST=1`.
-3. Runs the task's `verify` command in the folder and checks the run's events.
+3. Runs the task's `verify` command in the folder and checks the run's events. The verifier can
+   read the event log at `WISP_EVAL_EVENTS`, which is set only for verification.
 4. Appends one row to `runs.jsonl`. The run's `events.jsonl`, `stderr.txt`, `verify.txt` (and
    `setup.txt`) and session are kept under `results/<task>/<provider>__<model>/rep<n>/`.
 
@@ -102,6 +104,13 @@ timed-out runs and cost. Per model it prints mean calls and tokens across tasks,
 pass^1 with a 95% bootstrap interval over tasks. Compare calls and tokens only over the same
 tasks. pass^k (from tau-bench) is the chance that k runs of a task all pass, so it shows
 reliability that a plain pass rate hides.
+
+`Model requests / pass` counts completed assistant responses. `Tool rounds / pass` counts those
+responses that requested at least one tool, even if the response requested several in a batch.
+Both rates divide the work across passed and failed tasks by the number of passes. They exclude
+infrastructure errors, partial responses, provider retries, compaction requests, and subagent
+requests. A group with zero passes or missing counts has no rate. Older baselines retain their
+original measurements.
 
 Tokens are counted the same way for every provider. `Mean input` is every input token, `Cached` is
 the part of it read from the provider's cache, and `Mean output` is the output tokens. Providers
@@ -153,6 +162,8 @@ the tools are what changed. Tokens are input plus output, counted as in `report`
 recorded earlier compares with a new run on the same count. `(cache writes uncounted on one side)`
 says one side was recorded before cache writes were counted and the other has some: that side's
 tokens are too low, so read the tokens change as overstated.
+The round columns compare requests and tool rounds per pass on each side. They use the same
+scored-run denominator as `report` and do not carry a Welch interval.
 
 Each interval is 95% on its own, so across one comparison's many cells about one in twenty is
 marked by chance; the output says how many to expect. Trust a change that is marked on several
@@ -172,6 +183,7 @@ the commit the change starts from, with the models the change will be measured o
 
 | Baseline | What it measures |
 |---|---|
+| `2026-11-23-verification-rounds-before.json`, `2026-11-23-verification-rounds-after.json` | Exact prompt A/B for the wording-edit verification rule, with model-request and tool-round counts |
 | `2026-11-08-current-tools.json` | All 12 tasks before the `bash` head-and-tail preview (#921) |
 | `2026-11-08-bash-preview.json` | All 12 tasks after it; compare tool changes against this |
 | `2026-11-08-mcp-direct.json`, `2026-11-08-mcp-on-demand.json` | The MCP tasks, 5 runs each, with every MCP tool's definition sent and with on-demand discovery |
@@ -196,13 +208,41 @@ run. gpt-5.6-luna passed 55% of them: it matched check results to the wrong pull
 named the wrong service. Those are the mistakes keeping results and their calls together in a
 script should prevent.
 
+## Verification rounds baseline
+
+The November 23 baseline records two repetitions of eight tasks on GPT-6.2 Sol and Astra at
+medium effort. It includes wording edits, a failing-test repair, configuration lookup, a
+formatter followed by an edit, and a multi-file rename. Both arms passed 32/32. Requests fell
+from 174 to 172 overall. The 12 matched wording-edit runs went from 54 to 43 requests and from
+42 to 31 tool rounds. The multi-file rename varied in both arms. A separate Sol rename follow-up
+passed twice per arm and took 20 requests before and 19 after.
+
+The [before core prompt](guidance/2026-11-23-verification-rounds-before.txt) and
+[after core prompt](guidance/2026-11-23-verification-rounds-after.txt) match the hashes saved in
+the baselines. They were tested on the same working source tree using the two prompts as the
+only intentional change. Request counts were recovered from the recorded events. The saved
+formatter runs all showed the required reread and a successful test command. The current
+formatter task names the built-in file tools and checks that sequence in the verifier. The
+saved rows retain the task and fixture fingerprints from the recorded checkout.
+
+```bash
+uv run python -m evals.tool_use compare \
+  evals/tool_use/baselines/2026-11-23-verification-rounds-before.json \
+  evals/tool_use/baselines/2026-11-23-verification-rounds-after.json
+```
+
+For a fresh rerun, pass each saved prompt to `run --core-prompt`, set `--effort medium`, and
+select the same provider-model pairs and task IDs listed in the baseline's `suite` object.
+
 ## Agent-discipline experiments
 
 The opt-in `discipline` tasks exercise uncertain module paths, stale source-map offsets, and
 formatting between a read and an edit. Their verifiers live outside the editable fixture and
 reject changes to the tests/formatter. A passing run must solve the task with zero tool-invocation
 errors; nonzero shell exits are a separate command outcome, not automatically an agent mistake.
-The scripted tests also pin out-of-bounds recovery and the read-after-format safety guard.
+The formatter verifier also checks the observed read, format, reread, edit, and successful
+test sequence. The scripted tests pin out-of-bounds recovery and the read-after-format safety
+guard.
 
 ```bash
 uv run python -m evals.tool_use run --models openai-codex::gpt-6.1-sol --tags discipline \
@@ -213,9 +253,10 @@ uv run python -m evals.tool_use run --models openai-codex::gpt-6.1-sol --tags di
 uv run python -m evals.tool_use compare evals/tool_use/results/discipline-current evals/tool_use/results/discipline-guided
 ```
 
-Guidance is appended only in each temporary work folder, before its initial Git commit. Existing
-fixture instructions are preserved. Baselines retain `project_guidance_sha256`, so the candidate
-can be tied to the exact committed guidance text rather than an ephemeral file path.
+Guidance is added in the eval subprocess as a trusted project prompt section. The fixture and
+its Git state stay identical across arms. Baselines retain `project_guidance_sha256` and
+`project_guidance_transport`. The historical November 17 run predates prompt injection and
+used a fixture-level `AGENTS.md` overlay.
 
 The [2026-11-17 experiment](reports/2026-11-17-file-discipline.md) found no demonstrated benefit:
 6/6 passes and no tool errors on either side. This is a small single-model ceiling result, not

@@ -6,7 +6,7 @@ import argparse
 import json
 import shutil
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from functools import partial
 from pathlib import Path
@@ -15,7 +15,7 @@ from typing import Literal
 
 import anyio
 
-from benchmarks.support import Measurement, environment, measure_async
+from benchmarks.support import Measurement, environment, measure_async, measure_stable_tool
 from wisp.agent.loop.tool_execution import ToolBatch
 from wisp.coding.tool_execution import ConfiguredToolExecutor
 from wisp.events import ToolExecutionEnded, ToolResultReady
@@ -578,13 +578,13 @@ async def _measure_direct(
         _validate_direct_result(scenario, result)
         return result
 
-    await invoke()
-    result, measurement = await measure_async(
+    result, result_count, measurement = await measure_stable_tool(
         invoke,
+        scenario=scenario.name,
         iterations=config.iterations,
+        result_count=partial(_result_count, scenario.name),
         track_memory=config.track_memory,
     )
-    result_count = _result_count(scenario.name, result.data)
     return BenchmarkSample(
         scenario=scenario.name,
         layer="tool.run",
@@ -803,21 +803,21 @@ async def _measure_bash(cwd: Path, config: BenchmarkConfig) -> list[BenchmarkSam
     return samples
 
 
-def _result_count(scenario: str, data: Mapping[str, object]) -> int:
+def _result_count(scenario: str, result: ToolResult) -> int:
     if scenario.startswith("read_"):
         key = "selected_count"
     elif scenario.startswith("ls_"):
         key = "entry_count"
     else:
         key = "count"
-    value = data.get(key)
+    value = result.data.get(key)
     if not isinstance(value, int):
         raise RuntimeError(f"benchmark scenario {scenario} did not return integer {key}")
     return value
 
 
 def _validate_direct_result(scenario: _Scenario, result: ToolResult) -> None:
-    count = _result_count(scenario.name, result.data)
+    count = _result_count(scenario.name, result)
     if scenario.expected_count is not None and count != scenario.expected_count:
         raise RuntimeError(
             f"unexpected result count for {scenario.name}: {count} != {scenario.expected_count}"

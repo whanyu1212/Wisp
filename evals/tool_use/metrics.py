@@ -44,6 +44,8 @@ class RunMetrics:
         outcome (RunOutcome | None): The `agent.completed` outcome, or None when
             the run ended without one (a crash, or a forced stop).
         turns (int | None): Turns the run took, from `agent.completed`.
+        model_requests (int): Completed top-level model requests.
+        tool_rounds (int): Completed top-level requests that returned tool calls.
         tool_calls (Counter[str]): Calls started, by tool name.
         tool_errors (Counter[str]): Failed tool results, by `failure_code`
             (`unknown` when the result names none).
@@ -101,6 +103,8 @@ class RunMetrics:
     script_failures: Counter[str] = field(default_factory=Counter)
     nested_calls: int = 0
     failed_script_calls: int = 0
+    model_requests: int = 0
+    tool_rounds: int = 0
 
     @property
     def last_error(self) -> str | None:
@@ -168,7 +172,16 @@ def measure(events: Iterable[KnownWispEvent]) -> RunMetrics:
         elif isinstance(event, ToolExecutionEnded) and event.name == CODEMODE:
             match = _NESTED_CALLS.match(event.summary or "")
             metrics.nested_calls += int(match.group(1)) if match else 0
-        elif isinstance(event, MessageCompleted | CompactionCompleted):
+        elif isinstance(event, MessageCompleted):
+            _add_usage(metrics, event)
+            if event.role == "assistant" and event.finish_reason in (
+                "stop",
+                "tool_calls",
+                "length",
+            ):
+                metrics.model_requests += 1
+                metrics.tool_rounds += bool(event.tool_calls)
+        elif isinstance(event, CompactionCompleted):
             # Compaction summarizes the conversation with its own paid request.
             _add_usage(metrics, event)
         elif isinstance(event, ProviderRetrying):

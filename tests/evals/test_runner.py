@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import importlib.util
+import json
 from decimal import Decimal
 from pathlib import Path
 
@@ -165,7 +166,7 @@ def _task(tmp_path: Path, verify: str = "true", *, extra: str = "") -> Task:
     (folder / "repo" / "notes.txt").write_text("hello\n", encoding="utf-8")
     (folder / "task.toml").write_text(
         f'id = "demo"\ntitle = "Demo"\ntags = ["general"]\nprompt = "hi"\n'
-        f'verify = "{verify}"\ntools = ["read"]\ntimeout_seconds = 60\n{extra}',
+        f'verify = {json.dumps(verify)}\ntools = ["read"]\ntimeout_seconds = 60\n{extra}',
         encoding="utf-8",
     )
     return load_task(folder)
@@ -269,24 +270,47 @@ def test_fake_run_scored(tmp_path: Path, verify: str, status: str) -> None:
     )
     assert row.tools_sha256 is not None and len(row.tools_sha256) == 64
     assert row.credential_source == "none"
+    assert row.model_requests == 1
+    assert row.tool_rounds == 0
     assert (context.results_dir / row.run_dir / "events.jsonl").stat().st_size > 0
     assert (context.results_dir / row.run_dir / "verify.txt").exists()
 
 
 @pytest.mark.process
-def test_project_guidance_is_isolated_appended_and_fingerprinted(tmp_path: Path) -> None:
-    task = _task(tmp_path, "grep -q EXPERIMENT-CANDIDATE AGENTS.md && grep -q existing AGENTS.md")
+@pytest.mark.parametrize("has_instructions", [False, True])
+def test_guidance_leaves_fixture_intact(tmp_path: Path, has_instructions: bool) -> None:
+    verify = (
+        'test -s "$WISP_EVAL_EVENTS" && git diff --quiet HEAD && '
+        f"test {'-f' if has_instructions else '! -e'} AGENTS.md"
+    )
+    if has_instructions:
+        verify += " && ! grep -q EXPERIMENT-CANDIDATE AGENTS.md"
+    task = _task(tmp_path, verify)
+    instructions = task.fixture / "AGENTS.md"
     original = "Preserve the task's existing instructions.\n"
-    (task.fixture / "AGENTS.md").write_text(original)
+    if has_instructions:
+        instructions.write_text(original)
     context = dataclasses.replace(
         _context(tmp_path, build=detect_build(_REPO_ROOT)),
         project_guidance="EXPERIMENT-CANDIDATE: discover uncertain paths first.\n",
+        core_prompt="EXPERIMENT-CORE: answer the fixture question.",
     )
     row = run_one(task, ModelSpec("fake", "fake"), 1, context)
+
     assert row.status == "passed"
     assert row.project_guidance_sha256 == context.project_guidance_sha256
     assert row.project_guidance_sha256 is not None and len(row.project_guidance_sha256) == 64
-    assert (task.fixture / "AGENTS.md").read_text() == original
+    assert row.project_guidance_transport == "prompt"
+    assert row.core_prompt_sha256 == context.core_prompt_sha256
+    assert instructions.exists() is has_instructions
+    if has_instructions:
+        assert instructions.read_text() == original
+    session = next((context.results_dir / row.run_dir / "sessions").glob("*.jsonl"))
+    contents = session.read_text()
+    assert "EXPERIMENT-CANDIDATE" in contents
+    assert "EXPERIMENT-CORE" in contents
+    assert "You are Wisp, an autonomous software engineering agent" not in contents
+    assert (original.strip() in contents) is has_instructions
 
 
 @pytest.mark.process

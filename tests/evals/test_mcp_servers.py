@@ -63,25 +63,6 @@ def test_reorder_point_ignores_spelling(sku: str) -> None:
     )
 
 
-@pytest.mark.process
-def test_tool_call_through_wisp(tmp_path: Path) -> None:
-    task = next(task for task in _MCP_TASKS if task.id == "mcp-pick-tool")
-    servers = WispSettings.model_validate(mcp_settings(task, sys.executable)).mcp_servers
-
-    async def call() -> str:
-        runtime = await build_runtime(mcp_servers=servers or ())
-        try:
-            tool = runtime.tools.get("mcp__inventory__get_reorder_policy")
-            result = await tool.run(
-                {"sku": REORDER_SKU, "warehouse": "Lisbon"}, ToolContext(cwd=tmp_path)
-            )
-            return result.text
-        finally:
-            await runtime.aclose()
-
-    assert f"reorder point {REORDER_POINT} units" in anyio.run(call)
-
-
 def test_inventory_has_fifty_tools() -> None:
     names = CATALOGS["inventory"].tool_names
 
@@ -93,14 +74,20 @@ def test_inventory_has_fifty_tools() -> None:
 def test_servers_start_through_wisp(task: Task, tmp_path: Path) -> None:
     servers = WispSettings.model_validate(mcp_settings(task, sys.executable)).mcp_servers
 
-    async def offered() -> tuple[str, ...]:
+    async def check_server() -> None:
         runtime = await build_runtime(mcp_servers=servers or ())
         try:
-            return runtime.tools.names()
+            assert set(mcp_tool_names(task)) <= set(runtime.tools.names())
+            if task.id == "mcp-pick-tool":
+                tool = runtime.tools.get("mcp__inventory__get_reorder_policy")
+                result = await tool.run(
+                    {"sku": REORDER_SKU, "warehouse": "Lisbon"}, ToolContext(cwd=tmp_path)
+                )
+                assert f"reorder point {REORDER_POINT} units" in result.text
         finally:
             await runtime.aclose()
 
-    assert set(mcp_tool_names(task)) <= set(anyio.run(offered))
+    anyio.run(check_server)
 
 
 def test_triage_answer_comes_from_devhub() -> None:

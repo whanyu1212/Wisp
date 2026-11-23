@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -17,7 +18,9 @@ from evals.tool_use.task_definitions import TASKS_DIR, Task, load_task
 _TASKS = tuple(load_task(folder) for folder in sorted(TASKS_DIR.iterdir()) if folder.is_dir())
 
 
-def _verify(task: Task, tmp_path: Path, *, solved: bool, with_home: bool = True) -> int | None:
+def _verify(
+    task: Task, tmp_path: Path, *, solved: bool, with_home: bool = True, events: Path | None = None
+) -> int | None:
     """Run a task's verifier on its fixture, optionally with the solution applied.
 
     A solved run copies `solution/` into the work folder and, unless ``with_home`` is
@@ -35,6 +38,8 @@ def _verify(task: Task, tmp_path: Path, *, solved: bool, with_home: bool = True)
     home_files = task.folder / "solution-home"
     if solved and with_home and home_files.is_dir():
         shutil.copytree(home_files, home, dirs_exist_ok=True)
+    if events is not None:
+        environment["WISP_EVAL_EVENTS"] = str(events)
     return run_task_command(
         task.definition.verify,
         work,
@@ -71,6 +76,67 @@ def test_typographic_fixture_keeps_bytes() -> None:
 def test_bom_fixture_keeps_mark() -> None:
     fixture = next(task for task in _TASKS if task.id == "edit-bom-file").fixture
     assert (fixture / "messages.py").read_bytes().startswith(b"\xef\xbb\xbf")
+
+
+@pytest.mark.process
+@pytest.mark.parametrize(
+    "case", ["edit", "write", "quiet-pytest", "stale", "unrun", "echo", "failed", "later-edit"]
+)
+def test_formatter_checks_tool_evidence(tmp_path: Path, case: str) -> None:
+    task = next(task for task in _TASKS if task.id == "discipline-format-then-edit")
+    events = tmp_path / "events.jsonl"
+    test_command = {
+        "echo": "echo python -m unittest",
+        "quiet-pytest": "python -m pytest -q",
+    }.get(case, "python -B -m unittest")
+    calls = [
+        ("initial", "read", {"path": "worker.py"}),
+        ("format", "bash", {"command": "python format_source.py"}),
+        ("reread", "read", {"path": "worker.py"}),
+        ("edit", "write" if case == "write" else "edit", {"path": "worker.py"}),
+        (
+            "test",
+            "bash",
+            {"command": test_command},
+        ),
+    ]
+    if case == "later-edit":
+        calls.append(("unverified", "edit", {"path": "worker.py"}))
+    with events.open("w", encoding="utf-8") as stream:
+        for call_id, name, arguments in calls:
+            if (case, call_id) in {("stale", "reread"), ("unrun", "test")}:
+                continue
+            output = ""
+            if call_id == "test":
+                output = "Ran 1 test in 0.0s\n\n" + ("FAILED" if case == "failed" else "OK")
+                if case == "quiet-pytest":
+                    output = ". [100%]\n1 passed in 0.01s"
+            for stage, fields in (
+                ("started", {"arguments": arguments}),
+                (
+                    "ended",
+                    {
+                        "is_error": False,
+                        "exit_code": 0 if name == "bash" else None,
+                        "output": output,
+                    },
+                ),
+            ):
+                stream.write(
+                    json.dumps(
+                        {
+                            "type": f"tool.execution.{stage}",
+                            "name": name,
+                            "call_id": call_id,
+                            **fields,
+                        }
+                    )
+                    + "\n"
+                )
+
+    assert (_verify(task, tmp_path / "run", solved=True, events=events) == 0) is (
+        case in {"edit", "write", "quiet-pytest"}
+    )
 
 
 @pytest.mark.parametrize(
