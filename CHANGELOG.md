@@ -10,7 +10,22 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.16.6 — Unreleased
+## 0.16.7 — Unreleased
+
+- **Click to preview and edit from Files (#1140):** Click a file to open a read-only preview, or
+  press `e` on a selected file to open it in your editor. Saving and exiting refreshes the preview
+  and Git status without changing your chat draft. On narrow terminals, the preview stacks below
+  the file tree.
+- **Context usage and turn growth (#1141):** The docked Session panel adds a segmented context
+  gauge, a per-turn sparkline, and the latest completed run's throughput and duration when
+  available. `/context` charts token growth on wider layouts and keeps the list on narrow ones.
+- No changes to the live RPC contract, Python SDK, or saved-session format since 0.16.6. Use the
+  matching `0.16.7` backend and TUI together.
+
+<!-- Keeps links to the pre-release "0.16.6 — Unreleased" heading working. -->
+<a id="0166--unreleased"></a>
+
+## 0.16.6 — 2026-11-23
 
 - **Easier-to-scan Files sidebar (#1138):** The Rust TUI adds tree guides, a selection rail,
   a filter bar with match counts, and a scrollbar when the list overflows. Long names shorten

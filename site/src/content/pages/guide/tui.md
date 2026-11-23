@@ -312,8 +312,13 @@ runs, without moving the transcript. In the peek, Enter opens the process's card
 shows how many and their commands; Down from an empty composer, a click
 on the strip, or `/ps` focuses the panel on the first one. Stopping one tells the agent
 with its next prompt if it asked to hear when the process stops, and never wakes it. Model, effort, and YOLO remain in the composer,
-and the panel's keys join the main footer. Context's **Breakdown** expands source totals and costs; `/context` opens
-full details.
+and the panel's keys join the main footer.
+
+The **Context** section shows a segmented gauge when the context window is known, with marks for
+reserved space and the compaction threshold. A sparkline shows token growth by turn, and the
+latest completed run shows throughput and duration when available. Context's **Breakdown**
+expands source totals and costs. Open `/context` for full details, including a growth chart on
+wider layouts or a per-turn list on narrow ones.
 
 **MCP servers** and **Skills** fold to their heading row while healthy. MCP expands by itself when a
 server disconnects or the server list can't be read; Skills expands once a skill has been used, or
