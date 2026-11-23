@@ -2621,6 +2621,72 @@ mod tests {
     }
 
     #[test]
+    fn context_section_renders_bar_sparkline_and_telemetry() {
+        let mut state = session();
+        state.context.budget.as_mut().unwrap().reserve_tokens = 20_000;
+        // Without turns or run totals, only summary + segmented bar render.
+        let basic = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
+        assert!(basic.contains("198.8K · 73% context"), "{basic}");
+        assert!(basic.contains('━'), "{basic}");
+        assert!(basic.contains('┃'), "{basic}");
+        assert!(basic.contains('╍'), "{basic}");
+        assert!(!basic.contains("turns "), "{basic}");
+        assert!(!basic.contains("tok/s"), "{basic}");
+
+        // With turns and finished run totals (throughput + duration), the 3-line layout appears.
+        let stats = state.context.stats.as_mut().unwrap();
+        stats.context_breakdown = Some(ContextBreakdown {
+            sources: vec![ContextSourceUsage {
+                source: ContextSource::Messages,
+                tokens: 150_000,
+                count: Some(6),
+                children: Vec::new(),
+            }],
+            scaled: false,
+            turns: vec![
+                ContextTurnGrowth {
+                    turn: 1,
+                    tokens: 10_000,
+                },
+                ContextTurnGrowth {
+                    turn: 2,
+                    tokens: 25_000,
+                },
+                ContextTurnGrowth {
+                    turn: 3,
+                    tokens: 15_000,
+                },
+            ],
+            largest: Vec::new(),
+        });
+        let mut totals = crate::transcript::RunTotals::finished(1_400, 2);
+        totals.output_tokens = Some(58);
+        totals.model_ms = Some(1_000);
+        state.transcript.attach_run_summary(totals);
+
+        let rich = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
+        assert!(rich.contains("turns "), "{rich}");
+        assert!(rich.contains("58 tok/s · 1.4s"), "{rich}");
+
+        // Duration-only RunTotals omits `tok/s` while keeping duration.
+        state
+            .transcript
+            .attach_run_summary(crate::transcript::RunTotals::finished(1_400, 1));
+        let duration_only = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);
+        assert!(duration_only.contains("turns "), "{duration_only}");
+        assert!(!duration_only.contains("tok/s"), "{duration_only}");
+        assert!(duration_only.contains("1.4s"), "{duration_only}");
+
+        // Row 0 still holds focus and opens `/context` on Enter.
+        let mut panel = overlay(&state);
+        focus_section(&mut panel, &state, Section::Context);
+        assert_eq!(
+            panel.key(KeyCode::Enter, &state),
+            OverlayKey::Open(Target::Context)
+        );
+    }
+
+    #[test]
     fn inventory_summary_links_open_dialogs() {
         let state = reading_session();
         let text = panel_text(&screen(&state, &mut SidePanel::default(), 200), 200);

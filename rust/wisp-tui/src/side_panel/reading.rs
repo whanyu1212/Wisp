@@ -117,8 +117,8 @@ pub(super) fn attention_rows(
     }
 }
 
-/// Context as one compact text line (`55.5K · 14% context`) that turns amber, then
-/// red, as it fills. Hidden until context stats are known.
+/// Context summary, segmented gauge, and compact turn sparkline + throughput/duration
+/// telemetry. Hidden until context stats are known.
 pub(super) fn context_line(rows: &mut PanelRows, state: &UiState, width: usize, palette: Palette) {
     let Some(split) = Split::of(state) else {
         return;
@@ -147,6 +147,59 @@ pub(super) fn context_line(rows: &mut PanelRows, state: &UiState, width: usize, 
         )],
     );
     rows.action(0, PanelAction::Open(Target::Context));
+    if split.window.is_some() && width > 0 {
+        rows.push(crate::context_split::bar(&split, width, palette), None);
+    }
+
+    let mut telemetry = Vec::new();
+    if let Some(totals) = latest_run_totals(state) {
+        if let (Some(tokens), Some(model_ms)) = (
+            totals.output_tokens.filter(|tokens| *tokens > 0),
+            totals.model_ms.filter(|ms| *ms > 0),
+        ) {
+            telemetry.push(format!(
+                "{} tok/s",
+                crate::transcript::tokens_per_second(tokens, model_ms)
+            ));
+        }
+        if let Some(duration_ms) = totals.duration_ms {
+            telemetry.push(crate::tool_cards::format_duration(duration_ms));
+        }
+    }
+    let right_text = telemetry.join(" · ");
+    let turn_tokens: Vec<u64> = split
+        .breakdown
+        .map(|breakdown| breakdown.turns.iter().map(|turn| turn.tokens).collect())
+        .unwrap_or_default();
+    let spark_label = "turns ";
+    let reserved = spark_label.width() + right_text.width() + usize::from(!right_text.is_empty());
+    let max_spark_cols = width.saturating_sub(reserved).min(16);
+    let spark_spans =
+        crate::context_split::turn_sparkline_spans(&turn_tokens, max_spark_cols, palette);
+
+    if !spark_spans.is_empty() || !right_text.is_empty() {
+        let mut left = Vec::new();
+        if !spark_spans.is_empty() {
+            left.push(Span::styled(spark_label, muted));
+            left.extend(spark_spans);
+        }
+        let right = if right_text.is_empty() {
+            Vec::new()
+        } else {
+            vec![Span::styled(right_text, muted)]
+        };
+        rows.push(spread(left, right, width), None);
+    }
+}
+
+/// Totals of the newest finished run in the transcript, when reported.
+fn latest_run_totals(state: &UiState) -> Option<&crate::transcript::RunTotals> {
+    state
+        .transcript
+        .entries()
+        .iter()
+        .rev()
+        .find_map(|entry| entry.run_totals())
 }
 
 /// Inventories condensed onto one summary line (`7 MCP · 12 skills · 2 changed`),
