@@ -3,21 +3,14 @@ name: Rust TUI wheel candidates
 on:
   workflow_call:
   workflow_dispatch:
-  # Runtime merges still verify the installed wheel, even when their PR skipped
-  # candidate builds. Content-only updates cannot change the distribution.
-  push:
-    branches:
-      - main
-    paths-ignore:
-      - "book/**"
-      - "site/**"
-      - "assets/**"
-      - "AGENTS.md"
-      - "CHANGELOG.md"
+  # Candidate wheels run nightly on main, on packaging/native pull requests, and
+  # when invoked by release.yml via workflow_call.
+  schedule:
+    - cron: "37 6 * * *"
   # Pull requests build wheels only when they touch packaging, the native crates
   # the wheel bundles beyond the TUI, the wheel scripts and tests, or the Python
   # code that loads a native binary. TUI-only changes are compiled and tested by
-  # CI and get their wheel build on merge.
+  # CI and get their wheel build on nightly main or release.
   pull_request:
     branches:
       - main
@@ -45,6 +38,7 @@ on:
       - "src/wisp/cli/native_tui/**"
       - "src/wisp/tools/search/**"
       - "src/wisp/tools/shell/**"
+      - "tests/fixtures/pending_text_conformance.json"
       - "tests/tools/shell/test_pending_text_conformance.py"
       - "tests/tools/search/test_native_grep_conformance.py"
       - "tests/tools/search/test_grep.py"
@@ -60,10 +54,10 @@ on:
 permissions:
   contents: read
 
-# Scope by caller workflow so standalone main/tag wheel runs cannot cancel
-# release.yml dry runs or tag releases (and keep release calls non-cancelling).
+# Scope by caller workflow and event so nightly, dispatch, and release.yml runs
+# cannot cancel one another (and keep release calls non-cancelling).
 concurrency:
-  group: rust-tui-wheels-${{ github.workflow }}-${{ github.ref }}
+  group: rust-tui-wheels-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.workflow != 'Release' }}
 
 jobs:

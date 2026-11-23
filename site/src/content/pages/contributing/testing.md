@@ -155,20 +155,22 @@ change, while geometry and style regressions are already checked by Rust buffer 
 
 ## CI policy
 
-CI runs for pull requests targeting `main` or `develop`, for direct updates to `main`, and by manual
-dispatch.
+CI runs for pull requests targeting `main` or `develop`, for direct updates to `main`, on a nightly
+schedule on `main`, and by manual dispatch.
 
 CI selects jobs from the complete Git diff: pull requests use the merge base, and pushes use
-`before..after`. Renames include both paths. Manual runs, missing comparison commits, unknown paths,
-CI changes, dependencies, schemas, and shared fixtures run all checks.
+`before..after`. Renames include both paths. Nightly schedules, manual runs, missing comparison
+commits, unknown paths, CI changes, dependencies, schemas, and shared fixtures run all checks.
 
 | Change | Checks in the CI workflow |
 | -- | -- |
 | Documentation site or assets only | Documentation and repository contract tests |
 | README | Contract tests and package build/installed SDK verification |
-| Rust TUI source only | Linux/macOS Rust workspace, Linux TUI handoff, contract tests |
-| Python runtime | Quality, both Python suites, macOS platform smoke, package, TUI handoff |
-| RPC/events, shared inputs, native crates, or unclassified changes | Full CI |
+| Rust TUI source only | Linux Rust workspace, Linux TUI handoff, contract tests (macOS on nightly/manual) |
+| Python runtime (PR) | Quality, Python suite, macOS platform smoke, package, Linux TUI handoff |
+| Routine `main` push (Python/TUI) | Quality, Linux Python/Rust/handoff, package (macOS & Python 3.11 on nightly) |
+| `wisp-search`, Cargo/CI, or unclassified | Full CI (including macOS `rust-workspace`; `python-tests-oldest` on config/nightly) |
+| Shared inputs (`schemas/`, `events/`, `rpc/`, fixtures, support) | Full CI on Linux + macOS platform smoke (`python-tests-oldest` on `push`/nightly) |
 
 Mixed changes take the union of their checks. Contract tests run separately only when the full
 Python suite is not selected; the full suite already includes them. Documentation builds and
@@ -176,9 +178,10 @@ Astro browser checks retain their own workflow path filters.
 
 Linux is authoritative for the complete locked-environment Python quality and test suite: Ruff
 formatting and lint, configured `uv run mypy`, live RPC schema verification, and the `tests/` suite.
-Rust formatting runs on Linux; Clippy and workspace tests run on both Linux and macOS because
-platform-specific code needs coverage on each. The TUI handoff and benchmark harnesses run on Linux
-for relevant PRs; main and manual runs also exercise macOS handoff as a nonblocking diagnostic.
+Rust formatting runs on Linux; Clippy and workspace tests run on Linux on every Rust change and on
+macOS when `rust/wisp-search/`, Cargo manifests/lockfiles, or CI definitions change, as well as on
+nightly and manual runs. The TUI handoff and benchmark harnesses run on Linux for relevant PRs and
+pushes; nightly and manual runs also exercise macOS handoff as a nonblocking diagnostic.
 
 The `CI passed` job is the only required status check. It always runs and requires successful check
 selection, every selected job to succeed, and every unselected job to be explicitly skipped. A
@@ -201,14 +204,13 @@ exercises an installed fake-provider Rust TUI prompt, the managed-output extensi
 replacement with an actionable missing-binary error, corruption, offline reinstall, and uninstall;
 it uploads checksums, a CycloneDX SBOM, and observed size/startup/RSS evidence.
 
-It runs on runtime pushes to `main`, skipping changes confined to site content, assets, agent
-instructions, and the changelog. Pull requests build candidates for native crates, shared build and
-protocol inputs, packaging files, wheel scripts/tests, and Python modules that load a native binary
-(the TUI launcher and the search and shell tools). TUI-only PRs use workspace and handoff checks;
-their merged code still gets an installed-wheel build. Pull requests, `main` pushes, and manual runs
-only upload candidates. The tag-gated release workflow calls the same reusable builder, verifies the
-complete downloaded distribution set, and requires provenance attestation before trusted
-publication.
+It runs on a nightly schedule on `main`, on manual runs, and on pull requests that touch native
+crates, shared build and protocol inputs, packaging files, wheel scripts/tests, or Python modules
+that load a native binary (the TUI launcher and the search and shell tools). TUI-only PRs use
+workspace and handoff checks; their merged code gets an installed-wheel build on the nightly `main`
+run. Pull requests, nightly `main` runs, and manual runs only upload candidates. The tag-gated release
+workflow calls the same reusable builder, verifies the complete downloaded distribution set, and
+requires provenance attestation before trusted publication.
 
 The `production_fault` tests are a deterministic regression contract that runs with the rest of
 the suite; to run them alone:

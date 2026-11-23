@@ -96,8 +96,8 @@ for another platform.
   - checks the platform: `auditwheel` on Linux; on macOS, the minimum OS, linkage and signing;
   - runs the install, replace and uninstall lifecycle script.
 
-  It runs on every push to `main`, and on pull requests that change Rust crates, `packaging/`,
-  `pyproject.toml`, the wheel scripts, or the Python modules that load native code.
+  It runs nightly on `main`, on manual dispatch, and on pull requests that change Rust crates,
+  `packaging/`, `pyproject.toml`, the wheel scripts, or the Python modules that load native code.
 - **`release.yml`** runs for `v*` tags. It repeats the quality gates, calls `rust-tui-wheels.yml`,
   builds the sdist and pure wheel, and verifies all four distributions together. It then attests
   their provenance, publishes to PyPI with trusted publishing, and creates the GitHub release. The
