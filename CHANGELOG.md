@@ -10,7 +10,27 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.16.7 — Unreleased
+## 0.16.8 — Unreleased
+
+- **Responsive Files browsing (#1145).** The sidebar loads the root first and fetches folder
+  contents as you expand them. Refresh keeps the current tree, selection, and expanded folders
+  usable. Retry a failed folder directly. The Files filter and `@` picker share a background
+  index and show available matches while it scans.
+- **GPT-6.2 Codex prompt caching and verification (#1143).** Stable instructions can reuse a
+  cached prefix while turn-specific guidance stays separate. The agent keeps approved edit scope
+  explicit and can use a successful exact edit to verify a narrowly scoped wording change.
+- **Evaluation reporting (#1143, #1144).** Eval reports track model requests and tool rounds per
+  successful result, and runs can replay exact prompt snapshots. The SWE-bench Pro V2 pilot records
+  the pinned eight-task sample and reports results separately for each model and prompt.
+- **Live RPC discovery.** `get_project_files` accepts optional `directory` and `progressive`
+  arguments. `rpc.project_files` reports the directory scope and whether indexing is still in
+  progress. Use the matching `0.16.8` backend and TUI. Existing saved sessions open without
+  migration.
+
+<!-- Keeps links to the pre-release "0.16.7 — Unreleased" heading working. -->
+<a id="0167--unreleased"></a>
+
+## 0.16.7 — 2026-11-23
 
 - **Click to preview and edit from Files (#1140):** Click a file to open a read-only preview, or
   press `e` on a selected file to open it in your editor. Saving and exiting refreshes the preview
