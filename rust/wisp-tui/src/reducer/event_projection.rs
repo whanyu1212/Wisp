@@ -189,6 +189,8 @@ impl BackendEvent {
                     .map_err(|_| "Project discovery report exceeds the 1 MiB display limit or could not be decoded.".into());
                 return Ok(Self::ProjectFilesReported {
                     command_id,
+                    directory: value["directory"].as_str().map(str::to_owned),
+                    in_progress: value["in_progress"].as_bool().unwrap_or(false),
                     snapshot,
                 });
             }

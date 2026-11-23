@@ -240,6 +240,21 @@ impl FilePicker {
         } {
             return;
         }
+        let mut selected_path = None;
+        let mut expanded_paths = BTreeSet::new();
+        if let Some(old) = &self.snapshot
+            && snapshot.is_some_and(|new| old.generation == new.generation)
+        {
+            selected_path = self
+                .rows
+                .get(self.selected)
+                .map(|&index| old.entries[index].path.clone());
+            expanded_paths.extend(
+                self.expanded
+                    .iter()
+                    .map(|&index| old.entries[index].path.clone()),
+            );
+        }
         self.snapshot = snapshot.cloned();
         self.expanded.clear();
         self.parents.clear();
@@ -251,6 +266,11 @@ impl FilePicker {
                 .filter(|(_, entry)| entry.kind == ProjectFileKind::Directory)
                 .map(|(index, entry)| (entry.path.as_str(), index))
                 .collect();
+            self.expanded.extend(
+                expanded_paths
+                    .iter()
+                    .filter_map(|path| directories.get(path.as_str()).copied()),
+            );
             self.parents = snapshot
                 .entries
                 .iter()
@@ -264,6 +284,14 @@ impl FilePicker {
         }
         self.selected = 0;
         self.rebuild_rows();
+        if let (Some(path), Some(snapshot)) = (selected_path, &self.snapshot)
+            && let Some(index) = self
+                .rows
+                .iter()
+                .position(|&index| snapshot.entries[index].path == path)
+        {
+            self.selected = index;
+        }
     }
 
     fn rebuild_rows(&mut self) {
@@ -460,28 +488,43 @@ impl FilePicker {
                 controls: layout.controls,
             };
         }
+        let limited = files.snapshot().is_some_and(|snapshot| snapshot.truncated);
+        let status = if files.loading() {
+            Some(if files.snapshot.is_some() {
+                "Refreshing project files…"
+            } else if files.partial() {
+                "Indexing · showing available matches"
+            } else {
+                "Loading project files…"
+            })
+        } else if files.error.is_some() {
+            Some("Index unavailable · reopen to retry")
+        } else if limited {
+            Some("Limited snapshot • paths omitted")
+        } else {
+            None
+        };
         let message = if self
             .context
             .as_ref()
             .is_some_and(|context| context.overlong)
         {
             Some("Reference query exceeds 4096 bytes; shorten it to browse.".into())
-        } else if files.loading() {
-            Some("Loading project files…".to_owned())
-        } else if let Some(error) = &files.error {
+        } else if self.rows.is_empty()
+            && !files.loading()
+            && let Some(error) = &files.error
+        {
             Some(format!(
                 "{} Close/reopen to retry.",
                 crate::ui::sanitize_for_terminal(error)
             ))
         } else if self.rows.is_empty() {
-            Some(
-                if files.snapshot.as_ref().is_some_and(|s| s.truncated) {
-                    "No matches in limited snapshot."
-                } else {
-                    "No matching project files."
-                }
-                .to_owned(),
-            )
+            let message = if limited && !files.loading() && files.error.is_none() {
+                "No matches in limited snapshot."
+            } else {
+                status.unwrap_or("No matching project files.")
+            };
+            Some(message.to_owned())
         } else {
             None
         };
@@ -492,16 +535,13 @@ impl FilePicker {
                 controls: layout.controls,
             };
         }
-        let limited = files.snapshot.as_ref().is_some_and(|s| s.truncated);
         let list_area = if inner.height >= 2 {
             frame.render_widget(
-                Paragraph::new(if limited {
-                    "Limited snapshot • paths omitted"
-                } else if self.tree {
+                Paragraph::new(status.unwrap_or(if self.tree {
                     "←/→ folders • Tab fuzzy"
                 } else {
                     "Top 30 matches • Tab tree"
-                })
+                }))
                 .style(Style::default().fg(palette.muted)),
                 Rect { height: 1, ..inner },
             );

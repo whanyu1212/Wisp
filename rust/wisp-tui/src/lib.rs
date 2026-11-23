@@ -1158,7 +1158,7 @@ impl LiveUi {
                 UiEffect::CommandCatalogChanged => self.completion.invalidate(),
                 UiEffect::ProjectFilesChanged => {
                     self.file_picker
-                        .sync_snapshot(self.state.project_files.snapshot.as_ref());
+                        .sync_snapshot(self.state.project_files.search_snapshot());
                     self.file_picker.invalidate();
                     self.render_pending = true;
                 }
@@ -5225,6 +5225,28 @@ impl LiveUi {
         }
     }
 
+    /// Update the requested folders from the painted tree, only when a frame changed.
+    async fn sync_files_view(
+        &mut self,
+        writer: &mpsc::Sender<WriterMessage>,
+        limit: usize,
+    ) -> Result<LoopControl, Error> {
+        if !self.state.input_ready {
+            return Ok(LoopControl::Continue);
+        }
+        let filter = self.side_panel.files_search_open();
+        let folders = self.side_panel.files_requested_directories(&self.state);
+        if self.state.project_files.view_matches(filter, &folders) {
+            return Ok(LoopControl::Continue);
+        }
+        self.dispatch(
+            UiAction::SetProjectFilesView { filter, folders },
+            writer,
+            limit,
+        )
+        .await
+    }
+
     /// Reads the peeked process's output again, on the poll tick while it runs.
     async fn poll_process_peek(
         &mut self,
@@ -6312,7 +6334,7 @@ impl LiveUi {
             self.apply_effects(effects, writer, limit).await?;
         }
         self.file_picker.sync_snapshot(
-            open.then_some(self.state.project_files.snapshot.as_ref())
+            open.then_some(self.state.project_files.search_snapshot())
                 .flatten(),
         );
         Ok(())
@@ -6954,6 +6976,7 @@ impl LiveUi {
             return Ok(LoopControl::Continue);
         }
         let browser_shown = self.side_panel.mode() == side_panel::PanelMode::Browser;
+        self.side_panel.sync_files_context(&self.state);
         match self.side_panel.key(key.code, &self.state) {
             side_panel::OverlayKey::Close => self.side_panel.close_overlay(),
             // `b` switched the focused panel to the Browser view.
@@ -6986,6 +7009,11 @@ impl LiveUi {
                 self.render_pending = true;
                 return self
                     .dispatch(UiAction::RefreshProjectFiles, writer, limit)
+                    .await;
+            }
+            side_panel::OverlayKey::RetryProjectFileDirectory(path) => {
+                return self
+                    .dispatch(UiAction::RetryProjectFileDirectory(path), writer, limit)
                     .await;
             }
             side_panel::OverlayKey::Moved => {}

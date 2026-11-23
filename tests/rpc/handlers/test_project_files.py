@@ -17,6 +17,7 @@ from tests.support.rpc import build_rpc_executor_fixture
 from wisp.events import (
     ProjectFilesInvalidated,
     RpcCommandFinished,
+    RpcGitDiffReported,
     RpcProjectFile,
     RpcProjectFilesReported,
     WispEvent,
@@ -110,6 +111,181 @@ def test_discovery_contract_and_refresh(tmp_path: Path) -> None:
         GetProjectFilesCommand.model_validate({"type": "get_project_files", "root": "/"})
 
 
+@pytest.mark.parametrize("directory", ["/", "..", "./src", "src/", "src//a", "src\\a", "src\n"])
+def test_rejects_invalid_directory(directory: str) -> None:
+    with pytest.raises(ValidationError):
+        GetProjectFilesCommand(directory=directory)
+
+
+def test_rejects_progressive_directory() -> None:
+    with pytest.raises(ValidationError, match="requires a full project scan"):
+        GetProjectFilesCommand(directory="", progressive=True)
+
+
+def test_lists_only_direct_children(tmp_path: Path) -> None:
+    (tmp_path / "src" / "nested").mkdir(parents=True)
+    (tmp_path / "src" / "nested" / "deep.py").touch()
+    (tmp_path / "src" / "visible.py").touch()
+    (tmp_path / "src" / ".env").touch()
+
+    async def scenario() -> None:
+        async with running_host(tmp_path) as (_, command, events):
+            await command(type="get_project_files", id="root", directory="")
+            assert (await wait_finished(events, "root")).ok
+            await command(type="get_project_files", id="branch", directory="src")
+            assert (await wait_finished(events, "branch")).ok
+            root, branch = [event for event in events if isinstance(event, RpcProjectFilesReported)]
+            assert root.directory == "" and branch.directory == "src"
+            assert not root.in_progress and not branch.in_progress
+            assert RpcProjectFile(path="src", kind="directory") in root.entries
+            assert all("/" not in entry.path for entry in root.entries)
+            assert branch.entries == (
+                RpcProjectFile(path="src/nested", kind="directory"),
+                RpcProjectFile(path="src/visible.py", kind="file"),
+            )
+
+    anyio.run(scenario)
+
+
+@pytest.mark.parametrize("directory", ["secret/nested", ".GIT/nested", "link/nested", "missing"])
+def test_rejects_unavailable_branches(tmp_path: Path, directory: str) -> None:
+    for name in ("secret", ".git", "real"):
+        parent = tmp_path / name / "nested"
+        parent.mkdir(parents=True)
+        (parent / "private-name").touch()
+    # On case-sensitive filesystems, exercise both the ignored name and its case variant.
+    if not (tmp_path / ".GIT").exists():
+        (tmp_path / ".GIT" / "nested").mkdir(parents=True)
+        (tmp_path / ".GIT" / "nested" / "private-name").touch()
+    (tmp_path / "link").symlink_to(tmp_path / "real", target_is_directory=True)
+
+    async def scenario() -> None:
+        async with running_host(tmp_path) as (host, command, events):
+            host.project_files.reserve_protected_paths(("secret",))
+            host.project_files.settle_policy(host.agent.tool_context)
+            await command(type="get_project_files", id="branch", directory=directory)
+            assert (
+                await wait_finished(events, "branch")
+            ).error == "Project file discovery unavailable"
+            assert not any(isinstance(event, RpcProjectFilesReported) for event in events)
+
+    anyio.run(scenario)
+
+
+@pytest.mark.parametrize("progressive", [False, True])
+def test_unavailable_catalog_root(tmp_path: Path, progressive: bool) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "private-name").touch()
+    alias = tmp_path / "alias"
+    alias.symlink_to(real, target_is_directory=True)
+
+    async def scenario() -> None:
+        async with running_host(tmp_path) as (host, command, events):
+            host.project_files.settle_policy(ToolContext(cwd=alias))
+            await command(type="get_project_files", id="catalog", progressive=progressive)
+            finished = await wait_finished(events, "catalog")
+            reports = [event for event in events if isinstance(event, RpcProjectFilesReported)]
+            if progressive:
+                assert finished.error == "Project file discovery unavailable"
+                assert reports == []
+            else:
+                assert finished.ok
+                assert len(reports) == 1 and reports[0].entries == ()
+
+    anyio.run(scenario)
+
+
+@pytest.mark.parametrize("invalidate", [False, True])
+def test_progress_leaves_other_slots_free(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalidate: bool
+) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "first.py").touch()
+    (tmp_path / "src" / "later.py").touch()
+    waiting, release, exited = Event(), Event(), Event()
+    original = discovery.collect_project_snapshot
+
+    def staged(config: FileIndexConfig, *, cancelled=None, on_progress=None):  # type: ignore[no-untyped-def]
+        def report_then_wait(snapshot):  # type: ignore[no-untyped-def]
+            on_progress(snapshot)
+            waiting.set()
+            assert release.wait(5)
+
+        try:
+            return original(config, cancelled=cancelled, on_progress=report_then_wait)
+        finally:
+            exited.set()
+
+    monkeypatch.setattr(discovery, "collect_project_snapshot", staged)
+
+    def diff(
+        _context: ToolContext, _cancelled: Event, command_id: str, generation: int, _edits: object
+    ) -> RpcGitDiffReported:
+        return RpcGitDiffReported(
+            command_id=command_id, generation=generation, head="stub", files=(), truncated=False
+        )
+
+    monkeypatch.setattr(discovery, "collect_git_diff", diff)
+
+    async def scenario() -> None:
+        try:
+            async with running_host(tmp_path) as (host, command, events):
+                await command(type="get_project_files", id="catalog", progressive=True)
+                assert await anyio.to_thread.run_sync(waiting.wait, 3)
+                await command(type="get_project_files", id="directory", directory="src")
+                directory_finished = await wait_finished(events, "directory")
+                assert directory_finished.ok
+                await command(type="get_git_diff", id="diff")
+                assert (await wait_finished(events, "diff")).ok
+                assert any(
+                    isinstance(event, RpcGitDiffReported) and event.command_id == "diff"
+                    for event in events
+                )
+                assert not exited.is_set()
+                partial, branch = [
+                    event for event in events if isinstance(event, RpcProjectFilesReported)
+                ]
+                assert partial.command_id == "catalog" and partial.in_progress
+                assert partial.directory is None
+                assert RpcProjectFile(path="src", kind="directory") in partial.entries
+                assert RpcProjectFile(path="src/later.py", kind="file") not in partial.entries
+                assert branch.command_id == "directory" and not branch.in_progress
+                assert RpcProjectFile(path="src/later.py", kind="file") in branch.entries
+                if invalidate:
+                    invalidated = host.project_files.begin_policy_transition()
+                    host.project_files.reserve_protected_paths(("later.py",))
+                    host.project_files.settle_policy(host.agent.tool_context)
+                    assert not (await wait_finished(events, "catalog")).ok
+                    assert not exited.is_set()
+                    await command(type="get_project_files", id="new-directory", directory="src")
+                    assert (await wait_finished(events, "new-directory")).ok
+                    retained = [
+                        event for event in events if isinstance(event, RpcProjectFilesReported)
+                    ][-1]
+                    assert retained.generation == invalidated.generation
+                    assert retained.entries == (RpcProjectFile(path="src/first.py", kind="file"),)
+                release.set()
+                finished = await wait_finished(events, "catalog")
+                assert finished.ok is not invalidate
+                catalog = [
+                    event
+                    for event in events
+                    if isinstance(event, RpcProjectFilesReported) and event.command_id == "catalog"
+                ]
+                if invalidate:
+                    assert catalog == [partial]
+                else:
+                    assert [report.in_progress for report in catalog] == [True, False]
+                    assert RpcProjectFile(path="src/later.py", kind="file") in catalog[-1].entries
+                    assert events.index(catalog[-1]) < events.index(finished)
+        finally:
+            release.set()
+            assert await anyio.to_thread.run_sync(exited.wait, 3)
+
+    anyio.run(scenario)
+
+
 def test_byte_budget_includes_escaping_envelope_and_preserves_ancestors(tmp_path: Path) -> None:
     (tmp_path / "parent").mkdir()
     for i in range(12):
@@ -186,13 +362,22 @@ def test_policy_waiter_resumes_with_reserved_credentials(tmp_path: Path) -> None
     anyio.run(scenario)
 
 
-def test_invalidation_rechecks_result_after_waiting_for_publication(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("directory", "in_progress"), [(None, False), (None, True), ("", False)])
+def test_invalidation_rechecks_result_after_waiting_for_publication(
+    tmp_path: Path, directory: str | None, in_progress: bool
+) -> None:
     async def scenario() -> None:
         async with running_host(tmp_path) as (host, _, events):
             snapshot = collect_project_snapshot(
                 FileIndexConfig(root=tmp_path, context=host.agent.tool_context)
             )
-            report = project_files_report(snapshot, command_id="old", generation=1)
+            report = project_files_report(
+                snapshot,
+                command_id="old",
+                generation=1,
+                directory=directory,
+                in_progress=in_progress,
+            )
             waiting = anyio.Event()
             published: list[bool] = []
 

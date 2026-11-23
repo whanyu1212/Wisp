@@ -3593,6 +3593,8 @@ async fn user_shell_command_renders_inline_and_attaches_with_chip() {
 
 #[tokio::test]
 async fn files_side_panel_tab_filters_previews_and_inserts_reference() {
+    use wisp_protocol::events::{ProjectFileEntry, ProjectFileKind, ProjectFileSnapshot};
+
     struct TempRoot(PathBuf);
     impl Drop for TempRoot {
         fn drop(&mut self) {
@@ -3618,22 +3620,32 @@ async fn files_side_panel_tab_filters_previews_and_inserts_reference() {
         ..LiveUi::default()
     };
     ui.state.workspace_cwd = Some(root.0.to_string_lossy().into_owned());
-    ui.state.project_files.snapshot = Some(std::sync::Arc::new(
-        wisp_protocol::events::ProjectFileSnapshot {
-            generation: 1,
-            entries: vec![
-                wisp_protocol::events::ProjectFileEntry {
-                    path: "src/lib.rs".into(),
-                    kind: wisp_protocol::events::ProjectFileKind::File,
-                },
-                wisp_protocol::events::ProjectFileEntry {
-                    path: "README.md".into(),
-                    kind: wisp_protocol::events::ProjectFileKind::File,
-                },
-            ],
-            truncated: false,
-        },
-    ));
+    let listing = |entries| ProjectFileSnapshot {
+        generation: 1,
+        entries,
+        truncated: false,
+    };
+    let file = |path: &str| ProjectFileEntry {
+        path: path.into(),
+        kind: ProjectFileKind::File,
+    };
+    ui.state.project_files.set_directory_for_test(
+        "",
+        listing(vec![
+            ProjectFileEntry {
+                path: "src".into(),
+                kind: ProjectFileKind::Directory,
+            },
+            file("README.md"),
+        ]),
+    );
+    ui.state
+        .project_files
+        .set_directory_for_test("src", listing(vec![file("src/lib.rs")]));
+    ui.state.project_files.snapshot = Some(std::sync::Arc::new(listing(vec![
+        file("README.md"),
+        file("src/lib.rs"),
+    ])));
     ui.state.git_diff.snapshot = Some(std::sync::Arc::new(
         crate::reducer::git_diff::GitDiffSnapshot {
             generation: 1,
@@ -3663,7 +3675,15 @@ async fn files_side_panel_tab_filters_previews_and_inserts_reference() {
     let docked = draw(&mut ui, 152, 24);
     assert!(buffer_row(&docked, 0).contains("Session   Files   Browser"));
     let header = row_containing(&docked, "Project tree");
-    assert!(buffer_row(&docked, header).trim_end().ends_with("2 files"));
+    assert!(
+        buffer_row(&docked, header)
+            .trim_end()
+            .ends_with("2 entries")
+    );
+    row_containing(&docked, "▌├─ ▸ \u{f024b} src/");
+    assert!(!(0..docked.area().height).any(|y| buffer_row(&docked, y).contains("lib.rs")));
+    press(&mut ui, &writer, KeyCode::Right).await;
+    let docked = draw(&mut ui, 152, 24);
     row_containing(&docked, "▌├─ ▾ \u{f0770} src/");
     row_containing(&docked, "│ └─ M \u{f1617} lib.rs");
 

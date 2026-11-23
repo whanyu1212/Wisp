@@ -598,7 +598,8 @@ pub(super) async fn run_with_interrupts<B: FrameBackend>(
             && now >= last_paint + LIVE_FRAME_MIN_PAINT_INTERVAL;
         if now >= next_paint || live_frame_due {
             ui.advance_stream_reveal(now.into_std());
-            if ui.render_pending {
+            let painted = ui.render_pending;
+            if painted {
                 ui.draw(terminal, connection)?;
                 last_paint = now;
             }
@@ -607,6 +608,9 @@ pub(super) async fn run_with_interrupts<B: FrameBackend>(
             // is on screen; the reducer hears of a change before the loop waits.
             if !eof {
                 ui.sync_side_panel(writer, limit).await?;
+                if painted && ui.sync_files_view(writer, limit).await? == LoopControl::Exit {
+                    return Ok(Exit::User);
+                }
             }
         }
         // A released border drag can supply its final Chromium geometry only

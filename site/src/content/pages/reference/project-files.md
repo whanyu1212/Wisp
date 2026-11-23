@@ -1,6 +1,6 @@
 ---
 title: Project file discovery
-description: Contract for the get_project_files RPC command and the bounded, protected-path-aware rpc.project_files snapshot.
+description: Contract for the get_project_files RPC command and bounded, protected-path-aware rpc.project_files reports.
 route: reference/project-files.html
 section: reference
 order: 4
@@ -11,69 +11,86 @@ searchable: true
 
 # Project file discovery
 
-`get_project_files` returns one fresh, bounded `rpc.project_files` report between
-`rpc.command.started` and `rpc.command.finished`. The command accepts an optional
-correlation `id`; Python chooses the active tool working directory and resolved
-protection policy. It does not accept client paths, queries, or policy overrides.
+`get_project_files` discovers names under the active tool working directory using
+the backend's resolved protection policy. The command accepts an optional
+correlation `id` and two options.
 
-The report contains `command_id`, a process-local policy `generation`, `entries`
-with relative POSIX `path` and `kind` (`file` or `directory`), and `truncated`.
-The standard event `timestamp` field also applies. No absolute root,
-credential paths, denied-entry counts, file contents, or raw filesystem errors
-are returned. Paths are advisory names; later tool operations still perform their
-own access checks. Names that cannot be represented safely in UTF-8 or contain
-controls, bidirectional overrides, or ambiguous backslashes are omitted.
+| Options | Reports |
+| --- | --- |
+| No options | One fresh, bounded full-project snapshot. |
+| `directory: ""` | One report listing the root's direct children. |
+| `directory: "src/example"` | One report listing the selected directory's direct children. |
+| `progressive: true` | A bounded full-project scan that can report intermediate snapshots and always sends a final snapshot on success. |
 
-Clients derive hierarchy from path components and rank the snapshot locally.
-This supports tree browsing and fuzzy completion without a round trip for each
-keystroke or cross-language highlight-index conversions. Match offsets belong
-to the client renderer. A new request rescans the filesystem; there is no watcher,
-server snapshot cache, pagination, or filesystem freshness guarantee after a scan.
+Directory scopes are display-safe relative POSIX paths. A directory scope and
+`progressive: true` cannot be combined. All reports appear between
+`rpc.command.started` and `rpc.command.finished`.
+
+Each `rpc.project_files` report includes `command_id`, a process-local policy
+`generation`, `entries` with project-relative POSIX `path` and `kind` (`file` or
+`directory`), `truncated`, and the standard event `timestamp`. The report's
+`directory` echoes the requested scope and is null for a full-project scan.
+`in_progress` is true only for intermediate full-project snapshots. An
+intermediate snapshot contains the accumulated entries within the report budget,
+so clients can apply their search to it directly. A successful scan ends with an
+`in_progress: false` report even if its entries match the most recent intermediate report.
+
+A refresh rescans the filesystem. The backend has no watcher, snapshot cache,
+pagination, or guarantee that an entry still exists after discovery.
 
 ## Bounds and ordering
 
-The default scan accepts at most 10,000 files/directories, traverses at most 12
-levels, examines at most 50,000 raw directory entries (including rejected names),
-and has a cooperative 2.5-second deadline. Reports including their JSONL newline
-fit within 1 MiB, measured with the actual escaping and event envelope.
+A scan can return up to 10,000 files and directories, explore up to 12 levels,
+and examine up to 50,000 raw directory entries, including rejected names. A
+directory at the depth limit can appear in its parent's listing while its own
+listing is truncated. Entry, depth, work, and byte limits set `truncated`.
+Each report fits within 1 MiB, including the encoded event and JSONL newline.
+Retained paths are sorted with parents before descendants in full-project reports.
+An individual directory that exceeds the enumeration budget is omitted in full.
 
-Directories are opened with the shared guarded filesystem helpers. Symlinks and
-special files are never scanned. Each directory is materialized within the work
-budget before sorting; a directory that cannot be enumerated within that budget
-is omitted in full. Entry/depth/work/byte limits produce a sorted truncated
-snapshot with parents retained before descendants. Cancellation or timeout returns
-no snapshot. Thus successful snapshot selection is deterministic for an unchanged
-accessible filesystem; timeouts do not expose timing-dependent prefixes.
+Directory listings and full-project requests without progress have a
+2.5-second deadline. Progressive requests have a 30-second deadline and
+can report progress between directories up to eight times. Those updates start
+250 milliseconds apart and become less frequent during long scans.
+Cancellation, timeout, or another scan failure ends the
+request without a final snapshot. A client can retain earlier usable snapshots
+while they belong to the current policy generation.
 
-Checks run between filesystem operations. The RPC also stops awaiting the scan
-at the deadline. A blocked OS call itself cannot be interrupted, but it runs off
-the command loop. Only one physical scan can run per
-host: even after its awaiting task is cancelled, its admission slot remains held
-until the worker exits. Additional requests receive a generic busy failure.
-Discovery shares command IDs, cancellation, and bounded outstanding accounting
-with auxiliary reads, but does not hold up prompts or session operations.
-EOF and shutdown cancel discovery and wait for its terminal command event.
+Directories are opened with guarded filesystem helpers. Symlinks and special
+files are omitted. A selected branch must also pass the protected-path and
+ignored-directory checks for each of its components. Paths are advisory names
+and later tool operations perform their own access checks. Reports omit denied
+names, absolute roots, file contents, raw filesystem errors, and names that
+cannot be displayed safely.
+
+Each host has one physical worker slot each for directory listings, full-project
+scans, and Git diff reads. Each slot remains occupied
+until its worker exits, including when a blocked filesystem call outlasts
+cancellation of the request. Another request for that slot receives a generic
+busy failure. Discovery shares command IDs, cancellation, and bounded outstanding
+accounting with auxiliary reads. EOF and shutdown cancel discovery and wait
+for its terminal command event.
 
 ## Policy transitions and clients
 
-Before trusted configuration is applied, the host serializes
-`project_files.invalidated` with an advanced generation and cancels old discovery.
-Clients must clear earlier snapshots and reject reports for an older generation
-or a request ID they no longer want. A request arriving during the transition may
-wait for policy settlement; it remains cancellable. Additional requests are busy.
+Before applying trusted configuration, the host advances the policy generation,
+cancels earlier discovery requests, and publishes `project_files.invalidated`.
+Clients must clear earlier snapshots and discard reports for an older generation
+or an obsolete request ID. Requests received during the transition can wait for
+policy settlement and remain cancellable.
 
-Candidate protected paths are reserved before provider adoption, including the
-new credential path. All protection learned during a host's lifetime is retained
-for discovery, including after failed or cancelled adoption. Success and failure
-both settle waiters against the active policy plus these reserved protections.
-The host checks generation and cancellation again under its output lock before
-committing a report. A report already committed to output finishes publication;
-a subsequent invalidation tells clients to discard it.
+The backend reserves candidate protected paths before adopting the new provider
+configuration. It retains every protection learned during a host's lifetime,
+including after failed or cancelled adoption. The backend checks generation and
+cancellation under its output lock before publishing each partial or final
+report. If a report has begun publication, it finishes and any subsequent
+invalidation tells clients to discard it.
 
 ## Frontend transition
 
-The Rust frontend uses the RPC capability to request bounded snapshots for its file picker.
-Agent grep/find behavior and authorization are unchanged.
+The Files sidebar fetches the root and expanded directories independently.
+Global filtering and `@` completion share the full-project catalog and rank it
+locally.
 
-The contract is part of the current release's live RPC bundle; the backend and frontend must be
-the same Wisp release.
+The contract is part of the current release's live RPC bundle. The backend and
+frontend must be the same Wisp release.

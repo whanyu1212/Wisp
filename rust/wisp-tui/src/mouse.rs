@@ -546,6 +546,7 @@ impl LiveUi {
                 ) {
                     return Ok(LoopControl::Continue);
                 }
+                self.side_panel.sync_files_context(&self.state);
                 match self.side_panel.click(event.column, event.row) {
                     crate::side_panel::OverlayKey::Open(target) => {
                         self.side_panel.close_overlay();
@@ -562,6 +563,11 @@ impl LiveUi {
                         self.render_pending = true;
                         return self
                             .dispatch(UiAction::RefreshProjectFiles, writer, limit)
+                            .await;
+                    }
+                    crate::side_panel::OverlayKey::RetryProjectFileDirectory(path) => {
+                        return self
+                            .dispatch(UiAction::RetryProjectFileDirectory(path), writer, limit)
                             .await;
                     }
                     crate::side_panel::OverlayKey::BrowserControl(control) => {

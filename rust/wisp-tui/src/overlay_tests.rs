@@ -2260,6 +2260,8 @@ async fn file_picker_footer_hints_switch_modes_and_close() {
     ui.dispatch(
         UiAction::BackendEvent(reducer::BackendEvent::ProjectFilesReported {
             command_id: command_id.clone(),
+            directory: None,
+            in_progress: false,
             snapshot: Ok(snapshot),
         }),
         &writer,
@@ -2352,6 +2354,8 @@ async fn esc_closing_key_help_clears_stale_mouse_frame_and_diff_detail_keeps_esc
     ui.dispatch(
         UiAction::BackendEvent(reducer::BackendEvent::ProjectFilesReported {
             command_id: command_id.clone(),
+            directory: None,
+            in_progress: false,
             snapshot: Ok(snapshot),
         }),
         &writer,

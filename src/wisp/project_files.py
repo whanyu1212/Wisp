@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 import stat
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Event
@@ -32,6 +33,9 @@ PROJECT_PATH_PATTERN = (
     r"(?:/[^/\\\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]+)*(?![\s\S])"
 )
 _DISPLAY_PATH = re.compile(PROJECT_PATH_PATTERN)
+PROJECT_DIRECTORY_PATTERN = re.compile(rf"(?:^(?![\s\S])|{PROJECT_PATH_PATTERN})")
+_FIRST_PROGRESS_INTERVAL_SECONDS = 0.25
+_MAX_PROGRESS_REPORTS = 8
 
 
 def is_display_safe_path(path: str) -> bool:
@@ -141,6 +145,12 @@ class _ScanBudget:
     deadline: float
     cancelled: Event | None
 
+    @classmethod
+    def start(cls, config: FileIndexConfig, cancelled: Event | None) -> _ScanBudget:
+        return cls(
+            max(0, config.max_examined_entries), monotonic() + config.timeout_seconds, cancelled
+        )
+
     def check(self) -> None:
         if self.cancelled is not None and self.cancelled.is_set():
             raise ProjectScanCancelled
@@ -161,6 +171,7 @@ def _scan_directory(
     context: ToolContext,
     expected_identity: tuple[int, int] | None,
     budget: _ScanBudget,
+    reject_aliases: bool = False,
 ) -> list[_ScannedEntry] | None:
     """Collect a complete guarded directory, or omit it on enumeration exhaustion.
 
@@ -170,6 +181,8 @@ def _scan_directory(
         context (ToolContext): Resolved protected-path policy.
         expected_identity (tuple[int, int] | None): Previously observed device/inode pair.
         budget (_ScanBudget): Shared work, deadline, and cancellation limits.
+        reject_aliases (bool): Require a Windows directory supplied by the client to use
+            its canonical filesystem name.
 
     Returns:
         list[_ScannedEntry] | None: Sorted safe entries, or None if enumeration exhausted
@@ -181,9 +194,21 @@ def _scan_directory(
     from wisp.tools.search.tools import IGNORED_DIRS
 
     budget.check()
-    with open_directory(secure_tool_path(str(current), context)) as directory:
+    secured = secure_tool_path(str(current), context)
+    prefix = "" if current == root else f"{current.relative_to(root).as_posix()}/"
+    with open_directory(secured) as directory:
+        guarded_descriptor = isinstance(directory, int)
+        if (
+            reject_aliases
+            and isinstance(directory, Path)
+            and directory.resolve(strict=True) != current
+        ):
+            # On Windows, aliases such as a DOS short name can address an ignored
+            # or protected directory without spelling its real components.
+            raise ValueError("Project directory uses a filesystem alias")
         opened = os.fstat(directory) if isinstance(directory, int) else directory.stat()
-        if expected_identity is not None and (opened.st_dev, opened.st_ino) != expected_identity:
+        opened_identity = (opened.st_dev, opened.st_ino)
+        if expected_identity is not None and opened_identity != expected_identity:
             return []
         entries: list[os.DirEntry[str]] = []
         with os.scandir(directory) as iterator:
@@ -205,7 +230,7 @@ def _scan_directory(
         for entry in entries:
             budget.check()
             candidate = current / entry.name
-            relative = candidate.relative_to(root).as_posix()
+            relative = prefix + entry.name
             if not is_display_safe_path(relative):
                 continue
             try:
@@ -213,7 +238,7 @@ def _scan_directory(
                 is_dir = stat.S_ISDIR(info.st_mode)
                 if not is_dir and not stat.S_ISREG(info.st_mode):
                     continue
-                if is_dir and entry.name in IGNORED_DIRS:
+                if is_dir and entry.name.casefold() in IGNORED_DIRS:
                     continue
                 if is_protected_path(candidate, context):
                     continue
@@ -226,22 +251,108 @@ def _scan_directory(
                 continue
             typed = ProjectDirectory(relative) if is_dir else ProjectFile(relative)
             result.append(_ScannedEntry(typed, (info.st_dev, info.st_ino)))
+        if guarded_descriptor:
+            budget.check()
+            # A rename followed by a symlink to the same directory can pass a
+            # lexical stat against each leaf. Reopen the directory without
+            # following links and confirm its identity before exposing any names.
+            with open_directory(secured) as verified:
+                assert isinstance(verified, int)
+                reopened = os.fstat(verified)
+                if (reopened.st_dev, reopened.st_ino) != opened_identity:
+                    raise OSError("Project directory changed during discovery")
         return result
 
 
+def collect_project_directory(
+    config: FileIndexConfig, directory: str, *, cancelled: Event | None = None
+) -> ProjectSnapshot:
+    """Collect only the requested directory's direct children.
+
+    Args:
+        config (FileIndexConfig): Backend-resolved root, policy, and scan limits.
+        directory (str): A validated relative POSIX directory, or an empty string for the root.
+        cancelled (Event | None): Cooperative cancellation shared with the caller.
+
+    Returns:
+        ProjectSnapshot: Direct children with project-relative paths and truncation flags.
+
+    Raises:
+        ValueError: The directory uses a filesystem alias or is excluded by policy.
+        ToolError: The directory is missing, unreadable, or goes through a symbolic link.
+        OSError: Filesystem enumeration failed.
+        ProjectScanCancelled: The cancellation event was set.
+        ProjectScanTimedOut: The cooperative deadline expired.
+    """
+
+    from wisp.tools.files.paths import is_protected_path
+    from wisp.tools.search.tools import IGNORED_DIRS
+
+    root = Path(os.path.abspath(config.root.expanduser()))
+    budget = _ScanBudget.start(config, cancelled)
+    budget.check()
+    if is_protected_path(root, config.context):
+        raise ValueError("Project directory is excluded by policy")
+    parts = directory.split("/") if directory else []
+    if len(parts) > max(0, config.max_depth):
+        raise ValueError("Project directory exceeds the discovery depth limit")
+    current = root
+    for part in parts:
+        budget.check()
+        component = Path(part)
+        if component.parts != (part,) or component.anchor or part == "..":
+            raise ValueError("Invalid project directory component")
+        current /= component
+        if part.casefold() in IGNORED_DIRS or is_protected_path(current, config.context):
+            raise ValueError("Project directory is excluded by policy")
+    if parts and len(parts) >= config.max_depth:
+        return ProjectSnapshot(root=root, truncation=SnapshotTruncation(depth_limit_reached=True))
+
+    scanned = _scan_directory(
+        current,
+        root=root,
+        context=config.context,
+        expected_identity=None,
+        budget=budget,
+        reject_aliases=bool(parts),
+    )
+    budget.check()
+    if scanned is None:
+        return ProjectSnapshot(
+            root=root, truncation=SnapshotTruncation(enumeration_limit_reached=True)
+        )
+    entries = sorted((item.entry for item in scanned), key=lambda entry: entry.display_path)
+    max_entries = max(0, config.max_entries)
+    retained = tuple(entries[:max_entries])
+    return ProjectSnapshot(
+        root=root,
+        entries=retained,
+        child_adjacency=(
+            ProjectChildren(directory, tuple(sorted(entry.path for entry in retained))),
+        ),
+        truncation=SnapshotTruncation(entry_limit_reached=len(entries) > max_entries),
+    )
+
+
 def collect_project_snapshot(
-    config: FileIndexConfig, *, cancelled: Event | None = None
+    config: FileIndexConfig,
+    *,
+    cancelled: Event | None = None,
+    on_progress: Callable[[ProjectSnapshot], None] | None = None,
 ) -> ProjectSnapshot:
     """Collect a deterministic bounded hierarchy through guarded directories.
 
     Unreadable or replaced entries are omitted. An over-budget directory is
     omitted in full rather than retaining a filesystem-order-dependent prefix.
-    Cancellation and timeout discard the entire scan. Checks occur between OS
+    Cancellation and timeout discard the remaining scan. Checks occur between OS
     operations; a blocked syscall itself cannot be interrupted.
 
     Args:
         config (FileIndexConfig): Backend-resolved root, policy, and scan limits.
         cancelled (Event | None): Cooperative cancellation shared with the caller.
+        on_progress (Callable[[ProjectSnapshot], None] | None): Receive bounded nonempty
+            snapshots between directories. Callback errors and an unreadable root stop
+            a progressive scan.
 
     Returns:
         ProjectSnapshot: Sorted relative metadata and structural truncation flags.
@@ -255,17 +366,17 @@ def collect_project_snapshot(
 
     # Keep the root lexical: resolving here could follow a replacement symlink.
     root = Path(os.path.abspath(config.root.expanduser()))
-    budget = _ScanBudget(
-        max(0, config.max_examined_entries),
-        monotonic() + config.timeout_seconds,
-        cancelled,
-    )
+    budget = _ScanBudget.start(config, cancelled)
     collected: list[ProjectEntry] = []
     adjacency: dict[str, list[str]] = {"": []}
     stack: list[tuple[Path, int, str, tuple[int, int] | None]] = [(root, 0, "", None)]
     entry_limit_reached = False
     depth_limit_reached = False
     enumeration_limit_reached = False
+    progress_count = 0
+    progress_interval = _FIRST_PROGRESS_INTERVAL_SECONDS
+    next_progress_at = 0.0
+    progress_entry_count = 0
     while stack:
         budget.check()
         if len(collected) >= max(0, config.max_entries):
@@ -281,6 +392,9 @@ def collect_project_snapshot(
                 budget=budget,
             )
         except (OSError, RuntimeError, ValueError, ToolError):
+            if not parent and on_progress is not None:
+                # A refresh of an inaccessible root must preserve a usable catalog.
+                raise
             continue
         if entries is None:
             enumeration_limit_reached = True
@@ -301,6 +415,27 @@ def collect_project_snapshot(
                 else:
                     depth_limit_reached = True
         stack.extend(reversed(directories))
+        if (
+            on_progress is not None
+            and stack
+            and len(collected) > progress_entry_count
+            and not entry_limit_reached
+            and progress_count < _MAX_PROGRESS_REPORTS
+            and monotonic() >= next_progress_at
+        ):
+            on_progress(
+                ProjectSnapshot(
+                    root=root,
+                    entries=tuple(sorted(collected, key=lambda entry: entry.display_path)),
+                    truncation=SnapshotTruncation(depth_limit_reached=depth_limit_reached),
+                )
+            )
+            progress_count += 1
+            progress_entry_count = len(collected)
+            # Give quick scans frequent updates without spending the entire
+            # report budget in the first seconds of a much larger scan.
+            next_progress_at = monotonic() + progress_interval
+            progress_interval *= 2
     budget.check()
     return ProjectSnapshot(
         root=root,

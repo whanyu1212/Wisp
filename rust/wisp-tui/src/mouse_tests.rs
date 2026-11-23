@@ -1210,6 +1210,8 @@ async fn file_popup_click_selects_a_reference_but_never_inserts_until_enter() {
     ui.dispatch(
         UiAction::BackendEvent(BackendEvent::ProjectFilesReported {
             command_id: id.clone(),
+            directory: None,
+            in_progress: false,
             snapshot: Ok(Arc::new(ProjectFileSnapshot {
                 generation: 1,
                 truncated: false,

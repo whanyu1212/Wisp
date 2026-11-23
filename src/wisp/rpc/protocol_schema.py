@@ -305,7 +305,7 @@ _COMMAND_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     "get_session_tree": {},
     "get_sessions": {},
     "get_skills": {},
-    "get_project_files": {},
+    "get_project_files": {"directory": "src"},
     "get_git_diff": {},
     "get_state": {},
     "init": {},
@@ -621,8 +621,9 @@ _EVENT_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     "rpc.project_files": {
         "command_id": "command-1",
         "generation": 1,
-        "entries": [],
+        "entries": [{"path": "src/example.py", "kind": "file"}],
         "truncated": False,
+        "directory": "src",
     },
     "project_files.invalidated": {"generation": 2},
     "rpc.state": {"command_id": "command-1", "state": _RPC_STATE},
@@ -827,6 +828,14 @@ def _shape_current_event_output_schema(schema: JsonObject) -> None:
 
 def _add_command_semantic_constraints(schema: JsonObject) -> None:
     definitions = _object_member(schema, "$defs")
+
+    project_files = _named_definition(definitions, "GetProjectFilesCommand")
+    project_files["allOf"] = [
+        {
+            "if": {"properties": {"progressive": {"const": True}}, "required": ["progressive"]},
+            "then": {"not": {"required": ["directory"]}},
+        }
+    ]
 
     messages = _named_definition(definitions, "GetMessagesCommand")
     message_properties = _object_member(messages, "properties")
@@ -1072,6 +1081,14 @@ def _add_command_semantic_constraints(schema: JsonObject) -> None:
 
 def _add_event_semantic_constraints(schema: JsonObject) -> None:
     definitions = _object_member(schema, "$defs")
+
+    project_files = _named_definition(definitions, "RpcProjectFilesReported")
+    project_files["allOf"] = [
+        {
+            "if": {"properties": {"in_progress": {"const": True}}, "required": ["in_progress"]},
+            "then": {"properties": {"directory": {"type": "null"}}},
+        }
+    ]
     context_budget = _named_definition(definitions, "ContextBudget")
     context_properties = _object_member(context_budget, "properties")
     effective_tokens = _object_member(context_properties, "effective_tokens")
