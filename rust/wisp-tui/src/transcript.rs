@@ -381,7 +381,7 @@ fn mode_label(mode: &str) -> &str {
 }
 
 /// `31`, or `8.4` below ten, so a slow rate keeps a meaningful digit.
-fn tokens_per_second(tokens: u64, model_ms: u64) -> String {
+pub(crate) fn tokens_per_second(tokens: u64, model_ms: u64) -> String {
     let rate = tokens as f64 * 1000.0 / model_ms as f64;
     if rate < 10.0 {
         format!("{rate:.1}")

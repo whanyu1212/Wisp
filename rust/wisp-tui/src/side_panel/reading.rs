@@ -117,7 +117,7 @@ pub(super) fn attention_rows(
     }
 }
 
-/// Context summary, segmented gauge, and compact turn sparkline + cache/latency
+/// Context summary, segmented gauge, and compact turn sparkline + throughput/duration
 /// telemetry. Hidden until context stats are known.
 pub(super) fn context_line(rows: &mut PanelRows, state: &UiState, width: usize, palette: Palette) {
     let Some(split) = Split::of(state) else {
@@ -152,11 +152,19 @@ pub(super) fn context_line(rows: &mut PanelRows, state: &UiState, width: usize, 
     }
 
     let mut telemetry = Vec::new();
-    if let Some(hit_pct) = cache_hit_percent(state) {
-        telemetry.push(format!("cache {hit_pct}%"));
-    }
-    if let Some(duration_ms) = latest_run_duration_ms(state) {
-        telemetry.push(crate::tool_cards::format_duration(duration_ms));
+    if let Some(totals) = latest_run_totals(state) {
+        if let (Some(tokens), Some(model_ms)) = (
+            totals.output_tokens.filter(|tokens| *tokens > 0),
+            totals.model_ms.filter(|ms| *ms > 0),
+        ) {
+            telemetry.push(format!(
+                "{} tok/s",
+                crate::transcript::tokens_per_second(tokens, model_ms)
+            ));
+        }
+        if let Some(duration_ms) = totals.duration_ms {
+            telemetry.push(crate::tool_cards::format_duration(duration_ms));
+        }
     }
     let right_text = telemetry.join(" · ");
     let turn_tokens: Vec<u64> = split
@@ -184,37 +192,14 @@ pub(super) fn context_line(rows: &mut PanelRows, state: &UiState, width: usize, 
     }
 }
 
-/// Share of input tokens served from prompt cache, accounting for providers whose
-/// `input_tokens` excludes cache tokens (Anthropic) vs includes them.
-fn cache_hit_percent(state: &UiState) -> Option<u64> {
-    let usage = &state.context.stats.as_ref()?.usage;
-    let read = usage.cache_read_input_tokens?;
-    let write = usage.cache_write_input_tokens.unwrap_or(0);
-    let total_input = if state.provider.as_deref() == Some("anthropic")
-        || usage.input_tokens < read.saturating_add(write)
-    {
-        usage
-            .input_tokens
-            .saturating_add(read)
-            .saturating_add(write)
-    } else {
-        usage.input_tokens
-    };
-    if total_input == 0 {
-        return None;
-    }
-    let pct = ((read as f64 / total_input as f64) * 100.0).round() as u64;
-    Some(pct.min(100))
-}
-
-/// Duration of the newest finished run in the transcript, when reported.
-fn latest_run_duration_ms(state: &UiState) -> Option<u64> {
+/// Totals of the newest finished run in the transcript, when reported.
+fn latest_run_totals(state: &UiState) -> Option<&crate::transcript::RunTotals> {
     state
         .transcript
         .entries()
         .iter()
         .rev()
-        .find_map(|entry| entry.run_totals().and_then(|totals| totals.duration_ms))
+        .find_map(|entry| entry.run_totals())
 }
 
 /// Inventories condensed onto one summary line (`7 MCP · 12 skills · 2 changed`),
