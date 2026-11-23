@@ -15,7 +15,8 @@ use unicode_segmentation::UnicodeSegmentation;
 use wisp_protocol::events::{ProjectFileEntry, ProjectFileKind, ProjectFileSnapshot};
 
 const MAX_TOUCHED_FILES: usize = 12;
-const AUTO_EXPAND_FILE_THRESHOLD: usize = 40;
+// Each expanded directory has its own snapshot. Bound their combined UI work.
+const MAX_TREE_ROWS: usize = 10_000;
 const PREVIEW_MAX_BYTES: usize = 64 * 1024;
 const PREVIEW_MAX_LINES: usize = 512;
 const EXPANDED_SPLIT_MIN_WIDTH: usize = 72;
@@ -42,9 +43,17 @@ struct CachedDiffBadges {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum SelectableRowKind {
-    TouchedFile { path: String },
-    TreeDir { dir_path: String, expanded: bool },
-    TreeFile { path: String },
+    TouchedFile {
+        path: String,
+    },
+    TreeDir {
+        fold_path: String,
+        dir_path: String,
+        retry: bool,
+    },
+    TreeFile {
+        path: String,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -78,6 +87,13 @@ struct DirNode {
     files: Vec<String>,
 }
 
+#[derive(Debug)]
+struct SavedTreeSelection {
+    index: usize,
+    key: Option<String>,
+    scroll: usize,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct FilesState {
     filter: String,
@@ -88,8 +104,9 @@ pub(super) struct FilesState {
     reveal_selection: Cell<bool>,
     list_scroll: Cell<usize>,
     preview_scroll: Cell<usize>,
-    initialized_generation: Option<u64>,
-    collapsed_dirs: BTreeSet<String>,
+    generation: Option<u64>,
+    tree_selection: Option<SavedTreeSelection>,
+    painted_search: bool,
     expanded_dirs: BTreeSet<String>,
     diff_cache: RefCell<Option<CachedDiffBadges>>,
     preview_cache: RefCell<Option<CachedPreview>>,
@@ -107,7 +124,7 @@ impl FilesState {
     }
 
     pub(super) fn has_filter(&self) -> bool {
-        !self.filter.is_empty()
+        !self.filter.trim().is_empty()
     }
 
     pub(super) fn reset_for_workspace(&mut self) {
@@ -117,106 +134,118 @@ impl FilesState {
         self.selected_key = None;
         self.list_scroll.set(0);
         self.preview_scroll.set(0);
-        self.initialized_generation = None;
+        self.generation = None;
+        self.tree_selection = None;
+        self.painted_search = false;
         self.last_workspace_cwd = None;
         self.reveal_selection.set(true);
-        self.collapsed_dirs.clear();
         self.expanded_dirs.clear();
         *self.diff_cache.borrow_mut() = None;
         self.invalidate_preview();
         self.painted_rows.borrow_mut().clear();
+        self.painted_list_rect.set(Rect::default());
+        self.painted_filter_rect.set(Rect::default());
+        self.painted_preview_rect.set(Rect::default());
+        self.painted_list_total.set(0);
+        self.painted_preview_max_scroll.set(0);
     }
 
     pub(super) fn invalidate_preview(&self) {
         *self.preview_cache.borrow_mut() = None;
     }
 
-    fn sync_workspace_cwd(&mut self, cwd: Option<&str>) {
-        if let Some(prev) = &self.last_workspace_cwd
-            && cwd != Some(prev.as_str())
-        {
-            self.reset_for_workspace();
+    pub(super) fn sync_context(&mut self, state: &UiState) {
+        if !self.is_current(state) {
+            if self.generation.is_some() {
+                self.reset_for_workspace();
+            }
+            self.generation = Some(state.project_files.generation());
+            self.last_workspace_cwd.clone_from(&state.workspace_cwd);
         }
-        self.last_workspace_cwd = cwd.map(str::to_owned);
     }
 
-    /// Initialize default fold state when a new snapshot arrives: compact large trees
-    /// while keeping touched and git-changed branches expanded.
-    fn sync_snapshot_defaults(
-        &mut self,
-        snapshot: Option<&ProjectFileSnapshot>,
-        touched: &[String],
-        badges: &BTreeMap<String, GitBadge>,
-    ) {
-        let Some(snapshot) = snapshot else {
-            return;
-        };
-        if self.initialized_generation == Some(snapshot.generation) {
-            return;
-        }
-        self.initialized_generation = Some(snapshot.generation);
-        let file_count = snapshot
-            .entries
-            .iter()
-            .filter(|entry| entry.kind == ProjectFileKind::File)
-            .count();
-        self.collapsed_dirs.clear();
-        self.expanded_dirs.clear();
-        if file_count <= AUTO_EXPAND_FILE_THRESHOLD {
-            return;
-        }
+    fn is_current(&self, state: &UiState) -> bool {
+        self.generation == Some(state.project_files.generation())
+            && self.last_workspace_cwd == state.workspace_cwd
+    }
 
-        let mut active_dirs = HashSet::<String>::new();
-        for path in touched.iter().chain(badges.keys()) {
-            let mut cur = Path::new(path);
-            while let Some(parent) = cur.parent() {
-                let s = parent.to_string_lossy();
-                if s.is_empty() {
-                    break;
-                }
-                active_dirs.insert(s.into_owned());
-                cur = parent;
-            }
+    /// The open tree stays live while a filter is temporarily showing search results.
+    pub(super) fn requested_directories(&self, state: &UiState) -> Vec<String> {
+        if !self.is_current(state) {
+            return Vec::new();
         }
-        for entry in &snapshot.entries {
-            let rel = entry.path.trim_matches('/');
-            if rel.is_empty() {
+        let mut directories = Vec::new();
+        let mut visible = HashSet::new();
+        // The fold set is sorted by path, so a parent is processed before its children.
+        for path in &self.expanded_dirs {
+            let parent = parent_dir(path).unwrap_or_default();
+            if !parent.is_empty() && !visible.contains(parent) {
                 continue;
             }
-            if entry.kind == ProjectFileKind::Directory
-                && rel.contains('/')
-                && !active_dirs.contains(rel)
+            if state
+                .project_files
+                .directory(parent)
+                .is_some_and(|snapshot| {
+                    snapshot.entries.iter().any(|entry| {
+                        entry.kind == ProjectFileKind::Directory && entry.path == *path
+                    })
+                })
             {
-                self.collapsed_dirs.insert(rel.to_owned());
+                visible.insert(path.as_str());
+                directories.push(path.clone());
             }
         }
+        if self.painted_search == self.has_filter()
+            && let Some(SelectableRowKind::TouchedFile { path }) =
+                self.selected_row().map(|row| row.kind)
+            && let Some(parent) = parent_dir(&path)
+            && !visible.contains(parent)
+        {
+            directories.push(parent.to_owned());
+        }
+        directories
     }
 
     fn is_dir_expanded(&self, dir_path: &str) -> bool {
-        if !self.filter.is_empty() {
-            return true;
-        }
-        if self.expanded_dirs.contains(dir_path) {
-            return true;
-        }
-        !self.collapsed_dirs.contains(dir_path)
+        self.expanded_dirs.contains(dir_path)
     }
 
     fn set_dir_expanded(&mut self, dir_path: &str, expanded: bool) {
         self.reveal_selection.set(true);
         if expanded {
-            self.collapsed_dirs.remove(dir_path);
             self.expanded_dirs.insert(dir_path.to_owned());
         } else {
             self.expanded_dirs.remove(dir_path);
-            self.collapsed_dirs.insert(dir_path.to_owned());
         }
+    }
+
+    fn update_filter(&mut self, update: impl FnOnce(&mut String)) {
+        let had_filter = self.has_filter();
+        update(&mut self.filter);
+        if !had_filter && self.has_filter() {
+            self.tree_selection = Some(SavedTreeSelection {
+                index: self.selected_index,
+                key: self.selected_key.clone(),
+                scroll: self.list_scroll.get(),
+            });
+        }
+        if had_filter
+            && !self.has_filter()
+            && let Some(saved) = self.tree_selection.take()
+        {
+            self.selected_index = saved.index;
+            self.selected_key = saved.key;
+            self.list_scroll.set(saved.scroll);
+        } else {
+            self.list_scroll.set(0);
+        }
+        self.reveal_selection.set(true);
     }
 
     fn selected_row(&self) -> Option<SelectableRow> {
         let rows = self.painted_rows.borrow();
         if let Some(key) = &self.selected_key
-            && let Some(found) = rows.iter().find(|row| row.key() == *key)
+            && let Some(found) = rows.iter().find(|row| row.matches_key(key))
         {
             return Some(found.clone());
         }
@@ -300,13 +329,12 @@ impl FilesState {
         expanded: bool,
         state: &UiState,
     ) -> (OverlayKey, bool) {
+        self.sync_context(state);
         if self.filter_active {
             match key {
                 KeyCode::Esc => {
-                    self.filter.clear();
+                    self.update_filter(String::clear);
                     self.filter_active = false;
-                    self.list_scroll.set(0);
-                    self.reveal_selection.set(true);
                     return (OverlayKey::Moved, false);
                 }
                 KeyCode::Enter => {
@@ -314,18 +342,15 @@ impl FilesState {
                     return (OverlayKey::Moved, false);
                 }
                 KeyCode::Backspace => {
-                    if self.filter.pop().is_some() {
-                        self.list_scroll.set(0);
-                        self.reveal_selection.set(true);
-                    }
+                    self.update_filter(|filter| {
+                        filter.pop();
+                    });
                     return (OverlayKey::Moved, false);
                 }
                 KeyCode::Up => return (self.move_selection(-1), false),
                 KeyCode::Down => return (self.move_selection(1), false),
                 KeyCode::Char(ch) if !ch.is_control() => {
-                    self.filter.push(ch);
-                    self.list_scroll.set(0);
-                    self.reveal_selection.set(true);
+                    self.update_filter(|filter| filter.push(ch));
                     return (OverlayKey::Moved, false);
                 }
                 _ => return (OverlayKey::Ignored, false),
@@ -333,9 +358,8 @@ impl FilesState {
         }
 
         match key {
-            KeyCode::Esc if !self.filter.is_empty() => {
-                self.filter.clear();
-                self.list_scroll.set(0);
+            KeyCode::Esc if self.has_filter() => {
+                self.update_filter(String::clear);
                 (OverlayKey::Moved, false)
             }
             KeyCode::Char('/') => {
@@ -356,8 +380,8 @@ impl FilesState {
                 (OverlayKey::Moved, false)
             }
             KeyCode::Left => (self.collapse_or_parent(), false),
-            KeyCode::Right => (self.expand_selected(), false),
-            KeyCode::Enter | KeyCode::Char(' ') => self.activate_selected(expanded),
+            KeyCode::Right => (self.expand_selected(state), false),
+            KeyCode::Enter | KeyCode::Char(' ') => self.activate_selected(expanded, Some(state)),
             KeyCode::Char('e') => match self.selected_file_path() {
                 Some(path) => (OverlayKey::EditFile(path), false),
                 None => (OverlayKey::Ignored, false),
@@ -429,7 +453,7 @@ impl FilesState {
         };
         self.filter_active = false;
         self.select_index(idx);
-        self.activate_selected(expanded)
+        self.activate_selected(expanded, None)
     }
 
     pub(super) fn scroll_list_by(&self, delta: i32) {
@@ -483,7 +507,7 @@ impl FilesState {
             return None;
         }
         if let Some(key) = &self.selected_key
-            && let Some(pos) = rows.iter().position(|r| r.key() == *key)
+            && let Some(pos) = rows.iter().position(|r| r.matches_key(key))
         {
             return Some(pos);
         }
@@ -495,19 +519,15 @@ impl FilesState {
             return OverlayKey::Moved;
         };
         match row.kind {
-            SelectableRowKind::TreeDir {
-                ref dir_path,
-                expanded: true,
-            } => {
-                self.set_dir_expanded(dir_path, false);
-            }
-            SelectableRowKind::TreeDir { ref dir_path, .. } => {
-                if let Some(parent) = parent_dir(dir_path) {
+            SelectableRowKind::TreeDir { fold_path, .. } => {
+                if !self.has_filter() && self.is_dir_expanded(&fold_path) {
+                    self.set_dir_expanded(&fold_path, false);
+                } else if let Some(parent) = parent_dir(&fold_path) {
                     self.select_matching_dir_ancestor(parent);
                 }
             }
-            SelectableRowKind::TreeFile { ref path } => {
-                if let Some(parent) = parent_dir(path) {
+            SelectableRowKind::TreeFile { path } => {
+                if let Some(parent) = parent_dir(&path) {
                     self.select_matching_dir_ancestor(parent);
                 }
             }
@@ -516,25 +536,42 @@ impl FilesState {
         OverlayKey::Moved
     }
 
-    fn expand_selected(&mut self) -> OverlayKey {
-        if let Some(SelectableRowKind::TreeDir { dir_path, .. }) =
-            self.selected_row().map(|row| row.kind)
+    fn expand_selected(&mut self, state: &UiState) -> OverlayKey {
+        if !self.has_filter()
+            && let Some(SelectableRowKind::TreeDir {
+                fold_path,
+                dir_path,
+                ..
+            }) = self.selected_row().map(|row| row.kind)
         {
-            self.set_dir_expanded(&dir_path, true);
+            let was_expanded = self.is_dir_expanded(&fold_path);
+            self.set_dir_expanded(&fold_path, true);
+            if was_expanded && directory_failure(state, &dir_path).is_some() {
+                return OverlayKey::RetryProjectFileDirectory(dir_path);
+            }
         }
         OverlayKey::Moved
     }
 
-    fn activate_selected(&mut self, expanded: bool) -> (OverlayKey, bool) {
+    fn activate_selected(&mut self, expanded: bool, state: Option<&UiState>) -> (OverlayKey, bool) {
         let Some(row) = self.selected_row() else {
             return (OverlayKey::Ignored, false);
         };
         match row.kind {
             SelectableRowKind::TreeDir {
+                fold_path,
                 dir_path,
-                expanded: dir_expanded,
+                retry,
             } => {
-                self.set_dir_expanded(&dir_path, !dir_expanded);
+                if !self.has_filter() {
+                    let failed =
+                        state.map_or(retry, |state| directory_failure(state, &dir_path).is_some());
+                    let dir_expanded = self.is_dir_expanded(&fold_path);
+                    if dir_expanded && failed {
+                        return (OverlayKey::RetryProjectFileDirectory(dir_path), false);
+                    }
+                    self.set_dir_expanded(&fold_path, !dir_expanded);
+                }
                 (OverlayKey::Moved, false)
             }
             SelectableRowKind::TouchedFile { .. } | SelectableRowKind::TreeFile { .. } => {
@@ -548,7 +585,7 @@ impl FilesState {
         let mut candidate = parent;
         loop {
             let key = format!("dir:{candidate}");
-            if let Some(idx) = rows.iter().position(|row| row.key() == key) {
+            if let Some(idx) = rows.iter().position(|row| row.matches_key(&key)) {
                 drop(rows);
                 self.select_index(idx);
                 return;
@@ -565,8 +602,28 @@ impl SelectableRow {
     fn key(&self) -> String {
         match &self.kind {
             SelectableRowKind::TouchedFile { path } => format!("touched:{path}"),
-            SelectableRowKind::TreeDir { dir_path, .. } => format!("dir:{dir_path}"),
+            SelectableRowKind::TreeDir { fold_path, .. } => format!("dir:{fold_path}"),
             SelectableRowKind::TreeFile { path } => format!("file:{path}"),
+        }
+    }
+
+    fn matches_key(&self, key: &str) -> bool {
+        match &self.kind {
+            SelectableRowKind::TreeDir {
+                fold_path,
+                dir_path,
+                ..
+            } => key.strip_prefix("dir:").is_some_and(|path| {
+                (path == fold_path
+                    || path
+                        .strip_prefix(fold_path)
+                        .is_some_and(|tail| tail.starts_with('/')))
+                    && (dir_path == path
+                        || dir_path
+                            .strip_prefix(path)
+                            .is_some_and(|tail| tail.starts_with('/')))
+            }),
+            _ => self.key() == key,
         }
     }
 }
@@ -585,14 +642,9 @@ pub(super) fn render(
         return;
     }
 
+    panel.sync_files_context(state);
     let badges = panel.files_view.borrow().badge_map(state);
     let touched = collect_touched_files(state);
-    let snapshot = state.project_files.snapshot();
-    {
-        let mut files_view = panel.files_view.borrow_mut();
-        files_view.sync_workspace_cwd(state.workspace_cwd.as_deref());
-        files_view.sync_snapshot_defaults(snapshot, &touched, &badges);
-    }
 
     let footer_height = usize::from(panel.overlay_open() || panel.expanded() || height >= 6);
     let content_area = Rect {
@@ -638,20 +690,12 @@ pub(super) fn render(
     };
     if let Some((tree_area, preview_area, divider)) = preview_layout {
         render_tree_pane(
-            frame, tree_area, surface, state, panel, snapshot, &touched, &badges, palette,
+            frame, tree_area, surface, state, panel, &touched, &badges, palette,
         );
         if let Some(divider) = divider {
             render_divider(frame, divider, palette);
         }
-        render_preview_pane(
-            frame,
-            preview_area,
-            state,
-            panel,
-            snapshot,
-            &badges,
-            palette,
-        );
+        render_preview_pane(frame, preview_area, state, panel, &badges, palette);
     } else {
         {
             let files_view = panel.files_view.borrow();
@@ -664,7 +708,6 @@ pub(super) fn render(
             surface,
             state,
             panel,
-            snapshot,
             &touched,
             &badges,
             palette,
@@ -733,7 +776,6 @@ fn render_tree_pane(
     surface: Rect,
     state: &UiState,
     panel: &SidePanel,
-    snapshot: Option<&ProjectFileSnapshot>,
     touched: &[String],
     badges: &BTreeMap<String, GitBadge>,
     palette: Palette,
@@ -795,15 +837,7 @@ fn render_tree_pane(
     let row_width = usize::from(row_rect.width);
     let (mut rendered_lines, rows) = {
         let files_view = panel.files_view.borrow();
-        build_tree_rows(
-            state,
-            snapshot,
-            touched,
-            badges,
-            &files_view,
-            row_width,
-            palette,
-        )
+        build_tree_rows(state, touched, badges, &files_view, row_width, palette)
     };
 
     let total = rendered_lines.len();
@@ -812,6 +846,7 @@ fn render_tree_pane(
         let mut files_view = panel.files_view.borrow_mut();
         files_view.painted_list_rect.set(row_rect);
         files_view.painted_list_total.set(total);
+        files_view.painted_search = files_view.has_filter();
         *files_view.painted_rows.borrow_mut() = rows;
         let prev_index = files_view.selected_index;
         let reveal = files_view.reveal_selection.replace(false);
@@ -916,7 +951,6 @@ fn filter_line(filter: &str, active: bool, width: usize, palette: Palette) -> Li
 
 fn build_tree_rows(
     state: &UiState,
-    snapshot: Option<&ProjectFileSnapshot>,
     touched: &[String],
     badges: &BTreeMap<String, GitBadge>,
     files_view: &FilesState,
@@ -925,8 +959,6 @@ fn build_tree_rows(
 ) -> (Vec<Line<'static>>, Vec<SelectableRow>) {
     let mut lines = Vec::new();
     let mut rows = Vec::new();
-    let muted = Style::default().fg(palette.muted);
-    let dim = Style::default().fg(palette.dim());
     let query = files_view.filter.trim().to_ascii_lowercase();
 
     let filtered_touched: Vec<&String> = touched
@@ -962,73 +994,27 @@ fn build_tree_rows(
         lines.push(Line::default());
     }
 
-    let Some(snapshot) = snapshot else {
-        if state.project_files.loading() {
-            lines.push(Line::styled("Loading project files…", muted));
-        } else if let Some(err) = state.project_files.error.as_deref() {
-            lines.push(Line::styled(
-                ui::clip_columns(&sanitize_single_line(err), width),
-                Style::default().fg(palette.error),
-            ));
-        } else {
-            lines.push(Line::styled("Project file list unavailable.", dim));
-        }
-        return (lines, rows);
-    };
-
-    let filtered_entries: Vec<&ProjectFileEntry> = snapshot
-        .entries
-        .iter()
-        .filter(|entry| {
-            query.is_empty()
-                || (entry.kind == ProjectFileKind::File
-                    && entry.path.to_ascii_lowercase().contains(&query))
-        })
-        .collect();
-
-    let total_files = filtered_entries
-        .iter()
-        .filter(|entry| entry.kind == ProjectFileKind::File)
-        .count();
-    let suffix = if snapshot.truncated { "+" } else { "" };
-    let count = if !query.is_empty() {
-        format!(
-            "{total_files}{suffix} match{}",
-            if total_files == 1 { "" } else { "es" }
-        )
-    } else {
-        format!(
-            "{total_files}{suffix} file{}",
-            if total_files == 1 { "" } else { "s" }
-        )
-    };
-    lines.push(section_line("Project tree", count, width, palette));
-
-    let root = build_dir_trie(&filtered_entries);
-    if root.subdirs.is_empty() && root.files.is_empty() {
-        lines.push(Line::styled(
-            if query.is_empty() {
-                "No project files reported."
-            } else {
-                "No matching files."
-            },
-            dim,
-        ));
-        return (lines, rows);
-    }
-
-    emit_dir_children(
-        &root,
-        "",
-        &mut Vec::new(),
+    let mut tree = TreeRows {
+        state,
         files_view,
         badges,
         width,
         palette,
-        &mut lines,
-        &mut rows,
-    );
-    (lines, rows)
+        lines,
+        rows,
+        row_limit_reached: false,
+    };
+    if query.is_empty() {
+        let heading = tree.lines.len();
+        tree.directory("", &mut Vec::new());
+        if tree.row_limit_reached {
+            tree.lines[heading] =
+                section_line("Project tree · view limited", String::new(), width, palette);
+        }
+    } else {
+        tree.search(&query);
+    }
+    (tree.lines, tree.rows)
 }
 
 fn section_line(title: &str, count: String, width: usize, palette: Palette) -> Line<'static> {
@@ -1085,45 +1071,261 @@ fn sort_dir_files(node: &mut DirNode) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn emit_dir_children(
-    node: &DirNode,
-    prefix: &str,
-    ancestors: &mut Vec<bool>,
-    files_view: &FilesState,
-    badges: &BTreeMap<String, GitBadge>,
+struct TreeRows<'a> {
+    state: &'a UiState,
+    files_view: &'a FilesState,
+    badges: &'a BTreeMap<String, GitBadge>,
     width: usize,
     palette: Palette,
-    lines: &mut Vec<Line<'static>>,
-    rows: &mut Vec<SelectableRow>,
-) {
-    for (index, (name, child)) in node.subdirs.iter().enumerate() {
-        let has_next = index + 1 < node.subdirs.len() || !node.files.is_empty();
-        let mut label = name.clone();
-        let mut dir_path = join_rel(prefix, name);
-        let mut target = child;
-        // Single-child directory compaction keeps narrow 44–52 col trees readable.
-        while target.files.is_empty() && target.subdirs.len() == 1 {
-            let (sub_name, sub_node) = target.subdirs.iter().next().expect("checked len == 1");
-            label.push('/');
-            label.push_str(sub_name);
-            dir_path = join_rel(&dir_path, sub_name);
-            target = sub_node;
+    lines: Vec<Line<'static>>,
+    rows: Vec<SelectableRow>,
+    row_limit_reached: bool,
+}
+
+impl TreeRows<'_> {
+    fn search(&mut self, query: &str) {
+        let files = &self.state.project_files;
+        let snapshot = files.snapshot();
+        let entries: Vec<_> = snapshot
+            .into_iter()
+            .flat_map(|snapshot| &snapshot.entries)
+            .filter(|entry| {
+                entry.kind == ProjectFileKind::File
+                    && entry.path.to_ascii_lowercase().contains(query)
+            })
+            .collect();
+        let searching = files.partial() || files.loading() || snapshot.is_none();
+        let truncated = snapshot.is_some_and(|snapshot| snapshot.truncated);
+        let incomplete = truncated || searching || files.error.is_some();
+        let count = entries.len();
+        let suffix = if incomplete { "+" } else { "" };
+        let plural = if count == 1 { "match" } else { "matches" };
+        let count = if count != 0 || !incomplete {
+            format!("{count}{suffix} {plural}")
+        } else {
+            String::new()
+        };
+        self.heading("Project tree", count);
+
+        if let Some(error) = files.error.as_deref() {
+            self.notice(
+                &[],
+                false,
+                &format!("Search failed · r retry · {error}"),
+                self.palette.error,
+            );
+        } else if searching {
+            self.notice(&[], false, "Searching project…", self.palette.muted);
+        } else if truncated {
+            self.notice(
+                &[],
+                false,
+                "Search incomplete · result limit reached",
+                self.palette.muted,
+            );
+        } else if entries.is_empty() {
+            self.notice(&[], false, "No matching files.", self.palette.dim());
         }
-        let expanded = files_view.is_dir_expanded(&dir_path);
-        let line_idx = lines.len();
-        let mut left = tree_prefix(ancestors, has_next, width, palette);
-        if width.saturating_sub(spans_width(&left)) >= 4 {
+
+        let root = build_dir_trie(&entries);
+        self.search_children(&root, "", &mut Vec::new());
+    }
+
+    fn search_children(&mut self, node: &DirNode, prefix: &str, ancestors: &mut Vec<bool>) {
+        for (index, (name, child)) in node.subdirs.iter().enumerate() {
+            let has_next = index + 1 < node.subdirs.len() || !node.files.is_empty();
+            let mut dir_path = join_rel(prefix, name);
+            let mut target = child;
+            // All paths in a search result are fully expanded.
+            while target.files.is_empty()
+                && let Some((name, child)) = target
+                    .subdirs
+                    .first_key_value()
+                    .filter(|_| target.subdirs.len() == 1)
+            {
+                dir_path = join_rel(&dir_path, name);
+                target = child;
+            }
+            self.folder(
+                &dir_path, &dir_path, prefix, ancestors, has_next, true, false,
+            );
+            ancestors.push(has_next);
+            self.search_children(target, &dir_path, ancestors);
+            ancestors.pop();
+        }
+        for (index, path) in node.files.iter().enumerate() {
+            self.file(path, ancestors, index + 1 < node.files.len());
+        }
+    }
+
+    fn directory(&mut self, path: &str, ancestors: &mut Vec<bool>) {
+        let state = self.state;
+        let files = &state.project_files;
+        let snapshot = files.directory(path);
+        let entries = snapshot.map_or(&[][..], |snapshot| snapshot.entries.as_slice());
+        let mut entries: Vec<_> = entries
+            .iter()
+            .filter(|entry| is_direct_child(&entry.path, path))
+            .collect();
+        // Put folders before files and make rendering independent of report order.
+        entries.sort_unstable_by(|a, b| {
+            (a.kind == ProjectFileKind::File, &a.path)
+                .cmp(&(b.kind == ProjectFileKind::File, &b.path))
+        });
+        entries.dedup_by(|a, b| a.kind == b.kind && a.path == b.path);
+
+        let root = path.is_empty();
+        let truncated = snapshot.is_some_and(|snapshot| snapshot.truncated);
+        if root {
+            let status = snapshot
+                .map(|_| {
+                    if files.directory_loading(path) {
+                        "Refreshing…".to_owned()
+                    } else {
+                        format!(
+                            "{}{} {}",
+                            entries.len(),
+                            if truncated { "+" } else { "" },
+                            if entries.len() == 1 {
+                                "entry"
+                            } else {
+                                "entries"
+                            }
+                        )
+                    }
+                })
+                .unwrap_or_default();
+            self.heading("Project tree", status);
+        }
+        if let Some(error) = directory_failure(state, path) {
+            let action = if root { "r retry" } else { "Enter retry" };
+            self.notice(
+                ancestors,
+                !entries.is_empty(),
+                &format!("Load failed · {action} · {error}"),
+                self.palette.error,
+            );
+        } else if snapshot.is_none() {
+            let label = if root {
+                "Loading project files…"
+            } else {
+                "Loading…"
+            };
+            self.notice(ancestors, false, label, self.palette.muted);
+        } else if truncated {
+            self.notice(
+                ancestors,
+                !entries.is_empty(),
+                "Folder listing incomplete · entry limit reached",
+                self.palette.muted,
+            );
+        } else if entries.is_empty() {
+            let label = if root {
+                "No project files reported."
+            } else {
+                "Empty folder"
+            };
+            self.notice(ancestors, false, label, self.palette.dim());
+        }
+
+        let files_view = self.files_view;
+        for (index, entry) in entries.iter().enumerate() {
+            if self.rows.len() == MAX_TREE_ROWS {
+                self.row_limit_reached = true;
+                break;
+            }
+            let has_next = index + 1 < entries.len();
+            match entry.kind {
+                ProjectFileKind::File => self.file(&entry.path, ancestors, has_next),
+                ProjectFileKind::Directory => {
+                    let dir_path = compacted_directory(state, files_view, &entry.path);
+                    let expanded = files_view.is_dir_expanded(&entry.path);
+                    let retry = expanded && directory_failure(state, dir_path).is_some();
+                    self.folder(
+                        &entry.path,
+                        dir_path,
+                        path,
+                        ancestors,
+                        has_next,
+                        expanded,
+                        retry,
+                    );
+                    if expanded && self.rows.len() < MAX_TREE_ROWS {
+                        ancestors.push(has_next);
+                        self.directory(dir_path, ancestors);
+                        ancestors.pop();
+                    } else if expanded {
+                        self.row_limit_reached = true;
+                    }
+                }
+            }
+        }
+    }
+
+    fn heading(&mut self, title: &str, count: String) {
+        self.lines
+            .push(section_line(title, count, self.width, self.palette));
+    }
+
+    fn notice(
+        &mut self,
+        ancestors: &[bool],
+        has_next: bool,
+        label: &str,
+        color: ratatui::style::Color,
+    ) {
+        let mut spans = if ancestors.is_empty() {
+            Vec::new()
+        } else {
+            tree_prefix(ancestors, has_next, self.width, self.palette)
+        };
+        let room = self.width.saturating_sub(spans_width(&spans));
+        spans.push(Span::styled(
+            ui::clip_columns(&sanitize_single_line(label), room),
+            Style::default().fg(color),
+        ));
+        self.lines.push(Line::from(spans));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn folder(
+        &mut self,
+        fold_path: &str,
+        dir_path: &str,
+        parent: &str,
+        ancestors: &[bool],
+        has_next: bool,
+        expanded: bool,
+        retry: bool,
+    ) {
+        let label = if parent.is_empty() {
+            dir_path
+        } else {
+            &dir_path[parent.len() + 1..]
+        };
+        let mut left = tree_prefix(ancestors, has_next, self.width, self.palette);
+        if self.width.saturating_sub(spans_width(&left)) >= 4 {
             left.push(Span::styled(
                 if expanded { "▾ " } else { "▸ " },
-                Style::default().fg(palette.primary),
+                Style::default().fg(self.palette.primary),
             ));
         }
-        let label = format!("{}/", sanitize_single_line(&label));
-        let room = width.saturating_sub(spans_width(&left));
+        let label = format!("{}/", sanitize_single_line(label));
+        let room = self.width.saturating_sub(spans_width(&left));
+        let refreshing = expanded
+            && !self.files_view.has_filter()
+            && room >= 24
+            && self.state.project_files.directory(dir_path).is_some()
+            && self.state.project_files.directory_loading(dir_path);
+        let suffix = refreshing
+            .then(|| Span::styled("Refreshing… ", Style::default().fg(self.palette.muted)));
+        let room = room.saturating_sub(suffix.as_ref().map_or(0, |hint| hint.width() + 1));
         let icon = if expanded { "\u{f0770} " } else { "\u{f024b} " };
         let room = if icon_fits(&label, room) {
-            left.push(Span::styled(icon, Style::default().fg(palette.primary)));
+            left.push(Span::styled(
+                icon,
+                Style::default().fg(self.palette.primary),
+            ));
             room - ICON_COLUMNS
         } else {
             room
@@ -1131,41 +1333,70 @@ fn emit_dir_children(
         left.push(Span::styled(
             elide_middle(&label, room),
             Style::default()
-                .fg(palette.foreground)
+                .fg(self.palette.foreground)
                 .add_modifier(Modifier::BOLD),
         ));
-        lines.push(Line::from(left));
-        rows.push(SelectableRow {
-            line: line_idx,
+        self.rows.push(SelectableRow {
+            line: self.lines.len(),
             kind: SelectableRowKind::TreeDir {
-                dir_path: dir_path.clone(),
-                expanded,
+                fold_path: fold_path.to_owned(),
+                dir_path: dir_path.to_owned(),
+                retry,
             },
         });
-        if expanded {
-            ancestors.push(has_next);
-            emit_dir_children(
-                target, &dir_path, ancestors, files_view, badges, width, palette, lines, rows,
-            );
-            ancestors.pop();
-        }
-    }
-
-    for (index, path) in node.files.iter().enumerate() {
-        let line_idx = lines.len();
-        lines.push(format_file_entry_line(
-            tree_prefix(ancestors, index + 1 < node.files.len(), width, palette),
-            &file_name(path),
-            None,
-            badges.get(path.as_str()).copied(),
-            width,
-            palette,
-        ));
-        rows.push(SelectableRow {
-            line: line_idx,
-            kind: SelectableRowKind::TreeFile { path: path.clone() },
+        self.lines.push(if let Some(hint) = suffix {
+            spread(left, vec![hint], self.width)
+        } else {
+            Line::from(left)
         });
     }
+
+    fn file(&mut self, path: &str, ancestors: &[bool], has_next: bool) {
+        self.rows.push(SelectableRow {
+            line: self.lines.len(),
+            kind: SelectableRowKind::TreeFile {
+                path: path.to_owned(),
+            },
+        });
+        self.lines.push(format_file_entry_line(
+            tree_prefix(ancestors, has_next, self.width, self.palette),
+            &file_name(path),
+            None,
+            self.badges.get(path).copied(),
+            self.width,
+            self.palette,
+        ));
+    }
+}
+
+fn directory_failure<'a>(state: &'a UiState, path: &str) -> Option<&'a str> {
+    let files = &state.project_files;
+    if files.directory_loading(path) {
+        None
+    } else {
+        files.directory_error(path)
+    }
+}
+
+fn compacted_directory<'a>(state: &'a UiState, files_view: &FilesState, path: &'a str) -> &'a str {
+    let mut current = path;
+    // A compacted row only represents a chain already opened by the user.
+    // A truncated listing cannot establish that a folder has only one child.
+    while let Some(snapshot) = state.project_files.directory(current)
+        && !snapshot.truncated
+        && directory_failure(state, current).is_none()
+        && let [child] = snapshot.entries.as_slice()
+        && child.kind == ProjectFileKind::Directory
+        && is_direct_child(&child.path, current)
+        && files_view.is_dir_expanded(&child.path)
+    {
+        current = &child.path;
+    }
+    current
+}
+
+fn is_direct_child(path: &str, parent: &str) -> bool {
+    !path.is_empty() && !path.ends_with('/') && parent_dir(path).unwrap_or_default() == parent
 }
 
 #[cfg(unix)]
@@ -1465,7 +1696,6 @@ fn render_preview_pane(
     area: Rect,
     state: &UiState,
     panel: &SidePanel,
-    snapshot: Option<&ProjectFileSnapshot>,
     badges: &BTreeMap<String, GitBadge>,
     palette: Palette,
 ) {
@@ -1513,8 +1743,9 @@ fn render_preview_pane(
         return;
     };
 
-    let generation = snapshot.map_or(0, |s| s.generation);
-    let preview = load_cached_preview(
+    let snapshot = state.project_files.file_snapshot(&path);
+    let generation = state.project_files.generation();
+    let mut preview = load_cached_preview(
         &panel.files_view,
         &path,
         state.workspace_cwd.as_deref(),
@@ -1522,6 +1753,10 @@ fn render_preview_pane(
         generation,
         palette,
     );
+
+    if snapshot.is_none() {
+        preview.body = PreviewBody::Notice(file_listing_notice(state, &path).into());
+    }
 
     let mut header_left = vec![Span::styled(
         sanitize_single_line(&path),
@@ -1653,11 +1888,32 @@ fn indexed_file<'a>(
     Ok(rel)
 }
 
+fn file_listing_notice(state: &UiState, path: &str) -> &'static str {
+    let parent = parent_dir(path).unwrap_or_default();
+    let files = &state.project_files;
+    if files
+        .directory(parent)
+        .is_some_and(|snapshot| !snapshot.truncated)
+    {
+        "File is not in the active folder listing."
+    } else if directory_failure(state, parent).is_some() {
+        "Folder could not be loaded. Press r to retry."
+    } else if files.directory(parent).is_some() {
+        "File unavailable in the partial folder listing."
+    } else {
+        "Waiting for project file listing…"
+    }
+}
+
 pub(super) fn edit_target(
     path: &str,
     state: &UiState,
 ) -> Result<crate::external_editor::FileTarget, &'static str> {
-    let rel = indexed_file(path, state.project_files.snapshot())?;
+    let snapshot = state
+        .project_files
+        .file_snapshot(path)
+        .ok_or_else(|| file_listing_notice(state, path))?;
+    let rel = indexed_file(path, Some(snapshot))?;
     let root = state
         .workspace_cwd
         .as_deref()
@@ -1940,12 +2196,48 @@ mod tests {
             entries: paths
                 .iter()
                 .map(|path| ProjectFileEntry {
-                    path: (*path).to_owned(),
-                    kind: ProjectFileKind::File,
+                    path: path.trim_end_matches('/').to_owned(),
+                    kind: if path.ends_with('/') {
+                        ProjectFileKind::Directory
+                    } else {
+                        ProjectFileKind::File
+                    },
                 })
                 .collect(),
             truncated: false,
         }
+    }
+
+    fn set_directory(state: &mut UiState, path: &str, entries: &[&str]) {
+        let snapshot = sample_snapshot(state.project_files.generation(), entries);
+        state.project_files.set_directory_for_test(path, snapshot);
+    }
+
+    fn draw_files(term: &mut Terminal<TestBackend>, panel: &SidePanel, state: &UiState) -> String {
+        term.draw(|frame| {
+            render(
+                frame,
+                frame.area(),
+                frame.area(),
+                state,
+                panel,
+                Palette::default(),
+            );
+        })
+        .unwrap();
+        buffer_text(term.backend().buffer())
+    }
+
+    fn invalidate(state: &mut UiState) {
+        let generation = state.project_files.generation() + 1;
+        crate::reducer::reduce(
+            state,
+            crate::reducer::UiAction::BackendEvent(
+                crate::reducer::BackendEvent::ProjectFilesInvalidated(generation),
+            ),
+            &mut crate::SequentialCommandIds::default(),
+        )
+        .unwrap();
     }
 
     fn buffer_text(buf: &ratatui::buffer::Buffer) -> String {
@@ -1980,73 +2272,194 @@ mod tests {
     }
 
     #[test]
-    fn single_child_directories_compact_and_filter_narrows_tree() {
+    fn root_opens_folders_lazily() {
         let mut state = UiState::new("fake".into(), None, None);
-        state.project_files.snapshot = Some(Arc::new(sample_snapshot(
-            1,
-            &[
-                "src/wisp/rpc/handlers/shell.py",
-                "src/wisp/coding/session.py",
-                "rust/wisp-tui/src/side_panel.rs",
-            ],
-        )));
+        state.workspace_cwd = Some("/repo".into());
+        state.project_files.snapshot = Some(Arc::new(sample_snapshot(1, &["src/catalog.rs"])));
         let mut panel = SidePanel::default();
         panel.show(PanelMode::Files);
-        panel.width = 160;
-
         let mut term = Terminal::new(TestBackend::new(48, 18)).unwrap();
-        term.draw(|frame| {
-            render(
-                frame,
-                frame.area(),
-                frame.area(),
-                &state,
-                &panel,
-                Palette::default(),
-            );
-        })
-        .unwrap();
-        let text = buffer_text(term.backend().buffer());
-        assert!(text.contains("src/wisp/"), "{text}");
-        assert!(text.contains("rpc/handlers/"), "{text}");
-        assert!(text.contains("rust/wisp-tui/src/"), "{text}");
 
-        // Typing '/' then filter chars narrows rows and ignores shortcut letters like 'f'.
-        panel.files_view.borrow_mut().filter_active = true;
-        let expanded = panel.expanded();
+        let loading = draw_files(&mut term, &panel, &state);
+        assert!(loading.contains("Loading project files…"), "{loading}");
+        assert!(!loading.contains("catalog.rs"), "{loading}");
+
+        set_directory(&mut state, "", &["src/", "README.md"]);
+        let root = draw_files(&mut term, &panel, &state);
+        assert!(root.contains("▸ \u{f024b} src/"), "{root}");
+        assert!(root.contains("README.md"), "{root}");
+        assert!(!root.contains("catalog.rs"), "{root}");
+        assert!(panel.files_requested_directories(&state).is_empty());
+
         assert_eq!(
-            panel
-                .files_view
-                .borrow_mut()
-                .handle_key(KeyCode::Char('s'), expanded, &state)
-                .0,
+            panel.handle_files_key(KeyCode::Right, &state),
             OverlayKey::Moved
         );
-        assert_eq!(
-            panel
-                .files_view
-                .borrow_mut()
-                .handle_key(KeyCode::Char('f'), expanded, &state)
-                .0,
-            OverlayKey::Moved
+        assert_eq!(panel.files_requested_directories(&state), ["src"]);
+        state.project_files.set_directory_loading_for_test("src");
+        let expanded = draw_files(&mut term, &panel, &state);
+        assert!(expanded.contains("▾ \u{f0770} src/"), "{expanded}");
+        assert!(expanded.contains("└─ Loading…"), "{expanded}");
+        assert!(!expanded.contains("catalog.rs"), "{expanded}");
+
+        invalidate(&mut state);
+        assert!(panel.files_requested_directories(&state).is_empty());
+        set_directory(&mut state, "", &["src/", "README.md"]);
+        let reset = draw_files(&mut term, &panel, &state);
+        assert!(reset.contains("▸ \u{f024b} src/"), "{reset}");
+        assert!(panel.files_requested_directories(&state).is_empty());
+    }
+
+    #[test]
+    fn branch_refresh_keeps_children() {
+        let mut state = UiState::new("fake".into(), None, None);
+        set_directory(&mut state, "", &["src/", "README.md"]);
+        set_directory(&mut state, "src", &["src/lib.rs"]);
+        let mut panel = SidePanel::default();
+        panel.show(PanelMode::Files);
+        let mut term = Terminal::new(TestBackend::new(60, 18)).unwrap();
+        draw_files(&mut term, &panel, &state);
+        panel.handle_files_key(KeyCode::Right, &state);
+
+        let idle = draw_files(&mut term, &panel, &state);
+        assert!(idle.contains("lib.rs"), "{idle}");
+        let idle_files = state.project_files.clone();
+        state.project_files.set_directory_loading_for_test("src");
+        let refreshing = draw_files(&mut term, &panel, &state);
+        assert!(refreshing.contains("Refreshing…"), "{refreshing}");
+        assert!(refreshing.contains("lib.rs"), "{refreshing}");
+
+        state.project_files = idle_files;
+        state
+            .project_files
+            .set_directory_error_for_test("src", "Permission denied");
+        let failed = draw_files(&mut term, &panel, &state);
+        assert!(
+            failed.contains("Load failed · Enter retry · Permission denied"),
+            "{failed}"
         );
-        panel.files_view.borrow_mut().filter = "shell".into();
-        panel.files_view.borrow_mut().filter_active = false;
-        term.draw(|frame| {
-            render(
-                frame,
-                frame.area(),
-                frame.area(),
-                &state,
-                &panel,
-                Palette::default(),
+        assert!(failed.contains("lib.rs"), "{failed}");
+        for key in [KeyCode::Enter, KeyCode::Right] {
+            assert_eq!(
+                panel.handle_files_key(key, &state),
+                OverlayKey::RetryProjectFileDirectory("src".into())
             );
-        })
-        .unwrap();
-        let filtered = buffer_text(term.backend().buffer());
-        assert!(filtered.contains("shell.py"), "{filtered}");
-        assert!(filtered.contains("1 match"), "{filtered}");
-        assert!(!filtered.contains("session.py"), "{filtered}");
+        }
+
+        let row = {
+            let view = panel.files_view.borrow();
+            let folder = view.selected_row().expect("folder row selected");
+            view.painted_list_rect.get().y + folder.line as u16
+        };
+        assert_eq!(
+            panel.click(2, row),
+            OverlayKey::RetryProjectFileDirectory("src".into())
+        );
+        assert_eq!(
+            panel.handle_files_key(KeyCode::Left, &state),
+            OverlayKey::Moved
+        );
+        assert!(panel.files_requested_directories(&state).is_empty());
+        let collapsed = draw_files(&mut term, &panel, &state);
+        assert!(!collapsed.contains("Permission denied"), "{collapsed}");
+    }
+
+    #[test]
+    fn expanded_tree_bounds_rows() {
+        let mut state = UiState::new("fake".into(), None, None);
+        set_directory(&mut state, "", &["a/", "b/"]);
+        for directory in ["a", "b"] {
+            let entries = (0..MAX_TREE_ROWS / 2)
+                .map(|index| ProjectFileEntry {
+                    path: format!("{directory}/{index}.rs"),
+                    kind: ProjectFileKind::File,
+                })
+                .collect();
+            state.project_files.set_directory_for_test(
+                directory,
+                ProjectFileSnapshot {
+                    generation: 1,
+                    entries,
+                    truncated: false,
+                },
+            );
+        }
+        let view = FilesState {
+            expanded_dirs: ["a".into(), "b".into()].into_iter().collect(),
+            ..FilesState::default()
+        };
+        let (lines, rows) =
+            build_tree_rows(&state, &[], &BTreeMap::new(), &view, 60, Palette::default());
+        assert_eq!(rows.len(), MAX_TREE_ROWS);
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .any(|span| span.content.contains("view limited"))
+        );
+        assert!(rows.iter().any(|row| row.key() == "dir:b"));
+    }
+
+    #[test]
+    fn search_reports_partial_matches() {
+        let mut state = UiState::new("fake".into(), None, None);
+        set_directory(&mut state, "", &["src/", "README.md"]);
+        set_directory(&mut state, "src", &["src/main.rs"]);
+        let mut panel = SidePanel::default();
+        panel.show(PanelMode::Files);
+        let mut term = Terminal::new(TestBackend::new(52, 18)).unwrap();
+        draw_files(&mut term, &panel, &state);
+        panel.handle_files_key(KeyCode::Right, &state);
+        draw_files(&mut term, &panel, &state);
+        panel.handle_files_key(KeyCode::Down, &state);
+
+        panel.handle_files_key(KeyCode::Char('/'), &state);
+        assert!(panel.files_search_open());
+        // Shortcut letters belong to the filter while it is being edited.
+        for ch in ['f', 'a', 'r'] {
+            assert_eq!(
+                panel.handle_files_key(KeyCode::Char(ch), &state),
+                OverlayKey::Moved
+            );
+        }
+        state
+            .project_files
+            .set_partial_for_test(sample_snapshot(1, &["src/main.rs"]));
+        let pending = draw_files(&mut term, &panel, &state);
+        assert!(pending.contains("Searching project…"), "{pending}");
+        assert!(!pending.contains("No matching"), "{pending}");
+        assert!(!pending.contains("0 matches"), "{pending}");
+
+        state
+            .project_files
+            .set_partial_for_test(sample_snapshot(1, &["unopened/pkg/far.rs"]));
+        let partial = draw_files(&mut term, &panel, &state);
+        assert!(partial.contains("Searching project…"), "{partial}");
+        assert!(partial.contains("far.rs"), "{partial}");
+        assert!(partial.contains("1+ match"), "{partial}");
+        assert!(!partial.contains("README.md"), "{partial}");
+
+        let mut limited = sample_snapshot(1, &["src/main.rs"]);
+        limited.truncated = true;
+        state.project_files.snapshot = Some(Arc::new(limited));
+        let truncated = draw_files(&mut term, &panel, &state);
+        assert!(truncated.contains("Search incomplete"), "{truncated}");
+        assert!(!truncated.contains("No matching"), "{truncated}");
+
+        state.project_files.snapshot = Some(Arc::new(sample_snapshot(1, &["src/main.rs"])));
+        let complete = draw_files(&mut term, &panel, &state);
+        assert!(complete.contains("No matching files."), "{complete}");
+        assert!(!complete.contains("Searching"), "{complete}");
+        assert_eq!(panel.files_requested_directories(&state), ["src"]);
+
+        panel.handle_files_key(KeyCode::Esc, &state);
+        let restored = draw_files(&mut term, &panel, &state);
+        assert!(!panel.files_search_open());
+        assert!(restored.contains("main.rs"), "{restored}");
+        assert_eq!(
+            panel.files_view.borrow().selected_file_path().as_deref(),
+            Some("src/main.rs")
+        );
     }
 
     #[test]
@@ -2221,16 +2634,9 @@ mod tests {
         std::os::unix::fs::symlink(root.join("src"), root.join("linked")).unwrap();
         let mut state = UiState::new("fake".into(), None, None);
         state.workspace_cwd = Some(root.to_string_lossy().into_owned());
-        state.project_files.snapshot = Some(Arc::new(sample_snapshot(
-            1,
-            &[
-                "src/main.rs",
-                "src/link.rs",
-                "linked/main.rs",
-                "../out",
-                "src",
-            ],
-        )));
+        set_directory(&mut state, "src", &["src/main.rs", "src/link.rs"]);
+        set_directory(&mut state, "linked", &["linked/main.rs"]);
+        state.project_files.snapshot = Some(Arc::new(sample_snapshot(1, &["../out", "src"])));
         assert_eq!(
             edit_target("src/main.rs", &state).unwrap().path(),
             root.canonicalize().unwrap().join("src/main.rs"),
@@ -2239,6 +2645,8 @@ mod tests {
             assert!(edit_target(refused, &state).is_err(), "{refused}");
         }
         state.project_files.refresh();
+        assert!(edit_target("src/main.rs", &state).is_ok());
+        invalidate(&mut state);
         assert!(edit_target("src/main.rs", &state).is_err());
     }
 
@@ -2303,23 +2711,16 @@ mod tests {
             }],
             truncated: false,
         }));
-        state.project_files.snapshot = Some(Arc::new(sample_snapshot(1, &["src/app.rs"])));
-
         let mut panel = SidePanel::default();
         panel.show(PanelMode::Files);
         let mut term = Terminal::new(TestBackend::new(48, 16)).unwrap();
-        term.draw(|frame| {
-            render(
-                frame,
-                frame.area(),
-                frame.area(),
-                &state,
-                &panel,
-                Palette::default(),
-            );
-        })
-        .unwrap();
-        let text = buffer_text(term.backend().buffer());
+        let initial = draw_files(&mut term, &panel, &state);
+        assert!(initial.contains("Touched this session"), "{initial}");
+        assert!(initial.contains("Loading project files…"), "{initial}");
+        assert_eq!(panel.files_requested_directories(&state), ["src"]);
+
+        set_directory(&mut state, "", &["src/"]);
+        let text = draw_files(&mut term, &panel, &state);
         assert!(text.lines().any(|line| line.contains("Touched this session") && line.trim_end().ends_with('1')), "{text}");
         assert!(
             text.lines()
@@ -2329,7 +2730,7 @@ mod tests {
         );
         assert!(
             text.lines()
-                .any(|line| line.contains("Project tree") && line.trim_end().ends_with("1 file")),
+                .any(|line| line.contains("Project tree") && line.trim_end().ends_with("1 entry")),
             "{text}"
         );
     }
@@ -2363,12 +2764,19 @@ mod tests {
     }
 
     #[test]
-    fn collapse_or_parent_selects_compacted_ancestor_directory() {
+    fn collapses_to_compacted_ancestor() {
         let mut state = UiState::new("fake".into(), None, None);
-        state.project_files.snapshot =
-            Some(Arc::new(sample_snapshot(1, &["a/x.rs", "a/b/c/y.rs"])));
+        set_directory(&mut state, "", &["a/"]);
+        set_directory(&mut state, "a", &["a/x.rs", "a/b/"]);
+        set_directory(&mut state, "a/b", &["a/b/c/"]);
+        set_directory(&mut state, "a/b/c", &["a/b/c/y.rs"]);
         let mut panel = SidePanel::default();
         panel.show(PanelMode::Files);
+        let mut files_view = panel.files_view.borrow_mut();
+        for path in ["a", "a/b", "a/b/c"] {
+            files_view.set_dir_expanded(path, true);
+        }
+        drop(files_view);
         let mut term = Terminal::new(TestBackend::new(48, 16)).unwrap();
         term.draw(|frame| {
             render(
@@ -2381,6 +2789,12 @@ mod tests {
             );
         })
         .unwrap();
+
+        assert!(buffer_text(term.backend().buffer()).contains("b/c/"));
+        assert_eq!(
+            panel.files_requested_directories(&state),
+            ["a", "a/b", "a/b/c"]
+        );
 
         {
             let mut files_view = panel.files_view.borrow_mut();
@@ -2416,7 +2830,7 @@ mod tests {
         let mut state = UiState::new("fake".into(), None, None);
         let paths: Vec<String> = (0..20).map(|i| format!("file_{i:02}.rs")).collect();
         let path_refs: Vec<&str> = paths.iter().map(String::as_str).collect();
-        state.project_files.snapshot = Some(Arc::new(sample_snapshot(1, &path_refs)));
+        set_directory(&mut state, "", &path_refs);
         let mut panel = SidePanel::default();
         panel.show(PanelMode::Files);
         let mut term = Terminal::new(TestBackend::new(48, 10)).unwrap();

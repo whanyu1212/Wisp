@@ -13,6 +13,7 @@ from wisp.events.tools import PROCESS_COMMAND_SUMMARY_MAX_CHARS, TOOL_PROGRESS_T
 from wisp.project_files import (
     MAX_PROJECT_FILES,
     MAX_PROJECT_PATH_CHARS,
+    PROJECT_DIRECTORY_PATTERN,
     PROJECT_PATH_PATTERN,
     is_display_safe_path,
 )
@@ -697,13 +698,30 @@ class RpcProjectFile(BaseModel):
 
 
 class RpcProjectFilesReported(WispEvent):
-    """One bounded, non-persisted snapshot for a discovery request."""
+    """One bounded snapshot for a discovery request or full-scan progress update."""
 
     type: Literal["rpc.project_files"] = "rpc.project_files"
     command_id: str = Field(min_length=1, max_length=256)
     generation: int = Field(ge=1, le=2**53 - 1, strict=True)
     entries: tuple[RpcProjectFile, ...] = Field(max_length=MAX_PROJECT_FILES)
     truncated: bool
+    directory: str | None = Field(
+        default=None, max_length=MAX_PROJECT_PATH_CHARS, pattern=PROJECT_DIRECTORY_PATTERN
+    )
+    in_progress: bool = Field(default=False, strict=True)
+
+    @field_validator("directory")
+    @classmethod
+    def _require_display_safe_directory(cls, value: str | None) -> str | None:
+        if value and not is_display_safe_path(value):
+            raise ValueError("Directory scope must be a display-safe relative UTF-8 path")
+        return value
+
+    @model_validator(mode="after")
+    def _require_full_scan_for_progress(self) -> Self:
+        if self.in_progress and self.directory is not None:
+            raise ValueError("Progress updates require a full project scan")
+        return self
 
 
 class RpcGitDiffEdit(BaseModel):

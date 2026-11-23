@@ -69,6 +69,8 @@ async fn load(
     ui.dispatch(
         UiAction::BackendEvent(BackendEvent::ProjectFilesReported {
             command_id: id.into(),
+            directory: None,
+            in_progress: false,
             snapshot: Ok(snapshot),
         }),
         writer,

@@ -1879,8 +1879,39 @@
     },
     "GetProjectFilesCommand": {
       "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "progressive": {
+                "const": true
+              }
+            },
+            "required": [
+              "progressive"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "directory"
+              ]
+            }
+          }
+        }
+      ],
       "description": "Discover bounded metadata using only backend-owned root and policy.",
       "properties": {
+        "directory": {
+          "anyOf": [
+            {
+              "maxLength": 4096,
+              "pattern": "(?:^(?![\\s\\S])|^(?!(?:.*\\/)?\\.\\.?(?:\\/|$))[^/\\\\\\x00-\\x1f\\x7f-\\x9f\\u202a-\\u202e\\u2066-\\u2069]+(?:/[^/\\\\\\x00-\\x1f\\x7f-\\x9f\\u202a-\\u202e\\u2066-\\u2069]+)*(?![\\s\\S]))",
+              "type": "string"
+            }
+          ],
+          "title": "Directory"
+        },
         "id": {
           "anyOf": [
             {
@@ -1890,6 +1921,14 @@
             }
           ],
           "title": "Id"
+        },
+        "progressive": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            }
+          ],
+          "title": "Progressive"
         },
         "type": {
           "const": "get_project_files",
@@ -3735,6 +3774,7 @@
       "type": "get_processes"
     },
     "get_project_files": {
+      "directory": "src",
       "type": "get_project_files"
     },
     "get_queue_state": {

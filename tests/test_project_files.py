@@ -17,10 +17,12 @@ from wisp.project_files import (
     ProjectScanCancelled,
     ProjectScanTimedOut,
     ProjectSnapshot,
+    collect_project_directory,
     collect_project_snapshot,
 )
 from wisp.tools.context import ToolContext
 from wisp.tools.files import secure_fs
+from wisp.tools.result import ToolError
 
 
 def config(root: Path) -> FileIndexConfig:
@@ -90,8 +92,9 @@ def test_root_symlink_is_never_enumerated(tmp_path: Path) -> None:
     assert collect_project_snapshot(config(link)).entries == ()
 
 
+@pytest.mark.parametrize("direct", [False, True])
 def test_ancestor_swap_cannot_enumerate_replacement(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, direct: bool
 ) -> None:
     root = tmp_path / "project"
     (root / "parent" / "child").mkdir(parents=True)
@@ -113,12 +116,68 @@ def test_ancestor_swap_cannot_enumerate_replacement(
             yield directory
 
     monkeypatch.setattr(secure_fs, "open_directory", racing_open)
-    snapshot = collect_project_snapshot(config(root))
+    if direct:
+        with pytest.raises(ToolError):
+            collect_project_directory(config(root), "parent/child")
+    else:
+        snapshot = collect_project_snapshot(config(root))
+        assert not any("outside" in path for path in _display_paths(snapshot))
+        assert "parent/child/safe" not in _display_paths(snapshot)
     assert swapped
-    assert not any("outside" in path for path in _display_paths(snapshot))
-    assert "parent/child/safe" not in _display_paths(snapshot)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor race test")
+def test_reopens_directory_before_reporting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scanned = tmp_path / "visible"
+    scanned.mkdir()
+    (scanned / "file.py").touch()
+    original = secure_fs.open_directory
+    moved = tmp_path / "moved"
+
+    @contextmanager
+    def racing_open(path):  # type: ignore[no-untyped-def]
+        with original(path) as directory:
+            if path.path == scanned and not moved.exists():
+                scanned.rename(moved)
+                scanned.symlink_to(moved, target_is_directory=True)
+            yield directory
+
+    monkeypatch.setattr(secure_fs, "open_directory", racing_open)
+    with pytest.raises(ToolError):
+        collect_project_directory(config(tmp_path), "visible")
+    assert moved.exists()
 
 
 @pytest.mark.parametrize("path", ["/absolute", "../secret", "a/../secret", "a/./b", "a//b", "a/"])
 def test_relative_path_contract_rejects_ambiguous_paths(path: str) -> None:
     assert not project_files.is_display_safe_path(path)
+
+
+def test_directory_respects_entry_limit(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    for name in ("z", "a", "n"):
+        (tmp_path / "src" / name).touch()
+    snapshot = collect_project_directory(replace(config(tmp_path), max_entries=2), "src")
+    assert _display_paths(snapshot) == ("src/a", "src/n")
+    assert snapshot.truncation.entry_limit_reached
+
+
+def test_listing_respects_depth_limit(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "deeper.py").touch()
+    snapshot = collect_project_directory(replace(config(tmp_path), max_depth=1), "src")
+    assert snapshot.entries == ()
+    assert snapshot.truncation.depth_limit_reached
+
+
+def test_protected_root_denies_children(tmp_path: Path) -> None:
+    root = tmp_path / "private"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "file.py").touch()
+    options = config(root)
+    options = replace(options, context=replace(options.context, protected_paths=("private",)))
+
+    with pytest.raises(ValueError, match="excluded by policy"):
+        collect_project_directory(options, "src")

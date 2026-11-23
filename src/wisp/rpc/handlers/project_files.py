@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from _thread import LockType
 from collections.abc import Awaitable, Callable
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from threading import Event, Lock
 
@@ -26,6 +27,7 @@ from wisp.project_files import (
     ProjectScanCancelled,
     ProjectScanTimedOut,
     ProjectSnapshot,
+    collect_project_directory,
     collect_project_snapshot,
 )
 from wisp.rpc.commands import GetGitDiffCommand, GetProjectFilesCommand
@@ -39,6 +41,7 @@ ProjectFilesPublisher = TypeAliasType(
     "ProjectFilesPublisher",
     Callable[[RpcProjectFilesReported | RpcGitDiffReported, anyio.CancelScope], Awaitable[bool]],
 )
+_CATALOG_TIMEOUT_SECONDS = 30
 
 
 def project_files_report(
@@ -46,6 +49,8 @@ def project_files_report(
     *,
     command_id: str,
     generation: int,
+    directory: str | None = None,
+    in_progress: bool = False,
     max_bytes: int = MAX_PROJECT_FILES_REPORT_BYTES,
 ) -> RpcProjectFilesReported:
     """Retain a sorted prefix within the complete encoded event's byte budget.
@@ -54,6 +59,8 @@ def project_files_report(
         snapshot (ProjectSnapshot): Safe metadata sorted with parents before children.
         command_id (str): The requesting command's correlation ID.
         generation (int): Policy generation captured before scanning.
+        directory (str | None): The requested directory, or None for the full catalog.
+        in_progress (bool): The full catalog scan is still running.
         max_bytes (int): Maximum encoded report size, including a JSONL newline.
 
     Returns:
@@ -64,7 +71,12 @@ def project_files_report(
     """
 
     report = RpcProjectFilesReported(
-        command_id=command_id, generation=generation, entries=(), truncated=snapshot.truncated
+        command_id=command_id,
+        generation=generation,
+        entries=(),
+        truncated=snapshot.truncated,
+        directory=directory,
+        in_progress=in_progress,
     )
     size = len(report.model_dump_json().encode("utf-8")) + 1
     if size > max_bytes:
@@ -84,8 +96,16 @@ def project_files_report(
     return report.model_copy(update={"entries": tuple(entries), "truncated": truncated})
 
 
+@dataclass
+class _ScanSlot:
+    request_scope: anyio.CancelScope | None = None
+    # Owned by the physical worker: abandoning a blocked syscall cannot admit
+    # another scan before the first worker actually exits.
+    worker_lock: LockType = field(default_factory=Lock)
+
+
 class RpcProjectFiles:
-    """One host's discovery policy and single physical scan admission slot."""
+    """One host's discovery policy and bounded directory, catalog, and Git reads."""
 
     def __init__(self, context: ToolContext) -> None:
         self.generation = 1
@@ -93,10 +113,9 @@ class RpcProjectFiles:
         self._reserved_paths = context.protected_paths
         self._ready = anyio.Event()
         self._ready.set()
-        self._request_scope: anyio.CancelScope | None = None
-        # Owned by the physical worker, not the awaiting task: abandoning a
-        # blocked syscall must not admit another scan and accumulate threads.
-        self._worker_lock = Lock()
+        self._directory_scan = _ScanSlot()
+        self._catalog_scan = _ScanSlot()
+        self._git_diff = _ScanSlot()
 
     def begin_policy_transition(self) -> ProjectFilesInvalidated:
         """Invalidate under the host's publication lock before configuration awaits.
@@ -107,8 +126,9 @@ class RpcProjectFiles:
 
         self.generation += 1
         self._ready = anyio.Event()
-        if self._request_scope is not None:
-            self._request_scope.cancel()
+        for slot in (self._directory_scan, self._catalog_scan, self._git_diff):
+            if slot.request_scope is not None:
+                slot.request_scope.cancel()
         return ProjectFilesInvalidated(generation=self.generation)
 
     def reserve_protected_paths(self, paths: tuple[str, ...]) -> None:
@@ -169,32 +189,44 @@ class RpcProjectFiles:
         """
 
         lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
-        if self._request_scope is not None or self._worker_lock.locked():
+        if isinstance(command, GetGitDiffCommand):
+            slot = self._git_diff
+        elif command.directory is not None:
+            slot = self._directory_scan
+        else:
+            slot = self._catalog_scan
+        if slot.request_scope is not None or slot.worker_lock.locked():
             lifecycle.fail("Project file discovery is busy; retry after the active scan stops")
             return None
         scope = anyio.CancelScope()
-        self._request_scope = scope
-        task_group.start_soon(self._run, lifecycle, scope, send.clone(), publish, command, session)
+        slot.request_scope = scope
+        task_group.start_soon(
+            self._run, lifecycle, scope, slot, send.clone(), publish, command, session
+        )
         return _RpcRunningCommand(
             command_id=lifecycle.command_id, command_type=command.type, cancel_scope=scope
         )
 
     def _collect(
         self,
+        slot: _ScanSlot,
         config: FileIndexConfig,
         cancelled: Event,
         command_id: str,
         generation: int,
         command: GetProjectFilesCommand | GetGitDiffCommand,
         session: JsonlSession | None,
+        on_progress: Callable[[ProjectSnapshot], None] | None = None,
     ) -> RpcProjectFilesReported | RpcGitDiffReported:
         if cancelled.is_set():
             raise ProjectScanCancelled
         # A cancelled task can leave the thread pool before its callable starts.
         # Late starters observe cancellation without taking an admission slot.
-        if not self._worker_lock.acquire(blocking=False):
+        if not slot.worker_lock.acquire(blocking=False):
             raise ProjectScanCancelled
         try:
+            if cancelled.is_set():
+                raise ProjectScanCancelled
             if isinstance(command, GetGitDiffCommand):
                 return collect_git_diff(
                     config.context,
@@ -203,18 +235,82 @@ class RpcProjectFiles:
                     generation,
                     _read_session_edits(session, config.context),
                 )
-            snapshot = collect_project_snapshot(config, cancelled=cancelled)
-            report = project_files_report(snapshot, command_id=command_id, generation=generation)
+            if command.directory is not None:
+                snapshot = collect_project_directory(config, command.directory, cancelled=cancelled)
+            elif on_progress is not None:
+                snapshot = collect_project_snapshot(
+                    config, cancelled=cancelled, on_progress=on_progress
+                )
+            else:
+                snapshot = collect_project_snapshot(config, cancelled=cancelled)
+            report = project_files_report(
+                snapshot, command_id=command_id, generation=generation, directory=command.directory
+            )
             if cancelled.is_set():
                 raise ProjectScanCancelled
             return report
         finally:
-            self._worker_lock.release()
+            slot.worker_lock.release()
+
+    async def _collect_progressively(
+        self,
+        slot: _ScanSlot,
+        config: FileIndexConfig,
+        cancelled: Event,
+        command_id: str,
+        generation: int,
+        command: GetProjectFilesCommand,
+        publish: ProjectFilesPublisher,
+        scope: anyio.CancelScope,
+    ) -> RpcProjectFilesReported | RpcGitDiffReported:
+        # The command task publishes every report. Even a committed partial report
+        # waiting for output finishes before the command can publish its terminal.
+        send, receive = anyio.create_memory_object_stream[RpcProjectFilesReported](0)
+        result: RpcProjectFilesReported | RpcGitDiffReported | Exception | None = None
+
+        def report_progress(snapshot: ProjectSnapshot) -> None:
+            report = project_files_report(
+                snapshot, command_id=command_id, generation=generation, in_progress=True
+            )
+            anyio.from_thread.run(send.send, report)
+
+        async def collect() -> None:
+            nonlocal result
+            async with send:
+                try:
+                    result = await anyio.to_thread.run_sync(
+                        self._collect,
+                        slot,
+                        config,
+                        cancelled,
+                        command_id,
+                        generation,
+                        command,
+                        None,
+                        report_progress,
+                        abandon_on_cancel=True,
+                    )
+                except Exception as exc:
+                    result = exc
+
+        async with receive, anyio.create_task_group() as group:
+            group.start_soon(collect)
+            async for report in receive:
+                if not await publish(report, scope):
+                    group.cancel_scope.cancel()
+                    break
+
+        if isinstance(result, Exception):
+            raise result
+        if result is None:
+            raise ProjectScanCancelled
+        return result
 
     async def _run(
         self,
         lifecycle: RpcCommandLifecycle,
         scope: anyio.CancelScope,
+        slot: _ScanSlot,
         send: MemoryObjectSendStream[_RpcControlEvent],
         publish: ProjectFilesPublisher,
         command: GetProjectFilesCommand | GetGitDiffCommand,
@@ -230,19 +326,34 @@ class RpcProjectFiles:
                 await self._ready.wait()
                 generation = self.generation
                 config = FileIndexConfig(root=self._context.cwd, context=self._context)
-                with anyio.fail_after(
-                    6 if isinstance(command, GetGitDiffCommand) else config.timeout_seconds
-                ):
-                    report = await anyio.to_thread.run_sync(
-                        self._collect,
-                        config,
-                        cancelled,
-                        lifecycle.command_id,
-                        generation,
-                        command,
-                        session,
-                        abandon_on_cancel=True,
-                    )
+                if isinstance(command, GetProjectFilesCommand) and command.progressive:
+                    config = replace(config, timeout_seconds=_CATALOG_TIMEOUT_SECONDS)
+                    with anyio.fail_after(config.timeout_seconds):
+                        report = await self._collect_progressively(
+                            slot,
+                            config,
+                            cancelled,
+                            lifecycle.command_id,
+                            generation,
+                            command,
+                            publish,
+                            scope,
+                        )
+                else:
+                    with anyio.fail_after(
+                        6 if isinstance(command, GetGitDiffCommand) else config.timeout_seconds
+                    ):
+                        report = await anyio.to_thread.run_sync(
+                            self._collect,
+                            slot,
+                            config,
+                            cancelled,
+                            lifecycle.command_id,
+                            generation,
+                            command,
+                            session,
+                            abandon_on_cancel=True,
+                        )
                 ok = await publish(report, scope)
         except (ProjectScanTimedOut, TimeoutError):
             error = "Project file discovery timed out; retry to refresh"
@@ -260,7 +371,7 @@ class RpcProjectFiles:
             )
         finally:
             cancelled.set()
-            self._request_scope = None
+            slot.request_scope = None
             if not ok and error is None:
                 error = "Project file discovery cancelled"
             lifecycle.finish(ok=ok, error=error)

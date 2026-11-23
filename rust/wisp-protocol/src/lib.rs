@@ -786,6 +786,23 @@ pub mod commands {
             deserialize(serde_json::json!({"type": "get_project_files", "id": id}))
         }
 
+        /// List immediate children of a project-relative directory. An empty path lists the root.
+        pub fn get_project_directory(
+            id: &str,
+            directory: &str,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({
+                "type": "get_project_files", "id": id, "directory": directory
+            }))
+        }
+
+        /// Request project-wide matches with bounded intermediate reports.
+        pub fn get_project_file_index(id: &str) -> Result<Self, super::ProtocolDecodeError> {
+            deserialize(serde_json::json!({
+                "type": "get_project_files", "id": id, "progressive": true
+            }))
+        }
+
         /// Reload supported file settings only when the backend is idle.
         pub fn reload(id: &str) -> Result<Self, super::ProtocolDecodeError> {
             deserialize(serde_json::json!({"type": "reload", "id": id}))

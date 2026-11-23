@@ -287,6 +287,8 @@ pub(crate) enum OverlayKey {
     EditFile(String),
     /// Refresh project files and git status for the `Files` tab.
     RefreshFiles,
+    /// Retry a failed Files sidebar directory listing.
+    RetryProjectFileDirectory(String),
     Ignored,
 }
 
@@ -968,7 +970,10 @@ impl SidePanel {
                         .click(column, row, self.expanded);
                 if self.files_view.borrow().filter_active()
                     || toggle_expand
-                    || outcome == OverlayKey::Moved
+                    || matches!(
+                        outcome,
+                        OverlayKey::Moved | OverlayKey::RetryProjectFileDirectory(_)
+                    )
                 {
                     // Focus the docked panel so the filter caret, row highlight,
                     // and Files shortcuts take effect immediately after clicking.
@@ -1197,6 +1202,25 @@ impl SidePanel {
             self.reported_files_tab = wanted;
             wanted
         })
+    }
+
+    pub(crate) fn sync_files_context(&self, state: &UiState) {
+        self.files_view.borrow_mut().sync_context(state);
+    }
+
+    pub(crate) fn files_search_open(&self) -> bool {
+        let view = self.files_view.borrow();
+        self.visible()
+            && self.mode == PanelMode::Files
+            && (view.filter_active() || view.has_filter())
+    }
+
+    pub(crate) fn files_requested_directories(&self, state: &UiState) -> Vec<String> {
+        if self.visible() && self.mode == PanelMode::Files {
+            self.files_view.borrow().requested_directories(state)
+        } else {
+            Vec::new()
+        }
     }
 
     pub(crate) fn file_edit_target(

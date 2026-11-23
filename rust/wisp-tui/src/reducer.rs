@@ -1686,6 +1686,8 @@ pub enum BackendEvent {
     },
     ProjectFilesReported {
         command_id: String,
+        directory: Option<String>,
+        in_progress: bool,
         snapshot: project_files::ProjectFilesReport,
     },
     ProjectFilesInvalidated(u64),
@@ -1981,6 +1983,11 @@ pub enum UiAction {
     SubagentModel(Option<String>),
     SetProjectFilesOpen(bool),
     SetProjectFilesPanelOpen(bool),
+    SetProjectFilesView {
+        filter: bool,
+        folders: Vec<String>,
+    },
+    RetryProjectFileDirectory(String),
     RefreshProjectFiles,
     LoadContext,
     SetGitDiffOpen(bool),
@@ -2229,6 +2236,14 @@ pub fn reduce(
         UiAction::SetProjectFilesPanelOpen(panel) => {
             state.project_files.set_panel(panel);
             Ok(vec![UiEffect::ProjectFilesChanged, UiEffect::RequestRender])
+        }
+        UiAction::SetProjectFilesView { filter, folders } => {
+            state.project_files.set_view(filter, folders);
+            Ok(vec![UiEffect::RequestRender])
+        }
+        UiAction::RetryProjectFileDirectory(path) => {
+            state.project_files.retry_directory(path);
+            Ok(vec![UiEffect::RequestRender])
         }
         UiAction::RefreshProjectFiles => {
             state.project_files.refresh();

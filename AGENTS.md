@@ -6,6 +6,9 @@ These shared instructions apply to the entire repository and are tracked in vers
 
 - Inspect the current worktree, relevant callers, tests, and recent implementation before proposing
   or making a non-trivial change.
+- Always aim for the best design that serves the user's goal. Consider the everyday workflow,
+  realistic failure modes, and long-term maintainability. When delivering in stages, state the
+  target design and explain how the proposed change advances it.
 - Keep changes narrow, dependency-aware, and easy to review. Do not mix unrelated cleanup into the
   active task.
 - Preserve all unrelated tracked and untracked work. In particular, do not modify, remove, or stage

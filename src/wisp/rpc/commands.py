@@ -17,6 +17,7 @@ from pydantic import (
     StringConstraints,
     TypeAdapter,
     ValidationError,
+    field_validator,
     model_validator,
 )
 from typing_extensions import TypeAliasType
@@ -37,6 +38,11 @@ from wisp.events import (
 )
 from wisp.images import MAX_IMAGE_BYTES
 from wisp.mcp.config import MAX_MCP_TOOL_OVERRIDES
+from wisp.project_files import (
+    MAX_PROJECT_PATH_CHARS,
+    PROJECT_DIRECTORY_PATTERN,
+    is_display_safe_path,
+)
 from wisp.sessions.jsonl import SAVED_SESSION_ID_PATTERN
 from wisp.validation import redact_validation_error_inputs
 
@@ -408,6 +414,23 @@ class GetProjectFilesCommand(RpcCommandModel):
     """Discover bounded metadata using only backend-owned root and policy."""
 
     type: Literal["get_project_files"] = "get_project_files"
+    directory: str | None = Field(
+        default=None, max_length=MAX_PROJECT_PATH_CHARS, pattern=PROJECT_DIRECTORY_PATTERN
+    )
+    progressive: bool | None = Field(default=None, strict=True)
+
+    @field_validator("directory")
+    @classmethod
+    def _require_display_safe_directory(cls, value: str | None) -> str | None:
+        if value and not is_display_safe_path(value):
+            raise ValueError("Directory scope must be a display-safe relative UTF-8 path")
+        return value
+
+    @model_validator(mode="after")
+    def _require_full_scan_for_progress(self) -> Self:
+        if self.progressive and self.directory is not None:
+            raise ValueError("Progressive discovery requires a full project scan")
+        return self
 
 
 class GetSkillsCommand(RpcCommandModel):

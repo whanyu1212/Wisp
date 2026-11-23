@@ -2770,7 +2770,7 @@ fn render_composer(
         } else {
             let context = prompt_highlighting::Context::new(
                 state.command_catalog.as_deref(),
-                state.project_files.snapshot(),
+                state.project_files.snapshot.as_deref(),
             );
             let mut highlighted_line = None;
             let mut highlights = Vec::new();

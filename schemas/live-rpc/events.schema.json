@@ -5067,13 +5067,48 @@
     },
     "RpcProjectFilesReported": {
       "additionalProperties": false,
-      "description": "One bounded, non-persisted snapshot for a discovery request.",
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "in_progress": {
+                "const": true
+              }
+            },
+            "required": [
+              "in_progress"
+            ]
+          },
+          "then": {
+            "properties": {
+              "directory": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
+      "description": "One bounded snapshot for a discovery request or full-scan progress update.",
       "properties": {
         "command_id": {
           "maxLength": 256,
           "minLength": 1,
           "title": "Command Id",
           "type": "string"
+        },
+        "directory": {
+          "anyOf": [
+            {
+              "maxLength": 4096,
+              "pattern": "(?:^(?![\\s\\S])|^(?!(?:.*\\/)?\\.\\.?(?:\\/|$))[^/\\\\\\x00-\\x1f\\x7f-\\x9f\\u202a-\\u202e\\u2066-\\u2069]+(?:/[^/\\\\\\x00-\\x1f\\x7f-\\x9f\\u202a-\\u202e\\u2066-\\u2069]+)*(?![\\s\\S]))",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Directory"
         },
         "entries": {
           "items": {
@@ -5088,6 +5123,11 @@
           "minimum": 1,
           "title": "Generation",
           "type": "integer"
+        },
+        "in_progress": {
+          "default": false,
+          "title": "In Progress",
+          "type": "boolean"
         },
         "timestamp": {
           "format": "date-time",
@@ -5111,7 +5151,9 @@
         "command_id",
         "generation",
         "entries",
-        "truncated"
+        "truncated",
+        "directory",
+        "in_progress"
       ],
       "title": "RpcProjectFilesReported",
       "type": "object"
@@ -10493,8 +10535,15 @@
     },
     "rpc.project_files": {
       "command_id": "command-1",
-      "entries": [],
+      "directory": "src",
+      "entries": [
+        {
+          "kind": "file",
+          "path": "src/example.py"
+        }
+      ],
       "generation": 1,
+      "in_progress": false,
       "timestamp": "2026-01-02T03:04:05Z",
       "truncated": false,
       "type": "rpc.project_files"

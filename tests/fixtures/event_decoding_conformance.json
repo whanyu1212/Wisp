@@ -3240,6 +3240,14 @@
    "event": "rpc.project_files",
    "operation": "remove",
    "path": [
+    "directory"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.project_files",
+   "operation": "remove",
+   "path": [
     "entries"
    ],
    "accepted": false
@@ -3251,6 +3259,14 @@
     "generation"
    ],
    "accepted": false
+  },
+  {
+   "event": "rpc.project_files",
+   "operation": "remove",
+   "path": [
+    "in_progress"
+   ],
+   "accepted": true
   },
   {
    "event": "rpc.project_files",
@@ -3272,6 +3288,35 @@
    "event": "rpc.project_files",
    "operation": "add_unknown",
    "path": [],
+   "accepted": false
+  },
+  {
+   "event": "rpc.project_files",
+   "operation": "remove",
+   "path": [
+    "entries",
+    0,
+    "kind"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.project_files",
+   "operation": "remove",
+   "path": [
+    "entries",
+    0,
+    "path"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.project_files",
+   "operation": "add_unknown",
+   "path": [
+    "entries",
+    0
+   ],
    "accepted": false
   },
   {
