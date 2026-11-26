@@ -9,8 +9,9 @@ use wisp_protocol::events::{
     ConnectionCatalogSnapshot, ConnectionMethodSnapshot, ConnectionProviderSnapshot,
 };
 
-const KINDS: [OverlayKind; 14] = [
+const KINDS: [OverlayKind; 15] = [
     OverlayKind::Theme,
+    OverlayKind::TranscriptFind,
     OverlayKind::Logo,
     OverlayKind::PromptHistory,
     OverlayKind::Discovery,
@@ -93,6 +94,7 @@ fn tree(id: &str) -> reducer::SessionTreePage {
 
 fn open(ui: &mut LiveUi, kind: OverlayKind) {
     match kind {
+        OverlayKind::TranscriptFind => ui.transcript_find = Some(Default::default()),
         OverlayKind::Theme => ui.theme_picker = Some(ThemePicker::new(ui.theme.active)),
         OverlayKind::Logo => {
             ui.logo_picker = Some(LogoPicker::new(ui.logo_choice, ui.startup_logo))

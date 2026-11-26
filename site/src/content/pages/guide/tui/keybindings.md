@@ -43,6 +43,7 @@ the entire default keymap; other valid user settings still apply.
 | `queue.restore` | Alt+Up | Restore newest queued draft |
 | `queue.manage` | Unbound (`/queue`) | Inspect queues, change drain modes, restore or clear |
 | `history.open` | Ctrl+R | Search submitted prompts |
+| `transcript.find` | Ctrl+F | Find a literal phrase in session messages and retained tool output, including older history. Type or paste to search, ↑/↓ to change match, Enter to jump, Esc to close without moving. |
 | `prompt.external_editor` | Ctrl+O | Edit the draft, or open a browsed card's file, in `$VISUAL` or `$EDITOR` |
 | `theme.toggle` | Unbound (`/theme`) | Toggle Paper / last dark theme |
 | `panel.toggle` | Ctrl+P | Show or hide the side panel |

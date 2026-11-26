@@ -13,12 +13,13 @@ const MAX_CHORD_CHARS: usize = 64;
 const MAX_DIAGNOSTIC_CHARS: usize = 512;
 /// Actions whose defaults were added or changed recently; user overrides take
 /// precedence over these defaults so existing configs never break on upgrade.
-const RECENT_DEFAULTS: [Action; 5] = [
+const RECENT_DEFAULTS: [Action; 6] = [
     Action::TogglePanel,
     Action::BackgroundCommand,
     Action::CopyLastResponse,
     Action::TurnDiff,
     Action::AttachShellOutput,
+    Action::Find,
 ];
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -46,10 +47,11 @@ pub(crate) enum Action {
     BackgroundCommand,
     FocusBackground,
     AttachShellOutput,
+    Find,
 }
 
 impl Action {
-    pub(crate) const ALL: [Self; 23] = [
+    pub(crate) const ALL: [Self; 24] = [
         Self::Submit,
         Self::AlternateSubmit,
         Self::Newline,
@@ -73,6 +75,7 @@ impl Action {
         Self::BackgroundCommand,
         Self::FocusBackground,
         Self::AttachShellOutput,
+        Self::Find,
     ];
 
     pub(crate) const fn id(self) -> &'static str {
@@ -90,6 +93,7 @@ impl Action {
             Self::FocusBackground => "panel.background",
             Self::AttachShellOutput => "shell.attach_output",
             Self::History => "history.open",
+            Self::Find => "transcript.find",
             Self::ToggleTheme => "theme.toggle",
             Self::Browse => "transcript.browse",
             Self::CopyLastResponse => "transcript.copy_last_response",
@@ -122,6 +126,7 @@ impl Action {
                 "Attach or detach the latest ! shell output to the next prompt"
             }
             Self::History => "Open prompt history",
+            Self::Find => "Find in transcript",
             Self::ToggleTheme => "Toggle the theme",
             Self::Browse => "Browse and copy transcript items",
             Self::CopyLastResponse => "Copy the last assistant response",
@@ -279,6 +284,11 @@ impl Default for Bindings {
             ),
         ];
         chords[RestoreQueue.index()] = vec![Chord::exact(KeyCode::Up, KeyModifiers::ALT, "Alt+Up")];
+        chords[Find.index()] = vec![Chord::exact(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+            "Ctrl+F",
+        )];
         chords[History.index()] = vec![Chord::exact(
             KeyCode::Char('r'),
             KeyModifiers::CONTROL,

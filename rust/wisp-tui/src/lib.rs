@@ -97,6 +97,7 @@ mod top_bar_tests;
 mod transcript;
 #[cfg(feature = "transcript-benchmark")]
 pub mod transcript_benchmark;
+mod transcript_find;
 mod transcript_view;
 mod transport;
 mod ui;
@@ -722,6 +723,7 @@ enum OverlayKind {
     Theme,
     Logo,
     PromptHistory,
+    TranscriptFind,
     Discovery,
     Context,
     GitDiff,
@@ -825,6 +827,7 @@ struct LiveUi {
     composer_layout_cache: ComposerLayoutCache,
     prompt_history: PromptHistory,
     prompt_history_view: Option<PromptHistoryView>,
+    transcript_find: Option<transcript_find::TranscriptFind>,
     ids: SequentialCommandIds,
     notice: Option<String>,
     render_pending: bool,
@@ -928,6 +931,7 @@ impl Default for LiveUi {
             composer_layout_cache: ComposerLayoutCache::default(),
             prompt_history: PromptHistory::default(),
             prompt_history_view: None,
+            transcript_find: None,
             ids: SequentialCommandIds::default(),
             notice: None,
             render_pending: true,
@@ -998,6 +1002,7 @@ const LIVE_HISTORY_WAITS_NOTICE: &str = "Earlier history loads when this reply f
 
 impl LiveUi {
     fn reset_transcript_presentation(&mut self) {
+        self.transcript_find = None;
         self.mouse_frame = None;
         self.transcript_selection = None;
         self.transcript_viewport = TranscriptViewport::default();
@@ -1888,6 +1893,7 @@ impl LiveUi {
             self.file_picker.dismiss();
             self.theme_picker = None;
             self.logo_picker = None;
+            self.transcript_find = None;
             // A decision owns the screen; a docked panel stays beside it.
             self.side_panel.close_overlay();
             self.state.project_files.set_open(false);
@@ -1946,6 +1952,16 @@ impl LiveUi {
         let mut control = self.apply_effects(effects, writer, limit).await?;
         if control != LoopControl::Exit {
             let effects = self.request_pending_history_navigation(limit)?;
+            control = self.apply_effects(effects, writer, limit).await?;
+        }
+        if control != LoopControl::Exit
+            && history_window_changed
+            && self
+                .transcript_find
+                .as_ref()
+                .is_some_and(|find| find.has_query())
+        {
+            let effects = self.next_find_page(limit)?;
             control = self.apply_effects(effects, writer, limit).await?;
         }
         // Once the reply finishes, the pending scroll requests its history.
@@ -2143,6 +2159,8 @@ impl LiveUi {
             Some(OverlayKind::Theme)
         } else if self.logo_picker.is_some() {
             Some(OverlayKind::Logo)
+        } else if self.transcript_find.is_some() {
+            Some(OverlayKind::TranscriptFind)
         } else if self.prompt_history_view.is_some() {
             Some(OverlayKind::PromptHistory)
         } else if self.discovery_view.is_some() {
@@ -2677,6 +2695,31 @@ impl LiveUi {
                     );
                     painted.dialog_controls = dialog.controls;
                     dialog.rows
+                }
+                OverlayKind::TranscriptFind => {
+                    let status =
+                        if self.state.history_request_direction().is_some() {
+                            Some("Searching session history…")
+                        } else if self.find_history_action().is_some()
+                            && self
+                                .transcript_find
+                                .as_ref()
+                                .is_some_and(|find| find.has_query())
+                        {
+                            Some(self.notice.as_deref().unwrap_or(
+                                "More history available; press ↓ to continue when ready.",
+                            ))
+                        } else {
+                            None
+                        };
+                    self.transcript_find.as_mut().expect("active find").render(
+                        frame,
+                        area,
+                        &self.state.transcript,
+                        status,
+                        palette,
+                    );
+                    mouse::Rows::default()
                 }
                 OverlayKind::PromptHistory => {
                     let dialog = self
@@ -6534,6 +6577,13 @@ impl LiveUi {
                 }
                 Ok(Some(LoopControl::Continue))
             }
+            Some(KeyAction::Find) if self.active_overlay().is_none() && !decision_pending => {
+                self.transcript_find = Some(Default::default());
+                self.completion.dismiss();
+                self.notice = None;
+                self.render_pending = true;
+                Ok(Some(LoopControl::Continue))
+            }
             Some(KeyAction::FocusPanel) if self.active_overlay().is_none() && !decision_pending => {
                 self.side_panel.focus();
                 self.rendered_overlay = None;
@@ -6634,6 +6684,7 @@ impl LiveUi {
             | OverlayKind::Theme
             | OverlayKind::Logo
             | OverlayKind::Session
+            | OverlayKind::TranscriptFind
             | OverlayKind::PromptHistory
             | OverlayKind::Queue => key.code == KeyCode::Enter,
             OverlayKind::SidePanel => self.side_panel.key_activates(key),
@@ -6654,6 +6705,9 @@ impl LiveUi {
         limit: usize,
     ) -> Result<LoopControl, Error> {
         match (kind, input) {
+            (OverlayKind::TranscriptFind, input) => {
+                self.handle_find_input(input, writer, limit).await
+            }
             (OverlayKind::Queue, Input::Key(key)) => {
                 self.handle_queue_key(key, writer, limit).await
             }
@@ -14986,6 +15040,60 @@ mod tests {
             .await
             .unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn transcript_find_jumps_to_match_on_an_unloaded_page() {
+        let (writer, mut receiver) = mpsc::channel(WRITER_CHANNEL_CAPACITY);
+        let mut ui = history_navigation_fixture(true);
+        ui.editor.insert_paste("unsubmitted draft");
+        ui.handle_input(
+            Input::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL)),
+            &writer,
+            MAX_APPLICATION_FRAME_BYTES,
+        )
+        .await
+        .unwrap();
+        assert_eq!(ui.active_overlay(), Some(OverlayKind::TranscriptFind));
+        ui.handle_input(
+            Input::Paste("unloaded phrase".into()),
+            &writer,
+            MAX_APPLICATION_FRAME_BYTES,
+        )
+        .await
+        .unwrap();
+        for (id, more, content) in [
+            ("get_messages-1", true, "unrelated"),
+            ("get_messages-2", false, "older: unloaded phrase"),
+        ] {
+            assert!(receiver.try_recv().is_ok());
+            finish_navigation_page(&mut ui, &writer, id, true, more, Some(content)).await;
+        }
+        assert!(receiver.try_recv().is_err());
+        let terminal = draw_model_test(&mut ui, 100, 30);
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("match 1 of 1"));
+        ui.handle_input(
+            Input::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            &writer,
+            MAX_APPLICATION_FRAME_BYTES,
+        )
+        .await
+        .unwrap();
+        assert!(ui.active_overlay().is_none());
+        assert_eq!(ui.editor.text(), "unsubmitted draft");
+        assert!(
+            ui.transcript_viewport
+                .visible_rows(&ui.state.transcript, &mut ui.transcript_row_cache)[0]
+                .plain_text()
+                .contains("unloaded phrase")
+        );
     }
 
     #[tokio::test]
