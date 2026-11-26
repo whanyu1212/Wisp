@@ -398,7 +398,7 @@ pub fn render_interactive(
     let composer_height = composer_height(area, state, composer_layout, panel_docked);
     let status_height = status_line_height(state);
     let strip_height = background_strip_height(area, state, panel_docked);
-    let footer_rows = footer_height(area, panel_docked);
+    let footer_rows = footer_height(area);
     let completion_height =
         completion.map_or(0, |view| {
             (view.items.len().min(5) as u16).min(area.height.saturating_sub(
@@ -1297,10 +1297,9 @@ fn background_strip_height(area: Rect, state: &UiState, panel_docked: bool) -> u
     )
 }
 
-/// Two rows for the Antigravity-style telemetry deck when the conversation column is
-/// tall and wide enough without a docked side panel; one row otherwise.
-fn footer_height(area: Rect, panel_docked: bool) -> u16 {
-    if !panel_docked && area.height >= 16 && area.width >= 60 {
+/// Size the telemetry deck from the space left after splitting off any side panel.
+fn footer_height(area: Rect) -> u16 {
+    if area.height >= 16 && area.width >= 60 {
         2
     } else {
         1
@@ -1313,7 +1312,7 @@ fn footer_height(area: Rect, panel_docked: bool) -> u16 {
 fn rows_around_composer(area: Rect, state: &UiState, panel_docked: bool) -> u16 {
     status_line_height(state)
         + background_strip_height(area, state, panel_docked)
-        + footer_height(area, panel_docked)
+        + footer_height(area)
 }
 
 /// The strip under the composer: how many background processes run and their
@@ -11794,7 +11793,7 @@ mod tests {
         assert_eq!(mcp_fg, palette.error);
         assert!(mcp_mod.contains(Modifier::BOLD));
 
-        // Short (< 16), narrow (< 60), and docked-panel views fall back to the 1-row footer.
+        // Short (< 16), narrow (< 60), views fall back to the 1-row footer.
         state.view_status = ViewStatus::Idle;
         let short = render_to_string(140, 14, &state, &PromptEditor::default());
         assert!(
@@ -11806,7 +11805,7 @@ mod tests {
             !narrow.contains("╭─ •") && !narrow.contains("╰─ ctx"),
             "{narrow}"
         );
-        assert_eq!(footer_height(Rect::new(0, 0, 140, 20), true), 1);
+        assert_eq!(footer_height(Rect::new(0, 0, 60, 16)), 2);
 
         // Terminal width 120 shows #session_id, tight deck widths preserve cost over
         // the optional token ratio, and control-only workspace strings emit no empty `│  │`.
