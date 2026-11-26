@@ -324,9 +324,9 @@ def test_replay_rejects_unlinked_entries(
                 _message_entry("second", "user", "two"),
                 _message_entry("second-answer", "assistant", "answer two"),
                 _compaction_entry("compact-1", "first", "first-answer"),
-                _compaction_entry("compact-2", "first"),
+                _compaction_entry("compact-2", "first-answer", "second", "first"),
             ),
-            "inactive",
+            r"inactive context entry ids: \('first-answer', 'first'\)",
             id="inactive",
         ),
         pytest.param(
@@ -662,7 +662,8 @@ def test_replay_keeps_tool_result_order_and_call_entry_ids() -> None:
 
 # Timing assertion: run it with the serial benchmarks, not beside parallel workers.
 @pytest.mark.benchmark
-def test_replay_cost_grows_linearly_with_session_length() -> None:
+@pytest.mark.parametrize("compact", [False, True], ids=["messages", "compacted-prefix"])
+def test_replay_cost_grows_linearly_with_session_length(compact: bool) -> None:
     """Replay must stay linear in the session length.
 
     Rebuilding the context tuple per message made replay O(n^2), which dominated
@@ -672,16 +673,19 @@ def test_replay_cost_grows_linearly_with_session_length() -> None:
     """
 
     def session(message_count: int) -> tuple[SessionEntry, ...]:
-        return linked_entries(
-            tuple(
-                _message_entry(
-                    f"entry-{index}",
-                    "user" if index % 2 == 0 else "assistant",
-                    f"message {index}",
-                )
-                for index in range(message_count)
+        messages = tuple(
+            _message_entry(
+                f"entry-{index}",
+                "user" if index % 2 == 0 else "assistant",
+                f"message {index}",
             )
+            for index in range(message_count)
         )
+        if compact:
+            # Grow the replaced prefix with the history; retain one complete user turn.
+            compaction = _compaction_entry("compact", *(entry.id for entry in messages[:-2]))
+            return linked_entries((*messages, compaction))
+        return linked_entries(messages)
 
     def replay_seconds(entries: tuple[SessionEntry, ...]) -> float:
         start = time.perf_counter()
