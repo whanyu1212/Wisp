@@ -7541,10 +7541,16 @@ impl LiveUi {
                         .browser_viewport
                         .as_ref()
                         .is_some_and(|view| view.live);
+                    // Echo a live key through Chrome immediately when the input lane is idle.
+                    // Keep the short batching window for keys behind an earlier command.
+                    let idle_live = live
+                        && self.browser_typing_buffer.is_empty()
+                        && !self.state.browser_interact_in_flight()
+                        && self.pending_live_scroll.is_none();
                     let should_flush =
                         self.browser_typing_buffer
                             .push(ch, std::time::Instant::now(), live);
-                    if should_flush {
+                    if idle_live || should_flush {
                         return self.flush_browser_typing(writer, limit).await;
                     }
                     return Ok(LoopControl::Continue);

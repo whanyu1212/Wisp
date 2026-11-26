@@ -39,6 +39,10 @@ from wisp.events import (
 
 _MAX_CAPTURE_PIXELS = MAX_LIVE_BROWSER_WIDTH * MAX_LIVE_BROWSER_HEIGHT
 _INITIAL_VIEWPORT = LiveBrowserViewport(width=900, height=600, device_scale_factor=1)
+# Keep adjacent wheel bursts on one capture: restoring Retina frames in the
+# brief pause between gestures stalls the first repaint of the next gesture.
+_INTERACTION_IDLE_SECONDS = 0.65
+_TYPING_BURST_GAP = 0.30
 _STARTUP_TIMEOUT = 20
 _TIMEOUT = 10
 _CLOSED = "The live browser is closed; reopen it with /browser live"
@@ -426,6 +430,9 @@ class LiveBrowser:
         self._first_frame = anyio.Event()
         self._viewport: LiveBrowserViewport | None = None
         self._screencast_id = 0
+        self._interactive_capture = False
+        self._interactive_until = 0.0
+        self._typing_until = 0.0
         self._capture_loader: str | None = None
         self._navigation = anyio.Event()
         self._loader: str | None = None
@@ -599,8 +606,14 @@ class LiveBrowser:
         if self._window_mode:
             await self._refresh_title()
             return self._window_viewport_event()
-        if self._viewport is not None and self._capture_loader != self._loader:
-            return await self._restart_capture(self._viewport, resize=False)
+        if self._viewport is not None:
+            if self._capture_loader != self._loader:
+                return await self._restart_capture(self._viewport, resize=False)
+            interactive = self._interactive_until > anyio.current_time()
+            if interactive != self._interactive_capture:
+                return await self._restart_capture(
+                    self._viewport, resize=False, interactive=interactive
+                )
         return self.take_frame()
 
     async def next_frame(self) -> BrowserViewportUpdated | None:
@@ -638,7 +651,12 @@ class LiveBrowser:
                 frame = await self._poll_frame()
             if frame is not None:
                 return frame
-            await changed.wait()
+            if self._interactive_capture:
+                # A stationary page sends no frames to wake the full-resolution restore.
+                with anyio.move_on_after(max(0.0, self._interactive_until - anyio.current_time())):
+                    await changed.wait()
+            else:
+                await changed.wait()
 
     @property
     def lifetime(self) -> anyio.CancelScope | None:
@@ -671,11 +689,15 @@ class LiveBrowser:
             return await self._restart_capture(viewport, resize=True)
 
     async def _restart_capture(
-        self, viewport: LiveBrowserViewport, *, resize: bool
+        self, viewport: LiveBrowserViewport, *, resize: bool, interactive: bool = False
     ) -> BrowserViewportUpdated:
         # Stop retaining old frames before the first await. Chromium tags each new
         # screencast with a new sessionId, including scale-only changes.
         self._viewport = None
+        self._interactive_capture = interactive
+        if not interactive:
+            self._interactive_until = 0.0
+            self._typing_until = 0.0
         self._frame = self._delivered = None
         try:
             await self._command("Page.stopScreencast", {})
@@ -700,7 +722,7 @@ class LiveBrowser:
 
     async def _start_capture(self, viewport: LiveBrowserViewport) -> BrowserViewportUpdated:
         self._viewport = viewport
-        max_width, max_height = _capture_size(viewport)
+        max_width, max_height = _capture_size(viewport, interactive=self._interactive_capture)
         # A redirect can commit during capture startup. Retire that generation
         # and retry within the same deadline to bind pixels to the new document.
         with anyio.move_on_after(_TIMEOUT):
@@ -710,13 +732,15 @@ class LiveBrowser:
                 self._screencast_id += 1
                 # A CDP metrics or navigation acknowledgement can precede repaint.
                 # A one-pixel surface copy waits for the compositor on static pages.
-                await self._command(
-                    "Page.captureScreenshot",
-                    {
-                        "captureBeyondViewport": False,
-                        "clip": {"x": 0, "y": 0, "width": 1, "height": 1, "scale": 1},
-                    },
-                )
+                # Switching only the raster during interaction needs no layout repaint.
+                if not self._interactive_capture:
+                    await self._command(
+                        "Page.captureScreenshot",
+                        {
+                            "captureBeyondViewport": False,
+                            "clip": {"x": 0, "y": 0, "width": 1, "height": 1, "scale": 1},
+                        },
+                    )
                 await self._command(
                     "Page.startScreencast",
                     {"format": "png", "maxWidth": max_width, "maxHeight": max_height},
@@ -853,6 +877,9 @@ class LiveBrowser:
             self._smooth_scroll_active = False
             self._viewport = None
             self._screencast_id = 0
+            self._interactive_capture = False
+            self._interactive_until = 0.0
+            self._typing_until = 0.0
             self._capture_loader = None
             self._navigation.set()
             self._first_frame.set()
@@ -946,7 +973,7 @@ class LiveBrowser:
             and metadata.get("deviceHeight") == viewport.height
             and isinstance(data, str)
             and len(data) <= MAX_LIVE_BROWSER_FRAME_CHARS
-            and _png_matches_viewport(data, viewport)
+            and _png_matches_viewport(data, viewport, interactive=self._interactive_capture)
         ):
             self._frame = data
             self._first_frame.set()
@@ -1279,6 +1306,10 @@ class LiveBrowser:
                 await self._mouse(request)
             case "type":
                 await self._command("Input.insertText", {"text": request.text})
+                now = anyio.current_time()
+                if now < self._typing_until or now < self._interactive_until:
+                    self._keep_interactive_capture(now)
+                self._typing_until = now + _TYPING_BURST_GAP
             case "press_key":
                 key = request.key or ""
                 modifiers = request.modifiers or ()
@@ -1303,6 +1334,16 @@ class LiveBrowser:
             case _:
                 raise BrowserControlError("This action is unavailable in the live browser preview")
 
+    def _keep_interactive_capture(self, now: float) -> None:
+        if (
+            self._viewport is not None
+            and self._viewport.device_scale_factor > 1
+            and not self._window_mode
+        ):
+            self._interactive_until = now + _INTERACTION_IDLE_SECONDS
+            if not self._interactive_capture:
+                self._signal_change()
+
     async def _mouse(self, request: BrowserInteraction) -> None:
         x, y = request.x, request.y
         # Pointer coordinates are checked against the capture, so wait out a change.
@@ -1320,6 +1361,7 @@ class LiveBrowser:
         params = {"x": x, "y": y}
         if request.action == "scroll":
             await self._scroll(x, y, request.delta_x or 0, request.delta_y or 0)
+            self._keep_interactive_capture(anyio.current_time())
             return
         await self._cancel_smooth_scroll()
         button = request.button or "left"
@@ -1395,24 +1437,26 @@ class LiveBrowser:
         )
 
 
-def _capture_size(viewport: LiveBrowserViewport) -> tuple[int, int]:
+def _capture_size(viewport: LiveBrowserViewport, *, interactive: bool) -> tuple[int, int]:
     """Fit the device raster into the live frame's pixel budget.
 
     Args:
         viewport: Requested CSS dimensions and device pixel ratio.
+        interactive: Limit the raster to CSS resolution without changing page metrics.
 
     Returns:
         Maximum PNG width and height in physical pixels, scaled proportionally.
     """
-    width = viewport.width * viewport.device_scale_factor
-    height = viewport.height * viewport.device_scale_factor
+    raster_scale = 1 if interactive else viewport.device_scale_factor
+    width = viewport.width * raster_scale
+    height = viewport.height * raster_scale
     if width * height <= _MAX_CAPTURE_PIXELS:
         return width, height
     scale = math.sqrt(_MAX_CAPTURE_PIXELS / (width * height))
     return int(width * scale), int(height * scale)
 
 
-def _png_matches_viewport(data: str, viewport: LiveBrowserViewport) -> bool:
+def _png_matches_viewport(data: str, viewport: LiveBrowserViewport, *, interactive: bool) -> bool:
     # CDP can describe new CSS bounds while encoding the previous surface.
     # Read just the signature and IHDR dimensions (24 bytes / 32 base64 chars).
     try:
@@ -1423,7 +1467,7 @@ def _png_matches_viewport(data: str, viewport: LiveBrowserViewport) -> bool:
         return False
     width = int.from_bytes(header[16:20], "big")
     height = int.from_bytes(header[20:24], "big")
-    max_width, max_height = _capture_size(viewport)
+    max_width, max_height = _capture_size(viewport, interactive=interactive)
     scale = min(max_width / viewport.width, max_height / viewport.height)
     # Chromium may fit twice: round the short edge to a whole pixel, then
     # fit the long edge to preserve aspect, yielding slightly fewer pixels.

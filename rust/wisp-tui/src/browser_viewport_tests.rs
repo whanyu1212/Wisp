@@ -2041,6 +2041,23 @@ async fn next_frame_read_follows_paint() {
 }
 
 #[tokio::test]
+async fn idle_live_typing_sends_the_first_key_immediately() {
+    let dir = TempSessionDir::new("live-first-key");
+    let (writer, mut commands) = mpsc::channel(8);
+    let (mut ui, _) = live_page_reading_frames(&dir, &writer, &mut commands).await;
+    ui.enter_browser_takeover();
+    let sent = send_input_collecting(
+        &mut ui,
+        Input::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+    )
+    .await;
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0]["action"], "type");
+    assert_eq!(sent[0]["text"], "a");
+    assert!(ui.browser_typing_buffer.is_empty());
+}
+
+#[tokio::test]
 async fn frame_reads_ignore_input_in_flight() {
     let dir = TempSessionDir::new("frame-during-input");
     let (writer, mut commands) = mpsc::channel(8);
