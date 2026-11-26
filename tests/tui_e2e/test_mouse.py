@@ -92,17 +92,17 @@ def test_native_mouse_moves_the_composer_cursor_when_capture_is_enabled(
             # Read the draft from the replayed screen: a welcome tip can also paint
             # "draft", and typed keys may paint across several frames.
             elif phase == "draft" and screen_shows(all_output, "mouse draft"):
-                # SGR is one-based. The padded composer has its editor at
-                # column 6, row 22, after the outer margin, rail, and `> `; the
-                # bottom border, which names the model and mode, sits below it.
-                os.write(terminal_fd, b"\x1b[<0;6;22M\x1b[<0;6;22m")
+                # SGR is one-based. With the 2-row deck below the composer on a 24-row
+                # terminal, the padded composer has its editor at column 6, row 21, after
+                # the outer margin, rail, and `> `; its bottom border sits on row 22.
+                os.write(terminal_fd, b"\x1b[<0;6;21M\x1b[<0;6;21m")
                 output.clear()
                 if mouse_enabled:
                     phase = "cursor moved"
                 else:
                     os.write(terminal_fd, b"X\r")
                     phase = "submitted"
-            elif phase == "cursor moved" and b"\x1b[22;6H" in output:
+            elif phase == "cursor moved" and b"\x1b[21;6H" in output:
                 os.write(terminal_fd, b"X\r")
                 phase = "submitted"
                 output.clear()

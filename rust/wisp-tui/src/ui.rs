@@ -4210,23 +4210,10 @@ fn render_footer_deck(
         )]);
     }
     if let Some(branch) = state.git_branch.as_deref() {
-        let mut git_spans = vec![Span::styled(
+        row1_segments.push(vec![Span::styled(
             clip_columns(&sanitize_for_terminal(branch), BRANCH_MAX_COLUMNS),
             Style::default().fg(palette.primary),
-        )];
-        if let Some(files) = state
-            .git_diff
-            .snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.files.len())
-            .filter(|count| *count > 0)
-        {
-            git_spans.push(Span::styled(
-                format!(" (+{files})"),
-                Style::default().fg(palette.success),
-            ));
-        }
-        row1_segments.push(git_spans);
+        )]);
     }
     let (degraded_mcp, connected_mcp) = mcp_health_counts(state);
     if degraded_mcp > 0 {
@@ -11667,23 +11654,6 @@ mod tests {
             context_window: Some(200_000),
             reserve_tokens: 1_000,
         };
-        state.git_diff.snapshot = Some(Arc::new(crate::reducer::git_diff::GitDiffSnapshot {
-            generation: 1,
-            head: "abc123".into(),
-            files: vec![
-                crate::reducer::git_diff::GitDiffFile {
-                    path: "a.rs".into(),
-                    status: "modified".into(),
-                    ..Default::default()
-                },
-                crate::reducer::git_diff::GitDiffFile {
-                    path: "b.rs".into(),
-                    status: "modified".into(),
-                    ..Default::default()
-                },
-            ],
-            truncated: false,
-        }));
         state.context.budget = Some(budget.clone());
         state.context.stats = Some(Box::new(SessionStats {
             session_id: None,
@@ -11741,7 +11711,7 @@ mod tests {
         let palette = Palette::default();
         let screen = terminal.backend().to_string();
         assert!(
-            screen.contains("╭─ • idle │ /srv/wisp │ feat/deck (+2) │ 2 MCP"),
+            screen.contains("╭─ • idle │ /srv/wisp │ feat/deck │ 2 MCP"),
             "{screen}"
         );
         assert!(screen.contains("#a780c86d"), "{screen}");
@@ -11851,7 +11821,7 @@ mod tests {
         let empty_cwd = render_to_string(140, 20, &state, &PromptEditor::default());
         assert!(!empty_cwd.contains("│  │"), "{empty_cwd}");
         assert!(
-            empty_cwd.contains("╭─ • idle │ feat/deck (+2) │ 1 MCP off │ 1 sub"),
+            empty_cwd.contains("╭─ • idle │ feat/deck │ 1 MCP off │ 1 sub"),
             "{empty_cwd}"
         );
     }
