@@ -46,6 +46,7 @@ pub struct DetailView {
     /// Scroll state when the open card is a codemode script.
     pub(crate) script: crate::script_detail::ScriptDetailView,
     selected_entry: Option<TranscriptEntryId>,
+    plain_match_view: bool,
     top: Option<DetailAnchor>,
     width: usize,
     height: usize,
@@ -62,6 +63,7 @@ impl Default for DetailView {
             review: crate::diff_review::DiffReview::default(),
             script: crate::script_detail::ScriptDetailView::default(),
             selected_entry: None,
+            plain_match_view: false,
             top: None,
             width: 1,
             height: 1,
@@ -87,6 +89,7 @@ impl DetailView {
         self.review.reset();
         self.script.reset();
         self.selected_entry = Some(entry_id);
+        self.plain_match_view = false;
         self.top = presentation.rows.first().map(|row| DetailAnchor {
             row_key: row.key,
             byte_offset: 0,
@@ -98,6 +101,31 @@ impl DetailView {
             self.logical_rows.insert(row.key, rendered);
         }
         debug_assert!(self.retained_bytes <= DETAIL_CACHE_MAX_BYTES);
+    }
+
+    /// Show the exact retained row, including rows omitted by the inline diff preview.
+    pub(crate) fn open_match(
+        &mut self,
+        entry_id: TranscriptEntryId,
+        presentation: &ToolDetailPresentation,
+        part: usize,
+        offset: usize,
+    ) {
+        self.open(entry_id, presentation);
+        let row = &presentation.rows[part];
+        let formatted = &self.logical_rows[&row.key];
+        let prefix = formatted.strip_suffix(&row.text).map_or(0, str::len);
+        self.top = Some(DetailAnchor {
+            row_key: row.key,
+            byte_offset: prefix.saturating_add(offset),
+        });
+        // Normalize the source anchor at the actual overlay width on its first paint.
+        self.width = 0;
+        self.plain_match_view = true;
+    }
+
+    pub(crate) fn shows_diff_review(&self, presentation: &ToolDetailPresentation) -> bool {
+        !self.plain_match_view && crate::diff_review::is_diff(presentation)
     }
 
     /// Open a codemode script card's details, which are built from the card as drawn.
@@ -473,6 +501,22 @@ mod tests {
             ],
             truncated: false,
         }
+    }
+
+    #[test]
+    fn find_opens_the_selected_wrapped_detail_row_instead_of_the_diff_header() {
+        let mut detail = presentation();
+        detail.rows[1].text = format!("{}needle", "line ".repeat(40));
+        let mut view = DetailView::default();
+        let id = TranscriptEntryId::from_raw(7);
+        view.open_match(id, &detail, 1, detail.rows[1].text.find("needle").unwrap());
+        assert!(!view.shows_diff_review(&detail));
+        view.set_geometry(&detail, 24, 3);
+        let rows = view.visible_rows(&detail);
+        assert_eq!(rows[0].anchor.row_key, detail.rows[1].key);
+        assert!(rows[0].text.contains("needle"));
+        view.open(id, &detail);
+        assert!(view.shows_diff_review(&detail));
     }
 
     #[test]

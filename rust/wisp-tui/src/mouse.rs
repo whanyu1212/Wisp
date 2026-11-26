@@ -1021,7 +1021,8 @@ impl LiveUi {
                 .queue_view
                 .as_mut()
                 .is_some_and(|view| view.select_mouse(index, &self.state)),
-            OverlayKind::GitDiff
+            OverlayKind::TranscriptFind
+            | OverlayKind::GitDiff
             | OverlayKind::Context
             | OverlayKind::Help
             | OverlayKind::Detail

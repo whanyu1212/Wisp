@@ -106,6 +106,9 @@ impl KeyHelp {
                 "Startup logos: Up/Down/Page/Home/End preview; Enter applies.",
                 "Esc/Ctrl+C restores the committed logo choice.",
             ],
+            Owner::Overlay(OverlayKind::TranscriptFind) => {
+                &["Find: type a phrase, Up/Down select a match, Enter jumps, Esc closes."]
+            }
             Owner::Overlay(OverlayKind::PromptHistory) => &[
                 "History: type to search; Up/Down/Page/Home/End select.",
                 "Enter restores without submitting; Esc/Ctrl+C closes.",

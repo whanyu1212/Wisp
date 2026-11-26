@@ -5519,6 +5519,43 @@ impl TranscriptViewport {
         }
     }
 
+    pub(crate) fn reveal_match(
+        &mut self,
+        transcript: &Transcript,
+        cache: &mut TranscriptRowCache,
+        anchor: RowAnchor,
+    ) {
+        let Some(entry) = transcript.entry(anchor.entry_id) else {
+            return;
+        };
+        let mut anchor = anchor;
+        if let RowPosition::Content(source_offset) = anchor.position
+            && uses_markdown(entry)
+        {
+            anchor.position = RowPosition::Markdown(MarkdownPosition {
+                source_offset,
+                output_offset: 0,
+                block_gap_offset: None,
+            });
+        }
+        if !matches!(entry.kind, TranscriptEntryKind::Message) {
+            if let Some((start, _)) = card_run(transcript, anchor.entry_id) {
+                cache.fold_mut().expand_group(start);
+            }
+            cache.fold_mut().expand(anchor.entry_id);
+            cache.fold_mut().expand_output(anchor.entry_id);
+        }
+        self.reveal_entry(anchor.entry_id);
+        self.top = normalize_anchor(
+            transcript,
+            cache,
+            anchor,
+            self.width.max(1),
+            AnchorNormalization::Content,
+        )
+        .or(self.top);
+    }
+
     /// Scroll so an entry's first row is the top of the view, as a jump to a card does.
     pub(crate) fn reveal_entry(&mut self, entry_id: TranscriptEntryId) {
         self.top = Some(RowAnchor {

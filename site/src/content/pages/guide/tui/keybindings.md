@@ -43,6 +43,7 @@ the entire default keymap; other valid user settings still apply.
 | `queue.restore` | Alt+Up | Restore newest queued draft |
 | `queue.manage` | Unbound (`/queue`) | Inspect queues, change drain modes, restore or clear |
 | `history.open` | Ctrl+R | Search submitted prompts |
+| `transcript.find` | Ctrl+F | Find a literal phrase in session messages and retained tool output, including older history. Type or paste to search, ↑/↓ to change match, Enter to jump, Esc to close without moving. |
 | `prompt.external_editor` | Ctrl+O | Edit the draft, or open a browsed card's file, in `$VISUAL` or `$EDITOR` |
 | `theme.toggle` | Unbound (`/theme`) | Toggle Paper / last dark theme |
 | `panel.toggle` | Ctrl+P | Show or hide the side panel |
@@ -162,6 +163,7 @@ characters per chord.
 | `Ctrl+G` | Toggle contextual help for the focused Rust surface |
 | `Ctrl+L` | Edit the address of the visible live Chromium tab, or focus the `Browser` view's address bar when no page is open |
 | `Ctrl+R` | Search prompt history for this TUI run |
+| `Ctrl+F` | Find text in the session transcript, including retained tool output; Enter jumps to the selected match |
 | `Ctrl+O` | Edit the draft in `$VISUAL`, `$EDITOR`, or `vi`, then return with the saved text; while browsing cards, open the selected card's file |
 | Mouse wheel / trackpad | Scroll the transcript without moving editor focus |
 | `PageUp` / `PageDown` | Scroll the transcript by one page |
