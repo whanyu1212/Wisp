@@ -6443,7 +6443,7 @@ fn row_position_offset(position: RowPosition) -> Option<usize> {
 }
 
 /// Assistant prose wraps at a readable measure even on wide terminals.
-const PROSE_COLUMNS: usize = 88;
+const PROSE_COLUMNS: usize = 100;
 
 /// Whether a span keeps the full width: code, raw HTML and tables stay aligned, while
 /// paragraphs, headings and lists wrap at [`PROSE_COLUMNS`].
@@ -7122,7 +7122,11 @@ mod tests {
         });
         assert!(prose_rows.clone().count() >= 10, "{rows:#?}");
         assert!(
-            prose_rows.clone().all(|row| row.trim_end().width() <= 88),
+            prose_rows.clone().all(|row| row.trim_end().width() <= 100),
+            "{rows:#?}"
+        );
+        assert!(
+            prose_rows.clone().any(|row| row.trim_end().width() > 88),
             "{rows:#?}"
         );
         assert!(rows.iter().any(|row| row.contains(&code)), "{rows:#?}");
