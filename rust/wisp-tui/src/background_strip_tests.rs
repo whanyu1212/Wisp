@@ -124,8 +124,8 @@ fn strip_sits_under_composer() {
     assert!(row.contains("↓ open"), "{row}");
     // Command text is untrusted: the escape sequence is neutralized.
     assert!(!row.contains('\u{1b}') && !row.contains('\u{7}'), "{row:?}");
-    // The footer is the last row; the strip is directly above it.
-    assert_eq!(y, HEIGHT - 2, "{:#?}", rows(&buffer));
+    // The footer is 2 rows at this size; the strip is directly above it.
+    assert_eq!(y, HEIGHT - 3, "{:#?}", rows(&buffer));
 }
 
 #[test]
@@ -148,7 +148,7 @@ fn strip_sits_under_running_composer() {
     ui.state.view_status = ViewStatus::Running;
     let buffer = draw(&mut ui, NARROW, HEIGHT);
     let (y, _) = strip_row(&buffer).expect("strip painted");
-    assert_eq!(y, HEIGHT - 2, "{:#?}", rows(&buffer));
+    assert_eq!(y, HEIGHT - 3, "{:#?}", rows(&buffer));
     // The run's status line stays above the composer, which sits above the strip.
     let status = rows(&buffer)
         .iter()

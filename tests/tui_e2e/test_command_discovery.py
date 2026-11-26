@@ -216,14 +216,14 @@ for line in sys.stdin:
             elif (
                 phase == "prefix"
                 and screen_shows(output, "/help")
-                and frame_cursor(output) == (22, 9)
+                and frame_cursor(output) == (21, 9)
             ):
                 os.write(terminal_fd, b"\r")
                 phase = "completed"
                 output.clear()
             # A second Enter before the filled "/help" is painted can reach a menu the
             # user never saw; the cursor after the fill proves it was painted.
-            elif phase == "completed" and frame_cursor(output) == (22, 11):
+            elif phase == "completed" and frame_cursor(output) == (21, 11):
                 assert not any(command["type"] == "prompt" for command in commands)
                 os.write(terminal_fd, b"\r")
                 phase = "help"
@@ -257,7 +257,7 @@ for line in sys.stdin:
                 os.write(terminal_fd, b"\x1b")
                 phase = "closing help"
                 output.clear()
-            elif phase == "closing help" and frame_cursor(output) == (22, 6):
+            elif phase == "closing help" and frame_cursor(output) == (21, 6):
                 # Closing a popup leaves the background's unchanged cells out of
                 # differential writes. Resize to inspect the full restored frame.
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 102, 0, 0))
@@ -283,7 +283,16 @@ for line in sys.stdin:
                 os.write(terminal_fd, b"/build\r")
                 phase = "build"
                 output.clear()
-            elif phase == "build" and b"build mode enabled." in output:
+            elif phase == "build" and any(
+                command["type"] == "configure" and command.get("mode") == "build"
+                for command in commands
+            ):
+                # Resize after the request so the full notice is repainted even
+                # if cells match the prior footer status on the shared row.
+                fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 102, 0, 0))
+                phase = "build confirmed"
+                output.clear()
+            elif phase == "build confirmed" and screen_shows(output, "build mode enabled."):
                 # The context total can remain unchanged and be absent from a
                 # differential write. Inspect it in a fresh frame after applying.
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 101, 0, 0))
@@ -304,7 +313,7 @@ for line in sys.stdin:
                 fcntl.ioctl(terminal_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 103, 0, 0))
                 phase = "plan confirmed"
                 output.clear()
-            elif phase == "plan confirmed" and b"plan mode enabled." in output:
+            elif phase == "plan confirmed" and screen_shows(output, "plan mode enabled."):
                 os.write(terminal_fd, b"/context\r")
                 phase = "context"
                 output.clear()

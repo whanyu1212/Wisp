@@ -70,6 +70,18 @@ def test_screen_rows_join_partial_repaints() -> None:
     branch = _frame(b"\x1b[2;1Hidle \xc2\xb7 fix/idle     working \xc2\xb7 ctx ~?")
     assert not run_settled(branch, 0, b"fix")
 
+    # Two-row deck places the status label on the row above `╰─ ctx ...`.
+    deck_idle = _frame(
+        "\x1b[1;1H ╭─ • idle │ /srv/wisp │ feat/x\x1b[2;1H ╰─ ctx ~30% │ Ctrl+G help".encode()
+    )
+    assert run_settled(deck_idle, 0, b"feat/x")
+    deck_working = _frame(
+        (
+            "\x1b[1;1H ╭─ ● working │ /srv/wisp │ fix/idle\x1b[2;1H ╰─ ctx ~30% │ Esc interrupt"
+        ).encode()
+    )
+    assert not run_settled(deck_working, 0, b"fix/idle")
+
 
 def test_run_settled_respects_offset() -> None:
     output = _frame(b"fake response to: old idle")

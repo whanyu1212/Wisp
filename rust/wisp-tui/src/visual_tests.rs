@@ -1649,7 +1649,13 @@ fn composer_geometry_tracks_padding_and_keeps_the_cursor_in_the_editor() {
         assert_eq!(buffer[(editor.area.x, editor.area.y)].symbol(), "a");
         // A framed composer ends with its bottom border, which carries the identity.
         let bottom_padding = if height >= 16 { 1 } else { 0 };
-        assert_eq!(editor.area.bottom(), height - 1 - bottom_padding);
+        let surface_width = width - margin * 2;
+        let footer_rows = if surface_width >= 60 && height >= 16 {
+            2
+        } else {
+            1
+        };
+        assert_eq!(editor.area.bottom(), height - footer_rows - bottom_padding);
         if bottom_padding > 0 {
             assert_eq!(buffer[(margin, editor.area.y - 1)].symbol(), "╭");
             assert_eq!(buffer[(editor.area.x, editor.area.y - 1)].symbol(), "─");

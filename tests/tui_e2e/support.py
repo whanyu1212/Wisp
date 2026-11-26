@@ -259,6 +259,7 @@ def screen_shows(output: bytes | bytearray, text: str) -> bool:
 
 # The status word is followed by more status (` · `), the key hints (` │ `), or nothing.
 _STATUS_LABEL = re.compile(r"(?:^|\s)(idle|working)(?=\s[·│]|\s*$)")
+_DECK_STATUS_LABEL = re.compile(r"^\s*╭─\s+[•●✗]\s+(idle|working)(?=\s[·│]|\s*$)")
 
 
 def run_settled(output: bytes | bytearray, offset: int = 0, *fragments: bytes) -> bool:
@@ -281,7 +282,13 @@ def run_settled(output: bytes | bytearray, offset: int = 0, *fragments: bytes) -
     phase = frames[offset:]
     if not all(fragment in phase for fragment in fragments):
         return False
-    footer = next((row for row in reversed(screen_rows(frames)) if row.strip()), "")
+    rows = [row for row in screen_rows(frames) if row.strip()]
+    if not rows:
+        return False
+    if rows[-1].lstrip().startswith("╰─") and len(rows) >= 2:
+        match = _DECK_STATUS_LABEL.match(rows[-2])
+        return match is not None and match.group(1) == "idle"
+    footer = rows[-1]
     # The status label opens the footer's right side, after the folder and branch
     # on the left, so the last match wins and a branch named after a status word
     # does not count.

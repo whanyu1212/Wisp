@@ -3091,9 +3091,9 @@ mod tests {
     #[test]
     fn undocked_footer_offers_panel() {
         let rows = screen(&session(), &mut SidePanel::default(), 140);
-        let footer = rows.last().unwrap();
+        let footer = rows[rows.len() - 2..].join("\n");
         assert!(!rows.iter().any(|row| row.contains("2 MCP · 2 changed")));
-        assert!(footer.contains("/srv/wisp · fix/timeouts"), "{footer}");
+        assert!(footer.contains("/srv/wisp │ fix/timeouts"), "{footer}");
         assert!(footer.contains("Ctrl+P panel"), "{footer}");
     }
 
