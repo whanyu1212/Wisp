@@ -319,6 +319,14 @@ fn png_header_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     Some((width, height))
 }
 
+fn image_decode_limits() -> image::Limits {
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_DECODE_SIDE);
+    limits.max_image_height = Some(MAX_DECODE_SIDE);
+    limits.max_alloc = Some(MAX_DECODE_ALLOC_BYTES);
+    limits
+}
+
 /// Safely decode PNG, JPEG, GIF, or WebP bytes into a bounded RGBA image.
 fn decode_bounded(bytes: &[u8], max_width: u32, max_height: u32) -> Option<DecodedThumbnail> {
     let mut reader = image::ImageReader::new(Cursor::new(bytes))
@@ -335,11 +343,7 @@ fn decode_bounded(bytes: &[u8], max_width: u32, max_height: u32) -> Option<Decod
     ) {
         return None;
     }
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(MAX_DECODE_SIDE);
-    limits.max_image_height = Some(MAX_DECODE_SIDE);
-    limits.max_alloc = Some(MAX_DECODE_ALLOC_BYTES);
-    reader.limits(limits);
+    reader.limits(image_decode_limits());
 
     let decoded = reader.decode().ok()?;
     let pixel_width = decoded.width();
@@ -1196,13 +1200,48 @@ enum KittyImage<'a> {
         height: u32,
     },
     Png(&'a [u8]),
+    CompressedPixels {
+        data: Vec<u8>,
+        width: u32,
+        height: u32,
+        bits_per_pixel: u8,
+    },
+}
+
+/// Rex processes live frames faster when Kitty carries deflated pixels directly.
+fn compressed_kitty_pixels(png: &[u8]) -> Option<KittyImage<'_>> {
+    let mut reader = image::ImageReader::with_format(Cursor::new(png), image::ImageFormat::Png);
+    reader.limits(image_decode_limits());
+    let image = reader.decode().ok()?;
+    let bits_per_pixel = match image.color() {
+        image::ColorType::Rgb8 => 24,
+        image::ColorType::Rgba8 => 32,
+        _ => return None,
+    };
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(image.as_bytes()).ok()?;
+    let data = encoder.finish().ok()?;
+    // PNG's scanline filters can make gradients much smaller than deflated raw pixels.
+    if data.len() > png.len() {
+        return None;
+    }
+    Some(KittyImage::CompressedPixels {
+        data,
+        width: image.width(),
+        height: image.height(),
+        bits_per_pixel,
+    })
 }
 
 fn resolve_kitty_image<'a>(
     cache: &'a ImageCache,
     item: &NativePlacement,
+    compress_viewport_pixels: bool,
 ) -> Option<KittyImage<'a>> {
     if let Some(png) = cache.viewport_png(item) {
+        if compress_viewport_pixels && let Some(image) = compressed_kitty_pixels(png) {
+            return Some(image);
+        }
         return Some(KittyImage::Png(png));
     }
     let thumb = cache.get(&item.image_key)?;
@@ -1227,13 +1266,31 @@ fn encode_kitty(out: &mut Vec<u8>, id: u32, rect: Rect, image: KittyImage<'_>, u
     if !unicode {
         let _ = write!(out, "\x1b[{};{}H", rect.y + 1, rect.x + 1);
     }
-    let (data, dimensions) = match image {
+    let data = match &image {
         KittyImage::Rgba {
             data,
             width,
             height,
-        } => (data, Some((width, height))),
-        KittyImage::Png(data) => (data, None),
+        } => {
+            let _ = write!(out, "\x1b_Ga=T,f=32,s={width},v={height},");
+            *data
+        }
+        KittyImage::Png(data) => {
+            out.extend_from_slice(b"\x1b_Ga=T,f=100,");
+            *data
+        }
+        KittyImage::CompressedPixels {
+            data,
+            width,
+            height,
+            bits_per_pixel,
+        } => {
+            let _ = write!(
+                out,
+                "\x1b_Ga=T,f={bits_per_pixel},o=z,s={width},v={height},"
+            );
+            data.as_slice()
+        }
     };
     let encoded = base64::engine::general_purpose::STANDARD.encode(data);
     let chunks = encoded.as_bytes().chunks(KITTY_CHUNK_BYTES);
@@ -1242,11 +1299,6 @@ fn encode_kitty(out: &mut Vec<u8>, id: u32, rect: Rect, image: KittyImage<'_>, u
     for (index, chunk) in chunks.enumerate() {
         let more = usize::from(index + 1 < count);
         if index == 0 {
-            if let Some((width, height)) = dimensions {
-                let _ = write!(out, "\x1b_Ga=T,f=32,s={width},v={height},");
-            } else {
-                out.extend_from_slice(b"\x1b_Ga=T,f=100,");
-            }
             let _ = write!(
                 out,
                 "c={},r={},i={id},{placement},q=2,m={more};",
@@ -1520,6 +1572,7 @@ impl ActivePlacement {
 /// Diff-based native graphics placement tracker across frames.
 #[derive(Debug, Default)]
 pub(crate) struct ImagePlacementState {
+    compress_viewport_pixels: bool,
     active: HashMap<PlacementKey, ActivePlacement>,
     prepared_unicode: HashMap<PlacementKey, u32>,
     next_kitty_id: u32,
@@ -1527,6 +1580,15 @@ pub(crate) struct ImagePlacementState {
 }
 
 impl ImagePlacementState {
+    /// Use the measured Rex fast path only for a direct Kitty viewport transmission.
+    pub(crate) fn for_terminal(var: impl Fn(&str) -> Option<String>) -> Self {
+        let rex = var("TERM_PROGRAM").is_some_and(|name| name.eq_ignore_ascii_case("rex"));
+        Self {
+            compress_viewport_pixels: rex && var("TMUX").is_none_or(|value| value.is_empty()),
+            ..Self::default()
+        }
+    }
+
     /// Whether any Kitty placement is currently active on the terminal.
     pub(crate) fn has_active_kitty(&self) -> bool {
         self.active.values().any(|entry| entry.kitty_id != 0)
@@ -1651,7 +1713,9 @@ impl ImagePlacementState {
                 if matches!(protocol, ImageProtocol::Kitty | ImageProtocol::KittyUnicode)
                     && existing.spec.image_key != item.image_key
                 {
-                    let Some(image) = resolve_kitty_image(cache, item) else {
+                    let Some(image) =
+                        resolve_kitty_image(cache, item, self.compress_viewport_pixels)
+                    else {
                         continue;
                     };
                     encode_kitty(
@@ -1688,7 +1752,9 @@ impl ImagePlacementState {
             };
             let (kitty_id, unicode_placeholder) = match protocol {
                 ImageProtocol::Kitty | ImageProtocol::KittyUnicode => {
-                    let Some(image) = resolve_kitty_image(cache, item) else {
+                    let Some(image) =
+                        resolve_kitty_image(cache, item, self.compress_viewport_pixels)
+                    else {
                         continue;
                     };
                     let unicode = protocol == ImageProtocol::KittyUnicode
@@ -2292,6 +2358,52 @@ mod tests {
         assert_eq!(meta_decoded.key, meta.key);
         let cached = cache.get(&meta_decoded.key).unwrap();
         assert_eq!(cached.rgba.len(), 200 * 100 * 4);
+    }
+
+    #[test]
+    fn rex_preserves_viewport_pixels() {
+        use image::ExtendedColorType::{Rgb8, Rgba8};
+        for (color, pixels, format) in [
+            (Rgb8, &[37, 96, 20, 2, 188, 245][..], 24),
+            (Rgba8, &[37, 96, 20, 0, 2, 188, 245, 123][..], 32),
+        ] {
+            let mut png = Vec::new();
+            image::codecs::png::PngEncoder::new(&mut png)
+                .write_image(pixels, 2, 1, color)
+                .unwrap();
+            let image = compressed_kitty_pixels(&png).unwrap();
+            let mut bytes = Vec::new();
+            encode_kitty(&mut bytes, 7, Rect::new(0, 0, 2, 1), image, true);
+            let frame = std::str::from_utf8(&bytes).unwrap();
+            let (header, payload) = frame
+                .strip_suffix("\x1b\\")
+                .unwrap()
+                .split_once(';')
+                .unwrap();
+            assert_eq!(
+                header,
+                format!("\x1b_Ga=T,f={format},o=z,s=2,v=1,c=2,r=1,i=7,p=1,U=1,q=2,m=0")
+            );
+            let compressed = base64::engine::general_purpose::STANDARD
+                .decode(payload)
+                .unwrap();
+            let mut decoded = Vec::new();
+            flate2::read::ZlibDecoder::new(&compressed[..])
+                .read_to_end(&mut decoded)
+                .unwrap();
+            assert_eq!(decoded, pixels);
+        }
+    }
+
+    #[test]
+    fn gradients_keep_smaller_png() {
+        use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+        let gradient = image::RgbImage::from_fn(256, 64, |x, y| image::Rgb([x as u8, y as u8, 0]));
+        let mut png = Vec::new();
+        PngEncoder::new_with_quality(&mut png, CompressionType::Fast, FilterType::Sub)
+            .write_image(gradient.as_raw(), 256, 64, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        assert!(compressed_kitty_pixels(&png).is_none());
     }
 
     #[test]

@@ -1,4 +1,4 @@
-"""Measure how smoothly a live Chromium page reaches a Retina-sized terminal.
+"""Measure live Chromium output for Rex and Ghostty at Retina resolution.
 
 The test prints frame rates, frame intervals, input latency, and frame sizes for
 ``pytest -s``. It asserts that frames arrive, including while the wheel turns, and
@@ -131,11 +131,13 @@ _PAGE = b"""<!doctype html>
 
 @dataclass
 class _KittyFrame:
-    """One complete Kitty PNG transmission and when its first and last bytes were read."""
+    """One complete Kitty transmission and when its first and last bytes were read."""
 
     started: float
     width: int
     height: int
+    pixel_format: bytes
+    compression: bytes | None
     finished: float = 0.0
     transmission_bytes: int = 0
     base64_chars: int = 0
@@ -218,11 +220,21 @@ class _LiveTerminal:
     def _command(self, command: bytes, now: float) -> None:
         header, _, payload = command[3:-2].partition(b";")
         keys = dict(item.split(b"=", 1) for item in header.split(b",") if b"=" in item)
-        if keys.get(b"a") == b"T" and keys.get(b"f") == b"100":
-            # The PNG signature and IHDR length and type fill 16 bytes; width and height follow.
-            ihdr = base64.b64decode(payload[:32])
-            width, height = struct.unpack(">II", ihdr[16:24])
-            self._current = _KittyFrame(started=now, width=width, height=height)
+        if keys.get(b"a") == b"T":
+            pixel_format = keys[b"f"]
+            if pixel_format == b"100":
+                # PNG stores width and height after the signature, IHDR length and type.
+                ihdr = base64.b64decode(payload[:32])
+                width, height = struct.unpack(">II", ihdr[16:24])
+            else:
+                width, height = int(keys[b"s"]), int(keys[b"v"])
+            self._current = _KittyFrame(
+                started=now,
+                width=width,
+                height=height,
+                pixel_format=pixel_format,
+                compression=keys.get(b"o"),
+            )
         elif not header.startswith(b"m=") or self._current is None:
             return
         frame = self._current
@@ -273,9 +285,22 @@ def _cell_press(column: int, row: int) -> bytes:
     os.environ.get("WISP_TEST_LIVE_BROWSER") != "1",
     reason="set WISP_TEST_LIVE_BROWSER=1 on a host with Chrome or Chromium",
 )
-def test_live_browser_speed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("term_program", "expected_encodings"),
+    [
+        pytest.param("rex", {(b"24", b"z"), (b"32", b"z")}, id="rex"),
+        pytest.param("ghostty", {(b"100", None)}, id="ghostty"),
+    ],
+)
+def test_live_browser_speed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    term_program: str,
+    expected_encodings: set[tuple[bytes, bytes | None]],
+) -> None:
     """Print frame rate, input latency, and frame size for a Retina-sized live page."""
     monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.delenv("TMUX", raising=False)
     page_opened = threading.Event()
     focused = threading.Event()
     typed_lengths: list[int] = []
@@ -319,6 +344,7 @@ def test_live_browser_speed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
             cell_pixels=_CELL_PIXELS,
             environment={
                 "TERM": "xterm-256color",
+                "TERM_PROGRAM": term_program,
                 "COLORTERM": "truecolor",
                 "TMPDIR": str(tmp_path),
                 "PATH": keychain_safe_chrome_path(tmp_path, os.environ["PATH"]),
@@ -338,8 +364,13 @@ def test_live_browser_speed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
                 tui.send(f"http://127.0.0.1:{server.server_port}/page\r".encode())
                 live.wait(lambda: bool(live.frames), timeout=10, failure="No frame arrived")
                 assert page_opened.is_set()
+                first_frame = live.frames[0]
+                # Rex can retain PNG when its payload is smaller.
+                allowed_encodings = expected_encodings | {(b"100", None)}
+                assert (first_frame.pixel_format, first_frame.compression) in allowed_encodings
                 print(
-                    f"\nOpen to first frame: {(live.frames[0].finished - opened_at) * 1000:.0f} ms"
+                    f"\n{term_program} open to first frame: "
+                    f"{(first_frame.finished - opened_at) * 1000:.0f} ms"
                 )
 
                 live.pump(1.0)
@@ -347,16 +378,21 @@ def test_live_browser_speed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
                 live.pump(_WINDOW)
                 animation = live.finished_between(start, time.monotonic())
                 assert len(animation) >= 2, "The animation did not reach the terminal"
+                animation_encodings = {
+                    (frame.pixel_format, frame.compression) for frame in animation
+                }
+                assert animation_encodings <= allowed_encodings
+                assert animation_encodings & expected_encodings
                 _report_rate("Animation", animation, _WINDOW)
                 sizes = sorted({(frame.width, frame.height) for frame in animation})
                 transmissions = [frame.transmission_bytes for frame in animation]
-                png_bytes = [frame.base64_chars * 3 // 4 for frame in animation]
+                payload_bytes = [frame.base64_chars * 3 // 4 for frame in animation]
                 print(
-                    f"Frame pixels {sizes}; Kitty transmission median "
-                    f"{statistics.median(transmissions) / 1024:.0f} KiB, max "
-                    f"{max(transmissions) / 1024:.0f} KiB; PNG median "
-                    f"{statistics.median(png_bytes) / 1024:.0f} KiB, max "
-                    f"{max(png_bytes) / 1024:.0f} KiB"
+                    f"Frame pixels {sizes}; Kitty transmission total {sum(transmissions):,} bytes, "
+                    f"median {statistics.median(transmissions) / 1024:.0f} KiB, max "
+                    f"{max(transmissions) / 1024:.0f} KiB; image payload median "
+                    f"{statistics.median(payload_bytes) / 1024:.0f} KiB, max "
+                    f"{max(payload_bytes) / 1024:.0f} KiB"
                 )
 
                 tui.send(_cell_press(*_INPUT_CELL))

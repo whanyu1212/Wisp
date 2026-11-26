@@ -25,6 +25,8 @@ WISP_RUST_TUI_BINARY="$(pwd)/target/debug/wisp-tui" uv run wisp tui
 
 Supports OpenAI (including ChatGPT Plus/Pro via `/connect`), Anthropic, Google, xAI, DeepSeek, and the offline `fake` provider.
 
+The TUI’s built-in browser is **experimental**. Most testing so far has been in Ghostty and Rex.
+
 ## Benchmark result
 
 Wisp passed **all 32 attempts on an eight-task SWE-bench Pro V2 pilot**, including two Hard-51
