@@ -47,6 +47,7 @@ def test_resize_discards_stale_frames(
             monkeypatch.setattr(browser, "_socket", object())
             monkeypatch.setattr(browser, "_scope", tasks.cancel_scope)
             captures: list[Mapping[str, object]] = []
+            repaint_waits: list[int] = []
             metrics: list[Mapping[str, object]] = []
             mouse: list[Mapping[str, object]] = []
 
@@ -54,12 +55,17 @@ def test_resize_discards_stale_frames(
                 if method == "Emulation.setDeviceMetricsOverride":
                     metrics.append(params)
                 elif method == "Page.captureScreenshot":
+                    repaint_waits.append(len(captures))
                     assert params["clip"] == {"x": 0, "y": 0, "width": 1, "height": 1, "scale": 1}
                 elif method == "Page.startScreencast":
                     captures.append(params)
                     number = len(captures)
                     metadata = {"deviceWidth": width, "deviceHeight": height}
-                    raster = _png_header(width, height) if number == 1 else _png_header(*hd_size)
+                    raster = (
+                        _png_header(width, height)
+                        if params["maxWidth"] == width
+                        else _png_header(*hd_size)
+                    )
                     if number > 1:
                         # A scale-only change has identical CSS dimensions.
                         browser._accept_frame(
@@ -83,6 +89,8 @@ def test_resize_discards_stale_frames(
                     browser._accept_frame(
                         {"sessionId": number, "metadata": metadata, "data": raster}
                     )
+                elif method == "Input.insertText":
+                    assert params["text"] == "a"
                 elif method == "Input.dispatchMouseEvent":
                     assert params["type"] != "mouseWheel"
                     mouse.append(params)
@@ -127,6 +135,31 @@ def test_resize_discards_stale_frames(
             assert len(mouse) == 1
             assert mouse[0]["type"] == "smoothScroll"
             assert str(mouse[0]["expression"]).endswith(f"({width - 1}, {height - 1}, 0, 1)")
+            # A scroll burst changes the screencast raster, not the CSS layout or DPR.
+            moving = await browser.next_frame()
+            assert moving is not None and moving.live_png == _png_header(width, height)
+            assert moving.live_device_scale == 2
+            # Simulate a 350 ms pause between gestures without a wall-clock sleep.
+            browser._interactive_until -= 0.35
+            assert await browser.poll_frame() is None
+            await browser.interact(BrowserInteraction(action="scroll", x=1, y=2, delta_y=60))
+            assert await browser.poll_frame() is None
+            with anyio.fail_after(2):
+                sharp = await browser.next_frame()
+            assert sharp is not None and sharp.live_png == _png_header(*hd_size)
+            assert sharp.live_device_scale == 2
+            assert captures[2:] == captures[:2]
+            assert repaint_waits == [0, 1, 3]  # Don't block the first moving frame.
+            key = BrowserInteraction(action="type", text="a")
+            await browser.interact(key)
+            assert await browser.poll_frame() is None  # An isolated key stays sharp.
+            await browser.interact(key)
+            typing = await browser.poll_frame()
+            assert typing is not None and typing.live_png == _png_header(width, height)
+            with anyio.fail_after(2):
+                restored = await browser.next_frame()
+            assert restored is not None and restored.live_png == _png_header(*hd_size)
+            assert len(metrics) == 2
             mouse.clear()
             await browser.interact(BrowserInteraction(action="click", x=3, y=4))
             assert mouse[0]["type"] == "smoothScroll"

@@ -1210,6 +1210,14 @@ enum KittyImage<'a> {
 
 /// Rex processes live frames faster when Kitty carries deflated pixels directly.
 fn compressed_kitty_pixels(png: &[u8]) -> Option<KittyImage<'_>> {
+    // Detailed photo frames usually fall back to PNG after an expensive decode and
+    // deflate. Keep the original when a substantial frame already costs a byte/pixel.
+    if png.len() >= 128 * 1024 {
+        let (width, height) = png_header_dimensions(png)?;
+        if png.len() as u64 >= u64::from(width) * u64::from(height) {
+            return None;
+        }
+    }
     let mut reader = image::ImageReader::with_format(Cursor::new(png), image::ImageFormat::Png);
     reader.limits(image_decode_limits());
     let image = reader.decode().ok()?;
@@ -2393,6 +2401,27 @@ mod tests {
                 .unwrap();
             assert_eq!(decoded, pixels);
         }
+    }
+
+    #[test]
+    fn dense_viewport_skips_recompression() {
+        // Unfiltered, uncompressed PNG is a case where recompression would win on
+        // size; the density heuristic deliberately prioritizes frame latency instead.
+        use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+        let mut png = Vec::new();
+        PngEncoder::new_with_quality(
+            &mut png,
+            CompressionType::Uncompressed,
+            FilterType::NoFilter,
+        )
+        .write_image(
+            &vec![42; 256 * 256 * 3],
+            256,
+            256,
+            image::ExtendedColorType::Rgb8,
+        )
+        .unwrap();
+        assert!(compressed_kitty_pixels(&png).is_none());
     }
 
     #[test]
