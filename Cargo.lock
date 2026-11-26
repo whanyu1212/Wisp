@@ -3492,6 +3492,7 @@ dependencies = [
  "chrono",
  "clap",
  "crossterm",
+ "flate2",
  "image",
  "jsonschema",
  "nix 0.29.0",

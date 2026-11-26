@@ -8376,6 +8376,9 @@ where
                 motion_allowed,
                 hyperlinks: hyperlink::supported(std::env::var("TERM").ok().as_deref()),
                 image_protocol: terminal_images::ImageProtocol::from_env(color_depth, no_color),
+                image_placements: terminal_images::ImagePlacementState::for_terminal(|name| {
+                    std::env::var(name).ok()
+                }),
                 pointer_shape: pointer_shape::PointerShapeState::new(pointer_shape::supported(
                     |name| std::env::var(name).ok(),
                 )),

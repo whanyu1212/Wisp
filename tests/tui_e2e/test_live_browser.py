@@ -205,6 +205,7 @@ def test_live_browser_controls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
             home,
             environment={
                 "TERM": "xterm-256color",
+                "TERM_PROGRAM": "ghostty",
                 "COLORTERM": "truecolor",
                 "TMPDIR": str(tmp_path),
                 "PATH": keychain_safe_chrome_path(tmp_path, os.environ["PATH"]),
