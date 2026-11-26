@@ -2034,8 +2034,11 @@ fn render_transcript_row(
         })
         .collect::<Vec<_>>();
     if let Some(label) = label {
-        let verb = palette.action_verb(row.tone == TranscriptRowTone::Error);
-        spans[label].style = on_row(spans[label].style.patch(verb));
+        let verb = palette.action_verb(
+            spans[label].content.trim(),
+            row.tone == TranscriptRowTone::Error,
+        );
+        spans[label].style = on_row(base.patch(verb));
     }
     if let Some(mode) = mode {
         let style = palette.run_mode(spans[mode].content.trim());
@@ -8065,7 +8068,7 @@ mod tests {
             .unwrap();
         let palette = Palette::default();
         let (verb_fg, _, verb) = style_at_text(terminal.backend(), "Read ").unwrap();
-        assert_eq!(Some(verb_fg), palette.action_verb(false).fg);
+        assert_eq!(Some(verb_fg), palette.action_verb("Read", false).fg);
         assert!(verb.contains(Modifier::BOLD));
         let (marker_fg, _, _) = style_at_text(terminal.backend(), "•").unwrap();
         assert_eq!(marker_fg, palette.success);
@@ -8095,8 +8098,168 @@ mod tests {
             .unwrap();
         let palette = Palette::default();
         let (verb_fg, _, verb) = style_at_text(terminal.backend(), "Called ").unwrap();
-        assert_eq!(Some(verb_fg), palette.action_verb(false).fg);
+        assert_eq!(Some(verb_fg), palette.action_verb("Called", false).fg);
         assert!(verb.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn stacked_tool_verbs_render_per_tool_hues_and_error_override() {
+        let mut state = UiState::unconfigured();
+        state.transcript.append_prompt("check".into());
+        for (call_id, name, arguments) in [
+            ("r1", "read", json!({"path": "a.rs"})),
+            (
+                "e1",
+                "edit",
+                json!({"path": "b.rs", "old": "x", "new": "y"}),
+            ),
+        ] {
+            state
+                .transcript
+                .observe_tool_call(crate::tool_cards::ToolCallInput {
+                    call_id: call_id.into(),
+                    name: name.into(),
+                    detail_source: crate::tool_detail::ToolDetailSource::None,
+                    arguments,
+                });
+            finish_call(&mut state, call_id, name);
+        }
+        state
+            .transcript
+            .observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: "b1".into(),
+                name: "bash".into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+                arguments: json!({"command": "cargo test"}),
+            });
+        let mut failed = tool_result("b1", "Command exited with code 1");
+        failed.name = "bash".into();
+        failed.is_error = true;
+        failed.exit_code = Some(1);
+        failed.output_has_exit_status = true;
+        state.transcript.observe_tool_result(failed);
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &state,
+                    &mut TranscriptViewport::default(),
+                    &mut TranscriptRowCache::default(),
+                    &PromptEditor::default(),
+                    &connection(),
+                    None,
+                );
+            })
+            .unwrap();
+
+        let palette = Palette::default();
+        let (read_fg, read_bg, read_mod) = style_at_text(terminal.backend(), "Read ").unwrap();
+        let (edit_fg, edit_bg, edit_mod) = style_at_text(terminal.backend(), "Edited ").unwrap();
+        let (bash_fg, bash_bg, bash_mod) = style_at_text(terminal.backend(), "Ran ").unwrap();
+        assert_eq!(Some(read_fg), palette.action_verb("Read", false).fg);
+        assert_eq!(Some(edit_fg), palette.action_verb("Edited", false).fg);
+        assert_ne!(read_fg, edit_fg);
+        assert_eq!(bash_fg, palette.error);
+        assert_eq!(read_bg, palette.background);
+        assert_eq!(edit_bg, palette.background);
+        assert_eq!(bash_bg, palette.background);
+        assert!(read_mod.contains(Modifier::BOLD));
+        assert!(edit_mod.contains(Modifier::BOLD));
+        assert!(bash_mod.contains(Modifier::BOLD));
+
+        // Selected CardAction keeps a readable per-tool hue on the selected band.
+        let selected_row = TranscriptRow {
+            anchor: RowAnchor {
+                entry_id: TranscriptEntryId::from_raw(1),
+                position: crate::transcript_view::RowPosition::Header,
+            },
+            role: TranscriptRole::Tool,
+            kind: TranscriptRowKind::CardAction,
+            tone: TranscriptRowTone::Success,
+            spans: vec![
+                crate::markdown::TranscriptSpan {
+                    link: None,
+                    text: "• ".into(),
+                    affinity: crate::markdown::SourceAffinity::default(),
+                    style: TranscriptSpanStyle {
+                        inline: InlineStyle::ToolStatus,
+                        ..TranscriptSpanStyle::default()
+                    },
+                },
+                crate::markdown::TranscriptSpan {
+                    link: None,
+                    text: "Read".into(),
+                    affinity: crate::markdown::SourceAffinity::default(),
+                    style: TranscriptSpanStyle {
+                        inline: InlineStyle::ToolName,
+                        ..TranscriptSpanStyle::default()
+                    },
+                },
+                crate::markdown::TranscriptSpan {
+                    link: None,
+                    text: "  a.rs".into(),
+                    affinity: crate::markdown::SourceAffinity::default(),
+                    style: TranscriptSpanStyle {
+                        inline: InlineStyle::ToolPath,
+                        ..TranscriptSpanStyle::default()
+                    },
+                },
+            ],
+            gutter: RowGutter::None,
+            group_gutter: RowGutter::None,
+            fold_hint: crate::transcript_view::FoldHint::None,
+            fold_arrow: None,
+            trailing: None,
+            live_timer: false,
+            image: None,
+        };
+        let mut selected_term = Terminal::new(TestBackend::new(40, 2)).unwrap();
+        selected_term
+            .draw(|frame| {
+                render_transcript_row(
+                    frame,
+                    Rect::new(0, 0, 40, 1),
+                    selected_row.clone(),
+                    true,
+                    false,
+                    palette,
+                    None,
+                    None,
+                    None,
+                    None,
+                    &mut Vec::new(),
+                    &mut Vec::new(),
+                );
+                let mut evidence_row = selected_row.clone();
+                evidence_row.kind = TranscriptRowKind::Evidence;
+                evidence_row.spans[1].text = "Searched".into();
+                render_transcript_row(
+                    frame,
+                    Rect::new(0, 1, 40, 1),
+                    evidence_row,
+                    false,
+                    false,
+                    palette,
+                    None,
+                    None,
+                    None,
+                    None,
+                    &mut Vec::new(),
+                    &mut Vec::new(),
+                );
+            })
+            .unwrap();
+        let (sel_fg, sel_bg, sel_mod) = style_at_text(selected_term.backend(), "Read ").unwrap();
+        assert_eq!(sel_bg, palette.selected);
+        assert!(sel_mod.contains(Modifier::BOLD));
+        assert!(crate::theme::contrast_ratio(sel_fg, palette.selected) >= 4.5);
+
+        let (ev_fg, ev_bg, ev_mod) = style_at_text(selected_term.backend(), "Searched ").unwrap();
+        assert_eq!(Some(ev_fg), palette.action_verb("Searched", false).fg);
+        assert_eq!(ev_bg, palette.background);
+        assert!(ev_mod.contains(Modifier::BOLD));
     }
 
     #[test]
@@ -8832,7 +8995,7 @@ mod tests {
             user_bg,
             "{screen}"
         );
-        let chip = palette.action_verb(false);
+        let chip = palette.action_verb("Background", false);
         let buffer = terminal.backend().buffer();
         let (x, y) = (0..buffer.area.height)
             .find_map(|y| {
@@ -8892,7 +9055,7 @@ mod tests {
         let palette = Palette::default();
         let (pending_fg, _, pending_modifiers) =
             style_at_text(pending.backend(), "Read README.md").unwrap();
-        let verb = palette.action_verb(false);
+        let verb = palette.action_verb("Read", false);
         assert_eq!(Some(pending_fg), verb.fg);
         // The pending row keeps its bullet; the words carry the state.
         assert_eq!(
@@ -9437,12 +9600,10 @@ mod tests {
             assert!(screen.contains("└ out"), "{screen}");
 
             let (fg, bg, modifiers) = style_at_text(terminal.backend(), "Read ").unwrap();
-            let chip = palette.action_verb(false);
+            let chip = palette.action_verb("Read", false);
             assert!(modifiers.contains(Modifier::BOLD));
             assert!(!modifiers.contains(Modifier::REVERSED));
-            if !no_color {
-                assert_eq!(Some(fg), chip.fg);
-            }
+            assert_eq!(fg, chip.fg.unwrap_or(palette.foreground));
             // The chip has no fill, so the gap after it shares the label's background.
             let (_, gap_bg, _) = style_at_text(terminal.backend(), " a.rs").unwrap();
             assert_eq!(gap_bg, bg);

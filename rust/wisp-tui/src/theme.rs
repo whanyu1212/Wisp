@@ -210,11 +210,22 @@ impl Palette {
         Style::default().fg(color).add_modifier(Modifier::BOLD)
     }
 
-    /// The verb that opens a tool call's line: bold body text, or the error colour when
-    /// the call failed. Colour stays free to mean an outcome.
-    pub fn action_verb(self, failed: bool) -> Style {
-        let color = if failed { self.error } else { self.foreground };
-        Style::default().fg(color).add_modifier(Modifier::BOLD)
+    /// The verb that opens a tool call's line: the tool's hue on the plain background in
+    /// bold, or the error colour when the call failed. Unrecognized tool names fall back to
+    /// bold body text; monochrome palettes use bold alone.
+    pub fn action_verb(self, label: &str, failed: bool) -> Style {
+        if self.monochrome {
+            return Style::default().add_modifier(Modifier::BOLD);
+        }
+        if failed {
+            return Style::default().fg(self.error).add_modifier(Modifier::BOLD);
+        }
+        if let Some(category) = tool_hue_category(label) {
+            return self.chip(category);
+        }
+        Style::default()
+            .fg(self.foreground)
+            .add_modifier(Modifier::BOLD)
     }
 
     pub fn tool_argument(self) -> Style {
@@ -769,6 +780,34 @@ pub(crate) fn resolve(query: &str) -> Option<&'static Theme> {
 
 pub(crate) fn default_theme() -> &'static Theme {
     named(&catalog().default).expect("catalog default exists")
+}
+
+fn tool_hue_category(label: &str) -> Option<&'static str> {
+    let trimmed = label.trim().trim_end_matches(':');
+    match trimmed {
+        "Read"
+        | "Reading"
+        | "Read saved session"
+        | "Reading saved session"
+        | "Open"
+        | "Opened"
+        | "Opening"
+        | "Load"
+        | "Loaded"
+        | "Loading" => Some("Read"),
+        "Search" | "Searched" | "Searching" => Some("Search"),
+        "List" | "Listed" | "Listing" => Some("List"),
+        "Explore" | "Explored" | "Exploring" => Some("Explore"),
+        "Bash" | "Shell" | "!" | "Run" | "Ran" | "Running" | "Script" | "Run codemode"
+        | "Ran codemode" | "Running codemode" => Some("Bash"),
+        "Edit" | "Edited" | "Editing" | "Propose" | "Proposed" | "Proposing" => Some("Edit"),
+        "Write" | "Wrote" | "Writing" | "Type" | "Typed" | "Typing" | "Click" | "Clicked"
+        | "Clicking" | "Capture" | "Captured" | "Capturing" => Some("Write"),
+        "MCP" | "Call" | "Called" | "Calling" | "Calls to" | "Request" | "Requested"
+        | "Requesting" | "Subagent" | "Delegate" | "Delegated" | "Delegating" => Some("MCP"),
+        "Process" | "Background" => Some("Process"),
+        _ => None,
+    }
 }
 
 pub(crate) fn paper_theme() -> &'static Theme {
