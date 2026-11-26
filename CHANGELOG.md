@@ -10,7 +10,31 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.16.9 — Unreleased
+## 0.16.10 — Unreleased
+
+- **Lower-latency live browser interaction ([#1150](https://github.com/whanyu1212/Wisp/pull/1150)).**
+  Keep layout and input coordinates stable while sending smaller frames during scrolling and
+  typing, dispatch idle live keys immediately, and avoid costly recompression of dense Rex frames.
+- **Per-tool-family verb colors ([#1151](https://github.com/whanyu1212/Wisp/pull/1151)).**
+  Color built-in tool call action verbs by tool family via `Palette::chip` on a plain background,
+  keeping failed calls in `palette.error`, unrecognized tools in bold foreground, and monochrome mode
+  in bold alone.
+- **Wider prose measure and docked panel cap ([#1152](https://github.com/whanyu1212/Wisp/pull/1152)).**
+  Raise `MAX_PANEL_WIDTH` from `52` to `76` so the docked side panel scales up cleanly on wide
+  terminals, and widen `PROSE_COLUMNS` from `88` to `100` to match `MIN_TRANSCRIPT_WIDTH`.
+- **Two-row telemetry deck under the composer ([#1153](https://github.com/whanyu1212/Wisp/pull/1153)).**
+  Replace the 1-row footer with a 2-row `╭─` / `╰─` telemetry deck on undocked terminals
+  (`height >= 16`, `width >= 60`) showing dot + lowercase status (`• idle`, `● working`,
+  `● approval`, `✗ error`), workspace cwd, git branch, MCP status, active `bg`/`sub` counts,
+  right-aligned notices or `#session_id`, context meter, session cost, and keycap hints, falling back
+  to the 1-row footer on narrow, short, docked, or decision-pending screens.
+- No changes to the live RPC contract, Python SDK, or saved-session format since 0.16.9. Use the
+  matching `0.16.10` backend and TUI together.
+
+<!-- Keeps links to the pre-release "0.16.9 — Unreleased" heading working. -->
+<a id="0169--unreleased"></a>
+
+## 0.16.9 — 2026-11-26
 
 - **Live browser rendering in Rex.** When Wisp runs directly in Rex, the built-in browser can
   send losslessly compressed pixels for scrolling and other viewport updates. Wisp keeps the

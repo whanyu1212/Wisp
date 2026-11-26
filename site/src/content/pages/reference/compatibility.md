@@ -116,6 +116,11 @@ with `write_constraint`, under the exception below. Tool behavior changes are li
 `bash` runs commands in bash rather than `/bin/sh`, and that the read-only file tools follow
 symbolic links whose targets stay inside the workspace.
 
+## Wisp 0.16.10 compatibility
+
+Use the `0.16.10` backend and TUI together. No changes to the live RPC contract, Python SDK, or
+saved-session format were made since `0.16.9`; existing saved sessions open without migration.
+
 ## Wisp 0.16.9 compatibility
 
 Use the `0.16.9` backend and TUI together. The browser optimization applies to the connection
