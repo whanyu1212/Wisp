@@ -34,7 +34,7 @@ pub(crate) const PANEL_WIDTH: u16 = 44;
 
 /// The widest a docked panel grows on its own, so long paths and names fit without
 /// the panel becoming a second transcript. Dragging its border can go wider.
-const MAX_PANEL_WIDTH: u16 = 52;
+const MAX_PANEL_WIDTH: u16 = 76;
 
 /// Columns straddling the panel's left edge that start a resize: one column left
 /// of the seam, the left edge itself, and one column inside the left margin, so the
@@ -2896,9 +2896,10 @@ mod tests {
             (148, 44),
             (160, 50),
             (161, 50),
-            (180, 52),
-            (200, 52),
-            (240, 52),
+            (180, 60),
+            (200, 70),
+            (212, 76),
+            (240, 76),
         ] {
             assert_eq!(auto_width(total), panel, "{total}");
             let (conversation, docked) = SidePanel::default().split(Rect::new(0, 0, total, 10));
