@@ -3463,7 +3463,7 @@ dependencies = [
 
 [[package]]
 name = "wisp-python"
-version = "0.16.9"
+version = "0.16.10"
 dependencies = [
  "pyo3",
  "pyo3-build-config",
@@ -3483,7 +3483,7 @@ dependencies = [
 
 [[package]]
 name = "wisp-tui"
-version = "0.16.9"
+version = "0.16.10"
 dependencies = [
  "arboard",
  "base64",
