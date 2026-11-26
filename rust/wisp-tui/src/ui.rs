@@ -489,16 +489,24 @@ pub fn render_interactive(
         column.width,
     );
     mouse::Conversation {
-        transcript: Rect {
-            width: column.right().saturating_sub(chunks[0].x),
-            ..chunks[0]
+        transcript: if state.history_preview().is_some() {
+            Rect::default()
+        } else {
+            Rect {
+                width: column.right().saturating_sub(chunks[0].x),
+                ..chunks[0]
+            }
         },
         // The jump label sits on the transcript's last row, which holds no transcript text.
-        selectable: Rect {
-            height: chunks[0]
-                .height
-                .saturating_sub(u16::from(jump_to_latest.is_some())),
-            ..content_area(chunks[0])
+        selectable: if state.history_preview().is_some() {
+            Rect::default()
+        } else {
+            Rect {
+                height: chunks[0]
+                    .height
+                    .saturating_sub(u16::from(jump_to_latest.is_some())),
+                ..content_area(chunks[0])
+            }
         },
         jump_to_latest,
         background_strip,
@@ -867,6 +875,24 @@ fn clipped_tail_assistant_header(
         .map(|cached| cached.row)
 }
 
+/// A tail-pinned reading surface, separate from transcript anchors and hit targets.
+fn render_history_preview(frame: &mut Frame<'_>, area: Rect, preview: &[String], palette: Palette) {
+    if area.is_empty() {
+        return;
+    }
+    let rows = complete_detail_rows(&preview.join("\n"), usize::from(area.width));
+    let start = rows
+        .len()
+        .saturating_sub(usize::from(area.height.saturating_sub(1)));
+    let lines = std::iter::once(Line::styled(
+        "Latest history · loading…",
+        Style::default().fg(palette.muted),
+    ))
+    .chain(rows.into_iter().skip(start).map(Line::from))
+    .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_transcript(
     frame: &mut Frame<'_>,
@@ -882,6 +908,10 @@ fn render_transcript(
     welcome: Welcome,
     motion: Motion<'_>,
 ) -> (Option<Rect>, Vec<mouse::FoldRow>, Vec<mouse::WelcomeRow>) {
+    if let Some(preview) = state.history_preview() {
+        render_history_preview(frame, content_area(area), preview, palette);
+        return (None, Vec::new(), Vec::new());
+    }
     row_cache.painted_images.retain(|img| {
         !matches!(
             img.placement,
@@ -6040,6 +6070,37 @@ mod tests {
         view.open(target, &presentation);
 
         assert_eq!(selected_detail(&state, &view), Some(&presentation));
+    }
+
+    #[test]
+    fn read_only_history_preview_keeps_the_latest_text_visible_on_resize() {
+        let mut state = UiState::unconfigured();
+        state.input_ready = false;
+        state.session_operation = Some(crate::reducer::SessionOperation::StartupHydration {
+            initial_excerpt: vec![
+                "older text".into(),
+                format!(
+                    "Assistant: {}\nlatest\u{202e}reply",
+                    "long answer ".repeat(400)
+                ),
+            ],
+            command_id: "startup".into(),
+            report: None,
+            loaded: None,
+            completion: None,
+        });
+        let mut draft = PromptEditor::default();
+        draft.insert_paste("draft remains private");
+        for (width, height) in [(80, 24), (50, 14), (100, 30)] {
+            let screen = render_to_string(width, height, &state, &draft);
+            assert!(screen.contains("Latest history"), "{screen}");
+            assert!(
+                screen.contains("latest") && screen.contains("reply"),
+                "{screen}"
+            );
+            assert!(!screen.contains('\u{202e}') && !screen.contains("older text"));
+            assert!(!screen.contains("draft remains private"));
+        }
     }
 
     #[test]

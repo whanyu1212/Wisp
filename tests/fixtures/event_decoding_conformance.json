@@ -4341,6 +4341,28 @@
    "accepted": false
   },
   {
+   "event": "rpc.startup.history_preview",
+   "operation": "remove",
+   "path": [
+    "lines"
+   ],
+   "accepted": false
+  },
+  {
+   "event": "rpc.startup.history_preview",
+   "operation": "remove",
+   "path": [
+    "timestamp"
+   ],
+   "accepted": true
+  },
+  {
+   "event": "rpc.startup.history_preview",
+   "operation": "add_unknown",
+   "path": [],
+   "accepted": false
+  },
+  {
    "event": "rpc.state",
    "operation": "remove",
    "path": [

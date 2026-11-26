@@ -16,6 +16,7 @@ from wisp.cli.auth import auth_app
 from wisp.cli.browser import browser_app
 from wisp.cli.deadline import DEADLINE_EXIT_CODE, RunDeadline
 from wisp.cli.mcp import mcp_app
+from wisp.cli.startup_pipe import PreviewWorkspace, StartupPreviewPipe
 from wisp.coding import CodingSession, resolve_coding_session_configuration
 from wisp.coding.prompt import resolve_project_context_root
 from wisp.config.runtime import WispConfig
@@ -295,6 +296,14 @@ def cli_callback(
     # RPC subprocess starts). Standalone RPC prompts out-of-band.
     cwd = Path.cwd()
     project_context_root = resolve_project_context_root(cwd)
+    startup_preview = (
+        ctx.find_object(StartupPreviewPipe) if resolved_mode is OutputMode.rpc else None
+    )
+    preview_workspace = None
+    if startup_preview is not None or (
+        resolved_mode is OutputMode.tui and (resume is not None or continue_latest)
+    ):
+        preview_workspace = PreviewWorkspace.capture(project_context_root, cwd)
     if resolved_mode is OutputMode.rpc:
         trusted = _cli_trust.trusted_noninteractive(project_context_root)
     else:
@@ -315,6 +324,12 @@ def cli_callback(
         _exit_with_error(str(exc), mode=resolved_mode, console=console)
     try:
         if resolved_mode is OutputMode.rpc:
+            if startup_preview is not None and (
+                not startup_preview.matches_workspace(preview_workspace)
+                or preview_workspace != PreviewWorkspace.current()
+            ):
+                startup_preview.stream.close()
+                startup_preview = None
             anyio.run(
                 partial(
                     _cli_rpc._run_rpc,
@@ -330,6 +345,7 @@ def cli_callback(
                     config_overrides,
                     project_context_root,
                     handshake_complete=rpc_handshake_complete,
+                    startup_preview=startup_preview,
                     auto_command_read_dir=auto_command_read_dir,
                 )
             )
@@ -344,6 +360,7 @@ def cli_callback(
                 approve_unsafe_tools=approve_unsafe_tools,
                 max_tool_iterations=max_tool_iterations,
                 project_trusted=trusted,
+                preview_workspace=preview_workspace if trusted else None,
                 auto_command_read_dir=auto_command_read_dir,
                 # Forward the user's explicit --provider/--model/--session-dir/--auth-file
                 # (each None unless set) so `--mode tui` honors them; the launcher
@@ -461,7 +478,13 @@ def tui_command(
     # Resolve trust before config, preflight, or terminal UI startup. The persisted
     # decision is then observed by the RPC subprocess, so normal TUI launches never
     # enter the terminal interface with project trust still undecided.
-    project_context_root = resolve_project_context_root(Path.cwd())
+    cwd = Path.cwd()
+    project_context_root = resolve_project_context_root(cwd)
+    preview_workspace = (
+        PreviewWorkspace.capture(project_context_root, cwd)
+        if resume is not None or continue_latest
+        else None
+    )
     trusted = _resolve_cli_trust(project_context_root).trusted
     _validate_session_and_iteration_options(
         resume=resume,
@@ -487,6 +510,7 @@ def tui_command(
             approve_unsafe_tools=approve_unsafe_tools,
             max_tool_iterations=max_tool_iterations,
             project_trusted=trusted,
+            preview_workspace=preview_workspace if trusted else None,
             auto_command_read_dir=auto_command_read_dir,
             # These default to None on the `tui` command, so they are non-None only when
             # the user explicitly set them — exactly the values that should override a
@@ -567,6 +591,7 @@ def _run_tui_from_cli_options(
     approve_unsafe_tools: bool,
     max_tool_iterations: int | None,
     project_trusted: bool,
+    preview_workspace: PreviewWorkspace | None = None,
     user_provider: str | None = None,
     user_model: str | None = None,
     user_session_dir: Path | None = None,
@@ -588,6 +613,7 @@ def _run_tui_from_cli_options(
                 approve_unsafe_tools=approve_unsafe_tools,
                 max_tool_iterations=max_tool_iterations,
                 project_trusted=project_trusted,
+                preview_workspace=preview_workspace,
                 user_provider=user_provider,
                 user_model=user_model,
                 user_session_dir=user_session_dir,

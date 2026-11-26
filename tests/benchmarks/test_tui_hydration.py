@@ -114,6 +114,120 @@ def test_stage_totals_and_condition_distributions_keep_raw_evidence() -> None:
     assert payload["samples"][0]["ready_process_memory"][0]["rss_bytes"] == 512
 
 
+def _frame(body: str) -> bytes:
+    return f"\x1b[?2026h{body}\x1b[?2026l".encode()
+
+
+@pytest.mark.parametrize("history_messages, expected", [(0, None), (8, 30)])
+def test_first_visible_history(history_messages: int, expected: int | None) -> None:
+    paint = rust_tui_hydration._HydrationPaint(history_messages, first_reply=False)
+    # Printable bytes can spell the sentinel across unrelated screen rows.
+    paint.observe(_frame("\x1b[1;1HRC2 saved \x1b[2;1Hhistory ready"), 10)
+    assert paint.history_visible_ns is None
+
+    # A cursor move places "history" beside the first half. The resize frame
+    # erases the marker in the very read that completes the preview frame.
+    preview = _frame("\x1b[1;11Hhistory ready")
+    paint.observe(preview[:-1], 20)
+    assert paint.history_visible_ns is None
+    paint.observe(preview[-1:] + _frame("\x1b[2J\x1b[1;1HAsk Wisp anything"), 30)
+    paint.observe(_frame("\x1b[2;1HRC2 saved history ready"), 40)
+    assert paint.history_visible_ns == expected
+
+
+@pytest.mark.parametrize("reading", ["ctx ▰▱ ~35%", "ctx ~2.6k", "ctx 950"])
+def test_single_accepted_probe(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, reading: str
+) -> None:
+    paint = rust_tui_hydration._HydrationPaint(8, first_reply=True)
+    writes: list[bytes] = []
+
+    def write(_fd: int, data: bytes) -> int:
+        writes.append(data)
+        return len(data)
+
+    monkeypatch.setattr(rust_tui_hydration.os, "write", write)
+    monkeypatch.setattr(rust_tui_hydration.time, "perf_counter_ns", lambda: 35)
+    profile = tmp_path / "python.jsonl"
+    line = '{"stage":"python.page_read","duration_ms":1,"pid":123}\n'
+    profile.write_text(line, encoding="utf-8")
+
+    paint.observe(
+        _frame(
+            "\x1b[1;1Hctx 42%\x1b[2;1HRC2 saved history ready"
+            "\x1b[20;1HAsk Wisp anything\x1b[23;1Hidle\x1b[24;1Hctx ~…"
+        ),
+        10,
+    )
+    paint.submit_if_ready(1, tmp_path)
+    assert paint.history_visible_ns == 10
+    assert paint.submitted_ns is None
+    assert writes == []
+
+    budget = _frame(f"\x1b[24;1H\x1b[K{reading}")
+    paint.observe(budget[:-1], 20)
+    paint.submit_if_ready(1, tmp_path)
+    assert writes == []
+    paint.observe(budget[-1:], 30)
+    paint.submit_if_ready(1, tmp_path)
+    assert paint.submitted_ns == 35
+    assert writes == [b"WispProbe42\r"]
+
+    profile.write_text(line * 2, encoding="utf-8")  # post-prompt refresh
+    paint.observe(_frame("\x1b[2;1H▎WispProbe42\x1b[23;1Hworking"), 40)
+    paint.submit_if_ready(1, tmp_path)
+    assert paint.reply_ns is None
+    assert not paint.reply_idle
+
+    paint.observe(_frame("\x1b[4;1Hfake response to:") + _frame("\x1b[4;19HWispProbe42"), 50)
+    assert paint.reply_ns == 50
+    assert not paint.reply_idle
+    paint.observe(_frame("\x1b[23;1H\x1b[Kidle"), 60)
+    paint.submit_if_ready(1, tmp_path)
+    assert paint.reply_idle
+    assert paint.reply_ns == 50
+    assert writes == [b"WispProbe42\r"]
+    assert paint.startup_records == (ProfileRecord("python.jsonl", "python.page_read", 1, 123),)
+
+
+@pytest.mark.parametrize("first_reply", [False, True])
+def test_cli_reports_milestones(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], first_reply: bool
+) -> None:
+    def report(config: BenchmarkConfig) -> BenchmarkReport:
+        fresh = _sample(0, 1, 1)
+        saved = replace(_sample(8, 1, 2), launch_to_history_visible_ms=5)
+        samples: tuple[SessionSample, ...] = (fresh, saved)
+        if config.first_reply:
+            samples = tuple(
+                replace(s, launch_to_submit_ms=15, submit_to_reply_ms=10, launch_to_reply_ms=25)
+                for s in samples
+            )
+        return BenchmarkReport(config, {}, samples, summarize_samples(samples))
+
+    monkeypatch.setattr(rust_tui_hydration, "run_benchmark", report)
+    flags = ["--first-reply"] if first_reply else []
+    rust_tui_hydration.main(["--rust-binary", "/example/wisp-tui", *flags])
+    output = json.loads(capsys.readouterr().out)
+    assert output["config"]["first_reply"] is first_reply
+    assert output["config"]["profile"] is True
+    fresh, saved = output["samples"]
+    assert fresh["launch_to_history_visible_ms"] is None
+    assert saved["launch_to_history_visible_ms"] == 5
+    assert output["summaries"][0]["launch_to_history_visible_ms"] is None
+    assert output["summaries"][1]["launch_to_history_visible_ms"]["median"] == 5
+    for field, elapsed in (
+        ("launch_to_submit_ms", 15),
+        ("submit_to_reply_ms", 10),
+        ("launch_to_reply_ms", 25),
+    ):
+        assert saved[field] == (elapsed if first_reply else None)
+        distribution = output["summaries"][1][field]
+        assert distribution == (
+            {"median": elapsed, "p95": elapsed, "max": elapsed} if first_reply else None
+        )
+
+
 def test_summary_rejects_missing_stage_in_repeated_condition() -> None:
     first = _sample(8, 1, 1)
     second = _sample(8, 2, 2)
@@ -261,14 +375,37 @@ def test_post_fork_setup_failure_reaps_child(monkeypatch: pytest.MonkeyPatch) ->
 
 
 @pytest.mark.process
-def test_source_cli_emits_profile_records_for_both_histories() -> None:
+@pytest.mark.parametrize("first_reply", [False, True])
+def test_source_cli_emits_profile_records_for_both_histories(first_reply: bool) -> None:
     binary_value = os.environ.get("RUST_TUI_BINARY_UNDER_TEST")
     if binary_value is None:
         pytest.skip("set RUST_TUI_BINARY_UNDER_TEST to a built wisp-tui binary")
     binary = Path(binary_value).resolve(strict=True)
 
-    report = run_benchmark(BenchmarkConfig(rust_binary=binary, runs=1, history_messages=(0, 8)))
+    report = run_benchmark(
+        BenchmarkConfig(
+            rust_binary=binary, runs=1, history_messages=(0, 8), first_reply=first_reply
+        )
+    )
 
     assert {s.history_messages for s in report.samples} == {0, 8}
     assert all(s.profile_records for s in report.samples)
     assert all(s.clean_exit and s.terminal_restored for s in report.samples)
+    fresh, saved = report.samples
+    assert fresh.launch_to_history_visible_ms is None
+    assert saved.launch_to_history_visible_ms is not None
+    assert 0 < saved.launch_to_history_visible_ms <= saved.launch_to_ready_ms
+    for sample in report.samples:
+        if first_reply:
+            assert sample.launch_to_submit_ms is not None and sample.submit_to_reply_ms is not None
+            assert sample.launch_to_reply_ms is not None
+            assert (
+                sample.launch_to_ready_ms <= sample.launch_to_submit_ms < sample.launch_to_reply_ms
+            )
+            assert sample.launch_to_reply_ms == pytest.approx(
+                sample.launch_to_submit_ms + sample.submit_to_reply_ms
+            )
+        else:
+            assert sample.launch_to_submit_ms is None
+            assert sample.submit_to_reply_ms is None
+            assert sample.launch_to_reply_ms is None

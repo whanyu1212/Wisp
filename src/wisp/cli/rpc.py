@@ -7,6 +7,7 @@ import signal
 import sys
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import contextmanager
+from functools import partial
 from pathlib import Path
 from queue import Queue
 from threading import Thread
@@ -16,6 +17,7 @@ import anyio
 from anyio.streams.memory import MemoryObjectSendStream
 
 from wisp import __version__
+from wisp.cli.startup_pipe import StartupPreviewPipe
 from wisp.config.runtime import WispConfig
 from wisp.events import ErrorEvent, WispEvent
 from wisp.rpc.configuration import _ConfigOverrides
@@ -89,35 +91,41 @@ async def _run_rpc(
     project_context_root: Path | None = None,
     *,
     handshake_complete: bool = False,
+    startup_preview: StartupPreviewPipe | None = None,
     auto_command_read_dir: Path | None = None,
 ) -> None:
-    if not handshake_complete and not await _negotiate_rpc_connection():
-        return
-    # The host connects MCP servers once it is serving, so a resumed session's
-    # transcript does not wait for the slowest server.
-    runtime = await build_session_runtime(config, connect_mcp=False)
-    # The receiver stays open through runtime.aclose(), so a second signal sent while
-    # cleanup runs waits in its queue instead of ending the process mid-cleanup.
-    with _shutdown_signal_receiver() as shutdown_signals:
-        try:
-            await _run_rpc_with_runtime(
-                config,
-                runtime,
-                all_tools=all_tools,
-                allow_read_tools=allow_read_tools,
-                allowed_tools=allowed_tools,
-                resume=resume,
-                continue_latest=continue_latest,
-                approve_unsafe_tools=approve_unsafe_tools,
-                max_tool_iterations=max_tool_iterations,
-                startup_trusted=startup_trusted,
-                config_overrides=config_overrides,
-                project_context_root=project_context_root,
-                shutdown_signals=shutdown_signals,
-                auto_command_read_dir=auto_command_read_dir,
-            )
-        finally:
-            await runtime.aclose()
+    try:
+        if not handshake_complete and not await _negotiate_rpc_connection():
+            return
+        # The host connects MCP servers once it is serving, so a resumed session's
+        # transcript does not wait for the slowest server.
+        runtime = await build_session_runtime(config, connect_mcp=False)
+        # The receiver stays open through runtime.aclose(), so a second signal sent while
+        # cleanup runs waits in its queue instead of ending the process mid-cleanup.
+        with _shutdown_signal_receiver() as shutdown_signals:
+            try:
+                await _run_rpc_with_runtime(
+                    config,
+                    runtime,
+                    all_tools=all_tools,
+                    allow_read_tools=allow_read_tools,
+                    allowed_tools=allowed_tools,
+                    resume=resume,
+                    continue_latest=continue_latest,
+                    approve_unsafe_tools=approve_unsafe_tools,
+                    max_tool_iterations=max_tool_iterations,
+                    startup_trusted=startup_trusted,
+                    config_overrides=config_overrides,
+                    project_context_root=project_context_root,
+                    shutdown_signals=shutdown_signals,
+                    startup_preview=startup_preview,
+                    auto_command_read_dir=auto_command_read_dir,
+                )
+            finally:
+                await runtime.aclose()
+    finally:
+        if startup_preview is not None:
+            startup_preview.stream.close()
 
 
 @contextmanager
@@ -163,6 +171,7 @@ async def _run_rpc_with_runtime(
     config_overrides: _ConfigOverrides | None = None,
     project_context_root: Path | None = None,
     shutdown_signals: AsyncIterator[int] | None = None,
+    startup_preview: StartupPreviewPipe | None = None,
     auto_command_read_dir: Path | None = None,
 ) -> None:
     """Run the CLI's stdin/stdout adapter over the shared RPC host.
@@ -181,6 +190,13 @@ async def _run_rpc_with_runtime(
         if shutdown_signals is not None:
             task_group.start_soon(_stop_on_signal, shutdown_signals, task_group.cancel_scope)
         try:
+            cwd = Path.cwd()
+            on_session_selected = None
+            if startup_preview is not None:
+                if startup_trusted and (resume is not None or continue_latest):
+                    on_session_selected = partial(_write_startup_preview, startup_preview, cwd)
+                else:
+                    startup_preview.stream.close()
             host = await RpcHost.create(
                 config,
                 runtime,
@@ -194,11 +210,12 @@ async def _run_rpc_with_runtime(
                     max_tool_iterations=max_tool_iterations,
                     startup_trusted=startup_trusted,
                     project_context_root=project_context_root,
-                    cwd=Path.cwd(),
+                    cwd=cwd,
                     auto_command_read_dir=auto_command_read_dir,
                 ),
                 write_event=event_writer,
                 render_events=render_events,
+                _on_session_selected=on_session_selected,
                 # The CLI and TUI wake the agent: someone started this session to watch it.
                 wake_by_default=True,
                 config_overrides=config_overrides,
@@ -223,6 +240,17 @@ async def _run_rpc_with_runtime(
             task_group.cancel_scope.cancel()
     if startup_error is not None:
         raise startup_error
+
+
+async def _write_startup_preview(
+    preview: StartupPreviewPipe, cwd: Path, selected: Path, session_id: str
+) -> None:
+    from wisp.cli.rpc_preview import read_startup_preview
+
+    event = await read_startup_preview(preview, selected, session_id, cwd)
+    preview.stream.close()
+    if event is not None:
+        _write_json_event(event)
 
 
 async def _read_rpc_stdin(

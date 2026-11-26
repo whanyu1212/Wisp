@@ -70,6 +70,8 @@ from wisp.events.rpc import (
     MAX_RPC_MODEL_ID_CHARS,
     MAX_RPC_OAUTH_EXPIRY_CHARS,
     MAX_RPC_PROVIDER_ID_CHARS,
+    MAX_STARTUP_HISTORY_PREVIEW_LINE_CHARS,
+    MAX_STARTUP_HISTORY_PREVIEW_LINES,
     AgentMode,
     BackgroundProcess,
     BrowserViewportUpdated,
@@ -129,6 +131,7 @@ from wisp.events.rpc import (
     RpcSkillCatalogSnapshot,
     RpcSkillDiagnostic,
     RpcSkillsReported,
+    RpcStartupHistoryPreview,
     RpcStateReported,
     RpcStateSnapshot,
     RpcSubagentsReported,
@@ -272,6 +275,8 @@ __all__ = [
     "MAX_RPC_MODEL_ID_CHARS",
     "MAX_RPC_OAUTH_EXPIRY_CHARS",
     "MAX_RPC_PROVIDER_ID_CHARS",
+    "MAX_STARTUP_HISTORY_PREVIEW_LINES",
+    "MAX_STARTUP_HISTORY_PREVIEW_LINE_CHARS",
     "AgentCompleted",
     "AgentMode",
     "AgentStarted",
@@ -390,6 +395,7 @@ __all__ = [
     "RpcProcessOutputReported",
     "RpcProcessSnapshot",
     "RpcProcessesReported",
+    "RpcStartupHistoryPreview",
     "RpcStateReported",
     "RpcSubagentsReported",
     "RpcSettingsReloaded",
@@ -518,7 +524,8 @@ KnownWispEvent = TypeAliasType(
         | BrowserViewportUpdated
         | RpcBrowserAddressesReported
         | RpcShellProgress
-        | RpcShellCompleted,
+        | RpcShellCompleted
+        | RpcStartupHistoryPreview,
         Field(discriminator="type"),
     ],
 )

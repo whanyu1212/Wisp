@@ -245,7 +245,8 @@ def test_launcher_imports_without_posix_termios() -> None:
 import builtins
 import sys
 
-import wisp.cli
+# Load platform-dependent CLI dependencies on the real platform first.
+import wisp.cli.application
 
 real_import = builtins.__import__
 def import_without_termios(name, *args, **kwargs):
@@ -324,7 +325,9 @@ def test_launcher_spawns_without_shell_and_preserves_backend_environment(
         *,
         env: dict[str, str],
         process_group: int,
+        pass_fds: tuple[int, ...],
     ) -> FakeProcess:
+        assert pass_fds == ()
         calls.append((argv, env, process_group))
         return FakeProcess()
 
@@ -377,7 +380,9 @@ def test_launcher_forwards_user_preferences(
         *,
         env: dict[str, str],
         process_group: int,
+        pass_fds: tuple[int, ...],
     ) -> FakeProcess:
+        assert pass_fds == ()
         assert process_group == 0
         environments.append(env)
         return FakeProcess()

@@ -8303,7 +8303,8 @@ async fn run(cli: Cli) -> Result<(), Error> {
     };
     let _panic_hook = PanicHookGuard::install();
     let _signal_keys = SignalKeyGuard;
-    let (process, stdin, stdout, stderr) = BackendProcess::spawn(&cli.backend)?;
+    let (process, stdin, stdout, stderr) =
+        BackendProcess::spawn(&cli.backend, cli.backend_pass_fd)?;
     run_with_io(
         cli,
         bindings,
@@ -15457,6 +15458,7 @@ mod tests {
     #[tokio::test]
     async fn frontend_version_mismatch_fails_before_backend_spawn() {
         let error = run(Cli {
+            backend_pass_fd: None,
             expected_backend_version: "definitely-not-this-build".into(),
             backend: vec![OsString::from("/path/that/must/not/be-spawned")],
         })

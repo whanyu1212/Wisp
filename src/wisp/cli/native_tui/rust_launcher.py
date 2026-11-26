@@ -22,9 +22,11 @@ except ImportError:
     termios = None  # type: ignore[assignment]
 
 from wisp import __version__
+from wisp.cli.startup_pipe import PreviewWorkspace
 from wisp.config.settings import resolve_settings
 
 from .launch import TuiOptions, _preflight_tui_options, _rpc_command, _rpc_env
+from .preview import WORKER_LIFETIME_SECONDS, prewarm_preview, request_preview, stop_worker
 from .rust_binary import installed_rust_tui_binary
 
 _BINARY_ENV = "WISP_RUST_TUI_BINARY"
@@ -94,15 +96,18 @@ def resolve_rust_tui_binary() -> Path:
     return resolved
 
 
-def rust_tui_command(binary: Path, options: TuiOptions) -> tuple[str, ...]:
+def rust_tui_command(
+    binary: Path, options: TuiOptions, *, preview_fd: int | None = None
+) -> tuple[str, ...]:
     """Build the Rust argv while leaving the backend argv opaque after ``--``."""
 
     return (
         str(binary),
         "--expected-backend-version",
         __version__,
+        *(("--backend-pass-fd", str(preview_fd)) if preview_fd is not None else ()),
         "--",
-        *_rpc_command(options),
+        *_rpc_command(options, preview_fd=preview_fd),
     )
 
 
@@ -110,7 +115,28 @@ def run_rust_tui(options: TuiOptions) -> int:
     """Preflight, launch, and supervise the Rust frontend and Python backend."""
 
     binary = resolve_rust_tui_binary()
-    anyio.run(_preflight_tui_options, options)
+    with prewarm_preview(options) as worker:
+        workspace = options.preview_workspace
+        if worker is None or workspace != PreviewWorkspace.current():
+            workspace = None
+        path = anyio.run(_preflight_tui_options, options)
+        preview_fd = (
+            request_preview(worker, path, workspace.cwd)
+            if worker is not None
+            and path is not None
+            and workspace is not None
+            and workspace == PreviewWorkspace.current()
+            else None
+        )
+        return _supervise_tui(binary, options, worker, preview_fd)
+
+
+def _supervise_tui(
+    binary: Path,
+    options: TuiOptions,
+    worker: subprocess.Popen[bytes] | None,
+    preview_fd: int | None,
+) -> int:
     settings = resolve_settings(trust_project=False)
     terminal = _snapshot_terminal()
     process: subprocess.Popen[bytes] | None = None
@@ -135,13 +161,17 @@ def run_rust_tui(options: TuiOptions) -> int:
                         sort_keys=True,
                     )
                     process = subprocess.Popen(
-                        rust_tui_command(binary, options),
+                        rust_tui_command(binary, options, preview_fd=preview_fd),
+                        pass_fds=(preview_fd,) if preview_fd is not None else (),
                         env=environment,
                         process_group=0,
                     )
+                    if worker is not None:
+                        assert worker.stdout is not None
+                        worker.stdout.close()
                     if terminal is not None:
                         _set_foreground_pgrp(terminal.fd, process.pid)
-                    status = _wait_for_frontend(process, supervisor_signals)
+                    status = _wait_for_frontend(process, supervisor_signals, worker)
                     if supervisor_signals.signum is not None:
                         graceful_signal = supervisor_signals.signum
                         status = 128 + graceful_signal
@@ -240,13 +270,21 @@ def _supervisor_signal_handlers() -> Iterator[_SupervisorSignals]:
 def _wait_for_frontend(
     process: subprocess.Popen[bytes],
     observed: _SupervisorSignals,
+    worker: subprocess.Popen[bytes] | None,
 ) -> int:
+    deadline = time.monotonic() + WORKER_LIFETIME_SECONDS
     while True:
         status = process.poll()
         if status is not None:
             return status
         if observed.signum is not None:
             return 128 + observed.signum
+        if worker is not None:
+            if worker.poll() is not None:
+                worker = None
+            elif time.monotonic() >= deadline:
+                stop_worker(worker)
+                worker = None
         time.sleep(_POLL_SECONDS)
 
 

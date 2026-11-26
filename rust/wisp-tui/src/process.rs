@@ -24,8 +24,42 @@ pub struct BackendProcess {
     backend_pid: Pid,
 }
 
+/// Only the launcher can transfer ownership of an open, inheritable read pipe. Never
+/// close a descriptor allocated by this process or one that aliases an RPC stdio stream.
+fn validate_preview_pipe(fd: i32) -> Result<(), Error> {
+    use nix::fcntl::{FcntlArg, OFlag, fcntl};
+    use nix::sys::stat::{SFlag, fstat};
+    let valid = fd >= 3
+        && fcntl(fd, FcntlArg::F_GETFD) == Ok(0)
+        && fcntl(fd, FcntlArg::F_GETFL).is_ok_and(|flags| {
+            let flags = OFlag::from_bits_truncate(flags);
+            #[cfg(target_os = "linux")]
+            if flags.contains(OFlag::O_PATH) {
+                return false;
+            }
+            flags & OFlag::O_ACCMODE == OFlag::O_RDONLY
+        })
+        && fstat(fd).is_ok_and(|pipe| {
+            (SFlag::from_bits_truncate(pipe.st_mode) & SFlag::S_IFMT) == SFlag::S_IFIFO
+                && !(0..3).any(|stdio| {
+                    fstat(stdio).is_ok_and(|s| (s.st_dev, s.st_ino) == (pipe.st_dev, pipe.st_ino))
+                })
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "expected an inherited backend read pipe",
+        )))
+    }
+}
+
 impl BackendProcess {
-    pub fn spawn(argv: &[OsString]) -> Result<(Self, ChildStdin, ChildStdout, ChildStderr), Error> {
+    pub fn spawn(
+        argv: &[OsString],
+        preview_pipe: Option<i32>,
+    ) -> Result<(Self, ChildStdin, ChildStdout, ChildStderr), Error> {
         let (program, arguments) = argv.split_first().ok_or(Error::MissingBackendCommand)?;
         let mut command = Command::new(program);
         command
@@ -35,7 +69,15 @@ impl BackendProcess {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let mut child = command.spawn().map_err(|source| Error::Spawn {
+        if let Some(fd) = preview_pipe {
+            validate_preview_pipe(fd)?;
+        }
+        let child = command.spawn();
+        if let Some(fd) = preview_pipe {
+            // The backend inherited its reader. Do not retain it or pass it on to an editor.
+            nix::unistd::close(fd).map_err(std::io::Error::from)?;
+        }
+        let mut child = child.map_err(|source| Error::Spawn {
             program: program.clone(),
             source,
         })?;
@@ -117,10 +159,23 @@ impl Drop for BackendProcess {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn path_only_fifo_is_not_a_preview_reader() {
+        use nix::fcntl::{OFlag, open};
+        use nix::sys::stat::Mode;
+        use std::os::fd::AsRawFd;
+        let (read, _write) = nix::unistd::pipe().unwrap();
+        let path = std::path::PathBuf::from(format!("/proc/self/fd/{}", read.as_raw_fd()));
+        let fd = open(&path, OFlag::O_PATH, Mode::empty()).unwrap();
+        assert!(validate_preview_pipe(fd).is_err());
+        nix::unistd::close(fd).unwrap();
+    }
+
     #[tokio::test]
     async fn terminate_stage_signals_only_the_backend_pid() {
         let argv = [OsString::from("/bin/sleep"), OsString::from("30")];
-        let (mut backend, stdin, stdout, stderr) = BackendProcess::spawn(&argv).unwrap();
+        let (mut backend, stdin, stdout, stderr) = BackendProcess::spawn(&argv, None).unwrap();
         drop((stdin, stdout, stderr));
         assert_eq!(
             backend.terminate_then_kill().await.unwrap(),
@@ -139,7 +194,7 @@ mod tests {
             OsString::from("-c"),
             OsString::from("ps -o pgid= -p $$"),
         ];
-        let (mut backend, stdin, mut stdout, stderr) = BackendProcess::spawn(&argv).unwrap();
+        let (mut backend, stdin, mut stdout, stderr) = BackendProcess::spawn(&argv, None).unwrap();
         drop((stdin, stderr));
         let mut output = String::new();
         stdout.read_to_string(&mut output).await.unwrap();

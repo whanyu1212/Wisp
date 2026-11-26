@@ -52,3 +52,37 @@ process sampler can miss short peaks. The ready marker is observed in PTY output
 pixels. The larger page size applies only while loading the complete saved transcript; normal
 older/newer navigation retains 75-message requests. Oversize reports remain bounded by the live
 RPC frame limit and are split at whole-message boundaries by the Python backend.
+
+## HY-289: read-only startup preview
+
+Five paired release-mode blocks on macOS arm64 with Python 3.12.12, against `0d9b1d6ea`
+(the merged compaction replay fix). Each block ran fresh, 10k and 50k; variant and size
+order alternated. Both checkouts used this harness and their own source CLI and release TUI:
+
+```sh
+uv run python -m benchmarks.rust_tui_hydration --rust-binary "$PWD/target/release/wisp-tui" \
+  --no-profile --first-reply --runs 1 --history-messages 0,10000,50000
+```
+
+Medians in milliseconds, **base → preview**. “Visible” ends at the first complete PTY frame
+showing the fixture’s last message; “composer” uses the existing ready/context redraw check.
+Submit is the PTY write after startup context is measured, confirmed by the fake provider’s reply.
+It is not the time of an internal backend acknowledgement.
+
+| History | Newest visible | Composer | Submit | Submit → reply | Launch → reply |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Fresh | — | 881 → 887 | 897 → 905 | 88 → 87 | 981 → 989 |
+| 10k | 1300 → 907 | 1300 → 1382 | 1587 → 1675 | 538 → 545 | 2124 → 2221 |
+| 50k | 3408 → 992 | 3408 → 3648 | 4986 → 5232 | 2833 → 2832 | 7819 → 8062 |
+
+At 50k, the median newest frame was 105 ms later than the fresh composer. Four of the five
+paired gaps were within 200 ms (67, 58, 104 and 152 ms); the remaining launch took 4169 ms
+to show history. The fast route is best effort, not a latency guarantee. The preview is **not**
+an interaction speedup: median accepted submit was 246 ms later at 50k. Sampled process-tree
+CPU through reply and shutdown rose from 12.29 to 13.04 s; median peak tree RSS was 881 → 875 MiB.
+All 30 runs received the expected reply, exited cleanly and restored the terminal.
+
+A separate single pair included an inactive branch, turn events and a manual 40k-ID compaction
+(62,504 entries). Newest frame: 3525 → 1042 ms; composer: 3525 → 3739 ms; submit: 4573 →
+4780 ms; submit → reply: 1086 → 1085 ms. Both exited cleanly and restored the terminal.
+These are local measurements on disposable fixtures, not displayed pixels or CI thresholds.

@@ -1031,6 +1031,14 @@ impl BackendEvent {
                 command_id: exact_string_field(value, &event_type, "command_id", 256)?,
                 unreverted: session_tree_unrevert(value, &event_type)?,
             },
+            "rpc.startup.history_preview" => Self::StartupHistoryPreview {
+                lines: serde_json::from_value(value["lines"].clone()).map_err(|_| {
+                    EventProjectionError::InvalidField {
+                        event_type: event_type.clone(),
+                        field: "lines",
+                    }
+                })?,
+            },
             "rpc.messages" => {
                 let command_id = exact_string_field(value, &event_type, "command_id", 256)?;
                 let session = optional_session_identity(

@@ -8,10 +8,12 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from wisp.cli.startup_pipe import PreviewWorkspace
 from wisp.config.runtime import OPENAI_COMPATIBLE_CONFIG_ENV, WispConfig
 from wisp.runtime.extensions import build_runtime
 from wisp.runtime.registry import UnknownProviderError, UnknownToolError
 from wisp.sessions.jsonl import JsonlSessionStore
+from wisp.tools.selection import select_session
 
 
 @dataclass(frozen=True)
@@ -62,9 +64,10 @@ class TuiOptions:
     user_session_dir: Path | None = None
     user_auth_file: Path | None = None
     auto_command_read_dir: Path | None = None
+    preview_workspace: PreviewWorkspace | None = None
 
 
-async def _preflight_tui_options(options: TuiOptions) -> None:
+async def _preflight_tui_options(options: TuiOptions) -> Path | None:
     runtime = await build_runtime(
         auth_path=options.config.auth_path,
         retry_policy=options.config.retry_policy,
@@ -81,16 +84,17 @@ async def _preflight_tui_options(options: TuiOptions) -> None:
                 prefixes = tuple(f"mcp__{server.name}__" for server in options.config.mcp_servers)
                 if not tool_name.startswith(prefixes):
                     raise
-        sessions = JsonlSessionStore(options.config.session_dir)
-        if options.resume is not None:
-            sessions.load(options.resume)
-        elif options.continue_latest:
-            sessions.latest()
+        session = select_session(
+            JsonlSessionStore(options.config.session_dir),
+            resume=options.resume,
+            continue_latest=options.continue_latest,
+        )
+        return session.path if session is not None else None
     finally:
         await runtime.aclose()
 
 
-def _rpc_command(options: TuiOptions) -> tuple[str, ...]:
+def _rpc_command(options: TuiOptions, *, preview_fd: int | None = None) -> tuple[str, ...]:
     # Do NOT pass --provider / --model / --session-dir / --auth-file from the resolved
     # config: those are trust-gated (a trusted project's settings.json may set them), and
     # the subprocess resolves them itself using the parent's process-scoped trust decision.
@@ -99,11 +103,17 @@ def _rpc_command(options: TuiOptions) -> tuple[str, ...]:
     # overrides, which the subprocess cannot otherwise know about.
     command: list[str] = [
         sys.executable,
+        # A backend holding the preview reader must not import a project-local
+        # wisp package merely because the project is its working directory.
+        *(("-P",) if preview_fd is not None else ()),
         "-m",
         "wisp",
         "--mode",
         "rpc",
     ]
+    if preview_fd is not None:
+        assert options.preview_workspace is not None
+        command.append(options.preview_workspace.fd_argument(preview_fd))
     if options.user_provider is not None:
         command.extend(("--provider", options.user_provider))
     if options.user_model is not None:
