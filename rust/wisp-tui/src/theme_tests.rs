@@ -570,6 +570,66 @@ fn no_color_chip_bolds() {
 }
 
 #[test]
+fn action_verb_uses_tool_hues_errors_and_monochrome() {
+    let cases = [
+        ("Read", "Read"),
+        ("Reading", "Read"),
+        ("Opened", "Read"),
+        ("Search", "Search"),
+        ("Searched", "Search"),
+        ("List", "List"),
+        ("Listed", "List"),
+        ("Explore", "Explore"),
+        ("Explored", "Explore"),
+        ("Run", "Bash"),
+        ("Ran", "Bash"),
+        ("Ran codemode:", "Bash"),
+        ("Edit", "Edit"),
+        ("Edited", "Edit"),
+        ("Write", "Write"),
+        ("Wrote", "Write"),
+        ("Call", "MCP"),
+        ("Called", "MCP"),
+        ("Calls to", "MCP"),
+        ("Delegated:", "MCP"),
+        ("Background", "Process"),
+    ];
+    for theme in crate::theme::themes() {
+        let palette = theme.palette(false);
+        for (verb, category) in cases {
+            let style = palette.action_verb(verb, false);
+            assert_eq!(style, palette.chip(category), "{} {verb}", theme.name);
+            assert_eq!(style.bg, None, "{} {verb} has a fill", theme.name);
+            assert!(style.add_modifier.contains(Modifier::BOLD));
+            let fg = style.fg.expect("color palette sets fg");
+            assert!(
+                crate::theme::contrast_ratio(fg, palette.background) >= 4.5,
+                "{} {verb} contrast",
+                theme.name
+            );
+
+            let failed = palette.action_verb(verb, true);
+            assert_eq!(failed.fg, Some(palette.error), "{} {verb}", theme.name);
+            assert_eq!(failed.bg, None, "{} {verb}", theme.name);
+            assert!(failed.add_modifier.contains(Modifier::BOLD));
+        }
+
+        let unknown = palette.action_verb("custom_tool", false);
+        assert_eq!(unknown.fg, Some(palette.foreground), "{}", theme.name);
+        assert_eq!(unknown.bg, None, "{}", theme.name);
+        assert!(unknown.add_modifier.contains(Modifier::BOLD));
+
+        let mono = theme.palette(true);
+        for failed in [false, true] {
+            let style = mono.action_verb("Read", failed);
+            assert_eq!((style.fg, style.bg), (None, None), "{}", theme.name);
+            assert!(style.add_modifier.contains(Modifier::BOLD));
+            assert!(!style.add_modifier.contains(Modifier::REVERSED));
+        }
+    }
+}
+
+#[test]
 fn preferences_round_trip_dark_history_and_preserve_unrelated_fields() {
     let home = TestHome::new();
     let store = home.store();
