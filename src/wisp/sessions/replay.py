@@ -301,21 +301,25 @@ def _replay_session_path(entries: Sequence[SessionTreeEntry]) -> SessionReplay:
             raise SessionReplayError(f"Compaction {entry.id} contains duplicate replaced entry ids")
 
         active_entry_ids = tuple(row.entry_id for row in rows)
-        unknown = tuple(
-            entry_id for entry_id in replaced_entry_ids if entry_id not in known_context_entry_ids
-        )
-        if unknown:
-            raise SessionReplayError(
-                f"Compaction {entry.id} references unknown context entry ids: {unknown}"
-            )
-        inactive = tuple(
-            entry_id for entry_id in replaced_entry_ids if entry_id not in active_entry_ids
-        )
-        if inactive:
-            raise SessionReplayError(
-                f"Compaction {entry.id} references inactive context entry ids: {inactive}"
-            )
         if active_entry_ids[: len(replaced_entry_ids)] != replaced_entry_ids:
+            # A matching prefix is active by definition. Only classify IDs to explain a mismatch.
+            unknown = tuple(
+                entry_id
+                for entry_id in replaced_entry_ids
+                if entry_id not in known_context_entry_ids
+            )
+            if unknown:
+                raise SessionReplayError(
+                    f"Compaction {entry.id} references unknown context entry ids: {unknown}"
+                )
+            active_ids = set(active_entry_ids)
+            inactive = tuple(
+                entry_id for entry_id in replaced_entry_ids if entry_id not in active_ids
+            )
+            if inactive:
+                raise SessionReplayError(
+                    f"Compaction {entry.id} references inactive context entry ids: {inactive}"
+                )
             raise SessionReplayError(
                 f"Compaction {entry.id} replaced entry ids are not an active context prefix"
             )
