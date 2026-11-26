@@ -2302,7 +2302,7 @@ fn render_detail(
     presentation: &ToolDetailPresentation,
     palette: Palette,
 ) -> dialog::Controls {
-    let is_diff = crate::diff_review::is_diff(presentation);
+    let is_diff = view.shows_diff_review(presentation);
     let title = match (is_diff, presentation.truncated) {
         (true, true) => "review · this tool edit · before ↔ after · retained content incomplete",
         (true, false) => "review · this tool edit · before ↔ after",

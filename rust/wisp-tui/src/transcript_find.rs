@@ -69,6 +69,18 @@ impl LiveUi {
                         &mut self.transcript_row_cache,
                         anchor,
                     );
+                    if let Some(hit) = find.selected
+                        && let Some(card) = self
+                            .state
+                            .transcript
+                            .entry(hit.entry)
+                            .and_then(TranscriptEntry::tool_card)
+                        && let crate::tool_detail::DetailAvailability::LiveRetained(detail) =
+                            &card.structured_detail
+                    {
+                        self.detail_view
+                            .open_match(hit.entry, detail, hit.part, hit.offset);
+                    }
                     self.transcript_find = None;
                 }
             }

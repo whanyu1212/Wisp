@@ -5630,7 +5630,7 @@ impl LiveUi {
             self.render_pending = true;
             return LoopControl::Continue;
         };
-        if crate::diff_review::is_diff(presentation) {
+        if self.detail_view.shows_diff_review(presentation) {
             match key.code {
                 KeyCode::Up => self.detail_view.review.scroll(-1),
                 KeyCode::Down => self.detail_view.review.scroll(1),
