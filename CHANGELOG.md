@@ -10,7 +10,17 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.16.8 — Unreleased
+## 0.16.9 — Unreleased
+
+- **Live browser rendering in Rex.** When Wisp runs directly in Rex, the built-in browser can
+  send losslessly compressed pixels for scrolling and other viewport updates. Wisp keeps the
+  original PNG when it is smaller. The browser is experimental, with most testing in Ghostty
+  and Rex. [#1148](https://github.com/whanyu1212/Wisp/pull/1148)
+
+<!-- Keeps links to the pre-release "0.16.8 — Unreleased" heading working. -->
+<a id="0168--unreleased"></a>
+
+## 0.16.8 — 2026-11-23
 
 - **Responsive Files browsing (#1145).** The sidebar loads the root first and fetches folder
   contents as you expand them. Refresh keeps the current tree, selection, and expanded folders

@@ -116,6 +116,12 @@ with `write_constraint`, under the exception below. Tool behavior changes are li
 `bash` runs commands in bash rather than `/bin/sh`, and that the read-only file tools follow
 symbolic links whose targets stay inside the workspace.
 
+## Wisp 0.16.9 compatibility
+
+Use the `0.16.9` backend and TUI together. The browser optimization applies to the connection
+between the TUI and Rex. Existing SDK and RPC clients can use the same commands and event
+payloads, and saved sessions open without migration.
+
 ## Wisp 0.16.8 compatibility
 
 Use the `0.16.8` backend and TUI together. The Files sidebar uses the new optional directory and
