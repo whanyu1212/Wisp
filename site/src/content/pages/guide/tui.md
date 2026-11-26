@@ -62,7 +62,7 @@ mode the whole border turns amber, and `plan` keeps the full warning colour. Whe
 label names it in the warning colour after the mode; YOLO that is not saved for the project reads
 `YOLO (session)`. Ask, the safe default, is not shown. During a run that takes input, the top
 border names the keys that follow up or steer. The frame collapses on short terminals to preserve
-editing space, and the footer then names the mode and model. The footer shows the folder and
+editing space, and the footer then names the mode and model. Below the composer, the footer uses two rows when the conversation area is at least 60 columns wide and 16 rows tall, even with the side panel docked. The footer shows the folder and
 branch, then status (`idle`, `working`, `approval`, `trust`) and context, then the keys for the
 current workflow set apart by `│`, as space permits. The backend version stays in `Ctrl+G` help. An empty transcript shows a welcome
 card, centred in the conversation column: a rounded frame around the startup logo, the installed package version, and a menu of

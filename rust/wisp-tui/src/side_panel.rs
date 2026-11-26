@@ -2878,16 +2878,15 @@ mod tests {
     }
 
     #[test]
-    fn docked_panel_trims_footer() {
+    fn wide_docked_conversation_keeps_both_telemetry_rows() {
         let rows = screen(&session(), &mut SidePanel::default(), 200);
-        let footer = rows.last().unwrap();
-        let conversation: String = footer
-            .chars()
-            .take(usize::from(200 - auto_width(200)))
-            .collect();
-        assert!(conversation.contains("idle │"), "{conversation}");
-        assert!(!conversation.contains("/srv/wisp"), "{conversation}");
-        assert!(!conversation.contains("ctx"), "{conversation}");
+        let conversation = |row: &str| {
+            row.chars()
+                .take(usize::from(200 - auto_width(200)))
+                .collect::<String>()
+        };
+        assert!(conversation(&rows[rows.len() - 2]).contains("╭─"));
+        assert!(conversation(rows.last().unwrap()).contains("╰─"));
     }
 
     #[test]
@@ -3337,7 +3336,10 @@ mod tests {
             .map(|row| row.chars().take(start).collect())
             .collect();
         assert!(!panel.contains("idle"), "{panel}");
-        assert!(column.last().unwrap().contains("idle"), "{column:#?}");
+        assert!(
+            column[column.len() - 2].contains("╭─ • idle"),
+            "{column:#?}"
+        );
     }
 
     /// Whether the panel has a `Now` section heading.
