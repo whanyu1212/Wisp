@@ -25,6 +25,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wr
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 use wisp_protocol::commands::PermissionMode;
+use wisp_protocol::events::McpServerStatus;
 
 const MIN_TERMINAL_WIDTH: u16 = 30;
 const MIN_TERMINAL_HEIGHT: u16 = 8;
@@ -397,6 +398,7 @@ pub fn render_interactive(
     let composer_height = composer_height(area, state, composer_layout, panel_docked);
     let status_height = status_line_height(state);
     let strip_height = background_strip_height(area, state, panel_docked);
+    let footer_rows = footer_height(area, panel_docked);
     let completion_height =
         completion.map_or(0, |view| {
             (view.items.len().min(5) as u16).min(area.height.saturating_sub(
@@ -411,7 +413,7 @@ pub fn render_interactive(
             Constraint::Length(status_height),
             Constraint::Length(composer_height),
             Constraint::Length(strip_height),
-            Constraint::Length(1),
+            Constraint::Length(footer_rows),
         ])
         .split(area);
 
@@ -1295,11 +1297,23 @@ fn background_strip_height(area: Rect, state: &UiState, panel_docked: bool) -> u
     )
 }
 
+/// Two rows for the Antigravity-style telemetry deck when the conversation column is
+/// tall and wide enough without a docked side panel; one row otherwise.
+fn footer_height(area: Rect, panel_docked: bool) -> u16 {
+    if !panel_docked && area.height >= 16 && area.width >= 60 {
+        2
+    } else {
+        1
+    }
+}
+
 /// The rows stacked against the composer: the status line above it, and the
 /// background strip and the footer below it. Popups docked above the composer and
 /// the composer's own ceiling both leave room for them.
 fn rows_around_composer(area: Rect, state: &UiState, panel_docked: bool) -> u16 {
-    status_line_height(state) + background_strip_height(area, state, panel_docked) + 1
+    status_line_height(state)
+        + background_strip_height(area, state, panel_docked)
+        + footer_height(area, panel_docked)
 }
 
 /// The strip under the composer: how many background processes run and their
@@ -3796,6 +3810,21 @@ fn render_footer(
     identity_in_composer: bool,
     column_width: u16,
 ) -> bool {
+    if area.height >= 2 {
+        return render_footer_deck(
+            frame,
+            area,
+            state,
+            viewport,
+            notice,
+            palette,
+            bindings,
+            jump_painted,
+            menu,
+            identity_in_composer,
+            column_width,
+        );
+    }
     let width = usize::from(area.width);
     // Keep the established status priorities when outer presentation margins grow,
     // measured on the conversation's column rather than beside a docked panel.
@@ -3969,6 +3998,385 @@ fn render_footer(
         },
     );
     notice_ticker.is_some()
+}
+
+fn spans_width(spans: &[Span<'_>]) -> usize {
+    spans.iter().map(Span::width).sum()
+}
+
+fn join_span_segments(
+    segments: Vec<Vec<Span<'static>>>,
+    separator: &'static str,
+    sep_style: Style,
+    budget: usize,
+) -> Vec<Span<'static>> {
+    let sep_width = separator.width();
+    let mut out = Vec::new();
+    let mut used = 0;
+    for segment in segments {
+        let seg_width = spans_width(&segment);
+        if seg_width == 0 {
+            continue;
+        }
+        let needed = if out.is_empty() {
+            seg_width
+        } else {
+            sep_width + seg_width
+        };
+        if used + needed > budget {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(Span::styled(separator, sep_style));
+        }
+        used += needed;
+        out.extend(segment);
+    }
+    out
+}
+
+fn deck_state_spans(state: &UiState, palette: Palette) -> Vec<Span<'static>> {
+    let label = status_label(state);
+    if !state.configuration_active()
+        && state.interaction_status != crate::reducer::InteractionStatus::Compacting
+        && state.view_status == ViewStatus::Idle
+    {
+        return vec![
+            Span::styled("• ", Style::default().fg(palette.accent)),
+            Span::styled(label, Style::default().fg(palette.muted)),
+        ];
+    }
+    match state.view_status {
+        ViewStatus::Error => vec![Span::styled(
+            format!("✗ {label}"),
+            Style::default()
+                .fg(palette.error)
+                .add_modifier(Modifier::BOLD),
+        )],
+        ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust => vec![Span::styled(
+            format!("● {label}"),
+            Style::default()
+                .fg(palette.warning)
+                .add_modifier(Modifier::BOLD),
+        )],
+        _ => vec![Span::styled(
+            format!("● {label}"),
+            Style::default()
+                .fg(status_color(state, palette))
+                .add_modifier(Modifier::BOLD),
+        )],
+    }
+}
+
+fn active_subagent_count(state: &UiState) -> usize {
+    state
+        .transcript
+        .entries()
+        .iter()
+        .filter(|entry| {
+            entry.tool_card().is_some_and(|card| {
+                !card.status.terminal()
+                    && card.script.as_deref().is_some_and(|script| {
+                        script.host == crate::script_card::NestedHost::Subagent
+                    })
+            })
+        })
+        .count()
+}
+
+fn mcp_health_counts(state: &UiState) -> (usize, usize) {
+    let Some(snapshot) = state.mcp.snapshot.as_ref() else {
+        return (0, 0);
+    };
+    let mut degraded = 0;
+    let mut connected = 0;
+    for server in &snapshot.servers {
+        match server.status {
+            McpServerStatus::Disconnected | McpServerStatus::Unavailable => degraded += 1,
+            McpServerStatus::Connected => connected += 1,
+            McpServerStatus::Connecting | McpServerStatus::Disabled => {}
+        }
+    }
+    (degraded, connected)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_footer_deck(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &UiState,
+    viewport: &TranscriptViewport,
+    notice: Option<FooterNotice<'_>>,
+    palette: Palette,
+    bindings: &Bindings,
+    jump_painted: bool,
+    menu: bool,
+    identity_in_composer: bool,
+    column_width: u16,
+) -> bool {
+    let width = usize::from(area.width);
+    if width == 0 {
+        return false;
+    }
+    let muted = Style::default().fg(palette.muted);
+    let terminal_width = usize::from(column_width);
+    let panel_docked = column_width < frame.area().width;
+
+    let compaction_notice = state
+        .context
+        .compaction_notice
+        .as_deref()
+        .filter(|_| state.context.compaction_notice_is_warning);
+    let (notice_text, notice_shown_for) = match notice {
+        Some(notice) => (Some(notice.text), Some(notice.shown_for)),
+        None => (compaction_notice, None),
+    };
+
+    // Row 1 right: active notice (with ticker) or secondary queue/scroll/session metadata.
+    let (right1_spans, notice_scrolls) = if let Some(text) = notice_text {
+        let right_budget = (width / 2).max(24).min(width);
+        let clean = sanitize_for_terminal(text);
+        let ticker = notice_shown_for.filter(|_| right_budget > 0 && clean.width() > right_budget);
+        let shown = match ticker {
+            Some(shown_for) => notice_ticker_window(&clean, right_budget, shown_for),
+            None => clip_columns(&clean, right_budget),
+        };
+        (
+            vec![Span::styled(shown, Style::default().fg(palette.warning))],
+            ticker.is_some(),
+        )
+    } else {
+        let mut right_parts: Vec<Vec<Span<'static>>> = Vec::new();
+        if !identity_in_composer {
+            if let Some(yolo) = yolo_label(state) {
+                right_parts.push(vec![Span::styled(yolo, yolo_style(palette))]);
+            }
+            if state.mode_confirmed {
+                right_parts.push(vec![Span::styled(state.mode.as_str().to_owned(), muted)]);
+            }
+        }
+        if state.active_prompt_editable() {
+            let steering = state.queued_steering();
+            let follow_up = state.queued_follow_ups();
+            let omitted = steering.saturating_add(follow_up).saturating_sub(3);
+            let mut text = format!("s:{steering}/l:{follow_up}");
+            if omitted > 0 {
+                text.push_str(&format!(" +{omitted}"));
+            }
+            right_parts.push(vec![Span::styled(text, muted)]);
+        }
+        if let Some(reason) = state.context.compaction {
+            right_parts.push(vec![Span::styled(
+                format!("compacting ({})", reason.as_str()),
+                Style::default().fg(palette.primary),
+            )]);
+        }
+        if state.history.tail_evicted && viewport.follows_tail() {
+            right_parts.push(vec![Span::styled("more ↓", muted)]);
+        } else if !jump_painted && viewport.has_unseen_output() {
+            right_parts.push(vec![Span::styled("new ↓", muted)]);
+        } else if !jump_painted && !viewport.follows_tail() {
+            right_parts.push(vec![Span::styled("scrolled", muted)]);
+        }
+        if terminal_width >= 120
+            && let Some(session) = state.selected_session.as_ref()
+        {
+            let short: String = sanitize_for_terminal(&session.session_id)
+                .chars()
+                .take(8)
+                .collect();
+            if !short.is_empty() {
+                right_parts.push(vec![Span::styled(format!("#{short}"), muted)]);
+            }
+        }
+        (
+            join_span_segments(right_parts, " · ", muted, width / 2),
+            false,
+        )
+    };
+    let right1_width = spans_width(&right1_spans);
+
+    // Row 1 left: `╭─ ` + state + workspace + git branch/diff + alerts + active tasks + MCP count.
+    let left1_budget = width.saturating_sub(right1_width + usize::from(right1_width > 0) * 2);
+    let mut left1_spans = vec![Span::styled("╭─ ", muted)];
+    left1_spans.extend(deck_state_spans(state, palette));
+    let state_width = spans_width(&left1_spans);
+
+    let mut row1_segments: Vec<Vec<Span<'static>>> = Vec::new();
+    if let Some(cwd) = state.workspace_cwd.as_deref() {
+        row1_segments.push(vec![Span::styled(
+            display_workspace(&sanitize_for_terminal(cwd)),
+            Style::default().fg(palette.foreground),
+        )]);
+    }
+    if let Some(branch) = state.git_branch.as_deref() {
+        let mut git_spans = vec![Span::styled(
+            clip_columns(&sanitize_for_terminal(branch), BRANCH_MAX_COLUMNS),
+            Style::default().fg(palette.primary),
+        )];
+        if let Some(files) = state
+            .git_diff
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.files.len())
+            .filter(|count| *count > 0)
+        {
+            git_spans.push(Span::styled(
+                format!(" (+{files})"),
+                Style::default().fg(palette.success),
+            ));
+        }
+        row1_segments.push(git_spans);
+    }
+    let (degraded_mcp, connected_mcp) = mcp_health_counts(state);
+    if degraded_mcp > 0 {
+        row1_segments.push(vec![Span::styled(
+            format!("{degraded_mcp} MCP off"),
+            Style::default()
+                .fg(palette.error)
+                .add_modifier(Modifier::BOLD),
+        )]);
+    }
+    let bg_count = state.background_processes.running().len();
+    let sub_count = active_subagent_count(state);
+    let task_text = match (bg_count, sub_count) {
+        (0, 0) => None,
+        (bg, 0) => Some(format!("{bg} bg")),
+        (0, sub) => Some(format!("{sub} sub")),
+        (bg, sub) => Some(format!("{bg} bg · {sub} sub")),
+    };
+    if let Some(tasks) = task_text {
+        row1_segments.push(vec![Span::styled(
+            tasks,
+            Style::default()
+                .fg(palette.primary)
+                .add_modifier(Modifier::BOLD),
+        )]);
+    }
+    if degraded_mcp == 0 && connected_mcp > 0 {
+        row1_segments.push(vec![Span::styled(format!("{connected_mcp} MCP"), muted)]);
+    }
+
+    let extra_budget = left1_budget.saturating_sub(state_width + 3);
+    if left1_budget > state_width + 3 {
+        let extra = join_span_segments(row1_segments, " │ ", muted, extra_budget);
+        if !extra.is_empty() {
+            left1_spans.push(Span::styled(" │ ", muted));
+            left1_spans.extend(extra);
+        }
+    }
+
+    let row1_area = Rect { height: 1, ..area };
+    let left1_width = spans_width(&left1_spans).min(left1_budget);
+    frame.render_widget(
+        Paragraph::new(Line::from(left1_spans)),
+        Rect {
+            width: left1_width as u16,
+            ..row1_area
+        },
+    );
+    if !right1_spans.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(right1_spans)).alignment(Alignment::Right),
+            Rect {
+                x: row1_area.right().saturating_sub(right1_width as u16),
+                width: right1_width.min(width) as u16,
+                ..row1_area
+            },
+        );
+    }
+
+    // Row 2 right: keycap hints.
+    let hint_cap = if terminal_width < 120 {
+        width.saturating_sub(14).min(56)
+    } else {
+        width.saturating_sub(14)
+    };
+    let hints = footer_hints(state, bindings, menu, hint_cap);
+    let hints = if hints.is_empty() || decision_pending(state) {
+        hints
+    } else {
+        with_panel_hints(state, bindings, menu, panel_docked, hint_cap).unwrap_or(hints)
+    };
+    let right2_line = if hints.is_empty() {
+        Line::default()
+    } else {
+        keycap_hints_separated(&hints, HINT_SEPARATOR, palette)
+            .style(Style::default().fg(palette.muted))
+    };
+    let right2_width = right2_line.width();
+
+    // Row 2 left: `╰─ ` + context meter (+ token ratio) + session cost.
+    let left2_budget = width.saturating_sub(right2_width + usize::from(right2_width > 0) * 2);
+    let mut left2_spans = vec![Span::styled("╰─ ", muted)];
+    let telem_budget = left2_budget.saturating_sub(3);
+    if telem_budget > 0 {
+        let fill = crate::context_view::fill(state);
+        let cost = crate::context_view::session_cost(state);
+        let cost_reserve = cost.as_deref().map_or(0, |cost_str| 3 + cost_str.width());
+        let mut ctx_text = crate::context_view::indicator(state, telem_budget);
+        if cost_reserve > 0
+            && ctx_text.width() + cost_reserve > telem_budget
+            && let Some(room_for_ctx) = telem_budget.checked_sub(cost_reserve)
+            && room_for_ctx >= 6
+        {
+            ctx_text = crate::context_view::indicator(state, room_for_ctx);
+        }
+        let mut used = ctx_text.width();
+        if used <= telem_budget {
+            left2_spans.push(Span::styled(
+                ctx_text,
+                Style::default().fg(context_fill_color(fill, palette)),
+            ));
+            let cost_fits = cost_reserve > 0 && used + cost_reserve <= telem_budget;
+            let ratio_reserve = if cost_fits { cost_reserve } else { 0 };
+            if state
+                .context
+                .budget
+                .as_ref()
+                .and_then(|budget| budget.context_window)
+                .is_some_and(|window| window > 0)
+            {
+                let ratio = format!(" ({})", crate::context_view::status_text(state));
+                if used + ratio.width() + ratio_reserve <= telem_budget {
+                    used += ratio.width();
+                    left2_spans.push(Span::styled(ratio, muted));
+                }
+            }
+            if let Some(cost_str) = cost
+                && used + 3 + cost_str.width() <= telem_budget
+            {
+                left2_spans.push(Span::styled(" │ ", muted));
+                left2_spans.push(Span::styled(cost_str, Style::default().fg(palette.code)));
+            }
+        }
+    }
+
+    let row2_area = Rect {
+        y: area.y + 1,
+        height: 1,
+        ..area
+    };
+    let left2_width = spans_width(&left2_spans).min(left2_budget);
+    frame.render_widget(
+        Paragraph::new(Line::from(left2_spans)),
+        Rect {
+            width: left2_width as u16,
+            ..row2_area
+        },
+    );
+    if right2_width > 0 {
+        frame.render_widget(
+            Paragraph::new(right2_line).alignment(Alignment::Right),
+            Rect {
+                x: row2_area.right().saturating_sub(right2_width as u16),
+                width: right2_width.min(width) as u16,
+                ..row2_area
+            },
+        );
+    }
+
+    notice_scrolls
 }
 
 /// The footer hints with the panel key, and beside a docked panel the tree key,
@@ -6272,7 +6680,7 @@ mod tests {
             "{running}"
         );
         assert!(running.contains("Esc interrupt"), "{running}");
-        assert!(!running.contains("working"), "{running}");
+        assert!(running.contains("● working"), "{running}");
 
         state.current_command = None;
         state.interaction_status = InteractionStatus::Compacting;
@@ -6715,11 +7123,14 @@ mod tests {
                 .ends_with("─ Enter follow-up · Alt+Enter steer ─╮"),
             "{empty}"
         );
-        // The footer keeps the hints a run needs and leaves status to the line above.
-        let footer = empty.lines().last().unwrap();
-        assert!(footer.contains("Esc interrupt"), "{empty}");
-        assert!(!footer.contains("working"), "{empty}");
-        // A notice takes the footer's hints, and the border still names the keys.
+        // The deck shows the run state on row 1 and keeps key hints on row 2 even with a notice.
+        let lines: Vec<_> = empty.lines().collect();
+        let row1 = lines[lines.len() - 2];
+        let row2 = lines[lines.len() - 1];
+        assert!(row1.contains("● working"), "{empty}");
+        assert!(row2.contains("Esc interrupt"), "{empty}");
+        assert!(!row2.contains("working"), "{empty}");
+        // A notice sits on row 1 while row 2 keeps interrupt/panel hints visible.
         let noticed = render_to_string_with_notice(
             100,
             20,
@@ -6727,7 +7138,8 @@ mod tests {
             &PromptEditor::default(),
             Some("Model selection applied."),
         );
-        assert!(!noticed.contains("Esc interrupt"), "{noticed}");
+        assert!(noticed.contains("Model selection applied."), "{noticed}");
+        assert!(noticed.contains("Esc interrupt"), "{noticed}");
         assert!(
             noticed.contains("─ Enter follow-up · Alt+Enter steer ─╮"),
             "{noticed}"
@@ -7395,18 +7807,19 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        // The top border, the draft, then a bottom border naming the model and mode.
+        // The top border, the draft, then a bottom border naming the model and mode,
+        // above the 2-row deck on a 100-col terminal.
         let wide = rows(100);
-        assert!(wide[26].trim().starts_with('╭'), "{}", wide[26]);
-        assert!(wide[27].contains("› Ask Wisp anything"), "{}", wide[27]);
+        assert!(wide[25].trim().starts_with('╭'), "{}", wide[25]);
+        assert!(wide[26].contains("› Ask Wisp anything"), "{}", wide[26]);
         assert!(
-            wide[28]
+            wide[27]
                 .trim_end()
                 .ends_with("─ model-xyz (high) · build ─╯"),
             "{}",
-            wide[28]
+            wide[27]
         );
-        // A narrow composer keeps the mode and drops the model.
+        // A narrow composer (30 cols < 60) uses a 1-row footer and drops the model.
         let narrow = rows(30);
         assert!(
             narrow[28].trim_end().ends_with("─ build ─╯"),
@@ -7444,24 +7857,25 @@ mod tests {
                     .map(|x| buffer[(x, y)].symbol())
                     .collect::<String>()
             };
-            (row(height - 2), row(height - 1))
+            (row(height - 3), row(height - 2), row(height - 1))
         };
 
-        let (border, footer) = draw(20);
+        let (border, row1, row2) = draw(20);
         assert!(
             border.trim_end().ends_with("─ model-x (high) · build ─╯"),
             "{border}"
         );
         assert!(
-            footer.trim_start().starts_with("/srv/wisp · feat/x"),
-            "{footer}"
+            row1.trim_start()
+                .starts_with("╭─ • idle │ /srv/wisp │ feat/x"),
+            "{row1}"
         );
-        assert!(footer.contains("idle · ctx"), "{footer}");
-        assert!(!footer.contains("model-x"), "{footer}");
-        assert!(!footer.contains("build"), "{footer}");
+        assert!(row2.trim_start().starts_with("╰─ ctx"), "{row2}");
+        assert!(!row1.contains("model-x") && !row2.contains("model-x"));
+        assert!(!row1.contains("build") && !row2.contains("build"));
 
-        // Too short to frame the composer: the footer keeps mode and identity.
-        let (_, footer) = draw(12);
+        // Too short to frame the composer: the 1-row footer keeps mode and identity.
+        let (_, _, footer) = draw(12);
         assert!(footer.contains("idle · build"), "{footer}");
         assert!(footer.contains("fake/model-x · high"), "{footer}");
     }
@@ -7487,22 +7901,28 @@ mod tests {
                 })
                 .unwrap();
             let buffer = terminal.backend().buffer().clone();
-            (0..width)
-                .map(|x| buffer[(x, 19)].symbol())
-                .collect::<String>()
+            let row = |y: u16| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            };
+            (row(18), row(19))
         };
 
-        let wide = footer(100);
-        assert!(wide.contains("/srv/wisp · feat/footer"), "{wide}");
-        assert!(wide.contains("idle · ctx"), "{wide}");
-        assert!(wide.contains("help"), "{wide}");
+        let (wide_top, wide_bot) = footer(100);
+        assert!(
+            wide_top.contains("╭─ • idle │ /srv/wisp │ feat/footer"),
+            "{wide_top}"
+        );
+        assert!(wide_bot.contains("╰─ ctx"), "{wide_bot}");
+        assert!(wide_bot.contains("help"), "{wide_bot}");
 
-        let narrow = footer(60);
+        let (_, narrow) = footer(60);
         assert!(narrow.contains("/srv/wisp"), "{narrow}");
         assert!(!narrow.contains("feat/footer"), "{narrow}");
         assert!(narrow.contains("idle · ctx"), "{narrow}");
 
-        let tight = footer(40);
+        let (_, tight) = footer(40);
         assert!(tight.contains("/srv/wisp"), "{tight}");
         assert!(!tight.contains("help"), "{tight}");
         assert!(tight.contains("ctx"), "{tight}");
@@ -10303,12 +10723,15 @@ mod tests {
         state.transcript.append_prompt("hello".into());
         for width in [80, 150] {
             let screen = render_to_string(width, 20, &state, &PromptEditor::default());
-            let footer = screen.lines().last().unwrap().trim_matches('"');
-            assert!(footer.contains("idle · ctx"), "{footer}");
-            // Each hint after the status is a whole key and action, set apart by `│`.
-            let hints = footer
+            let lines: Vec<_> = screen.lines().collect();
+            let row1 = lines[lines.len() - 2].trim_matches('"');
+            let footer = lines[lines.len() - 1].trim_matches('"');
+            assert!(row1.contains("╭─ • idle"), "{row1}");
+            assert!(footer.contains("╰─ ctx"), "{footer}");
+            // Each hint on the right is a whole key and action, set apart by `│`.
+            let hints_start = footer.find("Ctrl+G").unwrap_or_else(|| panic!("{footer}"));
+            let hints = footer[hints_start..]
                 .split(" │ ")
-                .skip(1)
                 .map(str::trim)
                 .collect::<Vec<_>>();
             assert!(!hints.is_empty(), "{footer}");
@@ -11215,5 +11638,221 @@ mod tests {
         let trust = render_to_string(80, 24, &state, &PromptEditor::default());
         assert!(trust.contains("Allow project instructions, skills, and tools here."));
         assert!(trust.contains("Stay untrusted; block project instructions and tools."));
+    }
+
+    #[test]
+    fn footer_deck_renders_telemetry_states_and_fallbacks() {
+        use std::sync::Arc;
+        use wisp_protocol::events::{
+            ContextAccountingMethod, ContextBudget, ContextEstimate, McpServerSnapshot,
+            McpStatusSnapshot, SessionCostSummary, SessionStats, SessionTokenUsage,
+        };
+
+        let mut state = UiState::new("fake".into(), Some("model-x".into()), None);
+        state.workspace_cwd = Some("/srv/wisp".into());
+        state.git_branch = Some("feat/deck".into());
+        state.selected_session = Some(SessionIdentity {
+            session_id: "a780c86d-4bd9-4baa".into(),
+            session_path: "/tmp/s.jsonl".into(),
+            session_name: None,
+        });
+        let budget = ContextBudget {
+            estimate: ContextEstimate {
+                total_tokens: 84_000,
+            },
+            observed_tokens: Some(84_000),
+            observed_is_current: true,
+            effective_tokens: None,
+            accounting_method: ContextAccountingMethod::ProviderObserved,
+            context_window: Some(200_000),
+            reserve_tokens: 1_000,
+        };
+        state.git_diff.snapshot = Some(Arc::new(crate::reducer::git_diff::GitDiffSnapshot {
+            generation: 1,
+            head: "abc123".into(),
+            files: vec![
+                crate::reducer::git_diff::GitDiffFile {
+                    path: "a.rs".into(),
+                    status: "modified".into(),
+                    ..Default::default()
+                },
+                crate::reducer::git_diff::GitDiffFile {
+                    path: "b.rs".into(),
+                    status: "modified".into(),
+                    ..Default::default()
+                },
+            ],
+            truncated: false,
+        }));
+        state.context.budget = Some(budget.clone());
+        state.context.stats = Some(Box::new(SessionStats {
+            session_id: None,
+            active_message_count: 2,
+            compaction_count: 0,
+            usage: SessionTokenUsage {
+                input_tokens: 1,
+                output_tokens: 1,
+                total_tokens: 2,
+                cache_read_input_tokens: None,
+                cache_write_input_tokens: None,
+            },
+            context: budget,
+            compaction: None,
+            cost: SessionCostSummary {
+                known_usd: "0.14".into(),
+                complete: true,
+                priced_record_count: 1,
+                unpriced_record_count: 0,
+            },
+            context_breakdown: None,
+            branch: Default::default(),
+            used_skill_names: Vec::new(),
+        }));
+        state.mcp.snapshot = Some(Arc::new(McpStatusSnapshot {
+            servers: ["docs", "linear"]
+                .into_iter()
+                .map(|name| McpServerSnapshot {
+                    name: name.into(),
+                    status: McpServerStatus::Connected,
+                    tool_names: Vec::new(),
+                    read_only_tool_names: Vec::new(),
+                    read_only_hint_tool_names: Vec::new(),
+                    error: None,
+                    launch: None,
+                    sign_in: None,
+                })
+                .collect(),
+        }));
+
+        let mut terminal = Terminal::new(TestBackend::new(140, 20)).unwrap();
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    &state,
+                    &mut TranscriptViewport::default(),
+                    &mut TranscriptRowCache::default(),
+                    &PromptEditor::default(),
+                    &connection(),
+                    None,
+                );
+            })
+            .unwrap();
+        let palette = Palette::default();
+        let screen = terminal.backend().to_string();
+        assert!(
+            screen.contains("╭─ • idle │ /srv/wisp │ feat/deck (+2) │ 2 MCP"),
+            "{screen}"
+        );
+        assert!(screen.contains("#a780c86d"), "{screen}");
+        assert!(
+            screen.contains("╰─ ctx ▰▰▰▰▱▱▱▱▱▱ 42% (84K / 200K) │ $0.140"),
+            "{screen}"
+        );
+        assert!(screen.contains("Ctrl+G help"), "{screen}");
+        assert!(!screen.contains(" bg"), "{screen}");
+        assert!(!screen.contains(" sub"), "{screen}");
+
+        // Keycaps on row 2 have no background fill.
+        let key = style_at_text(terminal.backend(), "Ctrl+G").unwrap();
+        let action = style_at_text(terminal.backend(), " help").unwrap();
+        assert_eq!(key.1, action.1);
+
+        // Degraded MCP + running subagent + error/approval state labels.
+        state.mcp.snapshot = Some(Arc::new(McpStatusSnapshot {
+            servers: vec![McpServerSnapshot {
+                name: "docs".into(),
+                status: McpServerStatus::Disconnected,
+                tool_names: Vec::new(),
+                read_only_tool_names: Vec::new(),
+                read_only_hint_tool_names: Vec::new(),
+                error: None,
+                launch: None,
+                sign_in: None,
+            }],
+        }));
+        state
+            .transcript
+            .observe_tool_call(crate::tool_cards::ToolCallInput {
+                call_id: "sub-1".into(),
+                name: crate::script_card::SPAWN_AGENT.into(),
+                detail_source: crate::tool_detail::ToolDetailSource::None,
+                arguments: json!({"task": "check"}),
+            });
+        state.view_status = ViewStatus::Running;
+        let working = render_to_string(140, 20, &state, &PromptEditor::default());
+        assert!(working.contains("● working"), "{working}");
+        assert!(working.contains("1 MCP off"), "{working}");
+        assert!(working.contains("1 sub"), "{working}");
+
+        state.view_status = ViewStatus::WaitingForApproval;
+        let approval_spans = deck_state_spans(&state, palette);
+        assert_eq!(approval_spans.len(), 1);
+        assert_eq!(approval_spans[0].content, "● approval");
+        assert_eq!(approval_spans[0].style.fg, Some(palette.warning));
+        assert!(
+            approval_spans[0]
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
+        // Decision prompts keep their 1-row footer.
+        let approval = render_to_string(140, 20, &state, &PromptEditor::default());
+        assert!(!approval.contains("╭─ ● approval"), "{approval}");
+
+        state.view_status = ViewStatus::Error;
+        let mut err_term = Terminal::new(TestBackend::new(140, 20)).unwrap();
+        err_term
+            .draw(|frame| {
+                render(
+                    frame,
+                    &state,
+                    &mut TranscriptViewport::default(),
+                    &mut TranscriptRowCache::default(),
+                    &PromptEditor::default(),
+                    &connection(),
+                    None,
+                );
+            })
+            .unwrap();
+        let err_screen = err_term.backend().to_string();
+        assert!(err_screen.contains("✗ error"), "{err_screen}");
+        let (err_fg, _, err_mod) = style_at_text(err_term.backend(), "✗ error").unwrap();
+        assert_eq!(err_fg, palette.error);
+        assert!(err_mod.contains(Modifier::BOLD));
+        let (mcp_fg, _, mcp_mod) = style_at_text(err_term.backend(), "1 MCP off").unwrap();
+        assert_eq!(mcp_fg, palette.error);
+        assert!(mcp_mod.contains(Modifier::BOLD));
+
+        // Short (< 16), narrow (< 60), and docked-panel views fall back to the 1-row footer.
+        state.view_status = ViewStatus::Idle;
+        let short = render_to_string(140, 14, &state, &PromptEditor::default());
+        assert!(
+            !short.contains("╭─ •") && !short.contains("╰─ ctx"),
+            "{short}"
+        );
+        let narrow = render_to_string(50, 20, &state, &PromptEditor::default());
+        assert!(
+            !narrow.contains("╭─ •") && !narrow.contains("╰─ ctx"),
+            "{narrow}"
+        );
+        assert_eq!(footer_height(Rect::new(0, 0, 140, 20), true), 1);
+
+        // Terminal width 120 shows #session_id, tight deck widths preserve cost over
+        // the optional token ratio, and control-only workspace strings emit no empty `│  │`.
+        let at_120 = render_to_string(120, 20, &state, &PromptEditor::default());
+        assert!(at_120.contains("#a780c86d"), "{at_120}");
+
+        let tight_deck = render_to_string(74, 20, &state, &PromptEditor::default());
+        assert!(tight_deck.contains("╰─ ctx 42% │ $0.140"), "{tight_deck}");
+        assert!(!tight_deck.contains("(84K / 200K)"), "{tight_deck}");
+
+        state.workspace_cwd = Some(String::new());
+        let empty_cwd = render_to_string(140, 20, &state, &PromptEditor::default());
+        assert!(!empty_cwd.contains("│  │"), "{empty_cwd}");
+        assert!(
+            empty_cwd.contains("╭─ • idle │ feat/deck (+2) │ 1 MCP off │ 1 sub"),
+            "{empty_cwd}"
+        );
     }
 }
