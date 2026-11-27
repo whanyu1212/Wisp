@@ -96,7 +96,7 @@ def generate_protocol_artifacts() -> dict[str, str]:
         _COMMAND_SCHEMA: _serialize(commands),
         _EVENT_SCHEMA: _serialize(events),
         _RUST_COMMAND_SCHEMA: _serialize(_rust_type_projection(commands)),
-        _RUST_EVENT_SCHEMA: _serialize(_rust_type_projection(events)),
+        _RUST_EVENT_SCHEMA: _serialize(_rust_type_projection(events, discriminator_enums=True)),
     }
     schema_hashes: JsonObject = {
         filename: _sha256(content) for filename, content in schemas.items()
@@ -194,7 +194,7 @@ def _shape_command_output_schema(schema: JsonObject) -> None:
     _add_command_semantic_constraints(schema)
 
 
-def _rust_type_projection(schema: JsonObject) -> JsonObject:
+def _rust_type_projection(schema: JsonObject, *, discriminator_enums: bool = False) -> JsonObject:
     """Remove validation-only keywords unsupported by constructive Rust codegen."""
 
     projected = deepcopy(schema)
@@ -239,6 +239,23 @@ def _rust_type_projection(schema: JsonObject) -> JsonObject:
                     raw_property["title"] = (
                         f"{model_name}{''.join(part.title() for part in property_name.split('_'))}"
                     )
+        if discriminator_enums:
+            discriminator = projected.get("discriminator")
+            mapping = discriminator.get("mapping") if isinstance(discriminator, dict) else None
+            if isinstance(mapping, dict):
+                for ref in mapping.values():
+                    if not isinstance(ref, str) or not ref.startswith("#/$defs/"):
+                        continue
+                    raw_definition = definitions.get(ref.removeprefix("#/$defs/"))
+                    if not isinstance(raw_definition, dict):
+                        continue
+                    properties = raw_definition.get("properties")
+                    if not isinstance(properties, dict):
+                        continue
+                    type_property = properties.get("type")
+                    if isinstance(type_property, dict) and "const" in type_property:
+                        const_value = type_property.pop("const")
+                        type_property["enum"] = [const_value]
     return projected
 
 

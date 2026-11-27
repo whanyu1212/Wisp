@@ -969,3 +969,27 @@ def test_message_origins_are_optional(payload: dict[str, object]) -> None:
     assert with_origin.model_dump()["message_entry_id"] == "persisted-id"
     without_origin = wisp_event_from_dict(payload)
     assert without_origin.model_dump()["message_entry_id"] is None
+
+
+def test_rust_event_schema_uses_singleton_type_enums_for_mapped_discriminators() -> None:
+    canonical_schema = _artifact("events.schema.json")
+    rust_schema = _artifact("rust-events.schema.json")
+    mapping = _mapping(rust_schema)
+    canonical_defs = cast(dict[str, dict[str, object]], canonical_schema["$defs"])
+    rust_defs = cast(dict[str, dict[str, object]], rust_schema["$defs"])
+
+    assert mapping == _mapping(canonical_schema)
+    for tag, ref in mapping.items():
+        def_name = ref.removeprefix("#/$defs/")
+        canonical_type = cast(
+            dict[str, object],
+            cast(dict[str, object], canonical_defs[def_name]["properties"])["type"],
+        )
+        rust_type = cast(
+            dict[str, object],
+            cast(dict[str, object], rust_defs[def_name]["properties"])["type"],
+        )
+        assert canonical_type["const"] == tag
+        assert "enum" not in canonical_type
+        assert rust_type["enum"] == [tag]
+        assert "const" not in rust_type

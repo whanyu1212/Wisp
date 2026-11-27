@@ -8595,6 +8595,33 @@ mod tests {
     }
 
     #[test]
+    fn live_diagnostics_and_invalidation_project_from_typed_payload() {
+        for (event_type, message) in [("error", "something broke"), ("warning", "careful now")] {
+            let live = wisp_protocol::events::deserialize(serde_json::json!({
+                "type": event_type,
+                "timestamp": "2026-01-02T03:04:05Z",
+                "message": message,
+            }))
+            .unwrap();
+            assert_eq!(
+                BackendEvent::from_live(&live).unwrap(),
+                BackendEvent::Diagnostic(message.into())
+            );
+        }
+
+        let invalidated = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "project_files.invalidated",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "generation": 7,
+        }))
+        .unwrap();
+        assert_eq!(
+            BackendEvent::from_live(&invalidated).unwrap(),
+            BackendEvent::ProjectFilesInvalidated(7)
+        );
+    }
+
+    #[test]
     fn browser_addresses_report_lands_in_state() {
         let mut state = UiState::new("fake".into(), None, None);
         let mut ids = DeterministicIds::default();

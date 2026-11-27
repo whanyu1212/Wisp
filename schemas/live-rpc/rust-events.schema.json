@@ -107,8 +107,10 @@
           "type": "integer"
         },
         "type": {
-          "const": "agent.completed",
           "default": "agent.completed",
+          "enum": [
+            "agent.completed"
+          ],
           "title": "AgentCompletedType",
           "type": "string"
         }
@@ -176,8 +178,10 @@
           "type": "string"
         },
         "type": {
-          "const": "agent.started",
           "default": "agent.started",
+          "enum": [
+            "agent.started"
+          ],
           "title": "AgentStartedType",
           "type": "string"
         }
@@ -353,8 +357,10 @@
           "title": "BrowserViewportUpdatedTitle"
         },
         "type": {
-          "const": "browser.viewport.updated",
           "default": "browser.viewport.updated",
+          "enum": [
+            "browser.viewport.updated"
+          ],
           "title": "BrowserViewportUpdatedType",
           "type": "string"
         },
@@ -690,8 +696,10 @@
           "type": "string"
         },
         "type": {
-          "const": "compaction.completed",
           "default": "compaction.completed",
+          "enum": [
+            "compaction.completed"
+          ],
           "title": "CompactionCompletedType",
           "type": "string"
         },
@@ -813,8 +821,10 @@
           "title": "CompactionStartedTriggerBudget"
         },
         "type": {
-          "const": "compaction.started",
           "default": "compaction.started",
+          "enum": [
+            "compaction.started"
+          ],
           "title": "CompactionStartedType",
           "type": "string"
         }
@@ -1081,8 +1091,10 @@
           "type": "integer"
         },
         "type": {
-          "const": "context.estimated",
           "default": "context.estimated",
+          "enum": [
+            "context.estimated"
+          ],
           "title": "ContextEstimatedType",
           "type": "string"
         }
@@ -1231,8 +1243,10 @@
           "type": "integer"
         },
         "type": {
-          "const": "context.overflow",
           "default": "context.overflow",
+          "enum": [
+            "context.overflow"
+          ],
           "title": "ContextOverflowType",
           "type": "string"
         }
@@ -1299,8 +1313,10 @@
           "type": "integer"
         },
         "type": {
-          "const": "context.pressure",
           "default": "context.pressure",
+          "enum": [
+            "context.pressure"
+          ],
           "title": "ContextPressureType",
           "type": "string"
         }
@@ -1467,8 +1483,10 @@
           "type": "string"
         },
         "type": {
-          "const": "error",
           "default": "error",
+          "enum": [
+            "error"
+          ],
           "title": "ErrorEventType",
           "type": "string"
         }
@@ -1540,8 +1558,10 @@
           "type": "string"
         },
         "type": {
-          "const": "mcp.status.updated",
           "default": "mcp.status.updated",
+          "enum": [
+            "mcp.status.updated"
+          ],
           "title": "McpStatusUpdatedType",
           "type": "string"
         }
@@ -1651,8 +1671,10 @@
           "type": "integer"
         },
         "type": {
-          "const": "message.completed",
           "default": "message.completed",
+          "enum": [
+            "message.completed"
+          ],
           "title": "MessageCompletedType",
           "type": "string"
         },
@@ -1728,8 +1750,10 @@
           "type": "integer"
         },
         "type": {
-          "const": "message.delta",
           "default": "message.delta",
+          "enum": [
+            "message.delta"
+          ],
           "title": "MessageDeltaType",
           "type": "string"
         }
@@ -1770,8 +1794,10 @@
           "type": "integer"
         },
         "type": {
-          "const": "message.started",
           "default": "message.started",
+          "enum": [
+            "message.started"
+          ],
           "title": "MessageStartedType",
           "type": "string"
         }
@@ -1807,8 +1833,10 @@
           "type": "string"
         },
         "type": {
-          "const": "model.provider_auto_switched",
           "default": "model.provider_auto_switched",
+          "enum": [
+            "model.provider_auto_switched"
+          ],
           "title": "ModelProviderAutoSwitchedType",
           "type": "string"
         }
@@ -2109,8 +2137,10 @@
           "type": "string"
         },
         "type": {
-          "const": "process.ended",
           "default": "process.ended",
+          "enum": [
+            "process.ended"
+          ],
           "title": "ProcessEndedType",
           "type": "string"
         }
@@ -2183,8 +2213,10 @@
           "type": "string"
         },
         "type": {
-          "const": "project.config.applied",
           "default": "project.config.applied",
+          "enum": [
+            "project.config.applied"
+          ],
           "title": "ProjectConfigAppliedType",
           "type": "string"
         }
@@ -2217,8 +2249,10 @@
           "type": "string"
         },
         "type": {
-          "const": "project_files.invalidated",
           "default": "project_files.invalidated",
+          "enum": [
+            "project_files.invalidated"
+          ],
           "title": "ProjectFilesInvalidatedType",
           "type": "string"
         }
@@ -2285,8 +2319,10 @@
           "type": "integer"
         },
         "type": {
-          "const": "provider.retrying",
           "default": "provider.retrying",
+          "enum": [
+            "provider.retrying"
+          ],
           "title": "ProviderRetryingType",
           "type": "string"
         }
@@ -2381,8 +2417,10 @@
           "type": "string"
         },
         "type": {
-          "const": "queue.items.removed",
           "default": "queue.items.removed",
+          "enum": [
+            "queue.items.removed"
+          ],
           "title": "QueueItemsRemovedType",
           "type": "string"
         }
@@ -2457,8 +2495,10 @@
           "type": "string"
         },
         "type": {
-          "const": "queue.message.injected",
           "default": "queue.message.injected",
+          "enum": [
+            "queue.message.injected"
+          ],
           "title": "QueueMessageInjectedType",
           "type": "string"
         }
@@ -2569,8 +2609,10 @@
           "title": "QueueUpdatedToken"
         },
         "type": {
-          "const": "queue.updated",
           "default": "queue.updated",
+          "enum": [
+            "queue.updated"
+          ],
           "title": "QueueUpdatedType",
           "type": "string"
         }
@@ -2626,8 +2668,10 @@
           "type": "boolean"
         },
         "type": {
-          "const": "rpc.browser_addresses",
           "default": "rpc.browser_addresses",
+          "enum": [
+            "rpc.browser_addresses"
+          ],
           "title": "RpcBrowserAddressesReportedType",
           "type": "string"
         }
@@ -2660,8 +2704,10 @@
           "type": "string"
         },
         "type": {
-          "const": "rpc.codemode",
           "default": "rpc.codemode",
+          "enum": [
+            "rpc.codemode"
+          ],
           "title": "RpcCodemodeReportedType",
           "type": "string"
         }
@@ -2821,8 +2867,10 @@
           "type": "string"
         },
         "type": {
-          "const": "rpc.command.finished",
           "default": "rpc.command.finished",
+          "enum": [
+            "rpc.command.finished"
+          ],
           "title": "RpcCommandFinishedType",
           "type": "string"
         }
@@ -2855,8 +2903,10 @@
           "type": "string"
         },
         "type": {
-          "const": "rpc.command.started",
           "default": "rpc.command.started",
+          "enum": [
+            "rpc.command.started"
+          ],
           "title": "RpcCommandStartedType",
           "type": "string"
         }
@@ -2892,8 +2942,10 @@
           "type": "string"
         },
         "type": {
-          "const": "rpc.commands",
           "default": "rpc.commands",
+          "enum": [
+            "rpc.commands"
+          ],
           "title": "RpcCommandsReportedType",
           "type": "string"
         }
@@ -2925,8 +2977,10 @@
           "type": "string"
         },
         "type": {
-          "const": "rpc.connection_catalog",
           "default": "rpc.connection_catalog",
+          "enum": [
+            "rpc.connection_catalog"
+          ],
           "title": "RpcConnectionCatalogReportedType",
           "type": "string"
         }
@@ -3099,8 +3153,10 @@
           "type": "string"
         },
         "type": {
-          "const": "rpc.device_code.progress",
           "default": "rpc.device_code.progress",
+          "enum": [
+            "rpc.device_code.progress"
+          ],
           "title": "RpcDeviceCodeProgressReportedType",
           "type": "string"
         }
@@ -3135,8 +3191,10 @@
           "type": "string"
         },
         "type": {
-          "const": "rpc.device_code",
           "default": "rpc.device_code",
+          "enum": [
+            "rpc.device_code"
+          ],
           "title": "RpcDeviceCodeReportedType",
           "type": "string"
         },
@@ -3302,8 +3360,10 @@
           "type": "boolean"
         },
         "type": {
-          "const": "rpc.git_diff",
           "default": "rpc.git_diff",
+          "enum": [
+            "rpc.git_diff"
+          ],
           "title": "RpcGitDiffReportedType",
           "type": "string"
         }
@@ -3380,8 +3440,10 @@
           "type": "string"
         },
         "type": {
-          "const": "rpc.mcp.login",
           "default": "rpc.mcp.login",
+          "enum": [
+            "rpc.mcp.login"
+          ],
           "title": "RpcMcpLoginStartedType",
           "type": "string"
         }
@@ -3618,8 +3680,10 @@
           "type": "string"
         },
         "type": {
-          "const": "rpc.mcp.preview",
           "default": "rpc.mcp.preview",
+          "enum": [
+            "rpc.mcp.preview"
+          ],
           "title": "RpcMcpSnippetPreviewedType",
           "type": "string"
         }
@@ -3651,8 +3715,10 @@
           "type": "string"
         },
         "type": {
-          "const": "rpc.mcp",
           "default": "rpc.mcp",
+          "enum": [
+            "rpc.mcp"
+          ],
           "title": "RpcMcpStatusReportedType",
           "type": "string"
         }
@@ -4305,8 +4371,10 @@
           "type": "boolean"
         },
         "type": {
-          "const": "rpc.messages",
           "default": "rpc.messages",
+          "enum": [
+            "rpc.messages"
+          ],
           "title": "RpcMessagesReportedType",
           "type": "string"
         }
@@ -4406,8 +4474,10 @@
           "type": "string"
         },
         "type": {
-          "const": "rpc.model_catalog",
           "default": "rpc.model_catalog",
+          "enum": [
+            "rpc.model_catalog"
+          ],
           "title": "RpcModelCatalogReportedType",
           "type": "string"
         }
@@ -4600,8 +4670,10 @@
           "type": "string"
         },
         "type": {
-          "const": "rpc.permissions",
           "default": "rpc.permissions",
+          "enum": [
+            "rpc.permissions"
+          ],
           "title": "RpcPermissionsReportedType",
           "type": "string"
         }
@@ -4671,8 +4743,10 @@
           "type": "string"
         },
         "type": {
-          "const": "rpc.process_output",
           "default": "rpc.process_output",
+          "enum": [
+            "rpc.process_output"
+          ],
           "title": "RpcProcessOutputReportedType",
           "type": "string"
         }
@@ -4790,8 +4864,10 @@
           "type": "string"
         },
         "type": {
-          "const": "rpc.processes",
           "default": "rpc.processes",
+          "enum": [
+            "rpc.processes"
+          ],
           "title": "RpcProcessesReportedType",
           "type": "string"
         }
@@ -4885,8 +4961,10 @@
           "type": "boolean"
         },
         "type": {
-          "const": "rpc.project_files",
           "default": "rpc.project_files",
+          "enum": [
+            "rpc.project_files"
+          ],
           "title": "RpcProjectFilesReportedType",
           "type": "string"
         }
@@ -4993,8 +5071,10 @@
           "type": "string"
         },
         "type": {
-          "const": "rpc.session.cloned",
           "default": "rpc.session.cloned",
+          "enum": [
+            "rpc.session.cloned"
+          ],
           "title": "RpcSessionClonedType",
           "type": "string"
         }
@@ -5122,8 +5202,10 @@
           "type": "string"
         },
         "type": {
-          "const": "rpc.session.forked",
           "default": "rpc.session.forked",
+          "enum": [
+            "rpc.session.forked"
+          ],
           "title": "RpcSessionForkedType",
           "type": "string"
         }
@@ -5201,8 +5283,10 @@
           "type": "string"
         },
         "type": {
-          "const": "rpc.session.name_changed",
           "default": "rpc.session.name_changed",
+          "enum": [
+            "rpc.session.name_changed"
+          ],
           "title": "RpcSessionNameChangedType",
           "type": "string"
         }
@@ -5274,8 +5358,10 @@
           "type": "string"
         },
         "type": {
-          "const": "rpc.session.selected",
           "default": "rpc.session.selected",
+          "enum": [
+            "rpc.session.selected"
+          ],
           "title": "RpcSessionSelectedType",
           "type": "string"
         }
@@ -5438,8 +5524,10 @@
           "type": "string"
         },
         "type": {
-          "const": "rpc.session.tree.navigated",
           "default": "rpc.session.tree.navigated",
+          "enum": [
+            "rpc.session.tree.navigated"
+          ],
           "title": "RpcSessionTreeNavigatedType",
           "type": "string"
         }
@@ -5634,8 +5722,10 @@
           "type": "boolean"
         },
         "type": {
-          "const": "rpc.session.tree",
           "default": "rpc.session.tree",
+          "enum": [
+            "rpc.session.tree"
+          ],
           "title": "RpcSessionTreeReportedType",
           "type": "string"
         }
@@ -5715,8 +5805,10 @@
           "type": "string"
         },
         "type": {
-          "const": "rpc.session.tree.unreverted",
           "default": "rpc.session.tree.unreverted",
+          "enum": [
+            "rpc.session.tree.unreverted"
+          ],
           "title": "RpcSessionTreeUnrevertedType",
           "type": "string"
         }
@@ -5831,8 +5923,10 @@
           "type": "string"
         },
         "type": {
-          "const": "rpc.sessions",
           "default": "rpc.sessions",
+          "enum": [
+            "rpc.sessions"
+          ],
           "title": "RpcSessionsReportedType",
           "type": "string"
         }
@@ -5894,8 +5988,10 @@
           "type": "string"
         },
         "type": {
-          "const": "rpc.settings.reloaded",
           "default": "rpc.settings.reloaded",
+          "enum": [
+            "rpc.settings.reloaded"
+          ],
           "title": "RpcSettingsReloadedType",
           "type": "string"
         },
@@ -6009,8 +6105,10 @@
           "type": "boolean"
         },
         "type": {
-          "const": "rpc.shell.completed",
           "default": "rpc.shell.completed",
+          "enum": [
+            "rpc.shell.completed"
+          ],
           "title": "RpcShellCompletedType",
           "type": "string"
         }
@@ -6079,8 +6177,10 @@
           "type": "string"
         },
         "type": {
-          "const": "rpc.shell.progress",
           "default": "rpc.shell.progress",
+          "enum": [
+            "rpc.shell.progress"
+          ],
           "title": "RpcShellProgressType",
           "type": "string"
         }
@@ -6279,8 +6379,10 @@
           "type": "string"
         },
         "type": {
-          "const": "rpc.skills",
           "default": "rpc.skills",
+          "enum": [
+            "rpc.skills"
+          ],
           "title": "RpcSkillsReportedType",
           "type": "string"
         }
@@ -6314,8 +6416,10 @@
           "type": "string"
         },
         "type": {
-          "const": "rpc.startup.history_preview",
           "default": "rpc.startup.history_preview",
+          "enum": [
+            "rpc.startup.history_preview"
+          ],
           "title": "RpcStartupHistoryPreviewType",
           "type": "string"
         }
@@ -6346,8 +6450,10 @@
           "type": "string"
         },
         "type": {
-          "const": "rpc.state",
           "default": "rpc.state",
+          "enum": [
+            "rpc.state"
+          ],
           "title": "RpcStateReportedType",
           "type": "string"
         }
@@ -6548,8 +6654,10 @@
           "type": "string"
         },
         "type": {
-          "const": "rpc.subagents",
           "default": "rpc.subagents",
+          "enum": [
+            "rpc.subagents"
+          ],
           "title": "RpcSubagentsReportedType",
           "type": "string"
         }
@@ -6603,8 +6711,10 @@
           "type": "string"
         },
         "type": {
-          "const": "rpc.workspace",
           "default": "rpc.workspace",
+          "enum": [
+            "rpc.workspace"
+          ],
           "title": "RpcWorkspaceReportedType",
           "type": "string"
         }
@@ -6770,8 +6880,10 @@
           "type": "string"
         },
         "type": {
-          "const": "session.directory_changed",
           "default": "session.directory_changed",
+          "enum": [
+            "session.directory_changed"
+          ],
           "title": "SessionDirectoryChangedType",
           "type": "string"
         }
@@ -6804,8 +6916,10 @@
           "type": "string"
         },
         "type": {
-          "const": "session.saved",
           "default": "session.saved",
+          "enum": [
+            "session.saved"
+          ],
           "title": "SessionSavedType",
           "type": "string"
         }
@@ -6944,8 +7058,10 @@
           "type": "string"
         },
         "type": {
-          "const": "session.stats",
           "default": "session.stats",
+          "enum": [
+            "session.stats"
+          ],
           "title": "SessionStatsReportedType",
           "type": "string"
         }
@@ -6973,8 +7089,10 @@
           "type": "string"
         },
         "type": {
-          "const": "skill.catalog.updated",
           "default": "skill.catalog.updated",
+          "enum": [
+            "skill.catalog.updated"
+          ],
           "title": "SkillCatalogUpdatedType",
           "type": "string"
         }
@@ -7095,8 +7213,10 @@
           "type": "string"
         },
         "type": {
-          "const": "skill.invoked",
           "default": "skill.invoked",
+          "enum": [
+            "skill.invoked"
+          ],
           "title": "SkillInvokedType",
           "type": "string"
         }
@@ -7438,8 +7558,10 @@
           "type": "string"
         },
         "type": {
-          "const": "tool.approval.requested",
           "default": "tool.approval.requested",
+          "enum": [
+            "tool.approval.requested"
+          ],
           "title": "ToolApprovalRequestedType",
           "type": "string"
         }
@@ -7536,8 +7658,10 @@
           "type": "string"
         },
         "type": {
-          "const": "tool.approval.resolved",
           "default": "tool.approval.resolved",
+          "enum": [
+            "tool.approval.resolved"
+          ],
           "title": "ToolApprovalResolvedType",
           "type": "string"
         }
@@ -7653,8 +7777,10 @@
           "type": "string"
         },
         "type": {
-          "const": "tool.approval.reviewed",
           "default": "tool.approval.reviewed",
+          "enum": [
+            "tool.approval.reviewed"
+          ],
           "title": "ToolApprovalReviewedType",
           "type": "string"
         },
@@ -7721,8 +7847,10 @@
           "type": "string"
         },
         "type": {
-          "const": "tool.call",
           "default": "tool.call",
+          "enum": [
+            "tool.call"
+          ],
           "title": "ToolCallRequestedType",
           "type": "string"
         }
@@ -8105,8 +8233,10 @@
           "type": "boolean"
         },
         "type": {
-          "const": "tool.execution.ended",
           "default": "tool.execution.ended",
+          "enum": [
+            "tool.execution.ended"
+          ],
           "title": "ToolExecutionEndedType",
           "type": "string"
         }
@@ -8199,8 +8329,10 @@
           "type": "string"
         },
         "type": {
-          "const": "tool.execution.progress",
           "default": "tool.execution.progress",
+          "enum": [
+            "tool.execution.progress"
+          ],
           "title": "ToolExecutionProgressType",
           "type": "string"
         }
@@ -8254,8 +8386,10 @@
           "type": "string"
         },
         "type": {
-          "const": "tool.execution.started",
           "default": "tool.execution.started",
+          "enum": [
+            "tool.execution.started"
+          ],
           "title": "ToolExecutionStartedType",
           "type": "string"
         }
@@ -8289,8 +8423,10 @@
           "type": "string"
         },
         "type": {
-          "const": "tool.nested.ended",
           "default": "tool.nested.ended",
+          "enum": [
+            "tool.nested.ended"
+          ],
           "title": "ToolNestedCallEndedType",
           "type": "string"
         }
@@ -8351,8 +8487,10 @@
           "type": "string"
         },
         "type": {
-          "const": "tool.nested.started",
           "default": "tool.nested.started",
+          "enum": [
+            "tool.nested.started"
+          ],
           "title": "ToolNestedCallStartedType",
           "type": "string"
         }
@@ -8698,8 +8836,10 @@
           "type": "boolean"
         },
         "type": {
-          "const": "tool.result",
           "default": "tool.result",
+          "enum": [
+            "tool.result"
+          ],
           "title": "ToolResultReadyType",
           "type": "string"
         }
@@ -8762,8 +8902,10 @@
           "type": "string"
         },
         "type": {
-          "const": "trust.requested",
           "default": "trust.requested",
+          "enum": [
+            "trust.requested"
+          ],
           "title": "TrustRequestedType",
           "type": "string"
         }
@@ -8811,8 +8953,10 @@
           "type": "boolean"
         },
         "type": {
-          "const": "trust.resolved",
           "default": "trust.resolved",
+          "enum": [
+            "trust.resolved"
+          ],
           "title": "TrustResolvedType",
           "type": "string"
         }
@@ -8861,8 +9005,10 @@
           "type": "integer"
         },
         "type": {
-          "const": "turn.completed",
           "default": "turn.completed",
+          "enum": [
+            "turn.completed"
+          ],
           "title": "TurnCompletedType",
           "type": "string"
         }
@@ -8890,8 +9036,10 @@
           "type": "integer"
         },
         "type": {
-          "const": "turn.started",
           "default": "turn.started",
+          "enum": [
+            "turn.started"
+          ],
           "title": "TurnStartedType",
           "type": "string"
         }
@@ -9103,8 +9251,10 @@
           "type": "string"
         },
         "type": {
-          "const": "warning",
           "default": "warning",
+          "enum": [
+            "warning"
+          ],
           "title": "WarningEventType",
           "type": "string"
         }
@@ -9177,8 +9327,10 @@
           "type": "integer"
         },
         "type": {
-          "const": "web.search",
           "default": "web.search",
+          "enum": [
+            "web.search"
+          ],
           "title": "WebSearchPerformedType",
           "type": "string"
         }

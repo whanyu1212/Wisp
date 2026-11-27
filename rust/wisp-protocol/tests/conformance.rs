@@ -565,6 +565,123 @@ fn every_python_event_fixture_round_trips_in_rust() {
 }
 
 #[test]
+fn every_python_event_fixture_maps_to_its_exact_wire_variant() {
+    use events::wire::WispCurrentLiveEventOutput as Wire;
+
+    let fixtures = fixtures(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../schemas/live-rpc/events.schema.json"
+    )));
+    assert_eq!(fixtures.len(), 76);
+
+    for (discriminator, fixture) in fixtures {
+        let event = events::deserialize(fixture)
+            .unwrap_or_else(|error| panic!("{discriminator} did not deserialize: {error}"));
+        let matched = match event.payload() {
+            Wire::AgentCompleted(_) => "agent.completed",
+            Wire::AgentStarted(_) => "agent.started",
+            Wire::BrowserViewportUpdated(_) => "browser.viewport.updated",
+            Wire::CompactionCompleted(_) => "compaction.completed",
+            Wire::CompactionStarted(_) => "compaction.started",
+            Wire::ContextEstimated(_) => "context.estimated",
+            Wire::ContextOverflow(_) => "context.overflow",
+            Wire::ContextPressure(_) => "context.pressure",
+            Wire::ErrorEvent(_) => "error",
+            Wire::McpStatusUpdated(_) => "mcp.status.updated",
+            Wire::MessageCompleted(_) => "message.completed",
+            Wire::MessageDelta(_) => "message.delta",
+            Wire::MessageStarted(_) => "message.started",
+            Wire::ModelProviderAutoSwitched(_) => "model.provider_auto_switched",
+            Wire::ProcessEnded(_) => "process.ended",
+            Wire::ProjectConfigApplied(_) => "project.config.applied",
+            Wire::ProjectFilesInvalidated(_) => "project_files.invalidated",
+            Wire::ProviderRetrying(_) => "provider.retrying",
+            Wire::QueueItemsRemoved(_) => "queue.items.removed",
+            Wire::QueueMessageInjected(_) => "queue.message.injected",
+            Wire::QueueUpdated(_) => "queue.updated",
+            Wire::RpcBrowserAddressesReported(_) => "rpc.browser_addresses",
+            Wire::RpcCodemodeReported(_) => "rpc.codemode",
+            Wire::RpcCommandFinished(_) => "rpc.command.finished",
+            Wire::RpcCommandStarted(_) => "rpc.command.started",
+            Wire::RpcCommandsReported(_) => "rpc.commands",
+            Wire::RpcConnectionCatalogReported(_) => "rpc.connection_catalog",
+            Wire::RpcDeviceCodeReported(_) => "rpc.device_code",
+            Wire::RpcDeviceCodeProgressReported(_) => "rpc.device_code.progress",
+            Wire::RpcGitDiffReported(_) => "rpc.git_diff",
+            Wire::RpcMcpStatusReported(_) => "rpc.mcp",
+            Wire::RpcMcpLoginStarted(_) => "rpc.mcp.login",
+            Wire::RpcMcpSnippetPreviewed(_) => "rpc.mcp.preview",
+            Wire::RpcMessagesReported(_) => "rpc.messages",
+            Wire::RpcModelCatalogReported(_) => "rpc.model_catalog",
+            Wire::RpcPermissionsReported(_) => "rpc.permissions",
+            Wire::RpcProcessOutputReported(_) => "rpc.process_output",
+            Wire::RpcProcessesReported(_) => "rpc.processes",
+            Wire::RpcProjectFilesReported(_) => "rpc.project_files",
+            Wire::RpcSessionCloned(_) => "rpc.session.cloned",
+            Wire::RpcSessionForked(_) => "rpc.session.forked",
+            Wire::RpcSessionNameChanged(_) => "rpc.session.name_changed",
+            Wire::RpcSessionSelected(_) => "rpc.session.selected",
+            Wire::RpcSessionTreeReported(_) => "rpc.session.tree",
+            Wire::RpcSessionTreeNavigated(_) => "rpc.session.tree.navigated",
+            Wire::RpcSessionTreeUnreverted(_) => "rpc.session.tree.unreverted",
+            Wire::RpcSessionsReported(_) => "rpc.sessions",
+            Wire::RpcSettingsReloaded(_) => "rpc.settings.reloaded",
+            Wire::RpcShellCompleted(_) => "rpc.shell.completed",
+            Wire::RpcShellProgress(_) => "rpc.shell.progress",
+            Wire::RpcSkillsReported(_) => "rpc.skills",
+            Wire::RpcStartupHistoryPreview(_) => "rpc.startup.history_preview",
+            Wire::RpcStateReported(_) => "rpc.state",
+            Wire::RpcSubagentsReported(_) => "rpc.subagents",
+            Wire::RpcWorkspaceReported(_) => "rpc.workspace",
+            Wire::SessionDirectoryChanged(_) => "session.directory_changed",
+            Wire::SessionSaved(_) => "session.saved",
+            Wire::SessionStatsReported(_) => "session.stats",
+            Wire::SkillCatalogUpdated(_) => "skill.catalog.updated",
+            Wire::SkillInvoked(_) => "skill.invoked",
+            Wire::ToolApprovalRequested(_) => "tool.approval.requested",
+            Wire::ToolApprovalResolved(_) => "tool.approval.resolved",
+            Wire::ToolApprovalReviewed(_) => "tool.approval.reviewed",
+            Wire::ToolCallRequested(_) => "tool.call",
+            Wire::ToolExecutionEnded(_) => "tool.execution.ended",
+            Wire::ToolExecutionProgress(_) => "tool.execution.progress",
+            Wire::ToolExecutionStarted(_) => "tool.execution.started",
+            Wire::ToolNestedCallEnded(_) => "tool.nested.ended",
+            Wire::ToolNestedCallStarted(_) => "tool.nested.started",
+            Wire::ToolResultReady(_) => "tool.result",
+            Wire::TrustRequested(_) => "trust.requested",
+            Wire::TrustResolved(_) => "trust.resolved",
+            Wire::TurnCompleted(_) => "turn.completed",
+            Wire::TurnStarted(_) => "turn.started",
+            Wire::WarningEvent(_) => "warning",
+            Wire::WebSearchPerformed(_) => "web.search",
+        };
+        assert_eq!(matched, discriminator);
+    }
+}
+
+#[test]
+fn ambiguous_event_shapes_preserve_their_typed_variants() {
+    use events::wire::WispCurrentLiveEventOutput as Wire;
+
+    let fixtures = fixtures(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../schemas/live-rpc/events.schema.json"
+    )));
+
+    let tool_ended = events::deserialize(fixtures["tool.execution.ended"].clone()).unwrap();
+    assert!(matches!(tool_ended.payload(), Wire::ToolExecutionEnded(_)));
+
+    let tool_result = events::deserialize(fixtures["tool.result"].clone()).unwrap();
+    assert!(matches!(tool_result.payload(), Wire::ToolResultReady(_)));
+
+    let error_event = events::deserialize(fixtures["error"].clone()).unwrap();
+    assert!(matches!(error_event.payload(), Wire::ErrorEvent(_)));
+
+    let warning_event = events::deserialize(fixtures["warning"].clone()).unwrap();
+    assert!(matches!(warning_event.payload(), Wire::WarningEvent(_)));
+}
+
+#[test]
 fn model_catalog_projection_is_correlated_and_bounded() {
     let fixture = fixtures(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
