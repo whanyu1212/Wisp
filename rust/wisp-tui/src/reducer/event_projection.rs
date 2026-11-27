@@ -98,10 +98,10 @@ impl BackendEvent {
     pub fn from_live(event: &WispCurrentLiveEventOutput) -> Result<Self, EventProjectionError> {
         use wisp_protocol::events::wire::WispCurrentLiveEventOutput as WireEvent;
         match event.payload() {
-            WireEvent::ErrorEvent(payload) => return Ok(bounded_diagnostic(&payload.message)),
-            WireEvent::WarningEvent(payload) => return Ok(bounded_diagnostic(&payload.message)),
+            WireEvent::ErrorEvent(payload) => Ok(bounded_diagnostic(&payload.message)),
+            WireEvent::WarningEvent(payload) => Ok(bounded_diagnostic(&payload.message)),
             WireEvent::ProjectFilesInvalidated(payload) => {
-                return Ok(Self::ProjectFilesInvalidated(payload.generation.get()));
+                Ok(Self::ProjectFilesInvalidated(payload.generation.get()))
             }
             WireEvent::RpcProjectFilesReported(payload) => {
                 let command_id =
@@ -111,60 +111,53 @@ impl BackendEvent {
                         "Project discovery report exceeds the 1 MiB display limit or could not be decoded."
                             .into()
                     });
-                return Ok(Self::ProjectFilesReported {
+                Ok(Self::ProjectFilesReported {
                     command_id,
                     directory: payload.directory.as_deref().cloned(),
                     in_progress: payload.in_progress,
                     snapshot,
-                });
+                })
             }
             WireEvent::RpcSkillsReported(payload) => {
                 let command_id = exact_str(&payload.command_id, "rpc.skills", "command_id", 256)?;
                 let catalog =
                     discovery_report(&payload.catalog, || event.skill_catalog(&command_id));
-                return Ok(Self::SkillCatalogReported {
+                Ok(Self::SkillCatalogReported {
                     command_id,
                     catalog,
-                });
+                })
             }
-            WireEvent::SkillCatalogUpdated(payload) => {
-                return Ok(Self::SkillCatalogUpdated(discovery_report(
-                    &payload.catalog,
-                    || event.updated_skill_catalog(),
-                )));
-            }
+            WireEvent::SkillCatalogUpdated(payload) => Ok(Self::SkillCatalogUpdated(
+                discovery_report(&payload.catalog, || event.updated_skill_catalog()),
+            )),
             WireEvent::RpcMcpStatusReported(payload) => {
                 let command_id = exact_str(&payload.command_id, "rpc.mcp", "command_id", 256)?;
                 let status = discovery_report(&payload.status, || event.mcp_status(&command_id));
-                return Ok(Self::McpStatusReported { command_id, status });
+                Ok(Self::McpStatusReported { command_id, status })
             }
-            WireEvent::McpStatusUpdated(payload) => {
-                return Ok(Self::McpStatusUpdated(discovery_report(
-                    &payload.status,
-                    || event.updated_mcp_status(),
-                )));
-            }
-            WireEvent::RpcMcpLoginStarted(payload) => {
-                return Ok(Self::McpLoginStarted {
-                    command_id: exact_str(&payload.command_id, "rpc.mcp.login", "command_id", 256)?,
-                    name: exact_str(&payload.name, "rpc.mcp.login", "name", 256)?,
-                    authorization_url: exact_str(
-                        &payload.authorization_url,
-                        "rpc.mcp.login",
-                        "authorization_url",
-                        8_192 * 4,
-                    )?,
-                });
-            }
+            WireEvent::McpStatusUpdated(payload) => Ok(Self::McpStatusUpdated(discovery_report(
+                &payload.status,
+                || event.updated_mcp_status(),
+            ))),
+            WireEvent::RpcMcpLoginStarted(payload) => Ok(Self::McpLoginStarted {
+                command_id: exact_str(&payload.command_id, "rpc.mcp.login", "command_id", 256)?,
+                name: exact_str(&payload.name, "rpc.mcp.login", "name", 256)?,
+                authorization_url: exact_str(
+                    &payload.authorization_url,
+                    "rpc.mcp.login",
+                    "authorization_url",
+                    8_192 * 4,
+                )?,
+            }),
             WireEvent::RpcMcpSnippetPreviewed(payload) => {
                 let command_id =
                     exact_str(&payload.command_id, "rpc.mcp.preview", "command_id", 256)?;
                 let servers =
                     discovery_report(&payload.servers, || event.mcp_snippet_preview(&command_id));
-                return Ok(Self::McpSnippetPreviewed {
+                Ok(Self::McpSnippetPreviewed {
                     command_id,
                     servers,
-                });
+                })
             }
             WireEvent::SessionStatsReported(payload) => {
                 let command_id =
@@ -200,10 +193,10 @@ impl BackendEvent {
                         limit: 128,
                     });
                 }
-                return Ok(Self::SessionStatsReported {
+                Ok(Self::SessionStatsReported {
                     command_id,
                     stats: Box::new(stats),
-                });
+                })
             }
             WireEvent::ContextEstimated(payload) => {
                 let mut estimate = event.context_estimated().ok_or_else(|| {
@@ -225,7 +218,7 @@ impl BackendEvent {
                         limit: 1024,
                     });
                 }
-                return Ok(Self::ContextEstimated(estimate));
+                Ok(Self::ContextEstimated(estimate))
             }
             WireEvent::CompactionStarted(payload) => {
                 let mut started = event.compaction_started().ok_or_else(|| {
@@ -240,7 +233,7 @@ impl BackendEvent {
                     "session_id",
                     SESSION_ID_MAX_BYTES,
                 )?;
-                return Ok(Self::CompactionStarted(started));
+                Ok(Self::CompactionStarted(started))
             }
             WireEvent::CompactionCompleted(payload) => {
                 let mut completed = event.compaction_completed().ok_or_else(|| {
@@ -259,17 +252,17 @@ impl BackendEvent {
                     .error
                     .as_ref()
                     .map(|error| super::bounded_session_text(error, 1024));
-                return Ok(Self::CompactionCompleted(completed));
+                Ok(Self::CompactionCompleted(completed))
             }
             WireEvent::RpcBrowserAddressesReported(payload) => {
-                return Ok(Self::BrowserAddressesReported(BrowserAddresses {
+                Ok(Self::BrowserAddressesReported(BrowserAddresses {
                     trusted: payload.trusted,
                     addresses: payload
                         .addresses
                         .iter()
                         .map(|address| address.as_str().to_owned())
                         .collect(),
-                }));
+                }))
             }
             WireEvent::BrowserViewportUpdated(_) => {
                 let update = event.browser_viewport_updated().ok_or_else(|| {
@@ -302,7 +295,7 @@ impl BackendEvent {
                         )
                     })
                 });
-                return Ok(Self::BrowserViewportUpdated(Box::new(
+                Ok(Self::BrowserViewportUpdated(Box::new(
                     BrowserViewportInput {
                         live,
                         window_mode: update.window_mode,
@@ -315,7 +308,7 @@ impl BackendEvent {
                         source_tool: update.source_tool,
                         timestamp: update.timestamp,
                     },
-                )));
+                )))
             }
             WireEvent::RpcCommandsReported(payload) => {
                 let command_id = exact_str(&payload.command_id, "rpc.commands", "command_id", 256)?;
@@ -330,10 +323,10 @@ impl BackendEvent {
                     descriptor.description =
                         super::bounded_session_text(&descriptor.description, 1024);
                 }
-                return Ok(Self::CommandCatalogReported {
+                Ok(Self::CommandCatalogReported {
                     command_id,
                     catalog: catalog.into(),
-                });
+                })
             }
             WireEvent::RpcModelCatalogReported(payload) => {
                 let command_id =
@@ -345,10 +338,10 @@ impl BackendEvent {
                             event_type: "rpc.model_catalog".into(),
                             field: "catalog",
                         })?;
-                return Ok(Self::ModelCatalogReported {
+                Ok(Self::ModelCatalogReported {
                     command_id,
                     catalog,
-                });
+                })
             }
             WireEvent::RpcConnectionCatalogReported(payload) => {
                 let command_id = exact_str(
@@ -363,10 +356,10 @@ impl BackendEvent {
                         field: "command_id",
                     },
                 )?;
-                return Ok(Self::ConnectionCatalogReported {
+                Ok(Self::ConnectionCatalogReported {
                     command_id,
                     catalog,
-                });
+                })
             }
             WireEvent::RpcDeviceCodeReported(payload) => {
                 let command_id =
@@ -378,10 +371,10 @@ impl BackendEvent {
                             event_type: "rpc.device_code".into(),
                             field: "command_id",
                         })?;
-                return Ok(Self::DeviceCodeReported {
+                Ok(Self::DeviceCodeReported {
                     command_id,
                     challenge,
-                });
+                })
             }
             WireEvent::RpcDeviceCodeProgressReported(payload) => {
                 let command_id = exact_str(
@@ -396,10 +389,10 @@ impl BackendEvent {
                         field: "command_id",
                     },
                 )?;
-                return Ok(Self::DeviceCodeProgress {
+                Ok(Self::DeviceCodeProgress {
                     command_id,
                     progress,
-                });
+                })
             }
             WireEvent::RpcStateReported(payload) => {
                 let command_id = exact_str(&payload.command_id, "rpc.state", "command_id", 256)?;
@@ -413,12 +406,12 @@ impl BackendEvent {
                         wisp_protocol::commands::AgentMode::Plan
                     }
                 };
-                return Ok(Self::StateReported {
+                Ok(Self::StateReported {
                     command_id,
                     mode,
                     web_search: payload.state.web_search,
                     background_processes,
-                });
+                })
             }
             WireEvent::RpcProcessesReported(payload) => {
                 let command_id =
@@ -428,10 +421,10 @@ impl BackendEvent {
                     .iter()
                     .map(|process| wire_process_report(process, "rpc.processes"))
                     .collect::<Result<_, _>>()?;
-                return Ok(Self::ProcessesReported {
+                Ok(Self::ProcessesReported {
                     command_id,
                     processes,
-                });
+                })
             }
             WireEvent::RpcProcessOutputReported(payload) => {
                 let command_id =
@@ -452,14 +445,14 @@ impl BackendEvent {
                         (stream, chunk.text.clone())
                     })
                     .collect();
-                return Ok(Self::ProcessOutputReported {
+                Ok(Self::ProcessOutputReported {
                     command_id,
                     output: std::sync::Arc::new(super::background_processes::ProcessOutput {
                         process,
                         chunks,
                         omitted_bytes: payload.omitted_bytes,
                     }),
-                });
+                })
             }
             WireEvent::ProcessEnded(payload) => {
                 let exit_code = wire_exit_code(payload.exit_code, "process.ended")?;
@@ -480,32 +473,28 @@ impl BackendEvent {
                         crate::tool_cards::ProcessDisplayState::Cancelled
                     }
                 };
-                return Ok(Self::ProcessEnded {
+                Ok(Self::ProcessEnded {
                     process_id: exact_str(&payload.process_id, "process.ended", "process_id", 128)?,
                     command: (*payload.command).clone(),
                     state,
                     exit_code,
                     duration_ms: payload.duration_ms,
-                });
+                })
             }
-            WireEvent::AgentStarted(payload) => {
-                return wrap_message_origin(
-                    Self::Other {
-                        event_type: "agent.started".into(),
-                    },
-                    payload.message_entry_id.as_deref().map(String::as_str),
-                    Vec::new(),
-                );
-            }
-            WireEvent::SkillInvoked(payload) => {
-                return wrap_message_origin(
-                    Self::Other {
-                        event_type: "skill.invoked".into(),
-                    },
-                    Some(&payload.message_entry_id),
-                    Vec::new(),
-                );
-            }
+            WireEvent::AgentStarted(payload) => wrap_message_origin(
+                Self::Other {
+                    event_type: "agent.started".into(),
+                },
+                payload.message_entry_id.as_deref().map(String::as_str),
+                Vec::new(),
+            ),
+            WireEvent::SkillInvoked(payload) => wrap_message_origin(
+                Self::Other {
+                    event_type: "skill.invoked".into(),
+                },
+                Some(&payload.message_entry_id),
+                Vec::new(),
+            ),
             WireEvent::MessageStarted(payload) => {
                 let turn = u64::try_from(payload.turn).map_err(|_| {
                     EventProjectionError::InvalidField {
@@ -513,7 +502,7 @@ impl BackendEvent {
                         field: "turn",
                     }
                 })?;
-                return Ok(Self::MessageStarted { turn });
+                Ok(Self::MessageStarted { turn })
             }
             WireEvent::MessageDelta(payload) => {
                 let turn = u64::try_from(payload.turn).map_err(|_| {
@@ -530,11 +519,11 @@ impl BackendEvent {
                         MessageContentKind::Thinking
                     }
                 };
-                return Ok(Self::MessageDelta {
+                Ok(Self::MessageDelta {
                     turn,
                     delta: payload.delta.clone(),
                     content_kind,
-                });
+                })
             }
             WireEvent::MessageCompleted(payload) => {
                 let turn = u64::try_from(payload.turn).map_err(|_| {
@@ -555,14 +544,14 @@ impl BackendEvent {
                     .take(128)
                     .map(|call| bounded_identity(&call.call_id))
                     .collect();
-                return wrap_message_origin(
+                wrap_message_origin(
                     projected,
                     payload.message_entry_id.as_deref().map(String::as_str),
                     tool_call_ids,
-                );
+                )
             }
             WireEvent::AgentCompleted(payload) => {
-                return Ok(Self::RunCompleted(crate::transcript::RunTotals {
+                Ok(Self::RunCompleted(crate::transcript::RunTotals {
                     outcome: payload.outcome.to_string(),
                     duration_ms: payload.duration_ms,
                     tool_calls: payload.tool_calls,
@@ -574,7 +563,7 @@ impl BackendEvent {
                     }),
                     model: payload.model.clone(),
                     effort: payload.effort.clone(),
-                }));
+                }))
             }
             WireEvent::WebSearchPerformed(payload) => {
                 let turn = u64::try_from(payload.turn).map_err(|_| {
@@ -583,10 +572,10 @@ impl BackendEvent {
                         field: "turn",
                     }
                 })?;
-                return Ok(Self::WebSearch {
+                Ok(Self::WebSearch {
                     turn,
                     search: crate::web_search::search_from_wire(payload),
-                });
+                })
             }
             WireEvent::SessionDirectoryChanged(payload) => {
                 let Some(previous) = &payload.previous_cwd else {
@@ -594,35 +583,29 @@ impl BackendEvent {
                         event_type: "session.directory_changed".into(),
                     });
                 };
-                return Ok(Self::DirectoryChanged {
+                Ok(Self::DirectoryChanged {
                     previous: previous.clone(),
                     cwd: payload.cwd.clone(),
-                });
+                })
             }
-            WireEvent::RpcWorkspaceReported(payload) => {
-                return Ok(Self::WorkspaceReported {
-                    cwd: payload.cwd.clone(),
-                    git_branch: payload.git_branch.clone(),
-                    session_images_dir: payload
-                        .session_images_dir
-                        .as_deref()
-                        .filter(|path| !path.is_empty())
-                        .map(std::path::PathBuf::from),
-                });
-            }
-            WireEvent::TrustRequested(payload) => {
-                return Ok(Self::TrustRequested {
-                    request_id: payload.request_id.clone(),
-                    project_path: payload.project_path.clone(),
-                });
-            }
-            WireEvent::ProjectConfigApplied(payload) => {
-                return Ok(Self::ProjectConfigApplied {
-                    provider: payload.provider.clone(),
-                    model: payload.model.clone(),
-                    effort: payload.effort.clone(),
-                });
-            }
+            WireEvent::RpcWorkspaceReported(payload) => Ok(Self::WorkspaceReported {
+                cwd: payload.cwd.clone(),
+                git_branch: payload.git_branch.clone(),
+                session_images_dir: payload
+                    .session_images_dir
+                    .as_deref()
+                    .filter(|path| !path.is_empty())
+                    .map(std::path::PathBuf::from),
+            }),
+            WireEvent::TrustRequested(payload) => Ok(Self::TrustRequested {
+                request_id: payload.request_id.clone(),
+                project_path: payload.project_path.clone(),
+            }),
+            WireEvent::ProjectConfigApplied(payload) => Ok(Self::ProjectConfigApplied {
+                provider: payload.provider.clone(),
+                model: payload.model.clone(),
+                effort: payload.effort.clone(),
+            }),
             WireEvent::RpcCommandStarted(payload) => {
                 if payload.command_type == "process_wake" {
                     return Ok(Self::WakeStarted {
@@ -634,71 +617,63 @@ impl BackendEvent {
                         )?,
                     });
                 }
-                return Ok(Self::Other {
+                Ok(Self::Other {
                     event_type: "rpc.command.started".into(),
-                });
+                })
             }
-            WireEvent::RpcCommandFinished(payload) => {
-                return Ok(Self::CommandFinished {
-                    command_id: exact_str(
-                        &payload.command_id,
-                        "rpc.command.finished",
-                        "command_id",
-                        256,
-                    )?,
-                    command_type: BoundedText::head(&payload.command_type, 128, 8).text,
-                    ok: payload.ok,
-                    error: payload
-                        .error
-                        .as_deref()
-                        .map(|error| BoundedText::head(error, 1024, 8).text),
-                });
-            }
-            WireEvent::RpcShellProgress(payload) => {
-                return Ok(Self::ShellProgress {
-                    command_id: exact_str(
-                        &payload.command_id,
-                        "rpc.shell.progress",
-                        "command_id",
-                        256,
-                    )?,
-                    stdout_tail: (*payload.stdout_tail).clone(),
-                    stderr_tail: (*payload.stderr_tail).clone(),
-                    stdout_bytes: payload.stdout_bytes,
-                    stderr_bytes: payload.stderr_bytes,
-                });
-            }
-            WireEvent::RpcShellCompleted(payload) => {
-                return Ok(Self::ShellCompleted {
-                    command_id: exact_str(
-                        &payload.command_id,
-                        "rpc.shell.completed",
-                        "command_id",
-                        256,
-                    )?,
-                    command: BoundedText::head(&payload.command, 32_768, 8).text,
-                    exit_code: payload.exit_code,
-                    output: (*payload.output).clone(),
-                    truncated: payload.truncated,
-                    timed_out: payload.timed_out,
-                    cancelled: payload.cancelled,
-                    duration_ms: payload.duration_ms,
-                    error: payload
-                        .error
-                        .as_deref()
-                        .map(|error| BoundedText::head(error, 2_048, 8).text),
-                });
-            }
-            WireEvent::ToolCallRequested(payload) => {
-                return Ok(Self::ToolCall(ToolCallInput {
-                    call_id: bounded_identity(&payload.call_id),
-                    detail_source: project_tool_detail_source(&payload.name, &payload.arguments),
-                    arguments: bounded_tool_arguments_map(&payload.name, &payload.arguments),
-                    name: bounded_tool_name(&payload.name),
-                }));
-            }
+            WireEvent::RpcCommandFinished(payload) => Ok(Self::CommandFinished {
+                command_id: exact_str(
+                    &payload.command_id,
+                    "rpc.command.finished",
+                    "command_id",
+                    256,
+                )?,
+                command_type: BoundedText::head(&payload.command_type, 128, 8).text,
+                ok: payload.ok,
+                error: payload
+                    .error
+                    .as_deref()
+                    .map(|error| BoundedText::head(error, 1024, 8).text),
+            }),
+            WireEvent::RpcShellProgress(payload) => Ok(Self::ShellProgress {
+                command_id: exact_str(
+                    &payload.command_id,
+                    "rpc.shell.progress",
+                    "command_id",
+                    256,
+                )?,
+                stdout_tail: (*payload.stdout_tail).clone(),
+                stderr_tail: (*payload.stderr_tail).clone(),
+                stdout_bytes: payload.stdout_bytes,
+                stderr_bytes: payload.stderr_bytes,
+            }),
+            WireEvent::RpcShellCompleted(payload) => Ok(Self::ShellCompleted {
+                command_id: exact_str(
+                    &payload.command_id,
+                    "rpc.shell.completed",
+                    "command_id",
+                    256,
+                )?,
+                command: BoundedText::head(&payload.command, 32_768, 8).text,
+                exit_code: payload.exit_code,
+                output: (*payload.output).clone(),
+                truncated: payload.truncated,
+                timed_out: payload.timed_out,
+                cancelled: payload.cancelled,
+                duration_ms: payload.duration_ms,
+                error: payload
+                    .error
+                    .as_deref()
+                    .map(|error| BoundedText::head(error, 2_048, 8).text),
+            }),
+            WireEvent::ToolCallRequested(payload) => Ok(Self::ToolCall(ToolCallInput {
+                call_id: bounded_identity(&payload.call_id),
+                detail_source: project_tool_detail_source(&payload.name, &payload.arguments),
+                arguments: bounded_tool_arguments_map(&payload.name, &payload.arguments),
+                name: bounded_tool_name(&payload.name),
+            })),
             WireEvent::ToolApprovalRequested(payload) => {
-                return Ok(project_live_approval_requested(payload));
+                Ok(project_live_approval_requested(payload))
             }
             WireEvent::ToolExecutionStarted(payload) => {
                 let resolved = payload.target.as_deref().and_then(|target| {
@@ -710,23 +685,21 @@ impl BackendEvent {
                         name: bounded_tool_name(target),
                     })
                 });
-                return Ok(match resolved {
+                Ok(match resolved {
                     Some(resolved) => Self::ToolTargetResolved(resolved),
                     None => Self::Other {
                         event_type: "tool.execution.started".into(),
                     },
-                });
+                })
             }
-            WireEvent::ToolApprovalReviewed(payload) => {
-                return Ok(Self::ToolApprovalReviewed {
-                    call_id: bounded_identity(&payload.call_id),
-                    note: format!(
-                        "Command review ({}): {}",
-                        payload.verdict,
-                        BoundedText::head(&payload.reason, 500, 8).text,
-                    ),
-                });
-            }
+            WireEvent::ToolApprovalReviewed(payload) => Ok(Self::ToolApprovalReviewed {
+                call_id: bounded_identity(&payload.call_id),
+                note: format!(
+                    "Command review ({}): {}",
+                    payload.verdict,
+                    BoundedText::head(&payload.reason, 500, 8).text,
+                ),
+            }),
             WireEvent::ToolApprovalResolved(payload) => {
                 if payload.source.as_deref() == Some("auto") && payload.approved {
                     return Ok(Self::ToolAutoApproved {
@@ -738,7 +711,7 @@ impl BackendEvent {
                     });
                 }
                 let raw_name = payload.target.as_deref().unwrap_or(&payload.name);
-                return Ok(Self::ToolApprovalResolved {
+                Ok(Self::ToolApprovalResolved {
                     call_id: bounded_identity(&payload.call_id),
                     name: bounded_tool_name(raw_name),
                     approved: payload.approved,
@@ -746,32 +719,28 @@ impl BackendEvent {
                         .reason
                         .as_deref()
                         .map(|reason| BoundedText::head(reason, 512, 8).text),
-                });
+                })
             }
-            WireEvent::ToolExecutionEnded(payload) => {
-                return wrap_message_origin(
-                    Self::ToolExecutionEnded {
-                        call_id: bounded_identity(&payload.call_id),
-                    },
-                    payload.message_entry_id.as_deref().map(String::as_str),
-                    Vec::new(),
-                );
-            }
-            WireEvent::ToolExecutionProgress(payload) => {
-                return Ok(Self::ToolExecutionProgress {
+            WireEvent::ToolExecutionEnded(payload) => wrap_message_origin(
+                Self::ToolExecutionEnded {
                     call_id: bounded_identity(&payload.call_id),
-                    progress: ToolProgressInput {
-                        sequence: payload.sequence.get(),
-                        stdout_tail: (*payload.stdout_tail).clone(),
-                        stderr_tail: (*payload.stderr_tail).clone(),
-                        stdout_bytes: payload.stdout_bytes,
-                        stderr_bytes: payload.stderr_bytes,
-                    },
-                });
-            }
+                },
+                payload.message_entry_id.as_deref().map(String::as_str),
+                Vec::new(),
+            ),
+            WireEvent::ToolExecutionProgress(payload) => Ok(Self::ToolExecutionProgress {
+                call_id: bounded_identity(&payload.call_id),
+                progress: ToolProgressInput {
+                    sequence: payload.sequence.get(),
+                    stdout_tail: (*payload.stdout_tail).clone(),
+                    stderr_tail: (*payload.stderr_tail).clone(),
+                    stdout_bytes: payload.stdout_bytes,
+                    stderr_bytes: payload.stderr_bytes,
+                },
+            }),
             WireEvent::ToolNestedCallStarted(payload) => {
                 let target = payload.target.as_deref();
-                return Ok(Self::ScriptCallStarted {
+                Ok(Self::ScriptCallStarted {
                     parent_call_id: bounded_identity(&payload.parent_call_id),
                     call_id: payload.call_id.clone(),
                     tool: target.unwrap_or(&payload.name).to_owned(),
@@ -780,85 +749,443 @@ impl BackendEvent {
                         target,
                         payload.arguments.as_ref(),
                     ),
-                });
+                })
             }
-            WireEvent::ToolNestedCallEnded(payload) => {
-                return Ok(Self::ScriptCallEnded {
-                    parent_call_id: bounded_identity(&payload.parent_call_id),
-                    call: crate::script_card::ScriptCall::from_wire(&payload.call),
-                });
-            }
-            WireEvent::ToolResultReady(payload) => {
-                let projected = project_live_tool_result(payload)?;
-                return wrap_message_origin(
-                    projected,
-                    payload.message_entry_id.as_deref().map(String::as_str),
-                    Vec::new(),
-                );
-            }
-            _ => {}
-        }
-        let value = event.to_value()?;
-        let event_type = string_field(&value, "<unknown>", "type")?;
-        match event_type.as_str() {
-            "rpc.settings.reloaded" => {
-                let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
-                let report = serde_json::from_value(value.clone()).map_err(|_| {
-                    EventProjectionError::InvalidField {
-                        event_type: event_type.clone(),
-                        field: "state",
-                    }
-                })?;
-                return Ok(Self::SettingsReloaded {
+            WireEvent::ToolNestedCallEnded(payload) => Ok(Self::ScriptCallEnded {
+                parent_call_id: bounded_identity(&payload.parent_call_id),
+                call: crate::script_card::ScriptCall::from_wire(&payload.call),
+            }),
+            WireEvent::ToolResultReady(payload) => wrap_message_origin(
+                project_live_tool_result(payload)?,
+                payload.message_entry_id.as_deref().map(String::as_str),
+                Vec::new(),
+            ),
+            WireEvent::RpcSettingsReloaded(payload) => {
+                let command_id = exact_str(
+                    &payload.command_id,
+                    "rpc.settings.reloaded",
+                    "command_id",
+                    256,
+                )?;
+                let map_names = |names: &[wisp_protocol::events::wire::ReloadSettingName]| {
+                    names.iter().map(|name| (**name).clone()).collect()
+                };
+                let report = super::reload::ReloadReport {
+                    applied: map_names(&payload.applied),
+                    unchanged: map_names(&payload.unchanged),
+                    overridden: map_names(&payload.overridden),
+                    restart_required: map_names(&payload.restart_required),
+                    state: super::reload::ReloadSelection {
+                        provider: payload.state.provider.clone(),
+                        model: payload.state.model.clone(),
+                        effort: payload.state.effort.clone(),
+                    },
+                };
+                Ok(Self::SettingsReloaded {
                     command_id,
                     report: Box::new(report),
-                });
+                })
             }
-            "rpc.subagents" => {
-                let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
-                let subagents = discovery_report(&value["subagents"], || {
-                    serde_json::from_value(value["subagents"].clone()).ok()
+            WireEvent::RpcSubagentsReported(payload) => {
+                let command_id =
+                    exact_str(&payload.command_id, "rpc.subagents", "command_id", 256)?;
+                let subagents = discovery_report(&payload.subagents, || {
+                    Some(subagents_state_from_wire(&payload.subagents))
                 });
-                return Ok(Self::SubagentsReported {
+                Ok(Self::SubagentsReported {
                     command_id,
                     subagents,
-                });
+                })
             }
-            "rpc.codemode" => {
-                let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
-                let codemode = discovery_report(&value["codemode"], || {
-                    serde_json::from_value(value["codemode"].clone()).ok()
+            WireEvent::RpcCodemodeReported(payload) => {
+                let command_id = exact_str(&payload.command_id, "rpc.codemode", "command_id", 256)?;
+                let codemode = discovery_report(&payload.codemode, || {
+                    Some(codemode_state_from_wire(&payload.codemode))
                 });
-                return Ok(Self::CodemodeReported {
+                Ok(Self::CodemodeReported {
                     command_id,
                     codemode,
-                });
+                })
             }
-            "rpc.permissions" => {
-                let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
-                let permissions = discovery_report(&value["permissions"], || {
-                    serde_json::from_value(value["permissions"].clone()).ok()
+            WireEvent::RpcPermissionsReported(payload) => {
+                let command_id =
+                    exact_str(&payload.command_id, "rpc.permissions", "command_id", 256)?;
+                let permissions = discovery_report(&payload.permissions, || {
+                    Some(permission_state_from_wire(&payload.permissions))
                 });
-                return Ok(Self::PermissionsReported {
+                Ok(Self::PermissionsReported {
                     command_id,
                     permissions,
-                });
+                })
             }
-            "rpc.git_diff" => {
-                let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
+            WireEvent::RpcGitDiffReported(payload) => {
+                let command_id = exact_str(&payload.command_id, "rpc.git_diff", "command_id", 256)?;
                 let snapshot =
-                    discovery_report(&value, || serde_json::from_value(value.clone()).ok())
+                    discovery_report(payload, || Some(git_diff_snapshot_from_wire(payload)))
                         .map_err(|_| {
                             "Git diff exceeds the display limit or could not be decoded.".into()
                         });
-                return Ok(Self::GitDiffReported {
+                Ok(Self::GitDiffReported {
                     command_id,
                     snapshot,
-                });
+                })
             }
-            _ => {}
+            WireEvent::QueueUpdated(payload) => {
+                let event_type = "queue.updated";
+                validate_queue_str_slices(
+                    event_type,
+                    [payload.steering.as_slice(), payload.follow_up.as_slice()],
+                )?;
+                let steering_image_counts = queued_images_from_wire(
+                    &payload.steering_images,
+                    event_type,
+                    "steering_images",
+                    payload.steering.len(),
+                )
+                .map(|images| images.iter().map(ComposerImages::len).collect::<Vec<_>>());
+                let follow_up_image_counts = queued_images_from_wire(
+                    &payload.follow_up_images,
+                    event_type,
+                    "follow_up_images",
+                    payload.follow_up.len(),
+                )
+                .map(|images| images.iter().map(ComposerImages::len).collect::<Vec<_>>());
+                Ok(Self::QueueSnapshot(super::queue_management::Snapshot {
+                    steering_image_counts: steering_image_counts?,
+                    follow_up_image_counts: follow_up_image_counts?,
+                    steering: payload.steering.clone(),
+                    follow_up: payload.follow_up.clone(),
+                    steering_mode: wire_steering_mode(payload.steering_mode),
+                    follow_up_mode: wire_follow_up_mode(payload.follow_up_mode),
+                    token: optional_exact_str(
+                        payload.token.as_deref().map(String::as_str),
+                        event_type,
+                        "token",
+                        128,
+                    )?,
+                    command_id: optional_exact_str(
+                        payload.command_id.as_deref(),
+                        event_type,
+                        "command_id",
+                        256,
+                    )?,
+                }))
+            }
+            WireEvent::QueueItemsRemoved(payload) => {
+                let event_type = "queue.items.removed";
+                validate_queue_str_slices(
+                    event_type,
+                    [payload.steering.as_slice(), payload.follow_up.as_slice()],
+                )?;
+                let operation = match payload.operation {
+                    wisp_protocol::events::wire::QueueItemsRemovedOperation::Pop => {
+                        QueueRemovalOperation::Pop
+                    }
+                    wisp_protocol::events::wire::QueueItemsRemovedOperation::Clear => {
+                        QueueRemovalOperation::Clear
+                    }
+                };
+                let kind = payload.kind.map(wire_removed_queue_kind);
+                validate_queue_removal_counts(
+                    event_type,
+                    operation,
+                    kind,
+                    payload.steering.len(),
+                    payload.follow_up.len(),
+                )?;
+                Ok(Self::QueueItemsRemoved {
+                    command_id: exact_str(&payload.command_id, event_type, "command_id", 256)?,
+                    operation,
+                    kind,
+                    steering_images: queued_images_from_wire(
+                        &payload.steering_images,
+                        event_type,
+                        "steering_images",
+                        payload.steering.len(),
+                    )?,
+                    follow_up_images: queued_images_from_wire(
+                        &payload.follow_up_images,
+                        event_type,
+                        "follow_up_images",
+                        payload.follow_up.len(),
+                    )?,
+                    steering: payload.steering.clone(),
+                    follow_up: payload.follow_up.clone(),
+                })
+            }
+            WireEvent::QueueMessageInjected(payload) => {
+                let event_type = "queue.message.injected";
+                validate_queue_payload(event_type, [payload.content.as_str()])?;
+                let visible_content = payload
+                    .skill_invocation
+                    .as_ref()
+                    .map_or_else(|| payload.content.clone(), |s| s.original_content.clone());
+                validate_queue_payload(event_type, [visible_content.as_str()])?;
+                wrap_message_origin(
+                    Self::QueueMessageInjected {
+                        kind: wire_injected_queue_kind(payload.kind),
+                        content: visible_content,
+                        images: composer_images::reported_image_lines_from_wire(&payload.images),
+                        image_parts: composer_images::reported_transcript_images_from_wire(
+                            &payload.images,
+                        ),
+                    },
+                    payload.message_entry_id.as_deref().map(String::as_str),
+                    Vec::new(),
+                )
+            }
+            WireEvent::RpcSessionsReported(payload) => {
+                let event_type = "rpc.sessions";
+                if payload.sessions.len() > SESSION_CATALOG_LIMIT {
+                    return Err(EventProjectionError::TooManySessions);
+                }
+                let sessions = payload
+                    .sessions
+                    .iter()
+                    .map(|session| {
+                        Ok(SessionSummary {
+                            session_id: exact_str(
+                                &session.session_id,
+                                event_type,
+                                "session_id",
+                                SESSION_ID_MAX_BYTES,
+                            )?,
+                            session_path: exact_str(
+                                &session.session_path,
+                                event_type,
+                                "session_path",
+                                SESSION_PATH_MAX_BYTES,
+                            )?,
+                            name: session.name.as_deref().map(|name| {
+                                BoundedText::head(name, SESSION_LABEL_MAX_BYTES, 8).text
+                            }),
+                            updated_at: BoundedText::head(
+                                &session
+                                    .updated_at
+                                    .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
+                                SESSION_UPDATED_AT_MAX_BYTES,
+                                8,
+                            )
+                            .text,
+                            entry_count: bounded_entry_count_u64(session.entry_count),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, EventProjectionError>>()?;
+                Ok(Self::SessionsReported {
+                    command_id: exact_str(&payload.command_id, event_type, "command_id", 256)?,
+                    sessions,
+                    navigation: CatalogNavigation {
+                        next_cursor: optional_exact_str(
+                            payload.next_cursor.as_deref(),
+                            event_type,
+                            "next_cursor",
+                            4096,
+                        )?,
+                        previous_cursor: optional_exact_str(
+                            payload.previous_cursor.as_deref(),
+                            event_type,
+                            "previous_cursor",
+                            4096,
+                        )?,
+                    },
+                    selected_session: optional_session_identity_from_strs(
+                        payload.selected_session_id.as_deref().map(String::as_str),
+                        payload.selected_session_path.as_deref(),
+                        payload.selected_session_name.as_deref(),
+                        event_type,
+                        "selected_session_id",
+                        "selected_session_path",
+                    )?,
+                })
+            }
+            WireEvent::RpcSessionSelected(payload) => {
+                let event_type = "rpc.session.selected";
+                Ok(Self::SessionSelected {
+                    command_id: exact_str(&payload.command_id, event_type, "command_id", 256)?,
+                    session: required_session_identity_from_strs(
+                        &payload.session_id,
+                        &payload.session_path,
+                        payload.session_name.as_deref(),
+                        event_type,
+                        "session_id",
+                        "session_path",
+                    )?,
+                })
+            }
+            WireEvent::RpcSessionNameChanged(payload) => {
+                let event_type = "rpc.session.name_changed";
+                Ok(Self::SessionNameChanged {
+                    command_id: exact_str(&payload.command_id, event_type, "command_id", 256)?,
+                    changed: SessionNameChange {
+                        session: required_session_identity_from_strs(
+                            &payload.session_id,
+                            &payload.session_path,
+                            payload.name.as_deref(),
+                            event_type,
+                            "session_id",
+                            "session_path",
+                        )?,
+                        previous_name: payload
+                            .previous_name
+                            .as_deref()
+                            .map(|name| BoundedText::head(name, SESSION_LABEL_MAX_BYTES, 8).text),
+                        entry_count: bounded_entry_count_u64(payload.entry_count),
+                    },
+                })
+            }
+            WireEvent::RpcSessionCloned(payload) => {
+                let event_type = "rpc.session.cloned";
+                Ok(Self::SessionCloned {
+                    command_id: exact_str(&payload.command_id, event_type, "command_id", 256)?,
+                    derived: session_derivation_from_wire(
+                        event_type,
+                        &payload.source_session_id,
+                        &payload.source_session_path,
+                        payload.source_session_name.as_deref(),
+                        payload.source_active_leaf_id.as_deref().map(String::as_str),
+                        &payload.session_id,
+                        &payload.session_path,
+                        payload.session_name.as_deref(),
+                        payload.active_leaf_id.as_deref().map(String::as_str),
+                        payload.entry_count,
+                        None,
+                    )?,
+                })
+            }
+            WireEvent::RpcSessionForked(payload) => {
+                let event_type = "rpc.session.forked";
+                Ok(Self::SessionForked {
+                    command_id: exact_str(&payload.command_id, event_type, "command_id", 256)?,
+                    derived: session_derivation_from_wire(
+                        event_type,
+                        &payload.source_session_id,
+                        &payload.source_session_path,
+                        payload.source_session_name.as_deref(),
+                        payload.source_active_leaf_id.as_deref().map(String::as_str),
+                        &payload.session_id,
+                        &payload.session_path,
+                        payload.session_name.as_deref(),
+                        payload.active_leaf_id.as_deref().map(String::as_str),
+                        payload.entry_count,
+                        Some((
+                            &payload.selected_entry_id,
+                            &payload.selected_prompt,
+                            &payload.selected_images,
+                        )),
+                    )?,
+                })
+            }
+            WireEvent::RpcSessionTreeReported(payload) => Ok(Self::SessionTreeReported {
+                command_id: exact_str(&payload.command_id, "rpc.session.tree", "command_id", 256)?,
+                page: session_tree_page_from_wire(payload)?,
+            }),
+            WireEvent::RpcSessionTreeNavigated(payload) => Ok(Self::SessionTreeNavigated {
+                command_id: exact_str(
+                    &payload.command_id,
+                    "rpc.session.tree.navigated",
+                    "command_id",
+                    256,
+                )?,
+                navigation: session_tree_navigation_from_wire(payload)?,
+            }),
+            WireEvent::RpcSessionTreeUnreverted(payload) => Ok(Self::SessionTreeUnreverted {
+                command_id: exact_str(
+                    &payload.command_id,
+                    "rpc.session.tree.unreverted",
+                    "command_id",
+                    256,
+                )?,
+                unreverted: session_tree_unrevert_from_wire(payload)?,
+            }),
+            WireEvent::RpcStartupHistoryPreview(payload) => Ok(Self::StartupHistoryPreview {
+                lines: payload.lines.iter().map(|line| (**line).clone()).collect(),
+            }),
+            WireEvent::RpcMessagesReported(payload) => {
+                let event_type = "rpc.messages";
+                let command_id = exact_str(&payload.command_id, event_type, "command_id", 256)?;
+                let session = optional_session_identity_from_strs(
+                    payload.session_id.as_deref(),
+                    payload.session_path.as_deref(),
+                    None,
+                    event_type,
+                    "session_id",
+                    "session_path",
+                )?;
+                let source = match serde_json::to_value(&payload.messages)? {
+                    Value::Array(items) => items,
+                    _ => Vec::new(),
+                };
+                let started = std::time::Instant::now();
+                let projected = project_rpc_message_page_with_origins(&source, payload.truncated);
+                crate::hydration_profile::record(
+                    "rust.page_projection",
+                    started.elapsed(),
+                    source.len(),
+                );
+                Ok(match projected {
+                    Ok(page) => Self::MessagesReported {
+                        command_id,
+                        messages: SessionMessages {
+                            source_messages: {
+                                let started = std::time::Instant::now();
+                                let retained = source.as_slice().into();
+                                crate::hydration_profile::record(
+                                    "rust.page_clone",
+                                    started.elapsed(),
+                                    source.len(),
+                                );
+                                retained
+                            },
+                            session,
+                            active_leaf_id: optional_exact_str(
+                                payload.active_leaf_id.as_deref(),
+                                event_type,
+                                "active_leaf_id",
+                                SESSION_ID_MAX_BYTES,
+                            )?,
+                            truncated: payload.truncated,
+                            next_before_entry_id: optional_exact_str(
+                                payload.next_before_entry_id.as_deref(),
+                                event_type,
+                                "next_before_entry_id",
+                                SESSION_ID_MAX_BYTES,
+                            )?,
+                            next_after_entry_id: optional_exact_str(
+                                payload.next_after_entry_id.as_deref(),
+                                event_type,
+                                "next_after_entry_id",
+                                SESSION_ID_MAX_BYTES,
+                            )?,
+                            exact_tool_result: source
+                                .first()
+                                .and_then(|message| message.get("entry_id"))
+                                .and_then(Value::as_str)
+                                .and_then(|entry_id| {
+                                    crate::history::project_rpc_exact_tool_result(&source, entry_id)
+                                        .ok()
+                                        .map(Box::new)
+                                }),
+                            durable_entry_ids: page.durable_entry_ids,
+                            transcript: page.transcript,
+                        },
+                    },
+                    Err(error) => Self::MessagesProjectionFailed {
+                        command_id,
+                        error: BoundedText::head(&error.to_string(), 1024, 8).text,
+                    },
+                })
+            }
+            WireEvent::TurnStarted(_)
+            | WireEvent::ProviderRetrying(_)
+            | WireEvent::ContextPressure(_)
+            | WireEvent::ContextOverflow(_)
+            | WireEvent::TrustResolved(_)
+            | WireEvent::TurnCompleted(_)
+            | WireEvent::SessionSaved(_)
+            | WireEvent::ModelProviderAutoSwitched(_) => Ok(Self::Other {
+                event_type: event.event_type(),
+            }),
         }
-        Self::from_projection_value(&value)
     }
 
     /// Project a bounded trace event. The caller owns trace-schema validation.
@@ -1302,7 +1629,13 @@ impl BackendEvent {
                 )?;
                 let operation = queue_removal_operation_field(value, &event_type)?;
                 let kind = optional_queue_kind_field(value, &event_type)?;
-                validate_queue_removal_shape(&event_type, operation, kind, steering, follow_up)?;
+                validate_queue_removal_counts(
+                    &event_type,
+                    operation,
+                    kind,
+                    steering.len(),
+                    follow_up.len(),
+                )?;
                 Self::QueueItemsRemoved {
                     command_id: exact_string_field(value, &event_type, "command_id", 256)?,
                     operation,
@@ -1607,152 +1940,90 @@ fn bounded_device_attempt(value: &Value, event_type: &str) -> Result<u32, EventP
 }
 
 fn bounded_entry_count(value: &Value, event_type: &str) -> Result<u32, EventProjectionError> {
-    Ok(u64_field(value, event_type, "entry_count")?.min(u64::from(SESSION_ENTRY_COUNT_MAX)) as u32)
+    u64_field(value, event_type, "entry_count").map(bounded_entry_count_u64)
 }
 
-fn session_derivation(
-    value: &Value,
+#[allow(clippy::too_many_arguments)]
+fn finish_session_derivation(
     event_type: &str,
-    forked: bool,
+    source: SessionIdentity,
+    source_active_leaf_id: Option<String>,
+    session: SessionIdentity,
+    active_leaf_id: Option<String>,
+    entry_count: u32,
+    selected_entry_id: Option<String>,
+    selected_prompt: Option<String>,
+    selected_images: ComposerImages,
 ) -> Result<SessionDerivation, EventProjectionError> {
-    let source = required_session_identity(
-        value,
-        event_type,
-        "source_session_id",
-        "source_session_path",
-        Some("source_session_name"),
-    )?;
-    let session = required_session_identity(
-        value,
-        event_type,
-        "session_id",
-        "session_path",
-        Some("session_name"),
-    )?;
     if source.session_id == session.session_id {
         return Err(EventProjectionError::InvalidField {
             event_type: event_type.to_owned(),
             field: "session_id",
         });
     }
-    let selected_entry_id = forked
-        .then(|| exact_string_field(value, event_type, "selected_entry_id", SESSION_ID_MAX_BYTES))
-        .transpose()?;
-    let selected_prompt = forked
-        .then(|| {
-            exact_string_field(
-                value,
-                event_type,
-                "selected_prompt",
-                MAX_APPLICATION_FRAME_BYTES,
-            )
-        })
-        .transpose()?;
     Ok(SessionDerivation {
         source,
-        source_active_leaf_id: optional_exact_string_field(
-            value,
-            event_type,
-            "source_active_leaf_id",
-            SESSION_ID_MAX_BYTES,
-        )?,
+        source_active_leaf_id,
         session,
-        active_leaf_id: optional_exact_string_field(
-            value,
-            event_type,
-            "active_leaf_id",
-            SESSION_ID_MAX_BYTES,
-        )?,
-        entry_count: bounded_entry_count(value, event_type)?,
+        active_leaf_id,
+        entry_count,
         selected_entry_id,
         selected_prompt,
-        selected_images: if forked {
-            stored_images(value.get("selected_images"), event_type, "selected_images")?
-        } else {
-            ComposerImages::default()
-        },
+        selected_images,
     })
 }
 
-fn session_tree_page(
-    value: &Value,
+#[allow(clippy::too_many_arguments)]
+fn build_session_tree_node(
     event_type: &str,
-) -> Result<SessionTreePage, EventProjectionError> {
-    let raw_nodes = array_field(value, event_type, "nodes")?;
-    if raw_nodes.len() > SESSION_TREE_PAGE_LIMIT {
-        return Err(EventProjectionError::TooManyTreeNodes);
+    entry_ids: &mut std::collections::BTreeSet<String>,
+    entry_id: String,
+    parent_id: Option<String>,
+    created_at: String,
+    kind: SessionTreeNodeKind,
+    role: Option<String>,
+    raw_preview: &str,
+    preview_truncated: bool,
+) -> Result<SessionTreeNode, EventProjectionError> {
+    if !entry_ids.insert(entry_id.clone()) {
+        return Err(EventProjectionError::InvalidField {
+            event_type: event_type.to_owned(),
+            field: "nodes",
+        });
     }
-    let session = optional_session_identity(value, event_type, "session_id", "session_path", None)?;
-    let active_leaf_id =
-        optional_exact_string_field(value, event_type, "active_leaf_id", SESSION_ID_MAX_BYTES)?;
-    let total_node_count = u64_field(value, event_type, "total_node_count")?
-        .min(u64::from(SESSION_ENTRY_COUNT_MAX)) as u32;
-    let truncated = bool_field(value, event_type, "truncated")?;
-    let next_after_entry_id = optional_exact_string_field(
-        value,
-        event_type,
-        "next_after_entry_id",
-        SESSION_ID_MAX_BYTES,
-    )?;
-    let mut entry_ids = std::collections::BTreeSet::new();
-    let nodes = raw_nodes
-        .iter()
-        .map(|node| {
-            let entry_id = exact_string_field(node, event_type, "entry_id", SESSION_ID_MAX_BYTES)?;
-            if !entry_ids.insert(entry_id.clone()) {
-                return Err(EventProjectionError::InvalidField {
-                    event_type: event_type.to_owned(),
-                    field: "nodes",
-                });
-            }
-            let kind = match string_field_ref(node, event_type, "kind")? {
-                "message" => SessionTreeNodeKind::Message,
-                "event" => SessionTreeNodeKind::Event,
-                "compaction" => SessionTreeNodeKind::Compaction,
-                _ => {
-                    return Err(EventProjectionError::InvalidField {
-                        event_type: event_type.to_owned(),
-                        field: "kind",
-                    });
-                }
-            };
-            let role = optional_exact_string_field(node, event_type, "role", 32)?;
-            let valid_role = matches!(
-                role.as_deref(),
-                Some("system" | "user" | "assistant" | "tool")
-            );
-            if (kind == SessionTreeNodeKind::Message) != valid_role {
-                return Err(EventProjectionError::InvalidField {
-                    event_type: event_type.to_owned(),
-                    field: "role",
-                });
-            }
-            let raw_preview = string_field_ref(node, event_type, "preview")?;
-            let bounded_preview = BoundedText::head(raw_preview, SESSION_LABEL_MAX_BYTES, 8);
-            optional_exact_string_field(node, event_type, "operation_id", SESSION_ID_MAX_BYTES)?;
-            Ok(SessionTreeNode {
-                entry_id,
-                parent_id: optional_exact_string_field(
-                    node,
-                    event_type,
-                    "parent_id",
-                    SESSION_ID_MAX_BYTES,
-                )?,
-                created_at: bounded_display_string_field(
-                    node,
-                    event_type,
-                    "created_at",
-                    SESSION_UPDATED_AT_MAX_BYTES,
-                )?,
-                kind,
-                role,
-                preview: bounded_preview.text,
-                preview_truncated: bool_field(node, event_type, "preview_truncated")?
-                    || bounded_preview.dropped_bytes > 0
-                    || bounded_preview.dropped_lines > 0,
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let valid_role = matches!(
+        role.as_deref(),
+        Some("system" | "user" | "assistant" | "tool")
+    );
+    if (kind == SessionTreeNodeKind::Message) != valid_role {
+        return Err(EventProjectionError::InvalidField {
+            event_type: event_type.to_owned(),
+            field: "role",
+        });
+    }
+    let bounded_preview = BoundedText::head(raw_preview, SESSION_LABEL_MAX_BYTES, 8);
+    Ok(SessionTreeNode {
+        entry_id,
+        parent_id,
+        created_at,
+        kind,
+        role,
+        preview: bounded_preview.text,
+        preview_truncated: preview_truncated
+            || bounded_preview.dropped_bytes > 0
+            || bounded_preview.dropped_lines > 0,
+    })
+}
+
+fn finish_session_tree_page(
+    event_type: &str,
+    session: Option<SessionIdentity>,
+    active_leaf_id: Option<String>,
+    total_node_count: u32,
+    nodes: Vec<SessionTreeNode>,
+    truncated: bool,
+    next_after_entry_id: Option<String>,
+) -> Result<SessionTreePage, EventProjectionError> {
     let valid_cursor = truncated
         && !nodes.is_empty()
         && next_after_entry_id.as_ref() == nodes.last().map(|node| &node.entry_id);
@@ -1780,19 +2051,18 @@ fn session_tree_page(
     })
 }
 
-fn session_tree_navigation(
-    value: &Value,
+#[allow(clippy::too_many_arguments)]
+fn finish_session_tree_navigation(
     event_type: &str,
+    session: SessionIdentity,
+    selected_entry_id: String,
+    previous_active_leaf_id: Option<String>,
+    active_leaf_id: Option<String>,
+    editor_text: Option<String>,
+    editor_images: ComposerImages,
+    changed: bool,
+    entry_count: u32,
 ) -> Result<SessionTreeNavigation, EventProjectionError> {
-    let previous_active_leaf_id = optional_exact_string_field(
-        value,
-        event_type,
-        "previous_active_leaf_id",
-        SESSION_ID_MAX_BYTES,
-    )?;
-    let active_leaf_id =
-        optional_exact_string_field(value, event_type, "active_leaf_id", SESSION_ID_MAX_BYTES)?;
-    let changed = bool_field(value, event_type, "changed")?;
     if changed == (previous_active_leaf_id == active_leaf_id) {
         return Err(EventProjectionError::InvalidField {
             event_type: event_type.to_owned(),
@@ -1800,39 +2070,25 @@ fn session_tree_navigation(
         });
     }
     Ok(SessionTreeNavigation {
-        session: required_session_identity(value, event_type, "session_id", "session_path", None)?,
-        selected_entry_id: exact_string_field(
-            value,
-            event_type,
-            "selected_entry_id",
-            SESSION_ID_MAX_BYTES,
-        )?,
+        session,
+        selected_entry_id,
         previous_active_leaf_id,
         active_leaf_id,
-        editor_text: optional_exact_string_field(
-            value,
-            event_type,
-            "editor_text",
-            MAX_APPLICATION_FRAME_BYTES,
-        )?,
-        editor_images: stored_images(value.get("editor_images"), event_type, "editor_images")?,
+        editor_text,
+        editor_images,
         changed,
-        entry_count: bounded_entry_count(value, event_type)?,
+        entry_count,
     })
 }
 
-fn session_tree_unrevert(
-    value: &Value,
+fn finish_session_tree_unrevert(
     event_type: &str,
+    session: SessionIdentity,
+    source_transition_id: String,
+    previous_active_leaf_id: Option<String>,
+    active_leaf_id: Option<String>,
+    entry_count: u32,
 ) -> Result<SessionTreeUnrevert, EventProjectionError> {
-    let previous_active_leaf_id = optional_exact_string_field(
-        value,
-        event_type,
-        "previous_active_leaf_id",
-        SESSION_ID_MAX_BYTES,
-    )?;
-    let active_leaf_id =
-        optional_exact_string_field(value, event_type, "active_leaf_id", SESSION_ID_MAX_BYTES)?;
     if previous_active_leaf_id == active_leaf_id {
         return Err(EventProjectionError::InvalidField {
             event_type: event_type.to_owned(),
@@ -1840,17 +2096,185 @@ fn session_tree_unrevert(
         });
     }
     Ok(SessionTreeUnrevert {
-        session: required_session_identity(value, event_type, "session_id", "session_path", None)?,
-        source_transition_id: exact_string_field(
+        session,
+        source_transition_id,
+        previous_active_leaf_id,
+        active_leaf_id,
+        entry_count,
+    })
+}
+
+fn session_derivation(
+    value: &Value,
+    event_type: &str,
+    forked: bool,
+) -> Result<SessionDerivation, EventProjectionError> {
+    let source = required_session_identity(
+        value,
+        event_type,
+        "source_session_id",
+        "source_session_path",
+        Some("source_session_name"),
+    )?;
+    let session = required_session_identity(
+        value,
+        event_type,
+        "session_id",
+        "session_path",
+        Some("session_name"),
+    )?;
+    let selected_entry_id = forked
+        .then(|| exact_string_field(value, event_type, "selected_entry_id", SESSION_ID_MAX_BYTES))
+        .transpose()?;
+    let selected_prompt = forked
+        .then(|| {
+            exact_string_field(
+                value,
+                event_type,
+                "selected_prompt",
+                MAX_APPLICATION_FRAME_BYTES,
+            )
+        })
+        .transpose()?;
+    finish_session_derivation(
+        event_type,
+        source,
+        optional_exact_string_field(
+            value,
+            event_type,
+            "source_active_leaf_id",
+            SESSION_ID_MAX_BYTES,
+        )?,
+        session,
+        optional_exact_string_field(value, event_type, "active_leaf_id", SESSION_ID_MAX_BYTES)?,
+        bounded_entry_count(value, event_type)?,
+        selected_entry_id,
+        selected_prompt,
+        if forked {
+            stored_images(value.get("selected_images"), event_type, "selected_images")?
+        } else {
+            ComposerImages::default()
+        },
+    )
+}
+
+fn session_tree_page(
+    value: &Value,
+    event_type: &str,
+) -> Result<SessionTreePage, EventProjectionError> {
+    let raw_nodes = array_field(value, event_type, "nodes")?;
+    if raw_nodes.len() > SESSION_TREE_PAGE_LIMIT {
+        return Err(EventProjectionError::TooManyTreeNodes);
+    }
+    let session = optional_session_identity(value, event_type, "session_id", "session_path", None)?;
+    let active_leaf_id =
+        optional_exact_string_field(value, event_type, "active_leaf_id", SESSION_ID_MAX_BYTES)?;
+    let total_node_count =
+        bounded_entry_count_u64(u64_field(value, event_type, "total_node_count")?);
+    let truncated = bool_field(value, event_type, "truncated")?;
+    let next_after_entry_id = optional_exact_string_field(
+        value,
+        event_type,
+        "next_after_entry_id",
+        SESSION_ID_MAX_BYTES,
+    )?;
+    let mut entry_ids = std::collections::BTreeSet::new();
+    let nodes = raw_nodes
+        .iter()
+        .map(|node| {
+            let entry_id = exact_string_field(node, event_type, "entry_id", SESSION_ID_MAX_BYTES)?;
+            let kind = match string_field_ref(node, event_type, "kind")? {
+                "message" => SessionTreeNodeKind::Message,
+                "event" => SessionTreeNodeKind::Event,
+                "compaction" => SessionTreeNodeKind::Compaction,
+                _ => {
+                    return Err(EventProjectionError::InvalidField {
+                        event_type: event_type.to_owned(),
+                        field: "kind",
+                    });
+                }
+            };
+            let role = optional_exact_string_field(node, event_type, "role", 32)?;
+            let raw_preview = string_field_ref(node, event_type, "preview")?;
+            optional_exact_string_field(node, event_type, "operation_id", SESSION_ID_MAX_BYTES)?;
+            build_session_tree_node(
+                event_type,
+                &mut entry_ids,
+                entry_id,
+                optional_exact_string_field(node, event_type, "parent_id", SESSION_ID_MAX_BYTES)?,
+                bounded_display_string_field(
+                    node,
+                    event_type,
+                    "created_at",
+                    SESSION_UPDATED_AT_MAX_BYTES,
+                )?,
+                kind,
+                role,
+                raw_preview,
+                bool_field(node, event_type, "preview_truncated")?,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    finish_session_tree_page(
+        event_type,
+        session,
+        active_leaf_id,
+        total_node_count,
+        nodes,
+        truncated,
+        next_after_entry_id,
+    )
+}
+
+fn session_tree_navigation(
+    value: &Value,
+    event_type: &str,
+) -> Result<SessionTreeNavigation, EventProjectionError> {
+    finish_session_tree_navigation(
+        event_type,
+        required_session_identity(value, event_type, "session_id", "session_path", None)?,
+        exact_string_field(value, event_type, "selected_entry_id", SESSION_ID_MAX_BYTES)?,
+        optional_exact_string_field(
+            value,
+            event_type,
+            "previous_active_leaf_id",
+            SESSION_ID_MAX_BYTES,
+        )?,
+        optional_exact_string_field(value, event_type, "active_leaf_id", SESSION_ID_MAX_BYTES)?,
+        optional_exact_string_field(
+            value,
+            event_type,
+            "editor_text",
+            MAX_APPLICATION_FRAME_BYTES,
+        )?,
+        stored_images(value.get("editor_images"), event_type, "editor_images")?,
+        bool_field(value, event_type, "changed")?,
+        bounded_entry_count(value, event_type)?,
+    )
+}
+
+fn session_tree_unrevert(
+    value: &Value,
+    event_type: &str,
+) -> Result<SessionTreeUnrevert, EventProjectionError> {
+    finish_session_tree_unrevert(
+        event_type,
+        required_session_identity(value, event_type, "session_id", "session_path", None)?,
+        exact_string_field(
             value,
             event_type,
             "source_transition_id",
             SESSION_ID_MAX_BYTES,
         )?,
-        previous_active_leaf_id,
-        active_leaf_id,
-        entry_count: bounded_entry_count(value, event_type)?,
-    })
+        optional_exact_string_field(
+            value,
+            event_type,
+            "previous_active_leaf_id",
+            SESSION_ID_MAX_BYTES,
+        )?,
+        optional_exact_string_field(value, event_type, "active_leaf_id", SESSION_ID_MAX_BYTES)?,
+        bounded_entry_count(value, event_type)?,
+    )
 }
 
 fn session_summaries(
@@ -2069,6 +2493,24 @@ fn queued_images(
         .collect()
 }
 
+fn check_queue_limits(
+    event_type: &str,
+    count: usize,
+    bytes: usize,
+) -> Result<(), EventProjectionError> {
+    if count > QUEUE_MESSAGE_LIMIT {
+        return Err(EventProjectionError::TooManyQueueMessages {
+            event_type: event_type.to_owned(),
+        });
+    }
+    if bytes > QUEUE_CONTENT_BYTES_LIMIT {
+        return Err(EventProjectionError::OversizedQueueContent {
+            event_type: event_type.to_owned(),
+        });
+    }
+    Ok(())
+}
+
 fn validate_queue_arrays<'a>(
     event_type: &str,
     arrays: impl IntoIterator<Item = (&'static str, &'a [Value])>,
@@ -2087,17 +2529,22 @@ fn validate_queue_arrays<'a>(
             bytes = bytes.saturating_add(content.len());
         }
     }
-    if count > QUEUE_MESSAGE_LIMIT {
-        return Err(EventProjectionError::TooManyQueueMessages {
-            event_type: event_type.to_owned(),
-        });
+    check_queue_limits(event_type, count, bytes)
+}
+
+fn validate_queue_str_slices<'a>(
+    event_type: &str,
+    arrays: impl IntoIterator<Item = &'a [String]>,
+) -> Result<(), EventProjectionError> {
+    let mut count = 0usize;
+    let mut bytes = 0usize;
+    for contents in arrays {
+        for content in contents {
+            count = count.saturating_add(1);
+            bytes = bytes.saturating_add(content.len());
+        }
     }
-    if bytes > QUEUE_CONTENT_BYTES_LIMIT {
-        return Err(EventProjectionError::OversizedQueueContent {
-            event_type: event_type.to_owned(),
-        });
-    }
-    Ok(())
+    check_queue_limits(event_type, count, bytes)
 }
 
 fn validate_queue_payload<'a>(
@@ -2110,17 +2557,7 @@ fn validate_queue_payload<'a>(
         count = count.saturating_add(1);
         bytes = bytes.saturating_add(content.len());
     }
-    if count > QUEUE_MESSAGE_LIMIT {
-        return Err(EventProjectionError::TooManyQueueMessages {
-            event_type: event_type.to_owned(),
-        });
-    }
-    if bytes > QUEUE_CONTENT_BYTES_LIMIT {
-        return Err(EventProjectionError::OversizedQueueContent {
-            event_type: event_type.to_owned(),
-        });
-    }
-    Ok(())
+    check_queue_limits(event_type, count, bytes)
 }
 
 fn queue_kind_field(
@@ -2166,21 +2603,21 @@ fn queue_removal_operation_field(
     }
 }
 
-fn validate_queue_removal_shape(
+fn validate_queue_removal_counts(
     event_type: &str,
     operation: QueueRemovalOperation,
     kind: Option<QueueKind>,
-    steering: &[Value],
-    follow_up: &[Value],
+    steering_len: usize,
+    follow_up_len: usize,
 ) -> Result<(), EventProjectionError> {
     let valid = !matches!(operation, QueueRemovalOperation::Pop) || kind.is_some();
     let matching_kind = match kind {
-        Some(QueueKind::Steering) => follow_up.is_empty(),
-        Some(QueueKind::FollowUp) => steering.is_empty(),
+        Some(QueueKind::Steering) => follow_up_len == 0,
+        Some(QueueKind::FollowUp) => steering_len == 0,
         None => true,
     };
     let pop_size = !matches!(operation, QueueRemovalOperation::Pop)
-        || steering.len().saturating_add(follow_up.len()) <= 1;
+        || steering_len.saturating_add(follow_up_len) <= 1;
     if valid && matching_kind && pop_size {
         Ok(())
     } else {
@@ -2820,4 +3257,498 @@ fn u64_field_or(
                 field,
             }),
     }
+}
+
+fn optional_exact_str(
+    source: Option<&str>,
+    event_type: &str,
+    field: &'static str,
+    limit: usize,
+) -> Result<Option<String>, EventProjectionError> {
+    source
+        .map(|value| exact_str(value, event_type, field, limit))
+        .transpose()
+}
+
+fn bounded_entry_count_u64(count: u64) -> u32 {
+    count.min(u64::from(SESSION_ENTRY_COUNT_MAX)) as u32
+}
+
+fn wire_permission_mode(
+    mode: wisp_protocol::events::wire::PermissionMode,
+) -> wisp_protocol::commands::PermissionMode {
+    use wisp_protocol::commands::PermissionMode as Target;
+    use wisp_protocol::events::wire::PermissionMode as Wire;
+    match mode {
+        Wire::Ask => Target::Ask,
+        Wire::Auto => Target::Auto,
+        Wire::AutoCommands => Target::AutoCommands,
+        Wire::Yolo => Target::Yolo,
+    }
+}
+
+fn permission_state_from_wire(
+    src: &wisp_protocol::events::wire::PermissionState,
+) -> wisp_protocol::events::PermissionState {
+    wisp_protocol::events::PermissionState {
+        mode: wire_permission_mode(src.mode),
+        saved_mode: src.saved_mode.map(wire_permission_mode),
+        project_path: src.project_path.clone(),
+        session_only_yolo: src.session_only_yolo,
+        command_allow_rules: src.command_allow_rules.clone(),
+    }
+}
+
+fn wire_codemode_setting(
+    setting: wisp_protocol::events::wire::CodemodeSetting,
+) -> wisp_protocol::commands::CodemodeSetting {
+    use wisp_protocol::commands::CodemodeSetting as Target;
+    use wisp_protocol::events::wire::CodemodeSetting as Wire;
+    match setting {
+        Wire::Automatic => Target::Automatic,
+        Wire::Always => Target::Always,
+        Wire::Never => Target::Never,
+    }
+}
+
+fn wire_codemode_presentation(
+    presentation: wisp_protocol::events::wire::CodemodePresentation,
+) -> wisp_protocol::commands::CodemodePresentation {
+    use wisp_protocol::commands::CodemodePresentation as Target;
+    use wisp_protocol::events::wire::CodemodePresentation as Wire;
+    match presentation {
+        Wire::DirectAndCodemode => Target::DirectAndCodemode,
+        Wire::CodemodeOnly => Target::CodemodeOnly,
+    }
+}
+
+fn codemode_state_from_wire(
+    src: &wisp_protocol::events::wire::CodemodeState,
+) -> wisp_protocol::events::CodemodeState {
+    wisp_protocol::events::CodemodeState {
+        setting: wire_codemode_setting(src.setting),
+        presentation: wire_codemode_presentation(src.presentation),
+        effective_presentation: wire_codemode_presentation(src.effective_presentation),
+        available: src.available,
+        offered: src.offered,
+        env_setting: src.env_setting.map(wire_codemode_setting),
+        mcp_tools: src.mcp_tools,
+        scriptable_mcp_tools: src.scriptable_mcp_tools,
+    }
+}
+
+fn subagents_state_from_wire(
+    src: &wisp_protocol::events::wire::SubagentsState,
+) -> wisp_protocol::events::SubagentsState {
+    wisp_protocol::events::SubagentsState {
+        enabled: src.enabled,
+        offered: src.offered,
+        env_enabled: src.env_enabled,
+        model: src.model.clone(),
+        model_in_use: src.model_in_use.clone(),
+        env_model: src.env_model.clone(),
+        tools: src.tools.clone(),
+        refused_tools: src.refused_tools.clone(),
+        kinds: src
+            .kinds
+            .iter()
+            .map(|kind| wisp_protocol::events::SubagentKind {
+                name: kind.name.to_string(),
+                model: kind.model.clone(),
+                effort: kind.effort.clone(),
+                instructions: kind.instructions.clone(),
+            })
+            .collect(),
+        max_tool_rounds: src.max_tool_rounds,
+        max_tasks: src.max_tasks,
+        max_parallel: src.max_parallel,
+        report_max_bytes: src.report_max_bytes,
+    }
+}
+
+fn git_diff_snapshot_from_wire(
+    src: &wisp_protocol::events::wire::RpcGitDiffReported,
+) -> super::git_diff::GitDiffSnapshot {
+    super::git_diff::GitDiffSnapshot {
+        generation: src.generation.get(),
+        head: (*src.head).clone(),
+        files: src
+            .files
+            .iter()
+            .map(|file| super::git_diff::GitDiffFile {
+                path: (*file.path).clone(),
+                status: file.status.to_string(),
+                before: (*file.before).clone(),
+                after: (*file.after).clone(),
+                notice: (*file.notice).clone(),
+                edits: file
+                    .edits
+                    .iter()
+                    .map(|edit| super::git_diff::GitDiffEdit {
+                        call_id: (*edit.call_id).clone(),
+                        entry_id: (*edit.entry_id).clone(),
+                        tool: edit.tool.to_string(),
+                    })
+                    .collect(),
+            })
+            .collect(),
+        truncated: src.truncated,
+    }
+}
+
+fn wire_steering_mode(
+    mode: wisp_protocol::events::wire::QueueUpdatedSteeringMode,
+) -> wisp_protocol::commands::QueueMode {
+    use wisp_protocol::commands::QueueMode as Target;
+    use wisp_protocol::events::wire::QueueUpdatedSteeringMode as Wire;
+    match mode {
+        Wire::All => Target::All,
+        Wire::OneAtATime => Target::OneAtATime,
+    }
+}
+
+fn wire_follow_up_mode(
+    mode: wisp_protocol::events::wire::QueueUpdatedFollowUpMode,
+) -> wisp_protocol::commands::QueueMode {
+    use wisp_protocol::commands::QueueMode as Target;
+    use wisp_protocol::events::wire::QueueUpdatedFollowUpMode as Wire;
+    match mode {
+        Wire::All => Target::All,
+        Wire::OneAtATime => Target::OneAtATime,
+    }
+}
+
+fn wire_removed_queue_kind(kind: wisp_protocol::events::wire::QueueItemsRemovedKind) -> QueueKind {
+    use wisp_protocol::events::wire::QueueItemsRemovedKind as Wire;
+    match kind {
+        Wire::Steering => QueueKind::Steering,
+        Wire::FollowUp => QueueKind::FollowUp,
+    }
+}
+
+fn wire_injected_queue_kind(
+    kind: wisp_protocol::events::wire::QueueMessageInjectedKind,
+) -> QueueKind {
+    use wisp_protocol::events::wire::QueueMessageInjectedKind as Wire;
+    match kind {
+        Wire::Steering => QueueKind::Steering,
+        Wire::FollowUp => QueueKind::FollowUp,
+    }
+}
+
+fn stored_images_from_wire(
+    parts: &[wisp_protocol::events::wire::ImagePart],
+    event_type: &str,
+    field: &'static str,
+) -> Result<ComposerImages, EventProjectionError> {
+    parts
+        .iter()
+        .map(|part| {
+            AttachedImage::stored_from_wire(part).ok_or_else(|| {
+                EventProjectionError::InvalidField {
+                    event_type: event_type.to_owned(),
+                    field,
+                }
+            })
+        })
+        .collect()
+}
+
+fn queued_images_from_wire(
+    entries: &[Vec<wisp_protocol::events::wire::ImagePart>],
+    event_type: &str,
+    field: &'static str,
+    message_count: usize,
+) -> Result<Vec<ComposerImages>, EventProjectionError> {
+    if !entries.is_empty() && entries.len() != message_count {
+        return Err(EventProjectionError::InvalidField {
+            event_type: event_type.to_owned(),
+            field,
+        });
+    }
+    entries
+        .iter()
+        .map(|parts| stored_images_from_wire(parts, event_type, field))
+        .collect()
+}
+
+fn required_session_identity_from_strs(
+    session_id: &str,
+    session_path: &str,
+    session_name: Option<&str>,
+    event_type: &str,
+    id_field: &'static str,
+    path_field: &'static str,
+) -> Result<SessionIdentity, EventProjectionError> {
+    Ok(SessionIdentity {
+        session_id: exact_str(session_id, event_type, id_field, SESSION_ID_MAX_BYTES)?,
+        session_path: exact_str(session_path, event_type, path_field, SESSION_PATH_MAX_BYTES)?,
+        session_name: session_name
+            .map(|name| BoundedText::head(name, SESSION_LABEL_MAX_BYTES, 8).text),
+    })
+}
+
+fn optional_session_identity_from_strs(
+    session_id: Option<&str>,
+    session_path: Option<&str>,
+    session_name: Option<&str>,
+    event_type: &str,
+    id_field: &'static str,
+    path_field: &'static str,
+) -> Result<Option<SessionIdentity>, EventProjectionError> {
+    match (session_id, session_path) {
+        (None, None) => Ok(None),
+        (Some(id), Some(path)) => required_session_identity_from_strs(
+            id,
+            path,
+            session_name,
+            event_type,
+            id_field,
+            path_field,
+        )
+        .map(Some),
+        _ => Err(EventProjectionError::InvalidField {
+            event_type: event_type.to_owned(),
+            field: id_field,
+        }),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn session_derivation_from_wire(
+    event_type: &str,
+    source_session_id: &str,
+    source_session_path: &str,
+    source_session_name: Option<&str>,
+    source_active_leaf_id: Option<&str>,
+    session_id: &str,
+    session_path: &str,
+    session_name: Option<&str>,
+    active_leaf_id: Option<&str>,
+    entry_count: u64,
+    fork: Option<(&str, &str, &[wisp_protocol::events::wire::ImagePart])>,
+) -> Result<SessionDerivation, EventProjectionError> {
+    let source = required_session_identity_from_strs(
+        source_session_id,
+        source_session_path,
+        source_session_name,
+        event_type,
+        "source_session_id",
+        "source_session_path",
+    )?;
+    let session = required_session_identity_from_strs(
+        session_id,
+        session_path,
+        session_name,
+        event_type,
+        "session_id",
+        "session_path",
+    )?;
+    let (selected_entry_id, selected_prompt, selected_images) = match fork {
+        Some((entry_id, prompt, images)) => (
+            Some(exact_str(
+                entry_id,
+                event_type,
+                "selected_entry_id",
+                SESSION_ID_MAX_BYTES,
+            )?),
+            Some(exact_str(
+                prompt,
+                event_type,
+                "selected_prompt",
+                MAX_APPLICATION_FRAME_BYTES,
+            )?),
+            stored_images_from_wire(images, event_type, "selected_images")?,
+        ),
+        None => (None, None, ComposerImages::default()),
+    };
+    finish_session_derivation(
+        event_type,
+        source,
+        optional_exact_str(
+            source_active_leaf_id,
+            event_type,
+            "source_active_leaf_id",
+            SESSION_ID_MAX_BYTES,
+        )?,
+        session,
+        optional_exact_str(
+            active_leaf_id,
+            event_type,
+            "active_leaf_id",
+            SESSION_ID_MAX_BYTES,
+        )?,
+        bounded_entry_count_u64(entry_count),
+        selected_entry_id,
+        selected_prompt,
+        selected_images,
+    )
+}
+
+fn session_tree_page_from_wire(
+    payload: &wisp_protocol::events::wire::RpcSessionTreeReported,
+) -> Result<SessionTreePage, EventProjectionError> {
+    use wisp_protocol::events::wire::RpcSessionTreeNodeKind as WireNodeKind;
+    let event_type = "rpc.session.tree";
+    if payload.nodes.len() > SESSION_TREE_PAGE_LIMIT {
+        return Err(EventProjectionError::TooManyTreeNodes);
+    }
+    let session = optional_session_identity_from_strs(
+        payload.session_id.as_deref().map(String::as_str),
+        payload.session_path.as_deref(),
+        None,
+        event_type,
+        "session_id",
+        "session_path",
+    )?;
+    let active_leaf_id = optional_exact_str(
+        payload.active_leaf_id.as_deref().map(String::as_str),
+        event_type,
+        "active_leaf_id",
+        SESSION_ID_MAX_BYTES,
+    )?;
+    let total_node_count = bounded_entry_count_u64(payload.total_node_count);
+    let next_after_entry_id = optional_exact_str(
+        payload.next_after_entry_id.as_deref().map(String::as_str),
+        event_type,
+        "next_after_entry_id",
+        SESSION_ID_MAX_BYTES,
+    )?;
+    let mut entry_ids = std::collections::BTreeSet::new();
+    let nodes = payload
+        .nodes
+        .iter()
+        .map(|node| {
+            let entry_id = exact_str(&node.entry_id, event_type, "entry_id", SESSION_ID_MAX_BYTES)?;
+            let kind = match node.kind {
+                WireNodeKind::Message => SessionTreeNodeKind::Message,
+                WireNodeKind::Event => SessionTreeNodeKind::Event,
+                WireNodeKind::Compaction => SessionTreeNodeKind::Compaction,
+            };
+            optional_exact_str(
+                node.operation_id.as_deref(),
+                event_type,
+                "operation_id",
+                SESSION_ID_MAX_BYTES,
+            )?;
+            build_session_tree_node(
+                event_type,
+                &mut entry_ids,
+                entry_id,
+                optional_exact_str(
+                    node.parent_id.as_deref().map(String::as_str),
+                    event_type,
+                    "parent_id",
+                    SESSION_ID_MAX_BYTES,
+                )?,
+                BoundedText::head(
+                    &node
+                        .created_at
+                        .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
+                    SESSION_UPDATED_AT_MAX_BYTES,
+                    8,
+                )
+                .text,
+                kind,
+                node.role.as_ref().map(ToString::to_string),
+                &node.preview,
+                node.preview_truncated,
+            )
+        })
+        .collect::<Result<Vec<_>, EventProjectionError>>()?;
+    finish_session_tree_page(
+        event_type,
+        session,
+        active_leaf_id,
+        total_node_count,
+        nodes,
+        payload.truncated,
+        next_after_entry_id,
+    )
+}
+
+fn session_tree_navigation_from_wire(
+    payload: &wisp_protocol::events::wire::RpcSessionTreeNavigated,
+) -> Result<SessionTreeNavigation, EventProjectionError> {
+    let event_type = "rpc.session.tree.navigated";
+    finish_session_tree_navigation(
+        event_type,
+        required_session_identity_from_strs(
+            &payload.session_id,
+            &payload.session_path,
+            None,
+            event_type,
+            "session_id",
+            "session_path",
+        )?,
+        exact_str(
+            &payload.selected_entry_id,
+            event_type,
+            "selected_entry_id",
+            SESSION_ID_MAX_BYTES,
+        )?,
+        optional_exact_str(
+            payload
+                .previous_active_leaf_id
+                .as_deref()
+                .map(String::as_str),
+            event_type,
+            "previous_active_leaf_id",
+            SESSION_ID_MAX_BYTES,
+        )?,
+        optional_exact_str(
+            payload.active_leaf_id.as_deref().map(String::as_str),
+            event_type,
+            "active_leaf_id",
+            SESSION_ID_MAX_BYTES,
+        )?,
+        optional_exact_str(
+            payload.editor_text.as_deref(),
+            event_type,
+            "editor_text",
+            MAX_APPLICATION_FRAME_BYTES,
+        )?,
+        stored_images_from_wire(&payload.editor_images, event_type, "editor_images")?,
+        payload.changed,
+        bounded_entry_count_u64(payload.entry_count),
+    )
+}
+
+fn session_tree_unrevert_from_wire(
+    payload: &wisp_protocol::events::wire::RpcSessionTreeUnreverted,
+) -> Result<SessionTreeUnrevert, EventProjectionError> {
+    let event_type = "rpc.session.tree.unreverted";
+    finish_session_tree_unrevert(
+        event_type,
+        required_session_identity_from_strs(
+            &payload.session_id,
+            &payload.session_path,
+            None,
+            event_type,
+            "session_id",
+            "session_path",
+        )?,
+        exact_str(
+            &payload.source_transition_id,
+            event_type,
+            "source_transition_id",
+            SESSION_ID_MAX_BYTES,
+        )?,
+        optional_exact_str(
+            payload
+                .previous_active_leaf_id
+                .as_deref()
+                .map(String::as_str),
+            event_type,
+            "previous_active_leaf_id",
+            SESSION_ID_MAX_BYTES,
+        )?,
+        optional_exact_str(
+            payload.active_leaf_id.as_deref().map(String::as_str),
+            event_type,
+            "active_leaf_id",
+            SESSION_ID_MAX_BYTES,
+        )?,
+        bounded_entry_count_u64(payload.entry_count.get()),
+    )
 }

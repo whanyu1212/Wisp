@@ -207,6 +207,19 @@ impl AttachedImage {
         Self::from_stored_parts(media_type, sha256, byte_size, width, height)
     }
 
+    /// Construct a stored attachment from a typed wire `ImagePart`.
+    pub fn stored_from_wire(part: &wisp_protocol::events::wire::ImagePart) -> Option<Self> {
+        let width = u32::try_from(part.width.get()).ok()?;
+        let height = u32::try_from(part.height.get()).ok()?;
+        Self::from_stored_parts(
+            &part.media_type.to_string(),
+            &part.sha256,
+            part.byte_size.get(),
+            width,
+            height,
+        )
+    }
+
     /// Construct a stored attachment from validated wire fields.
     fn from_stored_parts(
         media_type: &str,
@@ -385,17 +398,9 @@ pub fn reported_transcript_images_from_wire(
 ) -> Vec<TranscriptImage> {
     images
         .iter()
-        .filter_map(|image| {
-            let width = u32::try_from(image.width.get()).ok()?;
-            let height = u32::try_from(image.height.get()).ok()?;
-            transcript_image_from_stored(
-                &image.media_type.to_string(),
-                &image.sha256,
-                image.byte_size.get(),
-                width,
-                height,
-            )
-        })
+        .filter_map(AttachedImage::stored_from_wire)
+        .filter(|image| image.byte_size() <= MAX_IMAGE_BYTES)
+        .map(|image| image.to_transcript_image())
         .collect()
 }
 
