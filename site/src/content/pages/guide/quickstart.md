@@ -68,8 +68,10 @@ explain the architecture of this repository
   for simple `bash` commands inside the project (`2` / `p`), or deny (`Esc`). Manage saved rules and
   modes anytime in `/permissions`; see [Tools & safety](tools-and-safety.md) for the full policy.
 - **Review changes per turn:** Every editing turn ends with a change summary (`+N −M in K files`).
-  Press `Alt+G` (or click the summary row) to open `/diff` filtered to that turn's edits, or run
-  `/diff` for the full working tree against `HEAD`.
+  Press `Alt+G` (or click the summary row) to open `/diff` filtered to the files touched in that
+  turn (comparing each file's current working tree against `HEAD`), select an individual edit card
+  with `F6` and `Enter` for its retained before/after diff, or run `/diff` for the full working
+  tree.
 - **Inspect the workspace side panel:** Click **`Session`**, **`Files`**, or **`Browser`** in the
   top bar (or press `Ctrl+P`) to view live context, the turn/subagent waterfall (`t`), inline file
   previews (`e` to edit), or the built-in browser.

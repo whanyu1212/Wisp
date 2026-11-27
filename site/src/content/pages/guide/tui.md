@@ -53,11 +53,13 @@ When you ask Wisp to make a change, the workspace keeps the turn readable end to
   being hidden by a later success. Codemode scripts and subagent delegations keep their task title
   and nested call counts (`F6` + `→` or a click expands any card; `Enter` opens full detail).
 - **Per-turn change summary and `delta`-style `/diff` (`Alt+G`):** Every `edit` or `write` card
-  shows a syntax-highlighted inline diff preview, and the bottom of the turn rail summarizes the
-  turn's net change (`╰ +N −M in K files`). Press `Alt+G` (or click / press `Enter` on the turn
-  summary row) to open `/diff` filtered to that turn's edits—complete with hunk headers, syntax and
-  word-level highlights, folded unchanged regions, and side-by-side split view on wide terminals.
-  Run `/diff` directly for the full working tree against `HEAD`.
+  shows a syntax-highlighted inline diff preview (select a card with `F6` and press `Enter` to
+  review that single edit's retained before/after diff), and the bottom of the turn rail summarizes
+  the turn's net change (`╰ +N −M in K files`). Press `Alt+G` (or click / press `Enter` on the turn
+  summary row) to open `/diff` filtered to the files touched in that turn—showing each file's
+  cumulative working-tree diff against `HEAD` with hunk headers, syntax and word-level highlights,
+  folded unchanged regions, and side-by-side split view on wide terminals. Run `/diff` directly for
+  the full working tree against `HEAD`.
 - **Two-row telemetry deck footer:** Below the composer, a two-row deck tracks live state at a
   glance:
   - **Row 1:** run state badge (`• idle`, `● working`, `● approval`, `● trust`, or `✗ error`),
