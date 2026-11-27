@@ -336,6 +336,22 @@ pub fn reported_image_lines(images: Option<&serde_json::Value>) -> Vec<String> {
         .collect()
 }
 
+/// Transcript lines for the typed `images` slice of a validated live event.
+pub fn reported_image_lines_from_wire(
+    images: &[wisp_protocol::events::wire::ImagePart],
+) -> Vec<String> {
+    images
+        .iter()
+        .map(|image| {
+            reported_image_line(
+                &image.media_type.to_string(),
+                image.width.get(),
+                image.height.get(),
+            )
+        })
+        .collect()
+}
+
 /// Convert stored `ImagePart` fields into a [`TranscriptImage`] if within [`MAX_IMAGE_BYTES`].
 pub fn transcript_image_from_stored(
     media_type: &str,
@@ -360,6 +376,26 @@ pub fn reported_transcript_images(images: Option<&serde_json::Value>) -> Vec<Tra
         .filter_map(AttachedImage::stored)
         .filter(|image| image.byte_size() <= MAX_IMAGE_BYTES)
         .map(|image| image.to_transcript_image())
+        .collect()
+}
+
+/// Thumbnail payloads for the typed `images` slice of a validated live event.
+pub fn reported_transcript_images_from_wire(
+    images: &[wisp_protocol::events::wire::ImagePart],
+) -> Vec<TranscriptImage> {
+    images
+        .iter()
+        .filter_map(|image| {
+            let width = u32::try_from(image.width.get()).ok()?;
+            let height = u32::try_from(image.height.get()).ok()?;
+            transcript_image_from_stored(
+                &image.media_type.to_string(),
+                &image.sha256,
+                image.byte_size.get(),
+                width,
+                height,
+            )
+        })
         .collect()
 }
 

@@ -8716,6 +8716,447 @@ mod tests {
     }
 
     #[test]
+    fn live_runtime_events_project_from_typed_payload() {
+        let message_completed = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "message.completed",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "message_entry_id": "msg-entry-1",
+            "turn": 2,
+            "role": "assistant",
+            "content": "all done",
+            "finish_reason": "tool_calls",
+            "tool_calls": [{"call_id": "call-1", "name": "read", "arguments": {"path": "README.md"}, "parse_error": null}],
+            "usage": {"input_tokens": 10, "output_tokens": 42, "total_tokens": 52, "cache_read_input_tokens": null, "cache_write_input_tokens": null, "reasoning_output_tokens": null}
+        }))
+        .unwrap();
+        match BackendEvent::from_live(&message_completed).unwrap() {
+            BackendEvent::MessageOrigin {
+                entry_id,
+                tool_call_ids,
+                event,
+            } => {
+                assert_eq!(entry_id, "msg-entry-1");
+                assert_eq!(
+                    tool_call_ids,
+                    vec![crate::tool_cards::bounded_identity("call-1")]
+                );
+                assert!(matches!(
+                    *event,
+                    BackendEvent::MessageCompleted {
+                        turn: 2,
+                        output_tokens: Some(42),
+                        ..
+                    }
+                ));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let sha = "a".repeat(64);
+        let tool_result = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "tool.result",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "message_entry_id": "tool-entry-1",
+            "call_id": "call-2",
+            "name": "write",
+            "output": "wrote file",
+            "is_error": false,
+            "before_text": "old text",
+            "created": false,
+            "edit_locations": [{"old_line": 1, "new_line": 2}],
+            "images": [{"media_type": "image/png", "sha256": sha, "byte_size": 128, "width": 10, "height": 20}]
+        }))
+        .unwrap();
+        match BackendEvent::from_live(&tool_result).unwrap() {
+            BackendEvent::MessageOrigin {
+                entry_id, event, ..
+            } => {
+                assert_eq!(entry_id, "tool-entry-1");
+                match *event {
+                    BackendEvent::ToolResult(result) => {
+                        assert_eq!(result.before_text.as_deref(), Some("old text"));
+                        assert!(!result.created);
+                        assert_eq!(result.edit_locations.len(), 1);
+                        assert_eq!(result.images, vec!["[image 10×20 png]"]);
+                        assert_eq!(result.image_parts.len(), 1);
+                    }
+                    other => panic!("unexpected inner event: {other:?}"),
+                }
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let auto_approved = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "tool.approval.resolved",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "call_id": "call-3",
+            "name": "bash",
+            "approved": true,
+            "source": "auto",
+            "reason": "workspace safe"
+        }))
+        .unwrap();
+        assert!(matches!(
+            BackendEvent::from_live(&auto_approved).unwrap(),
+            BackendEvent::ToolAutoApproved { note: Some(ref note), .. } if note == "workspace safe"
+        ));
+
+        let manual_denied = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "tool.approval.resolved",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "call_id": "call-4",
+            "name": "mcp_call",
+            "target": "linear",
+            "approved": false,
+            "reason": "user denied"
+        }))
+        .unwrap();
+        assert!(matches!(
+            BackendEvent::from_live(&manual_denied).unwrap(),
+            BackendEvent::ToolApprovalResolved {
+                ref name,
+                approved: false,
+                reason: Some(ref reason),
+                ..
+            } if name == "linear" && reason == "user denied"
+        ));
+
+        let state_event = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "rpc.state",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "command_id": "state-1",
+            "state": {
+                "provider": "openai",
+                "model": "gpt-5",
+                "mode": "plan",
+                "auto_compaction_enabled": true,
+                "web_search": true,
+                "steering_mode": "one_at_a_time",
+                "follow_up_mode": "all",
+                "pending_steering_count": 0,
+                "pending_follow_up_count": 0,
+                "background_processes": [
+                    {"process_id": "proc-1", "command": "sleep 1", "started_at_ms": 1234}
+                ]
+            }
+        }))
+        .unwrap();
+        match BackendEvent::from_live(&state_event).unwrap() {
+            BackendEvent::StateReported {
+                command_id,
+                mode,
+                web_search,
+                background_processes,
+            } => {
+                assert_eq!(command_id, "state-1");
+                assert_eq!(mode, wisp_protocol::commands::AgentMode::Plan);
+                assert!(web_search);
+                assert_eq!(background_processes.len(), 1);
+                assert_eq!(background_processes[0].started_at_ms, Some(1234));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let ended_nonzero = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "process.ended",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "process_id": "proc-2",
+            "command": "false",
+            "state": "completed",
+            "exit_code": 2,
+            "duration_ms": 55
+        }))
+        .unwrap();
+        assert!(matches!(
+            BackendEvent::from_live(&ended_nonzero).unwrap(),
+            BackendEvent::ProcessEnded {
+                state: crate::tool_cards::ProcessDisplayState::Failed,
+                exit_code: Some(2),
+                duration_ms: 55,
+                ..
+            }
+        ));
+
+        let wake_started = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "rpc.command.started",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "command_id": "wake-1",
+            "command_type": "process_wake"
+        }))
+        .unwrap();
+        assert_eq!(
+            BackendEvent::from_live(&wake_started).unwrap(),
+            BackendEvent::WakeStarted {
+                command_id: "wake-1".into()
+            }
+        );
+
+        let prompt_started = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "rpc.command.started",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "command_id": "prompt-1",
+            "command_type": "prompt"
+        }))
+        .unwrap();
+        assert_eq!(
+            BackendEvent::from_live(&prompt_started).unwrap(),
+            BackendEvent::Other {
+                event_type: "rpc.command.started".into()
+            }
+        );
+    }
+
+    #[test]
+    fn live_tool_proxying_search_and_directory_events_project_from_typed_payload() {
+        let approval_requested = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "tool.approval.requested",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "call_id": "call-approve",
+            "name": "mcp_call",
+            "target": "edit",
+            "arguments": {
+                "name": "edit",
+                "arguments": {
+                    "path": "a.rs",
+                    "edits": [{"oldText": "x", "newText": "y"}]
+                }
+            },
+            "safety": "mutating",
+            "grants_allowed": false
+        }))
+        .unwrap();
+        match BackendEvent::from_live(&approval_requested).unwrap() {
+            BackendEvent::ToolApprovalRequested(pending) => {
+                assert_eq!(pending.call_id, "call-approve");
+                assert_eq!(pending.name, "edit");
+                assert!(!pending.grants_allowed);
+                assert!(matches!(
+                    pending.detail_source,
+                    crate::tool_detail::ToolDetailSource::Edit(ref source) if source.path == "a.rs"
+                ));
+                assert!(pending.arguments.get("edits").is_some());
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let exec_started_proxied = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "tool.execution.started",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "call_id": "call-exec-1",
+            "name": "mcp_call",
+            "target": "bash",
+            "arguments": {"name": "bash", "arguments": {"command": "pwd"}}
+        }))
+        .unwrap();
+        match BackendEvent::from_live(&exec_started_proxied).unwrap() {
+            BackendEvent::ToolTargetResolved(resolved) => {
+                assert_eq!(resolved.call_id, "r11:call-exec-1");
+                assert_eq!(resolved.name, "bash");
+                assert_eq!(
+                    resolved.arguments.get("command").and_then(|v| v.as_str()),
+                    Some("pwd")
+                );
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let exec_started_plain = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "tool.execution.started",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "call_id": "call-exec-2",
+            "name": "bash",
+            "arguments": {"command": "pwd"}
+        }))
+        .unwrap();
+        assert_eq!(
+            BackendEvent::from_live(&exec_started_plain).unwrap(),
+            BackendEvent::Other {
+                event_type: "tool.execution.started".into()
+            }
+        );
+
+        let nested_started = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "tool.nested.started",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "parent_call_id": "parent-1",
+            "call_id": "nested-1",
+            "name": "read",
+            "arguments": {"path": "lib.rs"}
+        }))
+        .unwrap();
+        match BackendEvent::from_live(&nested_started).unwrap() {
+            BackendEvent::ScriptCallStarted {
+                parent_call_id,
+                call_id,
+                tool,
+                arguments,
+            } => {
+                assert_eq!(parent_call_id, "r8:parent-1");
+                assert_eq!(call_id, "nested-1");
+                assert_eq!(tool, "read");
+                assert_eq!(
+                    arguments.get("path").and_then(|v| v.as_str()),
+                    Some("lib.rs")
+                );
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let nested_ended = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "tool.nested.ended",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "parent_call_id": "parent-1",
+            "call": {
+                "call_id": "nested-1",
+                "name": "read",
+                "started_at": "2026-01-02T03:04:05Z",
+                "duration_ms": 12
+            }
+        }))
+        .unwrap();
+        match BackendEvent::from_live(&nested_ended).unwrap() {
+            BackendEvent::ScriptCallEnded {
+                parent_call_id,
+                call,
+            } => {
+                assert_eq!(parent_call_id, "r8:parent-1");
+                assert_eq!(call.call_id, "nested-1");
+                assert_eq!(call.tool, "read");
+                assert_eq!(call.duration_ms, Some(12));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let search_open_event = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "web.search",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "turn": 3,
+            "provider": "openai",
+            "action": "open_page",
+            "query": "https://example.com/docs",
+            "sources": [{"url": "https://example.com/docs", "title": "Docs"}]
+        }))
+        .unwrap();
+        match BackendEvent::from_live(&search_open_event).unwrap() {
+            BackendEvent::WebSearch { turn, search } => {
+                assert_eq!(turn, 3);
+                assert_eq!(search.label, "Opened");
+                assert!(!search.failed);
+                assert!(search.argument.contains("example.com"));
+                assert!(search.hosts.is_empty());
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let search_query_event = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "web.search",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "turn": 3,
+            "provider": "openai",
+            "action": "search",
+            "query": "rust docs",
+            "sources": [{"url": "https://example.com/docs", "title": "Docs"}]
+        }))
+        .unwrap();
+        match BackendEvent::from_live(&search_query_event).unwrap() {
+            BackendEvent::WebSearch { turn, search } => {
+                assert_eq!(turn, 3);
+                assert_eq!(search.label, "Searched");
+                assert_eq!(search.argument, "the web for \u{201c}rust docs\u{201d}");
+                assert_eq!(search.hosts, vec!["example.com"]);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let msg_with_cost = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "message.completed",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "turn": 4,
+            "content": "done",
+            "finish_reason": "stop",
+            "cost": {
+                "schema_version": 1,
+                "currency": "USD",
+                "provider": "openai",
+                "model": "gpt-5",
+                "billable": {
+                    "input_tokens": 1000,
+                    "cache_read_input_tokens": 0,
+                    "cache_write_input_tokens": 0,
+                    "output_tokens": 500
+                },
+                "rates": {
+                    "input_usd_per_million": "10.0",
+                    "output_usd_per_million": "20.0",
+                    "cache_read_usd_per_million": null,
+                    "cache_write_usd_per_million": null
+                },
+                "estimated_usd": "0.02"
+            }
+        }))
+        .unwrap();
+        match BackendEvent::from_live(&msg_with_cost).unwrap() {
+            BackendEvent::MessageCompleted { turn, cost, .. } => {
+                assert_eq!(turn, 4);
+                let cost = cost.expect("projected message cost");
+                assert_eq!(cost.label, "cost $0.020");
+                assert!(!cost.lower_bound);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let dir_unchanged = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "session.directory_changed",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "session_id": "sess-1",
+            "cwd": "/new",
+            "previous_cwd": null
+        }))
+        .unwrap();
+        assert_eq!(
+            BackendEvent::from_live(&dir_unchanged).unwrap(),
+            BackendEvent::Other {
+                event_type: "session.directory_changed".into()
+            }
+        );
+
+        let dir_changed = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "session.directory_changed",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "session_id": "sess-1",
+            "cwd": "/new",
+            "previous_cwd": "/old"
+        }))
+        .unwrap();
+        assert_eq!(
+            BackendEvent::from_live(&dir_changed).unwrap(),
+            BackendEvent::DirectoryChanged {
+                previous: "/old".into(),
+                cwd: "/new".into(),
+            }
+        );
+
+        let bash_result = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "tool.result",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "call_id": "call-bash",
+            "name": "bash",
+            "output": "ok",
+            "is_error": false,
+            "created": true,
+            "started_at": "2026-01-02T03:04:05Z"
+        }))
+        .unwrap();
+        match BackendEvent::from_live(&bash_result).unwrap() {
+            BackendEvent::ToolResult(result) => {
+                assert!(!result.created);
+                assert_eq!(result.started_at_ms, Some(1_767_323_045_000));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
     fn browser_addresses_report_lands_in_state() {
         let mut state = UiState::new("fake".into(), None, None);
         let mut ids = DeterministicIds::default();

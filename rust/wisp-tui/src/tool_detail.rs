@@ -323,6 +323,22 @@ pub fn parse_edit_locations(value: Option<&Value>) -> Result<Vec<EditLocation>, 
         .collect()
 }
 
+/// Convert validated wire `EditLocation` entries while preserving the hunk cap.
+pub fn edit_locations_from_wire(
+    locations: &[wisp_protocol::events::wire::EditLocation],
+) -> Result<Vec<EditLocation>, ()> {
+    if locations.len() > DETAIL_EDIT_MAX_HUNKS {
+        return Err(());
+    }
+    Ok(locations
+        .iter()
+        .map(|location| EditLocation {
+            old_line: location.old_line.get(),
+            new_line: location.new_line.get(),
+        })
+        .collect())
+}
+
 pub fn project_tool_detail_source(name: &str, arguments: &Map<String, Value>) -> ToolDetailSource {
     match name {
         "edit" => project_edit_source(arguments),
@@ -380,6 +396,19 @@ pub fn capture_write_before(
     }
     let Some(source) = value.as_str() else {
         return Err(DetailUnavailableReason::MalformedSource);
+    };
+    capture_write_before_str(name, Some(source))
+}
+
+pub fn capture_write_before_str(
+    name: &str,
+    before_text: Option<&str>,
+) -> Result<Option<String>, DetailUnavailableReason> {
+    if name != "write" {
+        return Ok(None);
+    }
+    let Some(source) = before_text else {
+        return Ok(None);
     };
     capture_text(source).map(|capture| Some(capture.text))
 }

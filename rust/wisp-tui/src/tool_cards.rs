@@ -1508,6 +1508,10 @@ pub fn bounded_tool_arguments(name: &str, arguments: &Value) -> Value {
     let Some(arguments) = arguments.as_object() else {
         return Value::Object(Map::new());
     };
+    bounded_tool_arguments_map(name, arguments)
+}
+
+pub fn bounded_tool_arguments_map(name: &str, arguments: &Map<String, Value>) -> Value {
     let keys: &[&str] = match name {
         "read" => &["path", "offset", "limit"],
         "grep" => &[
@@ -2151,6 +2155,16 @@ pub fn proxied_arguments<'a>(name: &str, arguments: &'a Value, target: &str) -> 
         .then(|| arguments.get("arguments"))
         .flatten()
         .filter(|inner| inner.is_object())
+}
+
+pub fn proxied_arguments_map<'a>(
+    name: &str,
+    arguments: &'a Map<String, Value>,
+    target: &str,
+) -> Option<&'a Map<String, Value>> {
+    (name == "mcp_call" && arguments.get("name").and_then(Value::as_str) == Some(target))
+        .then(|| arguments.get("arguments").and_then(Value::as_object))
+        .flatten()
 }
 
 pub fn bounded_tool_name(value: &str) -> String {
