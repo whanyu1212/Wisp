@@ -9,7 +9,7 @@ export const sections = {
   reference: "Reference",
   learn: "Learn",
   inside: "Inside Wisp",
-  contributing: "Contributing",
+  contributing: "Development",
   maintainers: "Maintainer archive",
 } as const;
 

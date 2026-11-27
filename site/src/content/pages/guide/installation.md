@@ -28,7 +28,7 @@ uv tool install --python 3.12 wisp-ai
 ```
 
 If `wisp` is not on your `PATH`, run `uv tool update-shell` once and restart your shell. To install
-an exact version, pin it, for example `"wisp-ai==0.10.1"`.
+an exact version, pin it, for example `"wisp-ai==0.16.12"`.
 
 To run Wisp without installing it:
 
@@ -42,9 +42,8 @@ Native wheels for macOS arm64 and Linux glibc 2.28+ x86_64 bundle the Rust TUI w
 backend in one install. Every other platform, including Intel macOS, gets a pure wheel: print, JSON,
 RPC, and SDK use work, but interactive `wisp` and `wisp tui` report how to obtain or build a
 matching Rust binary. Source checkouts build the binary separately; see
-[Development setup](../contributing/development.md#rust-tui-scaffold). Upgrading from 0.1? Read the
-[upgrade guide](upgrading.md) first. For the 0.3 release, see
-[Upgrading from Wisp 0.2 to 0.3](upgrading-to-0.3.md), including session rollback guidance.
+[Development setup](../contributing/development.md#rust-tui-scaffold). For release-to-release
+compatibility notes, see [Compatibility & versioning](../reference/compatibility.md).
 
 ## The TUI does not start after installing
 

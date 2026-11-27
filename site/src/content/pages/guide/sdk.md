@@ -7,7 +7,7 @@ order: 12
 layout: docs
 listed: true
 searchable: true
-navGroup: Integrate & upgrade
+navGroup: Integrate & troubleshoot
 ---
 
 # Python SDK
@@ -37,7 +37,7 @@ only as a command-line tool. While Wisp is below 1.0, a minor release may make a
 changes, so pin the minor line:
 
 ```bash
-uv add "wisp-ai~=0.2.0"
+uv add "wisp-ai~=0.16.0"
 ```
 
 The runtime and client ship together in `wisp-ai`; no separate SDK package is needed. The example

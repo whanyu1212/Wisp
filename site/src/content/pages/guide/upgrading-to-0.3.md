@@ -5,12 +5,20 @@ route: guide/upgrading-to-0.3.html
 section: using
 order: 14
 layout: docs
-listed: true
-searchable: true
+listed: false
+searchable: false
 navTitle: Upgrading to 0.3
 ---
 
 # Upgrading from Wisp 0.2 to 0.3
+
+> [!NOTE]
+> **Historical upgrade guide**
+>
+> This page records the historical Wisp 0.2 to 0.3 migration and is no longer listed in site
+> navigation or search. For current releases, see [Installation](installation.md),
+> [Compatibility & versioning](../reference/compatibility.md), and the
+> [changelog](https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md).
 
 Wisp 0.3 brings a redesigned terminal conversation and sidebar, working-tree diff review,
 context breakdowns, richer tool activity, and more concise default replies. It keeps Python

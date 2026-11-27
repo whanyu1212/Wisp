@@ -9,7 +9,7 @@ const titles = [
   "Reference",
   "Learn",
   "Inside Wisp",
-  "Contributing",
+  "Development",
 ];
 
 test("homepage, desktop, and mobile share user-first section destinations", async ({

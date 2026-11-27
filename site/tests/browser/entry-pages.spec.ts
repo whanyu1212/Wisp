@@ -56,7 +56,7 @@ test("homepage offers install, product context, and preserved entry anchors with
   }
   await expect(page.locator(".secondary-starts a")).toHaveText([
     "Inside Wisp →",
-    "Contributing →",
+    "Development →",
   ]);
 });
 

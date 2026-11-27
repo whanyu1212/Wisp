@@ -37,6 +37,26 @@ test("homepage release notes open the root changelog with working upgrade links"
     .getByRole("link", { name: "0.3 upgrade guide", exact: true })
     .click();
   await expect(page).toHaveURL(/\/Wisp\/guide\/upgrading-to-0\.3.html$/);
+  for (const [route, anchor] of [
+    ["guide/upgrading-to-0.3.html", "going-back-to-024"],
+    ["guide/upgrading.html", "going-back-to-010"],
+  ] as const) {
+    await page.goto(route);
+    await expect(page.locator('meta[name="robots"]')).toHaveAttribute(
+      "content",
+      "noindex",
+    );
+    await expect(page.locator("[data-pagefind-body]")).toHaveCount(0);
+    await expect(page.locator("article")).toContainText(
+      "Historical upgrade guide",
+    );
+    await expect(page.locator(`article [id="${anchor}"]`)).toHaveCount(1);
+    await expect(
+      page.locator(
+        `.mobile-navigation a[href="${href(route)}"], .sidebar a[href="${href(route)}"]`,
+      ),
+    ).toHaveCount(0);
+  }
 });
 
 for (const [id, heading] of [
@@ -85,14 +105,20 @@ for (const [id, heading] of [
   });
 }
 
-test("contributing exposes every historical release through a non-indexed archive", async ({
+test("development exposes every historical release through a non-indexed archive", async ({
   page,
 }) => {
   await page.goto("contributing/index.html");
+  await expect(page.locator("article h1#contributing")).toHaveText(
+    "Development",
+  );
   await page
     .getByRole("link", { name: "release record archive", exact: true })
     .click();
   await expect(page).toHaveURL(/\/Wisp\/maintainers\/releases\/$/);
+  await expect(
+    page.locator('.sidebar a[href="/Wisp/contributing/"]'),
+  ).toHaveText("Development");
   await expect(page.locator('meta[name="robots"]')).toHaveAttribute(
     "content",
     "noindex",
