@@ -44,6 +44,16 @@ test("SDK tasks and API lookups link to each other without mixing in historical 
     .getByRole("link", { name: "SDK capability audit", exact: true })
     .click();
   await expect(page).toHaveURL(/architecture\/sdk-capability-audit\.html$/);
+  await expect(page.locator('meta[name="robots"]')).toHaveAttribute(
+    "content",
+    "noindex",
+  );
+  await expect(page.locator("[data-pagefind-body]")).toHaveCount(0);
+  await expect(
+    page.locator(
+      '.mobile-navigation a[href="/Wisp/architecture/sdk-capability-audit.html"], .sidebar a[href="/Wisp/architecture/sdk-capability-audit.html"]',
+    ),
+  ).toHaveCount(0);
   await expect(page.locator("article")).toContainText(
     "Historical design evidence",
   );

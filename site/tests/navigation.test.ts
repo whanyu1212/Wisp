@@ -63,8 +63,14 @@ test("the real collections expose the same section order, course sequence, and n
   const metadata = loadMetadata();
   const groups = navigation(metadata);
   assert.deepEqual(
-    groups.map((group) => group.key),
-    ["using", "reference", "learn", "inside", "contributing"],
+    groups.map((group) => [group.key, group.title]),
+    [
+      ["using", "Using Wisp"],
+      ["reference", "Reference"],
+      ["learn", "Learn"],
+      ["inside", "Inside Wisp"],
+      ["contributing", "Development"],
+    ],
   );
   const pages = groups.flatMap((group) => group.pages);
   assert.equal(
@@ -93,12 +99,20 @@ test("the real collections expose the same section order, course sequence, and n
   assert.equal(using[mcpIndex + 1]!.source, "guide/sessions.md");
   assert.deepEqual(
     using.slice(-3).map((page) => page.source),
-    [
-      "guide/troubleshooting.md",
-      "guide/upgrading-to-0.3.md",
-      "guide/upgrading.md",
-    ],
+    ["guide/skills.md", "guide/sdk.md", "guide/troubleshooting.md"],
   );
+  for (const retired of [
+    "guide/upgrading-to-0.3.md",
+    "guide/upgrading.md",
+    "architecture/sdk-capability-audit.md",
+  ]) {
+    const entry = metadata.find((page) => page.source === retired);
+    assert.ok(entry, `Expected retired page in metadata: ${retired}`);
+    assert.equal(entry.layout, "docs");
+    assert.equal(entry.listed, false);
+    assert.equal(entry.searchable, false);
+    assert.ok(!pages.some((page) => page.source === retired));
+  }
   for (const entry of metadata) {
     assert.ok(
       !entry.description.endsWith("…") && !entry.description.endsWith(":"),

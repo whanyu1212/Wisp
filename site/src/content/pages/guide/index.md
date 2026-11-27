@@ -21,9 +21,9 @@ gates, lifecycle events arrive in an enforced order, and sessions are append-onl
 that can be inspected and resumed. These guarantees make Wisp useful both at a terminal and inside
 long-lived integrations.
 
-This guide describes Wisp 0.3. While Wisp remains below 1.0, a minor release may make announced
-breaking changes under the documented [compatibility policy](../reference/compatibility.md); see the
-[0.3 upgrade guide](upgrading-to-0.3.md) and the earlier [0.2 upgrade guide](upgrading.md).
+This guide covers current Wisp (`0.16.x`). While Wisp remains below 1.0, a minor release may make
+announced breaking changes under the documented [compatibility policy](../reference/compatibility.md);
+see the [changelog](https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md) for per-release notes.
 
 Start with [Installation](installation.md) and the [Quickstart](quickstart.md). Then read
 [Staying in sync](staying-in-sync.md) for the exact steering, follow-up, cancellation, and approval

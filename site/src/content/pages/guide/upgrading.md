@@ -5,12 +5,20 @@ route: guide/upgrading.html
 section: using
 order: 15
 layout: docs
-listed: true
-searchable: true
+listed: false
+searchable: false
 navTitle: Upgrading to 0.2
 ---
 
 # Upgrading from Wisp 0.1 to 0.2
+
+> [!NOTE]
+> **Historical upgrade guide**
+>
+> This page records the historical Wisp 0.1 to 0.2 migration and is no longer listed in site
+> navigation or search. For current releases, see [Installation](installation.md),
+> [Compatibility & versioning](../reference/compatibility.md), and the
+> [changelog](https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md).
 
 For the next upgrade, see [Upgrading from Wisp 0.2 to 0.3](upgrading-to-0.3.md).
 The instructions below describe the historical 0.2 upgrade.

@@ -1,5 +1,5 @@
 ---
-title: Contributing
+title: Development
 description: Project scope, bug reporting policy, local development setup, testing, and packaging notes for Wisp.
 route: contributing/index.html
 section: contributing
@@ -9,7 +9,7 @@ listed: true
 searchable: true
 ---
 
-# Contributing
+# Development {#contributing}
 
 Wisp is personal software built for daily terminal use and to explore agent engineering. The source
 and documentation are MIT-licensed to read, learn from, or fork, rather than run as an

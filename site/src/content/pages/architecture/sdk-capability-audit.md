@@ -5,8 +5,8 @@ route: architecture/sdk-capability-audit.html
 section: inside
 order: 3
 layout: docs
-listed: true
-searchable: true
+listed: false
+searchable: false
 legacySource: reference/sdk-capability-audit.md
 ---
 

@@ -2,7 +2,7 @@
 
 Wisp is personal software built for my own daily use and experiments. Reproducible bug reports are welcome in GitHub issues; I'm not looking for feature requests or unsolicited pull requests, though you're welcome to fork it.
 
-The commands below are the local setup and checks I run. Longer notes live in the [Contributing docs](https://whanyu1212.github.io/Wisp/contributing/index.html) and [AGENTS.md](AGENTS.md).
+The commands below are the local setup and checks I run. Longer notes live in the [Development docs](https://whanyu1212.github.io/Wisp/contributing/index.html) and [AGENTS.md](AGENTS.md).
 
 ## Setup
 

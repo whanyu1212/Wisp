@@ -81,7 +81,8 @@ def test_audit_is_linked_as_design_evidence_not_api_reference() -> None:
     assert "sdk-capability-audit" not in reference_index
     assert "[SDK capability audit](sdk-capability-audit.md)" in architecture_index
     assert metadata["section"] == "inside"
-    assert metadata["listed"] is True
+    assert metadata["listed"] is False
+    assert metadata["searchable"] is False
     assert metadata["route"] == "architecture/sdk-capability-audit.html"
     assert "Historical design evidence" in _AUDIT
     assert f"capability audit pinned to Pi SDK {_PI_RELEASE}" in changelog
