@@ -220,6 +220,7 @@ Adding or enabling a server needs confirmation; reconnecting clears per-tool ses
 /history                                  search prompts submitted in this TUI run
 /theme [name]                             preview or select a curated color theme
 /logo [name]                              preview or select a startup logo
+/verbosity [low|medium|high]              set transcript verbosity (low, medium, or high)
 /update [check|install]                   show instructions for updating outside the TUI
 /skills                                   inspect loaded skills and discovery diagnostics
 /mcp                                      manage MCP servers: add, remove, enable, disable, reconnect
