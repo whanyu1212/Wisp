@@ -9157,6 +9157,926 @@ mod tests {
     }
 
     #[test]
+    fn live_rpc_report_and_preview_events_project_from_typed_payload() {
+        let reloaded = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "rpc.settings.reloaded",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "command_id": "reload-1",
+            "applied": ["model"],
+            "unchanged": ["provider"],
+            "overridden": [],
+            "restart_required": [],
+            "state": {
+                "provider": "openai",
+                "model": "gpt-5",
+                "mode": "build",
+                "effort": "high",
+                "auto_compaction_enabled": true,
+                "web_search": false,
+                "steering_mode": "one_at_a_time",
+                "follow_up_mode": "all",
+                "pending_steering_count": 0,
+                "pending_follow_up_count": 0
+            }
+        }))
+        .unwrap();
+        match BackendEvent::from_live(&reloaded).unwrap() {
+            BackendEvent::SettingsReloaded { command_id, report } => {
+                assert_eq!(command_id, "reload-1");
+                assert_eq!(report.applied, vec!["model"]);
+                assert_eq!(report.unchanged, vec!["provider"]);
+                assert_eq!(report.state.provider, "openai");
+                assert_eq!(report.state.model.as_deref(), Some("gpt-5"));
+                assert_eq!(report.state.effort.as_deref(), Some("high"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let permissions = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "rpc.permissions",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "command_id": "perm-1",
+            "permissions": {
+                "mode": "auto_commands",
+                "saved_mode": "ask",
+                "project_path": "/repo",
+                "session_only_yolo": true,
+                "command_allow_rules": ["cargo test"]
+            }
+        }))
+        .unwrap();
+        match BackendEvent::from_live(&permissions).unwrap() {
+            BackendEvent::PermissionsReported {
+                command_id,
+                permissions,
+            } => {
+                let permissions = permissions.unwrap();
+                assert_eq!(command_id, "perm-1");
+                assert_eq!(
+                    permissions.mode,
+                    wisp_protocol::commands::PermissionMode::AutoCommands
+                );
+                assert_eq!(
+                    permissions.saved_mode,
+                    Some(wisp_protocol::commands::PermissionMode::Ask)
+                );
+                assert!(permissions.session_only_yolo);
+                assert_eq!(permissions.command_allow_rules, vec!["cargo test"]);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let codemode = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "rpc.codemode",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "command_id": "cm-1",
+            "codemode": {
+                "setting": "automatic",
+                "presentation": "codemode_only",
+                "effective_presentation": "direct_and_codemode",
+                "available": true,
+                "offered": false,
+                "env_setting": "always",
+                "mcp_tools": 4,
+                "scriptable_mcp_tools": 3
+            }
+        }))
+        .unwrap();
+        match BackendEvent::from_live(&codemode).unwrap() {
+            BackendEvent::CodemodeReported {
+                command_id,
+                codemode,
+            } => {
+                let codemode = codemode.unwrap();
+                assert_eq!(command_id, "cm-1");
+                assert_eq!(
+                    codemode.setting,
+                    wisp_protocol::commands::CodemodeSetting::Automatic
+                );
+                assert_eq!(
+                    codemode.presentation,
+                    wisp_protocol::commands::CodemodePresentation::CodemodeOnly
+                );
+                assert_eq!(codemode.mcp_tools, 4);
+                assert_eq!(codemode.scriptable_mcp_tools, 3);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let subagents = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "rpc.subagents",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "command_id": "sub-1",
+            "subagents": {
+                "enabled": true,
+                "offered": true,
+                "env_enabled": null,
+                "model": "gpt-5",
+                "model_in_use": "gpt-5",
+                "env_model": null,
+                "tools": ["read"],
+                "refused_tools": ["bash"],
+                "kinds": [{
+                    "name": "fresh",
+                    "model": "gpt-5-mini",
+                    "effort": "low",
+                    "instructions": "stay focused"
+                }],
+                "max_tool_rounds": 8,
+                "max_tasks": 3,
+                "max_parallel": 2,
+                "report_max_bytes": 4096
+            }
+        }))
+        .unwrap();
+        match BackendEvent::from_live(&subagents).unwrap() {
+            BackendEvent::SubagentsReported {
+                command_id,
+                subagents,
+            } => {
+                let subagents = subagents.unwrap();
+                assert_eq!(command_id, "sub-1");
+                assert!(subagents.enabled);
+                assert_eq!(subagents.kinds.len(), 1);
+                assert_eq!(subagents.kinds[0].name, "fresh");
+                assert_eq!(subagents.max_parallel, 2);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let git_diff = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "rpc.git_diff",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "command_id": "diff-1",
+            "generation": 2,
+            "head": "deadbeef",
+            "truncated": false,
+            "files": [{
+                "path": "src/lib.rs",
+                "kind": "file",
+                "status": "modified",
+                "before": "old",
+                "after": "new",
+                "notice": "",
+                "edits": [{
+                    "call_id": "call-e1",
+                    "entry_id": "entry-e1",
+                    "tool": "edit"
+                }]
+            }]
+        }))
+        .unwrap();
+        match BackendEvent::from_live(&git_diff).unwrap() {
+            BackendEvent::GitDiffReported {
+                command_id,
+                snapshot,
+            } => {
+                let snapshot = snapshot.unwrap();
+                assert_eq!(command_id, "diff-1");
+                assert_eq!(snapshot.generation, 2);
+                assert_eq!(snapshot.head, "deadbeef");
+                assert_eq!(snapshot.files.len(), 1);
+                assert_eq!(snapshot.files[0].edits[0].tool, "edit");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let preview = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "rpc.startup.history_preview",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "lines": ["Recent session", "You: hello"]
+        }))
+        .unwrap();
+        assert_eq!(
+            BackendEvent::from_live(&preview).unwrap(),
+            BackendEvent::StartupHistoryPreview {
+                lines: vec!["Recent session".into(), "You: hello".into()],
+            }
+        );
+
+        for (raw, expected) in [
+            (
+                serde_json::json!({
+                    "type": "turn.started",
+                    "timestamp": "2026-01-02T03:04:05Z",
+                    "turn": 1
+                }),
+                "turn.started",
+            ),
+            (
+                serde_json::json!({
+                    "type": "session.saved",
+                    "timestamp": "2026-01-02T03:04:05Z",
+                    "session_id": "sess-1",
+                    "path": "/tmp/sess-1.jsonl"
+                }),
+                "session.saved",
+            ),
+            (
+                serde_json::json!({
+                    "type": "model.provider_auto_switched",
+                    "timestamp": "2026-01-02T03:04:05Z",
+                    "command_id": "cmd-1",
+                    "provider": "openai",
+                    "model": "gpt-5"
+                }),
+                "model.provider_auto_switched",
+            ),
+        ] {
+            let wire = wisp_protocol::events::deserialize(raw).unwrap();
+            assert_eq!(
+                BackendEvent::from_live(&wire).unwrap(),
+                BackendEvent::Other {
+                    event_type: expected.into()
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn live_queue_and_session_events_project_from_typed_payload() {
+        let sha = "a".repeat(64);
+        let image = serde_json::json!({
+            "media_type": "image/png",
+            "sha256": sha,
+            "byte_size": 128,
+            "width": 10,
+            "height": 20
+        });
+
+        let queue_updated = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "queue.updated",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "steering": ["first"],
+            "follow_up": ["next"],
+            "steering_images": [[image.clone()]],
+            "follow_up_images": [[]],
+            "steering_mode": "all",
+            "follow_up_mode": "one_at_a_time",
+            "token": "tok-1",
+            "command_id": "q-1"
+        }))
+        .unwrap();
+        match BackendEvent::from_live(&queue_updated).unwrap() {
+            BackendEvent::QueueSnapshot(snapshot) => {
+                assert_eq!(snapshot.steering, vec!["first"]);
+                assert_eq!(snapshot.follow_up, vec!["next"]);
+                assert_eq!(snapshot.steering_image_counts, vec![1]);
+                assert_eq!(snapshot.follow_up_image_counts, vec![0]);
+                assert_eq!(
+                    snapshot.steering_mode,
+                    wisp_protocol::commands::QueueMode::All
+                );
+                assert_eq!(
+                    snapshot.follow_up_mode,
+                    wisp_protocol::commands::QueueMode::OneAtATime
+                );
+                assert_eq!(snapshot.token.as_deref(), Some("tok-1"));
+                assert_eq!(snapshot.command_id.as_deref(), Some("q-1"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let queue_removed = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "queue.items.removed",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "command_id": "rem-1",
+            "operation": "pop",
+            "kind": "steering",
+            "steering": ["first"],
+            "follow_up": [],
+            "steering_images": [[image.clone()]],
+            "follow_up_images": []
+        }))
+        .unwrap();
+        match BackendEvent::from_live(&queue_removed).unwrap() {
+            BackendEvent::QueueItemsRemoved {
+                command_id,
+                operation,
+                kind,
+                steering,
+                steering_images,
+                ..
+            } => {
+                assert_eq!(command_id, "rem-1");
+                assert_eq!(operation, QueueRemovalOperation::Pop);
+                assert_eq!(kind, Some(QueueKind::Steering));
+                assert_eq!(steering, vec!["first"]);
+                assert_eq!(steering_images.len(), 1);
+                assert_eq!(steering_images[0].len(), 1);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let queue_injected = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "queue.message.injected",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "message_entry_id": "entry-q-1",
+            "kind": "follow_up",
+            "content": "expanded skill instructions",
+            "images": [image.clone()],
+            "skill_invocation": {
+                "name": "demo-skill",
+                "original_content": "$demo-skill run check",
+                "request": "run check",
+                "content_sha256": sha,
+                "instructions_truncated": false
+            }
+        }))
+        .unwrap();
+        match BackendEvent::from_live(&queue_injected).unwrap() {
+            BackendEvent::MessageOrigin {
+                entry_id, event, ..
+            } => {
+                assert_eq!(entry_id, "entry-q-1");
+                match *event {
+                    BackendEvent::QueueMessageInjected {
+                        kind,
+                        content,
+                        images,
+                        image_parts,
+                    } => {
+                        assert_eq!(kind, QueueKind::FollowUp);
+                        assert_eq!(content, "$demo-skill run check");
+                        assert_eq!(images, vec!["[image 10×20 png]"]);
+                        assert_eq!(image_parts.len(), 1);
+                    }
+                    other => panic!("unexpected inner event: {other:?}"),
+                }
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let sessions = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "rpc.sessions",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "command_id": "sess-list-1",
+            "sessions": [{
+                "session_id": "s1",
+                "session_path": "/tmp/s1.jsonl",
+                "updated_at": "2026-01-02T03:04:05Z",
+                "entry_count": 3,
+                "active_leaf_id": "leaf-1",
+                "name": "First"
+            }],
+            "selected_session_id": "s1",
+            "selected_session_path": "/tmp/s1.jsonl",
+            "selected_session_name": "First"
+        }))
+        .unwrap();
+        match BackendEvent::from_live(&sessions).unwrap() {
+            BackendEvent::SessionsReported {
+                command_id,
+                sessions,
+                selected_session,
+                ..
+            } => {
+                assert_eq!(command_id, "sess-list-1");
+                assert_eq!(sessions.len(), 1);
+                assert_eq!(sessions[0].updated_at, "2026-01-02T03:04:05Z");
+                assert_eq!(selected_session.unwrap().session_id, "s1");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let selected = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "rpc.session.selected",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "command_id": "sel-1",
+            "session_id": "s1",
+            "session_path": "/tmp/s1.jsonl",
+            "active_leaf_id": "leaf-1",
+            "entry_count": 3,
+            "session_name": "First"
+        }))
+        .unwrap();
+        match BackendEvent::from_live(&selected).unwrap() {
+            BackendEvent::SessionSelected {
+                command_id,
+                session,
+            } => {
+                assert_eq!(command_id, "sel-1");
+                assert_eq!(session.session_name.as_deref(), Some("First"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let renamed = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "rpc.session.name_changed",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "command_id": "ren-1",
+            "session_id": "s1",
+            "session_path": "/tmp/s1.jsonl",
+            "previous_name": "Old",
+            "name": "New",
+            "entry_count": 4
+        }))
+        .unwrap();
+        match BackendEvent::from_live(&renamed).unwrap() {
+            BackendEvent::SessionNameChanged {
+                command_id,
+                changed,
+            } => {
+                assert_eq!(command_id, "ren-1");
+                assert_eq!(changed.previous_name.as_deref(), Some("Old"));
+                assert_eq!(changed.session.session_name.as_deref(), Some("New"));
+                assert_eq!(changed.entry_count, 4);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let cloned = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "rpc.session.cloned",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "command_id": "clone-1",
+            "source_session_id": "s1",
+            "source_session_path": "/tmp/s1.jsonl",
+            "source_active_leaf_id": "leaf-1",
+            "source_session_name": "Old",
+            "session_id": "s2",
+            "session_path": "/tmp/s2.jsonl",
+            "active_leaf_id": "leaf-1",
+            "session_name": "Clone",
+            "entry_count": 4
+        }))
+        .unwrap();
+        match BackendEvent::from_live(&cloned).unwrap() {
+            BackendEvent::SessionCloned {
+                command_id,
+                derived,
+            } => {
+                assert_eq!(command_id, "clone-1");
+                assert_eq!(derived.source.session_id, "s1");
+                assert_eq!(derived.session.session_id, "s2");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let forked = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "rpc.session.forked",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "command_id": "fork-1",
+            "source_session_id": "s1",
+            "source_session_path": "/tmp/s1.jsonl",
+            "source_active_leaf_id": "leaf-1",
+            "source_session_name": "Old",
+            "session_id": "s3",
+            "session_path": "/tmp/s3.jsonl",
+            "active_leaf_id": "leaf-0",
+            "session_name": "Fork",
+            "entry_count": 2,
+            "selected_entry_id": "e-1",
+            "selected_prompt": "retry this",
+            "selected_images": [image.clone()]
+        }))
+        .unwrap();
+        match BackendEvent::from_live(&forked).unwrap() {
+            BackendEvent::SessionForked {
+                command_id,
+                derived,
+            } => {
+                assert_eq!(command_id, "fork-1");
+                assert_eq!(derived.selected_entry_id.as_deref(), Some("e-1"));
+                assert_eq!(derived.selected_prompt.as_deref(), Some("retry this"));
+                assert_eq!(derived.selected_images.len(), 1);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let tree = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "rpc.session.tree",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "command_id": "tree-1",
+            "session_id": "s1",
+            "session_path": "/tmp/s1.jsonl",
+            "active_leaf_id": "e-1",
+            "total_node_count": 2,
+            "truncated": true,
+            "next_after_entry_id": "e-1",
+            "nodes": [{
+                "entry_id": "e-1",
+                "parent_id": null,
+                "operation_id": null,
+                "created_at": "2026-01-02T03:04:05Z",
+                "kind": "message",
+                "role": "user",
+                "preview": "hello",
+                "preview_truncated": false
+            }]
+        }))
+        .unwrap();
+        match BackendEvent::from_live(&tree).unwrap() {
+            BackendEvent::SessionTreeReported { command_id, page } => {
+                assert_eq!(command_id, "tree-1");
+                assert!(page.truncated);
+                assert_eq!(page.nodes.len(), 1);
+                assert_eq!(page.nodes[0].role.as_deref(), Some("user"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let navigated = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "rpc.session.tree.navigated",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "command_id": "nav-1",
+            "session_id": "s1",
+            "session_path": "/tmp/s1.jsonl",
+            "selected_entry_id": "e-1",
+            "previous_active_leaf_id": "e-2",
+            "active_leaf_id": "e-1",
+            "editor_text": "draft",
+            "editor_images": [image.clone()],
+            "changed": true,
+            "entry_count": 2
+        }))
+        .unwrap();
+        match BackendEvent::from_live(&navigated).unwrap() {
+            BackendEvent::SessionTreeNavigated {
+                command_id,
+                navigation,
+            } => {
+                assert_eq!(command_id, "nav-1");
+                assert!(navigation.changed);
+                assert_eq!(navigation.editor_text.as_deref(), Some("draft"));
+                assert_eq!(navigation.editor_images.len(), 1);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let unreverted = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "rpc.session.tree.unreverted",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "command_id": "unrev-1",
+            "session_id": "s1",
+            "session_path": "/tmp/s1.jsonl",
+            "source_transition_id": "tr-1",
+            "previous_active_leaf_id": "e-1",
+            "active_leaf_id": "e-2",
+            "entry_count": 2
+        }))
+        .unwrap();
+        match BackendEvent::from_live(&unreverted).unwrap() {
+            BackendEvent::SessionTreeUnreverted {
+                command_id,
+                unreverted,
+            } => {
+                assert_eq!(command_id, "unrev-1");
+                assert_eq!(unreverted.source_transition_id, "tr-1");
+                assert_eq!(unreverted.active_leaf_id.as_deref(), Some("e-2"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let messages = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "rpc.messages",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "command_id": "msgs-1",
+            "session_id": "s1",
+            "session_path": "/tmp/s1.jsonl",
+            "active_leaf_id": "m-1",
+            "truncated": false,
+            "next_before_entry_id": null,
+            "next_after_entry_id": null,
+            "messages": [{
+                "entry_id": "m-1",
+                "parent_id": null,
+                "operation_id": null,
+                "created_at": "2026-01-02T03:04:05Z",
+                "role": "user",
+                "content": "hello",
+                "content_original_bytes": 5,
+                "content_truncated": false,
+                "images": [],
+                "tool_call_id": null,
+                "auto_approved": false,
+                "approval_note": null,
+                "tool_name": null,
+                "tool_calls": [],
+                "tool_calls_original_count": 0,
+                "tool_calls_truncated": false,
+                "response_id": null,
+                "finish_reason": null,
+                "is_error": false,
+                "usage": null,
+                "cost": null,
+                "web_searches": [],
+                "run_completed": null,
+                "moved_to": null,
+                "tool_result": null,
+                "skill_invocation": null,
+                "process_wake": false
+            }]
+        }))
+        .unwrap();
+        match BackendEvent::from_live(&messages).unwrap() {
+            BackendEvent::MessagesReported {
+                command_id,
+                messages,
+            } => {
+                assert_eq!(command_id, "msgs-1");
+                assert_eq!(messages.session.unwrap().session_id, "s1");
+                assert_eq!(messages.durable_entry_ids, vec!["m-1"]);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn live_remaining_other_variants_and_edge_cases_project_from_typed_payload() {
+        for (raw, expected) in [
+            (
+                serde_json::json!({
+                    "type": "provider.retrying",
+                    "timestamp": "2026-01-02T03:04:05Z",
+                    "turn": 1,
+                    "provider": "openai",
+                    "attempt": 1,
+                    "max_attempts": 3,
+                    "delay_seconds": 1.0,
+                    "reason": "rate_limit",
+                    "status_code": 429
+                }),
+                "provider.retrying",
+            ),
+            (
+                serde_json::json!({
+                    "type": "context.pressure",
+                    "timestamp": "2026-01-02T03:04:05Z",
+                    "turn": 1,
+                    "provider": "openai",
+                    "model": "gpt-5",
+                    "observed_tokens": 9000,
+                    "context_window": 10000,
+                    "remaining_tokens": 1000,
+                    "pressure_ratio": 0.9
+                }),
+                "context.pressure",
+            ),
+            (
+                serde_json::json!({
+                    "type": "context.overflow",
+                    "timestamp": "2026-01-02T03:04:05Z",
+                    "turn": 1,
+                    "provider": "openai",
+                    "model": "gpt-5",
+                    "context_window": 10000,
+                    "message": "too long"
+                }),
+                "context.overflow",
+            ),
+            (
+                serde_json::json!({
+                    "type": "trust.resolved",
+                    "timestamp": "2026-01-02T03:04:05Z",
+                    "request_id": "req-1",
+                    "project_path": "/repo",
+                    "trusted": true,
+                    "reason": null
+                }),
+                "trust.resolved",
+            ),
+            (
+                serde_json::json!({
+                    "type": "turn.completed",
+                    "timestamp": "2026-01-02T03:04:05Z",
+                    "turn": 1,
+                    "finish_reason": "stop",
+                    "outcome": "completed"
+                }),
+                "turn.completed",
+            ),
+        ] {
+            let wire = wisp_protocol::events::deserialize(raw).unwrap();
+            assert_eq!(
+                BackendEvent::from_live(&wire).unwrap(),
+                BackendEvent::Other {
+                    event_type: expected.into()
+                }
+            );
+        }
+
+        let sha = "b".repeat(64);
+        let oversized_image = serde_json::json!({
+            "media_type": "image/png",
+            "sha256": sha,
+            "byte_size": (crate::composer_images::MAX_IMAGE_BYTES as u64) + 1,
+            "width": 10,
+            "height": 20
+        });
+        let plain_injected = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "queue.message.injected",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "message_entry_id": null,
+            "kind": "steering",
+            "content": "plain message",
+            "images": [oversized_image],
+            "skill_invocation": null
+        }))
+        .unwrap();
+        match BackendEvent::from_live(&plain_injected).unwrap() {
+            BackendEvent::QueueMessageInjected {
+                kind,
+                content,
+                images,
+                image_parts,
+            } => {
+                assert_eq!(kind, QueueKind::Steering);
+                assert_eq!(content, "plain message");
+                assert_eq!(images, vec!["[image 10×20 png]"]);
+                assert!(image_parts.is_empty());
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let too_many_queue = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "queue.updated",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "steering": vec!["x"; QUEUE_MESSAGE_LIMIT + 1],
+            "follow_up": []
+        }))
+        .unwrap();
+        assert!(matches!(
+            BackendEvent::from_live(&too_many_queue),
+            Err(EventProjectionError::TooManyQueueMessages { ref event_type }) if event_type == "queue.updated"
+        ));
+
+        let oversized_queue = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "queue.updated",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "steering": ["a".repeat(QUEUE_CONTENT_BYTES_LIMIT + 1)],
+            "follow_up": []
+        }))
+        .unwrap();
+        assert!(matches!(
+            BackendEvent::from_live(&oversized_queue),
+            Err(EventProjectionError::OversizedQueueContent { ref event_type }) if event_type == "queue.updated"
+        ));
+
+        let misaligned_images = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "queue.updated",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "steering": ["one"],
+            "follow_up": [],
+            "steering_images": [[], []]
+        }))
+        .unwrap();
+        assert!(matches!(
+            BackendEvent::from_live(&misaligned_images),
+            Err(EventProjectionError::InvalidField { ref event_type, field: "steering_images" }) if event_type == "queue.updated"
+        ));
+
+        let misaligned_clear = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "queue.items.removed",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "command_id": "rem-bad",
+            "operation": "clear",
+            "kind": null,
+            "steering": ["a"],
+            "follow_up": ["b"],
+            "steering_images": [],
+            "follow_up_images": [[], []]
+        }))
+        .unwrap();
+        assert!(matches!(
+            BackendEvent::from_live(&misaligned_clear),
+            Err(EventProjectionError::InvalidField { ref event_type, field: "follow_up_images" }) if event_type == "queue.items.removed"
+        ));
+
+        let oversized_selected = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "rpc.sessions",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "command_id": "sess-bad",
+            "sessions": [],
+            "selected_session_id": "x".repeat(SESSION_ID_MAX_BYTES + 1),
+            "selected_session_path": "/tmp/s1.jsonl"
+        }))
+        .unwrap();
+        assert!(matches!(
+            BackendEvent::from_live(&oversized_selected),
+            Err(EventProjectionError::OversizedField { ref event_type, field: "selected_session_id", .. }) if event_type == "rpc.sessions"
+        ));
+
+        let empty_tree = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "rpc.session.tree",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "command_id": "tree-empty",
+            "session_id": null,
+            "session_path": null,
+            "total_node_count": 0,
+            "nodes": []
+        }))
+        .unwrap();
+        match BackendEvent::from_live(&empty_tree).unwrap() {
+            BackendEvent::SessionTreeReported { command_id, page } => {
+                assert_eq!(command_id, "tree-empty");
+                assert!(page.session.is_none());
+                assert!(page.nodes.is_empty());
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let long_preview_tree = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "rpc.session.tree",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "command_id": "tree-trunc",
+            "session_id": "s1",
+            "session_path": "/tmp/s1.jsonl",
+            "total_node_count": 1,
+            "nodes": [{
+                "entry_id": "e-1",
+                "parent_id": null,
+                "operation_id": null,
+                "created_at": "2026-01-02T03:04:05Z",
+                "kind": "compaction",
+                "role": null,
+                "preview": "p".repeat(SESSION_LABEL_MAX_BYTES + 20),
+                "preview_truncated": false
+            }]
+        }))
+        .unwrap();
+        match BackendEvent::from_live(&long_preview_tree).unwrap() {
+            BackendEvent::SessionTreeReported { page, .. } => {
+                assert!(page.nodes[0].preview_truncated);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let single_tool_msg = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "rpc.messages",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "command_id": "msgs-tool",
+            "session_id": "s1",
+            "session_path": "/tmp/s1.jsonl",
+            "messages": [{
+                "entry_id": "t-1",
+                "parent_id": null,
+                "operation_id": null,
+                "created_at": "2026-01-02T03:04:05Z",
+                "role": "tool",
+                "content": "output",
+                "content_original_bytes": 6,
+                "content_truncated": false,
+                "images": [],
+                "tool_call_id": "call-t1",
+                "tool_name": "bash",
+                "tool_result": {
+                    "status": "done",
+                    "exit_code": 0,
+                    "output_has_exit_status": true,
+                    "before_text": null,
+                    "created": false,
+                    "summary": null,
+                    "truncated": false,
+                    "duration_ms": 10,
+                    "process_started_at": null,
+                    "process_ended_at": null,
+                    "target": null,
+                    "edit_locations": [],
+                    "nested_calls": [],
+                    "nested_calls_omitted": null
+                }
+            }]
+        }))
+        .unwrap();
+        match BackendEvent::from_live(&single_tool_msg).unwrap() {
+            BackendEvent::MessagesReported {
+                command_id,
+                messages,
+            } => {
+                assert_eq!(command_id, "msgs-tool");
+                assert!(messages.exact_tool_result.is_some());
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let failed_msgs = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "rpc.messages",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "command_id": "msgs-fail",
+            "session_id": "s1",
+            "session_path": "/tmp/s1.jsonl",
+            "messages": [{
+                "entry_id": "",
+                "parent_id": null,
+                "operation_id": null,
+                "created_at": "2026-01-02T03:04:05Z",
+                "role": "tool",
+                "content": "output",
+                "content_original_bytes": 6,
+                "content_truncated": false,
+                "images": [],
+                "tool_call_id": null,
+                "tool_name": "bash"
+            }]
+        }))
+        .unwrap();
+        assert!(matches!(
+            BackendEvent::from_live(&failed_msgs).unwrap(),
+            BackendEvent::MessagesProjectionFailed { ref command_id, .. } if command_id == "msgs-fail"
+        ));
+    }
+
+    #[test]
     fn browser_addresses_report_lands_in_state() {
         let mut state = UiState::new("fake".into(), None, None);
         let mut ids = DeterministicIds::default();
