@@ -10,7 +10,27 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.16.11 — Unreleased
+## 0.16.12 — Unreleased
+
+- **Add `/verbosity` (`low`, `medium`, `high`) transcript toggle** ([#1160](https://github.com/whanyu1212/Wisp/pull/1160)).
+  Switch between quiet turn skimming (`low`), balanced output (`medium`, default), and full detail
+  with expanded thinking, ungrouped calls, diffs, and inline bash output (`high`), persisted in
+  `~/.wisp/tui.json` without changing backend history or hiding errors.
+- **Speed up repeated session reads and projections** ([#1161](https://github.com/whanyu1212/Wisp/pull/1161)).
+  Cache run snapshots and resolved tree state on `JsonlSession` and fast-path unchanged refreshes
+  when file signature and generation match.
+- **Exhaustive typed live event projection in `wisp-tui`** ([#1162](https://github.com/whanyu1212/Wisp/pull/1162),
+  [#1163](https://github.com/whanyu1212/Wisp/pull/1163), [#1164](https://github.com/whanyu1212/Wisp/pull/1164),
+  [#1165](https://github.com/whanyu1212/Wisp/pull/1165)).
+  Project all 76 `WispCurrentLiveEventOutput` variants directly from generated Rust wire types via
+  `payload()` and remove live JSON `Value` field lookups, while keeping trace replay untouched.
+- No wire-contract, Python SDK, or saved-session format changes. Use matching `0.16.12` backend
+  and frontend packages.
+
+<!-- Keeps links to the pre-release "0.16.11 — Unreleased" heading working. -->
+<a id="01611--unreleased"></a>
+
+## 0.16.11 — 2026-11-27
 
 - **Find text in a session** ([#1155](https://github.com/whanyu1212/Wisp/pull/1155)). Press
   `Ctrl+F` to search messages and retained tool output, including older history. Press Enter to jump
