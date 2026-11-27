@@ -72,7 +72,7 @@ impl std::io::Write for DiscoveryBudget {
 }
 
 fn discovery_report<T>(
-    value: &Value,
+    value: &(impl serde::Serialize + ?Sized),
     project: impl FnOnce() -> Option<T>,
 ) -> Result<Arc<T>, String> {
     if serde_json::to_writer(DiscoveryBudget(DISCOVERY_REPORT_MAX_BYTES), value).is_err() {
@@ -99,6 +99,304 @@ impl BackendEvent {
             WireEvent::WarningEvent(payload) => return Ok(bounded_diagnostic(&payload.message)),
             WireEvent::ProjectFilesInvalidated(payload) => {
                 return Ok(Self::ProjectFilesInvalidated(payload.generation.get()));
+            }
+            WireEvent::RpcProjectFilesReported(payload) => {
+                let command_id =
+                    exact_str(&payload.command_id, "rpc.project_files", "command_id", 256)?;
+                let snapshot = discovery_report(payload, || event.project_files(&command_id))
+                    .map_err(|_| {
+                        "Project discovery report exceeds the 1 MiB display limit or could not be decoded."
+                            .into()
+                    });
+                return Ok(Self::ProjectFilesReported {
+                    command_id,
+                    directory: payload.directory.as_deref().cloned(),
+                    in_progress: payload.in_progress,
+                    snapshot,
+                });
+            }
+            WireEvent::RpcSkillsReported(payload) => {
+                let command_id = exact_str(&payload.command_id, "rpc.skills", "command_id", 256)?;
+                let catalog =
+                    discovery_report(&payload.catalog, || event.skill_catalog(&command_id));
+                return Ok(Self::SkillCatalogReported {
+                    command_id,
+                    catalog,
+                });
+            }
+            WireEvent::SkillCatalogUpdated(payload) => {
+                return Ok(Self::SkillCatalogUpdated(discovery_report(
+                    &payload.catalog,
+                    || event.updated_skill_catalog(),
+                )));
+            }
+            WireEvent::RpcMcpStatusReported(payload) => {
+                let command_id = exact_str(&payload.command_id, "rpc.mcp", "command_id", 256)?;
+                let status = discovery_report(&payload.status, || event.mcp_status(&command_id));
+                return Ok(Self::McpStatusReported { command_id, status });
+            }
+            WireEvent::McpStatusUpdated(payload) => {
+                return Ok(Self::McpStatusUpdated(discovery_report(
+                    &payload.status,
+                    || event.updated_mcp_status(),
+                )));
+            }
+            WireEvent::RpcMcpLoginStarted(payload) => {
+                return Ok(Self::McpLoginStarted {
+                    command_id: exact_str(&payload.command_id, "rpc.mcp.login", "command_id", 256)?,
+                    name: exact_str(&payload.name, "rpc.mcp.login", "name", 256)?,
+                    authorization_url: exact_str(
+                        &payload.authorization_url,
+                        "rpc.mcp.login",
+                        "authorization_url",
+                        8_192 * 4,
+                    )?,
+                });
+            }
+            WireEvent::RpcMcpSnippetPreviewed(payload) => {
+                let command_id =
+                    exact_str(&payload.command_id, "rpc.mcp.preview", "command_id", 256)?;
+                let servers =
+                    discovery_report(&payload.servers, || event.mcp_snippet_preview(&command_id));
+                return Ok(Self::McpSnippetPreviewed {
+                    command_id,
+                    servers,
+                });
+            }
+            WireEvent::SessionStatsReported(payload) => {
+                let command_id =
+                    exact_str(&payload.command_id, "session.stats", "command_id", 256)?;
+                let mut stats = event.session_stats(&command_id).ok_or_else(|| {
+                    EventProjectionError::InvalidField {
+                        event_type: "session.stats".into(),
+                        field: "stats",
+                    }
+                })?;
+                if stats
+                    .session_id
+                    .as_ref()
+                    .is_some_and(|id| id.len() > SESSION_ID_MAX_BYTES)
+                {
+                    return Err(EventProjectionError::OversizedField {
+                        event_type: "session.stats".into(),
+                        field: "stats.session_id",
+                        limit: SESSION_ID_MAX_BYTES,
+                    });
+                }
+                // All retained prose is bounded independently of the negotiated wire limit.
+                if let Some(policy) = &mut stats.compaction {
+                    policy.threshold_ineligible_reason = policy
+                        .threshold_ineligible_reason
+                        .as_ref()
+                        .map(|reason| super::bounded_session_text(reason, 1024));
+                }
+                if stats.cost.known_usd.len() > 128 {
+                    return Err(EventProjectionError::OversizedField {
+                        event_type: "session.stats".into(),
+                        field: "stats.cost.known_usd",
+                        limit: 128,
+                    });
+                }
+                return Ok(Self::SessionStatsReported {
+                    command_id,
+                    stats: Box::new(stats),
+                });
+            }
+            WireEvent::ContextEstimated(payload) => {
+                let mut estimate = event.context_estimated().ok_or_else(|| {
+                    EventProjectionError::InvalidField {
+                        event_type: "context.estimated".into(),
+                        field: "budget",
+                    }
+                })?;
+                estimate.provider =
+                    exact_str(&payload.provider, "context.estimated", "provider", 256)?;
+                if estimate
+                    .model
+                    .as_ref()
+                    .is_some_and(|model| model.len() > 1024)
+                {
+                    return Err(EventProjectionError::OversizedField {
+                        event_type: "context.estimated".into(),
+                        field: "model",
+                        limit: 1024,
+                    });
+                }
+                return Ok(Self::ContextEstimated(estimate));
+            }
+            WireEvent::CompactionStarted(payload) => {
+                let mut started = event.compaction_started().ok_or_else(|| {
+                    EventProjectionError::InvalidField {
+                        event_type: "compaction.started".into(),
+                        field: "compaction",
+                    }
+                })?;
+                started.session_id = exact_str(
+                    &payload.session_id,
+                    "compaction.started",
+                    "session_id",
+                    SESSION_ID_MAX_BYTES,
+                )?;
+                return Ok(Self::CompactionStarted(started));
+            }
+            WireEvent::CompactionCompleted(payload) => {
+                let mut completed = event.compaction_completed().ok_or_else(|| {
+                    EventProjectionError::InvalidField {
+                        event_type: "compaction.completed".into(),
+                        field: "compaction",
+                    }
+                })?;
+                completed.session_id = exact_str(
+                    &payload.session_id,
+                    "compaction.completed",
+                    "session_id",
+                    SESSION_ID_MAX_BYTES,
+                )?;
+                completed.error = completed
+                    .error
+                    .as_ref()
+                    .map(|error| super::bounded_session_text(error, 1024));
+                return Ok(Self::CompactionCompleted(completed));
+            }
+            WireEvent::RpcBrowserAddressesReported(payload) => {
+                return Ok(Self::BrowserAddressesReported(BrowserAddresses {
+                    trusted: payload.trusted,
+                    addresses: payload
+                        .addresses
+                        .iter()
+                        .map(|address| address.as_str().to_owned())
+                        .collect(),
+                }));
+            }
+            WireEvent::BrowserViewportUpdated(_) => {
+                let update = event.browser_viewport_updated().ok_or_else(|| {
+                    EventProjectionError::InvalidField {
+                        event_type: "browser.viewport.updated".into(),
+                        field: "browser.viewport.updated",
+                    }
+                })?;
+                let live = update.live_png.is_some() || update.window_mode;
+                let live_image = update.live_png.as_deref().and_then(|png| {
+                    composer_images::transcript_image_from_live_png(
+                        png,
+                        update.viewport_width.zip(update.viewport_height),
+                    )
+                });
+                if update.live_png.is_some() && live_image.is_none() {
+                    return Err(EventProjectionError::InvalidField {
+                        event_type: "browser.viewport.updated".into(),
+                        field: "live_png",
+                    });
+                }
+                let image = live_image.or_else(|| {
+                    update.image.as_ref().and_then(|img| {
+                        composer_images::transcript_image_from_stored(
+                            &img.media_type,
+                            &img.sha256,
+                            img.byte_size,
+                            img.width,
+                            img.height,
+                        )
+                    })
+                });
+                return Ok(Self::BrowserViewportUpdated(Box::new(
+                    BrowserViewportInput {
+                        live,
+                        window_mode: update.window_mode,
+                        live_device_scale: update.live_device_scale,
+                        image,
+                        url: update.url,
+                        title: update.title,
+                        viewport_width: update.viewport_width,
+                        viewport_height: update.viewport_height,
+                        source_tool: update.source_tool,
+                        timestamp: update.timestamp,
+                    },
+                )));
+            }
+            WireEvent::RpcCommandsReported(payload) => {
+                let command_id = exact_str(&payload.command_id, "rpc.commands", "command_id", 256)?;
+                let mut catalog = event.command_catalog(&command_id).ok_or(
+                    EventProjectionError::InvalidField {
+                        event_type: "rpc.commands".into(),
+                        field: "commands",
+                    },
+                )?;
+                catalog.sort_by(|a, b| (a.order, &a.name).cmp(&(b.order, &b.name)));
+                for descriptor in &mut catalog {
+                    descriptor.description =
+                        super::bounded_session_text(&descriptor.description, 1024);
+                }
+                return Ok(Self::CommandCatalogReported {
+                    command_id,
+                    catalog: catalog.into(),
+                });
+            }
+            WireEvent::RpcModelCatalogReported(payload) => {
+                let command_id =
+                    exact_str(&payload.command_id, "rpc.model_catalog", "command_id", 256)?;
+                let catalog =
+                    event
+                        .model_catalog(&command_id)
+                        .ok_or(EventProjectionError::InvalidField {
+                            event_type: "rpc.model_catalog".into(),
+                            field: "catalog",
+                        })?;
+                return Ok(Self::ModelCatalogReported {
+                    command_id,
+                    catalog,
+                });
+            }
+            WireEvent::RpcConnectionCatalogReported(payload) => {
+                let command_id = exact_str(
+                    &payload.command_id,
+                    "rpc.connection_catalog",
+                    "command_id",
+                    256,
+                )?;
+                let catalog = event.connection_catalog(&command_id).ok_or(
+                    EventProjectionError::InvalidField {
+                        event_type: "rpc.connection_catalog".into(),
+                        field: "command_id",
+                    },
+                )?;
+                return Ok(Self::ConnectionCatalogReported {
+                    command_id,
+                    catalog,
+                });
+            }
+            WireEvent::RpcDeviceCodeReported(payload) => {
+                let command_id =
+                    exact_str(&payload.command_id, "rpc.device_code", "command_id", 256)?;
+                let challenge =
+                    event
+                        .device_code(&command_id)
+                        .ok_or(EventProjectionError::InvalidField {
+                            event_type: "rpc.device_code".into(),
+                            field: "command_id",
+                        })?;
+                return Ok(Self::DeviceCodeReported {
+                    command_id,
+                    challenge,
+                });
+            }
+            WireEvent::RpcDeviceCodeProgressReported(payload) => {
+                let command_id = exact_str(
+                    &payload.command_id,
+                    "rpc.device_code.progress",
+                    "command_id",
+                    256,
+                )?;
+                let progress = event.device_code_progress(&command_id).ok_or(
+                    EventProjectionError::InvalidField {
+                        event_type: "rpc.device_code.progress".into(),
+                        field: "command_id",
+                    },
+                )?;
+                return Ok(Self::DeviceCodeProgress {
+                    command_id,
+                    progress,
+                });
             }
             _ => {}
         }
@@ -199,297 +497,26 @@ impl BackendEvent {
                     snapshot,
                 });
             }
-            "rpc.project_files" => {
-                let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
-                let snapshot = discovery_report(&value, || event.project_files(&command_id))
-                    .map_err(|_| "Project discovery report exceeds the 1 MiB display limit or could not be decoded.".into());
-                return Ok(Self::ProjectFilesReported {
-                    command_id,
-                    directory: value["directory"].as_str().map(str::to_owned),
-                    in_progress: value["in_progress"].as_bool().unwrap_or(false),
-                    snapshot,
-                });
-            }
-            "rpc.skills" => {
-                let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
-                let catalog =
-                    discovery_report(&value["catalog"], || event.skill_catalog(&command_id));
-                return Ok(Self::SkillCatalogReported {
-                    command_id,
-                    catalog,
-                });
-            }
-            "skill.catalog.updated" => {
-                return Ok(Self::SkillCatalogUpdated(discovery_report(
-                    &value["catalog"],
-                    || event.updated_skill_catalog(),
-                )));
-            }
-            "rpc.mcp" => {
-                let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
-                let status = discovery_report(&value["status"], || event.mcp_status(&command_id));
-                return Ok(Self::McpStatusReported { command_id, status });
-            }
-            "mcp.status.updated" => {
-                return Ok(Self::McpStatusUpdated(discovery_report(
-                    &value["status"],
-                    || event.updated_mcp_status(),
-                )));
-            }
-            "rpc.mcp.login" => {
-                let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
-                let name = exact_string_field(&value, &event_type, "name", 256)?;
-                let authorization_url =
-                    exact_string_field(&value, &event_type, "authorization_url", 8_192 * 4)?;
-                return Ok(Self::McpLoginStarted {
-                    command_id,
-                    name,
-                    authorization_url,
-                });
-            }
-            "rpc.mcp.preview" => {
-                let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
-                let servers =
-                    discovery_report(&value["servers"], || event.mcp_snippet_preview(&command_id));
-                return Ok(Self::McpSnippetPreviewed {
-                    command_id,
-                    servers,
-                });
-            }
-            "session.stats" => {
-                let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
-                let mut stats = event.session_stats(&command_id).ok_or_else(|| {
-                    EventProjectionError::InvalidField {
-                        event_type: event_type.clone(),
-                        field: "stats",
-                    }
-                })?;
-                if stats
-                    .session_id
-                    .as_ref()
-                    .is_some_and(|id| id.len() > SESSION_ID_MAX_BYTES)
-                {
-                    return Err(EventProjectionError::OversizedField {
-                        event_type,
-                        field: "stats.session_id",
-                        limit: SESSION_ID_MAX_BYTES,
-                    });
-                }
-                // All retained prose is bounded independently of the negotiated wire limit.
-                if let Some(policy) = &mut stats.compaction {
-                    policy.threshold_ineligible_reason = policy
-                        .threshold_ineligible_reason
-                        .as_ref()
-                        .map(|reason| super::bounded_session_text(reason, 1024));
-                }
-                if stats.cost.known_usd.len() > 128 {
-                    return Err(EventProjectionError::OversizedField {
-                        event_type,
-                        field: "stats.cost.known_usd",
-                        limit: 128,
-                    });
-                }
-                return Ok(Self::SessionStatsReported {
-                    command_id,
-                    stats: Box::new(stats),
-                });
-            }
-            "context.estimated" => {
-                let mut estimate = event.context_estimated().ok_or_else(|| {
-                    EventProjectionError::InvalidField {
-                        event_type: event_type.clone(),
-                        field: "budget",
-                    }
-                })?;
-                estimate.provider = exact_string_field(&value, &event_type, "provider", 256)?;
-                if estimate
-                    .model
-                    .as_ref()
-                    .is_some_and(|model| model.len() > 1024)
-                {
-                    return Err(EventProjectionError::OversizedField {
-                        event_type,
-                        field: "model",
-                        limit: 1024,
-                    });
-                }
-                return Ok(Self::ContextEstimated(estimate));
-            }
-            "compaction.started" => {
-                let mut started = event.compaction_started().ok_or_else(|| {
-                    EventProjectionError::InvalidField {
-                        event_type: event_type.clone(),
-                        field: "compaction",
-                    }
-                })?;
-                started.session_id =
-                    exact_string_field(&value, &event_type, "session_id", SESSION_ID_MAX_BYTES)?;
-                return Ok(Self::CompactionStarted(started));
-            }
-            "compaction.completed" => {
-                let mut completed = event.compaction_completed().ok_or_else(|| {
-                    EventProjectionError::InvalidField {
-                        event_type: event_type.clone(),
-                        field: "compaction",
-                    }
-                })?;
-                completed.session_id =
-                    exact_string_field(&value, &event_type, "session_id", SESSION_ID_MAX_BYTES)?;
-                completed.error = completed
-                    .error
-                    .as_ref()
-                    .map(|error| super::bounded_session_text(error, 1024));
-                return Ok(Self::CompactionCompleted(completed));
-            }
-            "rpc.browser_addresses" => {
-                let addresses = array_field(&value, &event_type, "addresses")?
-                    .iter()
-                    .map(|address| address.as_str().map(str::to_owned))
-                    .collect::<Option<Vec<_>>>()
-                    .ok_or_else(|| EventProjectionError::InvalidField {
-                        event_type: event_type.clone(),
-                        field: "addresses",
-                    })?;
-                return Ok(Self::BrowserAddressesReported(BrowserAddresses {
-                    trusted: bool_field(&value, &event_type, "trusted")?,
-                    addresses,
-                }));
-            }
-            "browser.viewport.updated" => {
-                let update = event.browser_viewport_updated().ok_or_else(|| {
-                    EventProjectionError::InvalidField {
-                        event_type: event_type.clone(),
-                        field: "browser.viewport.updated",
-                    }
-                })?;
-                let live = update.live_png.is_some() || update.window_mode;
-                let live_image = update.live_png.as_deref().and_then(|png| {
-                    composer_images::transcript_image_from_live_png(
-                        png,
-                        update.viewport_width.zip(update.viewport_height),
-                    )
-                });
-                if update.live_png.is_some() && live_image.is_none() {
-                    return Err(EventProjectionError::InvalidField {
-                        event_type,
-                        field: "live_png",
-                    });
-                }
-                let image = live_image.or_else(|| {
-                    update.image.as_ref().and_then(|img| {
-                        composer_images::transcript_image_from_stored(
-                            &img.media_type,
-                            &img.sha256,
-                            img.byte_size,
-                            img.width,
-                            img.height,
-                        )
-                    })
-                });
-                return Ok(Self::BrowserViewportUpdated(Box::new(
-                    BrowserViewportInput {
-                        live,
-                        window_mode: update.window_mode,
-                        live_device_scale: update.live_device_scale,
-                        image,
-                        url: update.url,
-                        title: update.title,
-                        viewport_width: update.viewport_width,
-                        viewport_height: update.viewport_height,
-                        source_tool: update.source_tool,
-                        timestamp: update.timestamp,
-                    },
-                )));
-            }
             _ => {}
         }
-        let command_id = match event_type.as_str() {
-            "rpc.connection_catalog"
-            | "rpc.model_catalog"
-            | "rpc.commands"
-            | "rpc.state"
-            | "rpc.device_code"
-            | "rpc.device_code.progress" => {
-                exact_string_field(&value, &event_type, "command_id", 256)?
-            }
-            _ => return Self::from_projection_value(&value),
-        };
-        match event_type.as_str() {
-            "rpc.commands" => event
-                .command_catalog(&command_id)
-                .map(|mut catalog| {
-                    catalog.sort_by(|a, b| (a.order, &a.name).cmp(&(b.order, &b.name)));
-                    for descriptor in &mut catalog {
-                        descriptor.description =
-                            super::bounded_session_text(&descriptor.description, 1024);
-                    }
-                    Self::CommandCatalogReported {
-                        command_id,
-                        catalog: catalog.into(),
-                    }
-                })
-                .ok_or(EventProjectionError::InvalidField {
-                    event_type,
-                    field: "commands",
-                }),
-            "rpc.state" => {
-                let background_processes =
-                    background_processes(&value["state"]["background_processes"], &event_type)?;
-                event
-                    .agent_mode(&command_id)
-                    .map(|mode| Self::StateReported {
-                        command_id,
-                        mode,
-                        web_search: value["state"]["web_search"].as_bool().unwrap_or(false),
-                        background_processes,
-                    })
-                    .ok_or(EventProjectionError::InvalidField {
-                        event_type,
-                        field: "state.mode",
-                    })
-            }
-            "rpc.model_catalog" => event
-                .model_catalog(&command_id)
-                .map(|catalog| Self::ModelCatalogReported {
+        if event_type == "rpc.state" {
+            let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
+            let background_processes =
+                background_processes(&value["state"]["background_processes"], &event_type)?;
+            return event
+                .agent_mode(&command_id)
+                .map(|mode| Self::StateReported {
                     command_id,
-                    catalog,
+                    mode,
+                    web_search: value["state"]["web_search"].as_bool().unwrap_or(false),
+                    background_processes,
                 })
                 .ok_or(EventProjectionError::InvalidField {
                     event_type,
-                    field: "catalog",
-                }),
-            "rpc.connection_catalog" => event
-                .connection_catalog(&command_id)
-                .map(|catalog| Self::ConnectionCatalogReported {
-                    command_id,
-                    catalog,
-                })
-                .ok_or(EventProjectionError::InvalidField {
-                    event_type,
-                    field: "command_id",
-                }),
-            "rpc.device_code" => event
-                .device_code(&command_id)
-                .map(|challenge| Self::DeviceCodeReported {
-                    command_id,
-                    challenge,
-                })
-                .ok_or(EventProjectionError::InvalidField {
-                    event_type,
-                    field: "command_id",
-                }),
-            "rpc.device_code.progress" => event
-                .device_code_progress(&command_id)
-                .map(|progress| Self::DeviceCodeProgress {
-                    command_id,
-                    progress,
-                })
-                .ok_or(EventProjectionError::InvalidField {
-                    event_type,
-                    field: "command_id",
-                }),
-            _ => unreachable!("connection events were selected above"),
+                    field: "state.mode",
+                });
         }
+        Self::from_projection_value(&value)
     }
 
     /// Project a bounded trace event. The caller owns trace-schema validation.
@@ -1597,13 +1624,12 @@ fn optional_exact_string_field(
     }
 }
 
-fn exact_string_field(
-    value: &Value,
+fn exact_str(
+    source: &str,
     event_type: &str,
     field: &'static str,
     limit: usize,
 ) -> Result<String, EventProjectionError> {
-    let source = string_field_ref(value, event_type, field)?;
     if source.len() > limit {
         return Err(EventProjectionError::OversizedField {
             event_type: event_type.to_owned(),
@@ -1612,6 +1638,20 @@ fn exact_string_field(
         });
     }
     Ok(source.to_owned())
+}
+
+fn exact_string_field(
+    value: &Value,
+    event_type: &str,
+    field: &'static str,
+    limit: usize,
+) -> Result<String, EventProjectionError> {
+    exact_str(
+        string_field_ref(value, event_type, field)?,
+        event_type,
+        field,
+        limit,
+    )
 }
 
 fn array_field<'a>(

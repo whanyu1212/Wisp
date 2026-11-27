@@ -8622,6 +8622,100 @@ mod tests {
     }
 
     #[test]
+    fn live_catalog_and_login_arms_preserve_bounds_and_sorting_from_typed_payload() {
+        let oversized_login = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "rpc.mcp.login",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "command_id": "x".repeat(257),
+            "name": "srv",
+            "authorization_url": "https://example.test/auth",
+        }))
+        .unwrap();
+        assert!(matches!(
+            BackendEvent::from_live(&oversized_login),
+            Err(EventProjectionError::OversizedField {
+                ref event_type,
+                field: "command_id",
+                limit: 256,
+            }) if event_type == "rpc.mcp.login"
+        ));
+
+        let commands_event = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "rpc.commands",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "command_id": "cmds-1",
+            "commands": [
+                {
+                    "name": "zeta",
+                    "title": "Zeta",
+                    "description": "z".repeat(2_000),
+                    "category": "general",
+                    "aliases": [],
+                    "slash_command": "/zeta",
+                    "slash_aliases": [],
+                    "arguments": [],
+                    "accepts_arguments": false,
+                    "prefill_on_partial_enter": false,
+                    "order": 2
+                },
+                {
+                    "name": "alpha",
+                    "title": "Alpha",
+                    "description": "short description",
+                    "category": "general",
+                    "aliases": [],
+                    "slash_command": "/alpha",
+                    "slash_aliases": [],
+                    "arguments": [],
+                    "accepts_arguments": false,
+                    "prefill_on_partial_enter": false,
+                    "order": 1
+                }
+            ]
+        }))
+        .unwrap();
+        match BackendEvent::from_live(&commands_event).unwrap() {
+            BackendEvent::CommandCatalogReported {
+                command_id,
+                catalog,
+            } => {
+                assert_eq!(command_id, "cmds-1");
+                assert_eq!(catalog.len(), 2);
+                assert_eq!(catalog[0].name, "alpha");
+                assert_eq!(catalog[1].name, "zeta");
+                assert!(catalog[1].description.len() <= 1024);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let files_event = wisp_protocol::events::deserialize(serde_json::json!({
+            "type": "rpc.project_files",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "command_id": "files-1",
+            "generation": 3,
+            "entries": [{"path": "src/main.rs", "kind": "file"}],
+            "truncated": false,
+            "directory": "src",
+            "in_progress": false
+        }))
+        .unwrap();
+        match BackendEvent::from_live(&files_event).unwrap() {
+            BackendEvent::ProjectFilesReported {
+                command_id,
+                directory,
+                in_progress,
+                snapshot,
+            } => {
+                assert_eq!(command_id, "files-1");
+                assert_eq!(directory.as_deref(), Some("src"));
+                assert!(!in_progress);
+                assert_eq!(snapshot.unwrap().entries[0].path, "src/main.rs");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
     fn browser_addresses_report_lands_in_state() {
         let mut state = UiState::new("fake".into(), None, None);
         let mut ids = DeterministicIds::default();

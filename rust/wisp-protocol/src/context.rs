@@ -185,3 +185,234 @@ pub struct CompactionCompleted {
     pub error: Option<String>,
     pub will_retry: bool,
 }
+
+impl From<&crate::events::wire::ContextEstimate> for ContextEstimate {
+    fn from(wire: &crate::events::wire::ContextEstimate) -> Self {
+        Self {
+            total_tokens: wire.total_tokens,
+        }
+    }
+}
+
+impl From<&crate::events::wire::ContextBudgetAccountingMethod> for ContextAccountingMethod {
+    fn from(wire: &crate::events::wire::ContextBudgetAccountingMethod) -> Self {
+        match wire {
+            crate::events::wire::ContextBudgetAccountingMethod::FullyEstimated => {
+                Self::FullyEstimated
+            }
+            crate::events::wire::ContextBudgetAccountingMethod::ProviderObserved => {
+                Self::ProviderObserved
+            }
+            crate::events::wire::ContextBudgetAccountingMethod::ProviderObservedPlusEstimate => {
+                Self::ProviderObservedPlusEstimate
+            }
+        }
+    }
+}
+
+impl From<&crate::events::wire::ContextBudget> for ContextBudget {
+    fn from(wire: &crate::events::wire::ContextBudget) -> Self {
+        Self {
+            estimate: ContextEstimate::from(&wire.estimate),
+            observed_tokens: wire.observed_tokens,
+            observed_is_current: wire.observed_is_current,
+            effective_tokens: Some(wire.effective_tokens),
+            accounting_method: ContextAccountingMethod::from(&wire.accounting_method),
+            context_window: wire.context_window.map(std::num::NonZeroU64::get),
+            reserve_tokens: wire.reserve_tokens,
+        }
+    }
+}
+
+impl From<&crate::events::wire::TokenUsage> for SessionTokenUsage {
+    fn from(wire: &crate::events::wire::TokenUsage) -> Self {
+        Self {
+            input_tokens: wire.input_tokens,
+            output_tokens: wire.output_tokens,
+            total_tokens: wire.total_tokens,
+            cache_read_input_tokens: wire.cache_read_input_tokens,
+            cache_write_input_tokens: wire.cache_write_input_tokens,
+        }
+    }
+}
+
+impl From<&crate::events::wire::SessionCostSummary> for SessionCostSummary {
+    fn from(wire: &crate::events::wire::SessionCostSummary) -> Self {
+        Self {
+            known_usd: wire.known_usd.to_string(),
+            complete: wire.complete,
+            priced_record_count: wire.priced_record_count,
+            unpriced_record_count: wire.unpriced_record_count,
+        }
+    }
+}
+
+impl From<&crate::events::wire::CompactionPolicyStatus> for CompactionPolicyStatus {
+    fn from(wire: &crate::events::wire::CompactionPolicyStatus) -> Self {
+        Self {
+            auto_compaction_enabled: wire.auto_compaction_enabled,
+            threshold_eligible: wire.threshold_eligible,
+            threshold_ineligible_reason: wire.threshold_ineligible_reason.clone(),
+            overflow_recovery_enabled: wire.overflow_recovery_enabled,
+        }
+    }
+}
+
+impl From<&crate::events::wire::ContextSourceUsageSource> for ContextSource {
+    fn from(wire: &crate::events::wire::ContextSourceUsageSource) -> Self {
+        match wire {
+            crate::events::wire::ContextSourceUsageSource::Messages => Self::Messages,
+            crate::events::wire::ContextSourceUsageSource::BuiltInTools => Self::BuiltInTools,
+            crate::events::wire::ContextSourceUsageSource::McpTools => Self::McpTools,
+            crate::events::wire::ContextSourceUsageSource::CustomPrompt => Self::CustomPrompt,
+            crate::events::wire::ContextSourceUsageSource::SystemPrompt => Self::SystemPrompt,
+            crate::events::wire::ContextSourceUsageSource::Skills => Self::Skills,
+            crate::events::wire::ContextSourceUsageSource::ProjectInstructions => {
+                Self::ProjectInstructions
+            }
+            crate::events::wire::ContextSourceUsageSource::ProjectContext => Self::ProjectContext,
+        }
+    }
+}
+
+impl From<&crate::events::wire::ContextSourceItem> for ContextSourceItem {
+    fn from(wire: &crate::events::wire::ContextSourceItem) -> Self {
+        Self {
+            label: wire.label.clone(),
+            tokens: wire.tokens,
+            count: wire.count,
+        }
+    }
+}
+
+impl From<&crate::events::wire::ContextSourceUsage> for ContextSourceUsage {
+    fn from(wire: &crate::events::wire::ContextSourceUsage) -> Self {
+        Self {
+            source: ContextSource::from(&wire.source),
+            tokens: wire.tokens,
+            count: wire.count,
+            children: wire.children.iter().map(ContextSourceItem::from).collect(),
+        }
+    }
+}
+
+impl From<&crate::events::wire::ContextItem> for ContextItem {
+    fn from(wire: &crate::events::wire::ContextItem) -> Self {
+        Self {
+            label: wire.label.clone(),
+            tokens: wire.tokens,
+            turn: wire.turn.get(),
+        }
+    }
+}
+
+impl From<&crate::events::wire::ContextTurnGrowth> for ContextTurnGrowth {
+    fn from(wire: &crate::events::wire::ContextTurnGrowth) -> Self {
+        Self {
+            turn: wire.turn.get(),
+            tokens: wire.tokens,
+        }
+    }
+}
+
+impl From<&crate::events::wire::ContextBreakdown> for ContextBreakdown {
+    fn from(wire: &crate::events::wire::ContextBreakdown) -> Self {
+        Self {
+            sources: wire.sources.iter().map(ContextSourceUsage::from).collect(),
+            scaled: wire.scaled,
+            turns: wire.turns.iter().map(ContextTurnGrowth::from).collect(),
+            largest: wire.largest.iter().map(ContextItem::from).collect(),
+        }
+    }
+}
+
+impl From<&crate::events::wire::SessionBranchSummary> for SessionBranchSummary {
+    fn from(wire: &crate::events::wire::SessionBranchSummary) -> Self {
+        Self {
+            branched_from_turn: wire.branched_from_turn,
+            siblings: wire.siblings,
+            branches: wire.branches,
+        }
+    }
+}
+
+impl From<&crate::events::wire::SessionStats> for SessionStats {
+    fn from(wire: &crate::events::wire::SessionStats) -> Self {
+        Self {
+            session_id: wire.session_id.clone(),
+            active_message_count: wire.active_message_count,
+            compaction_count: wire.compaction_count,
+            usage: SessionTokenUsage::from(&wire.usage),
+            context: ContextBudget::from(&wire.context),
+            compaction: wire.compaction.as_ref().map(CompactionPolicyStatus::from),
+            cost: SessionCostSummary::from(&wire.cost),
+            context_breakdown: wire.context_breakdown.as_ref().map(ContextBreakdown::from),
+            branch: SessionBranchSummary::from(&wire.branch),
+            used_skill_names: wire.used_skill_names.clone(),
+        }
+    }
+}
+
+impl From<&crate::events::wire::ContextEstimated> for ContextEstimated {
+    fn from(wire: &crate::events::wire::ContextEstimated) -> Self {
+        Self {
+            provider: wire.provider.clone(),
+            model: wire.model.clone(),
+            budget: ContextBudget::from(&wire.budget),
+        }
+    }
+}
+
+impl From<&crate::events::wire::CompactionStartedReason> for CompactionReason {
+    fn from(wire: &crate::events::wire::CompactionStartedReason) -> Self {
+        match wire {
+            crate::events::wire::CompactionStartedReason::Manual => Self::Manual,
+            crate::events::wire::CompactionStartedReason::Threshold => Self::Threshold,
+            crate::events::wire::CompactionStartedReason::Overflow => Self::Overflow,
+        }
+    }
+}
+
+impl From<&crate::events::wire::CompactionCompletedReason> for CompactionReason {
+    fn from(wire: &crate::events::wire::CompactionCompletedReason) -> Self {
+        match wire {
+            crate::events::wire::CompactionCompletedReason::Manual => Self::Manual,
+            crate::events::wire::CompactionCompletedReason::Threshold => Self::Threshold,
+            crate::events::wire::CompactionCompletedReason::Overflow => Self::Overflow,
+        }
+    }
+}
+
+impl From<&crate::events::wire::CompactionCompletedOutcome> for CompactionOutcome {
+    fn from(wire: &crate::events::wire::CompactionCompletedOutcome) -> Self {
+        match wire {
+            crate::events::wire::CompactionCompletedOutcome::Completed => Self::Completed,
+            crate::events::wire::CompactionCompletedOutcome::Failed => Self::Failed,
+            crate::events::wire::CompactionCompletedOutcome::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+impl From<&crate::events::wire::CompactionStarted> for CompactionStarted {
+    fn from(wire: &crate::events::wire::CompactionStarted) -> Self {
+        Self {
+            session_id: wire.session_id.clone(),
+            reason: CompactionReason::from(&wire.reason),
+            trigger_budget: wire.trigger_budget.as_ref().map(ContextBudget::from),
+        }
+    }
+}
+
+impl From<&crate::events::wire::CompactionCompleted> for CompactionCompleted {
+    fn from(wire: &crate::events::wire::CompactionCompleted) -> Self {
+        Self {
+            session_id: wire.session_id.clone(),
+            reason: CompactionReason::from(&wire.reason),
+            outcome: CompactionOutcome::from(&wire.outcome),
+            replaced_entry_count: wire.replaced_entry_count,
+            retained_entry_count: wire.retained_entry_count,
+            error: wire.error.clone(),
+            will_retry: wire.will_retry,
+        }
+    }
+}

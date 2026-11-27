@@ -192,3 +192,134 @@ pub struct McpServerPreview {
 pub struct McpStatusSnapshot {
     pub servers: Vec<McpServerSnapshot>,
 }
+
+impl From<&crate::events::wire::SkillSource> for SkillSource {
+    fn from(wire: &crate::events::wire::SkillSource) -> Self {
+        match wire {
+            crate::events::wire::SkillSource::ProjectWisp => Self::ProjectWisp,
+            crate::events::wire::SkillSource::ProjectAgents => Self::ProjectAgents,
+            crate::events::wire::SkillSource::UserWisp => Self::UserWisp,
+            crate::events::wire::SkillSource::UserAgents => Self::UserAgents,
+            crate::events::wire::SkillSource::PackageWisp => Self::PackageWisp,
+        }
+    }
+}
+
+impl From<&crate::events::wire::RpcSkillCatalogEntry> for SkillCatalogEntry {
+    fn from(wire: &crate::events::wire::RpcSkillCatalogEntry) -> Self {
+        Self {
+            name: wire.name.clone(),
+            description: wire.description.clone(),
+            source: SkillSource::from(&wire.source),
+        }
+    }
+}
+
+impl From<&crate::events::wire::SkillDiagnosticSeverity> for SkillDiagnosticSeverity {
+    fn from(wire: &crate::events::wire::SkillDiagnosticSeverity) -> Self {
+        match wire {
+            crate::events::wire::SkillDiagnosticSeverity::Warning => Self::Warning,
+            crate::events::wire::SkillDiagnosticSeverity::Error => Self::Error,
+        }
+    }
+}
+
+impl From<&crate::events::wire::RpcSkillDiagnostic> for SkillDiagnostic {
+    fn from(wire: &crate::events::wire::RpcSkillDiagnostic) -> Self {
+        Self {
+            code: wire.code.to_string(),
+            severity: SkillDiagnosticSeverity::from(&wire.severity),
+            message: wire.message.clone(),
+            source: SkillSource::from(&wire.source),
+            path: wire.path.clone(),
+        }
+    }
+}
+
+impl From<&crate::events::wire::RpcSkillCatalogSnapshot> for SkillCatalogSnapshot {
+    fn from(wire: &crate::events::wire::RpcSkillCatalogSnapshot) -> Self {
+        Self {
+            entries: wire.entries.iter().map(SkillCatalogEntry::from).collect(),
+            diagnostics: wire.diagnostics.iter().map(SkillDiagnostic::from).collect(),
+            project_trusted: wire.project_trusted,
+        }
+    }
+}
+
+impl From<&crate::events::wire::RpcMcpServerSnapshotStatus> for McpServerStatus {
+    fn from(wire: &crate::events::wire::RpcMcpServerSnapshotStatus) -> Self {
+        match wire {
+            crate::events::wire::RpcMcpServerSnapshotStatus::Connecting => Self::Connecting,
+            crate::events::wire::RpcMcpServerSnapshotStatus::Connected => Self::Connected,
+            crate::events::wire::RpcMcpServerSnapshotStatus::Disconnected => Self::Disconnected,
+            crate::events::wire::RpcMcpServerSnapshotStatus::Unavailable => Self::Unavailable,
+            crate::events::wire::RpcMcpServerSnapshotStatus::Disabled => Self::Disabled,
+        }
+    }
+}
+
+impl From<&crate::events::wire::RpcMcpServerSnapshotSignIn> for McpSignIn {
+    fn from(wire: &crate::events::wire::RpcMcpServerSnapshotSignIn) -> Self {
+        match wire {
+            crate::events::wire::RpcMcpServerSnapshotSignIn::Required => Self::Required,
+            crate::events::wire::RpcMcpServerSnapshotSignIn::SignedIn => Self::SignedIn,
+            crate::events::wire::RpcMcpServerSnapshotSignIn::Available => Self::Available,
+        }
+    }
+}
+
+impl From<&crate::events::wire::RpcMcpHeaderFrom> for McpHeaderFrom {
+    fn from(wire: &crate::events::wire::RpcMcpHeaderFrom) -> Self {
+        Self {
+            header: wire.header.to_string(),
+            variable: wire.variable.to_string(),
+            scheme: wire.scheme.clone(),
+        }
+    }
+}
+
+impl From<&crate::events::wire::RpcMcpServerLaunch> for McpServerLaunch {
+    fn from(wire: &crate::events::wire::RpcMcpServerLaunch) -> Self {
+        Self {
+            command: wire.command.clone(),
+            args: wire.args.clone(),
+            url: wire.url.clone(),
+            env_names: wire.env_names.clone(),
+            env_from: wire.env_from.clone(),
+            header_names: wire.header_names.clone(),
+            headers_from: wire.headers_from.iter().map(McpHeaderFrom::from).collect(),
+        }
+    }
+}
+
+impl From<&crate::events::wire::RpcMcpServerSnapshot> for McpServerSnapshot {
+    fn from(wire: &crate::events::wire::RpcMcpServerSnapshot) -> Self {
+        Self {
+            name: wire.name.to_string(),
+            status: McpServerStatus::from(&wire.status),
+            tool_names: wire.tool_names.clone(),
+            read_only_tool_names: wire.read_only_tool_names.clone(),
+            read_only_hint_tool_names: wire.read_only_hint_tool_names.clone(),
+            error: wire.error.clone(),
+            launch: wire.launch.as_ref().map(McpServerLaunch::from),
+            sign_in: wire.sign_in.as_ref().map(McpSignIn::from),
+        }
+    }
+}
+
+impl From<&crate::events::wire::RpcMcpServerPreview> for McpServerPreview {
+    fn from(wire: &crate::events::wire::RpcMcpServerPreview) -> Self {
+        Self {
+            name: wire.name.to_string(),
+            launch: McpServerLaunch::from(&wire.launch),
+        }
+    }
+}
+
+impl From<&crate::events::wire::RpcMcpStatusSnapshot> for McpStatusSnapshot {
+    fn from(wire: &crate::events::wire::RpcMcpStatusSnapshot) -> Self {
+        Self {
+            servers: wire.servers.iter().map(McpServerSnapshot::from).collect(),
+        }
+    }
+}
