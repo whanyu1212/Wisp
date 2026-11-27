@@ -365,8 +365,8 @@ def _require_current_entry_version(raw: JsonObject, *, location: str) -> None:
 def _require_persisted_base_fields(raw: JsonObject, *, location: str) -> None:
     """Prevent defaults from manufacturing unstable persisted identity or time."""
 
-    missing = tuple(field for field in ("id", "session_id", "created_at") if field not in raw)
-    if missing:
+    if "id" not in raw or "session_id" not in raw or "created_at" not in raw:
+        missing = tuple(field for field in ("id", "session_id", "created_at") if field not in raw)
         fields = ", ".join(missing)
         raise MalformedSessionEntryError(
             f"Persisted session entry is missing required field(s) {fields}{location}"

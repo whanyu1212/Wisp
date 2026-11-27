@@ -402,3 +402,98 @@ def test_limited_session_read_stops_after_requested_entry(
     assert len(entries) == 1
     assert entries[0].session_id == "session-id"
     assert tracking_file.next_calls == 1
+
+
+def test_run_snapshot_caches_and_invalidates_on_writes(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def write_initial() -> None:
+        await session.append_message(Message(role="user", content="one"))
+        await session.append_message(Message(role="assistant", content="two"))
+
+    anyio.run(write_initial)
+
+    replay_calls = 0
+    real_replay = jsonl_module.replay_session_entries
+
+    def counting_replay(*args: object, **kwargs: object) -> object:
+        nonlocal replay_calls
+        replay_calls += 1
+        return real_replay(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(jsonl_module, "replay_session_entries", counting_replay)
+
+    first = session.read_run_snapshot()
+    second = session.read_run_snapshot()
+
+    assert replay_calls == 1
+    assert second == first
+    assert second.replay.codemode_state is not first.replay.codemode_state
+    first.replay.codemode_state["mutated"] = True
+    assert "mutated" not in session.read_run_snapshot().replay.codemode_state
+
+    async def append_more() -> None:
+        await session.append_message(Message(role="user", content="three"))
+
+    anyio.run(append_more)
+    third = session.read_run_snapshot()
+    assert replay_calls == 2
+    assert third.entry_count == 3
+    assert [m.content for m in third.replay.messages] == ["one", "two", "three"]
+
+    async def rename() -> None:
+        await session.set_name("Renamed")
+
+    anyio.run(rename)
+    fourth = session.read_run_snapshot()
+    assert replay_calls == 3
+    assert fourth.name == "Renamed"
+
+    async def truncate() -> None:
+        await session.truncate_entries(2)
+
+    anyio.run(truncate)
+    fifth = session.read_run_snapshot()
+    assert replay_calls == 4
+    assert fifth.entry_count == 2
+    assert fifth.name is None
+
+
+def test_cached_reads_skip_redundant_recovery_until_external_change(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def write_initial() -> None:
+        await session.append_message(Message(role="user", content="safe"))
+
+    anyio.run(write_initial)
+
+    recovery_calls = 0
+    real_recover = jsonl_module.recover_incomplete_tail
+
+    def counting_recover(path: Path) -> bool:
+        nonlocal recovery_calls
+        recovery_calls += 1
+        return real_recover(path)
+
+    reopened = JsonlSessionStore(tmp_path).load(session.session_id)
+    monkeypatch.setattr(jsonl_module, "recover_incomplete_tail", counting_recover)
+
+    # Initial load runs tail recovery; repeated reads on the unchanged file skip it.
+    assert reopened.read_run_snapshot().entry_count == 1
+    assert recovery_calls == 1
+    assert reopened.read_run_snapshot().entry_count == 1
+    assert reopened.read_message_page().messages[0].content == "safe"
+    assert recovery_calls == 1
+
+    # An external incomplete write changes the signature, so recovery runs again.
+    original = session.path.read_bytes()
+    session.path.write_bytes(original + b'{"incomplete":')
+    assert reopened.read_run_snapshot().entry_count == 1
+    assert recovery_calls == 2
+    assert session.path.read_bytes() == original

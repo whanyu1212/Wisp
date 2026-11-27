@@ -211,7 +211,11 @@ def resolve_session_tree(entries: Sequence[SessionEntry]) -> SessionTreeState:
         transition_by_id[entry.id] = entry
         latest_history_entry_id = entry.id
 
-    active_path = _path_to_leaf(tuple(nodes), active_leaf_id) if active_leaf_id is not None else ()
+    active_path = (
+        _path_to_leaf(nodes, active_leaf_id, node_by_id=node_by_id)
+        if active_leaf_id is not None
+        else ()
+    )
     return SessionTreeState(
         nodes=tuple(nodes),
         active_leaf_id=active_leaf_id,
@@ -223,15 +227,16 @@ def replay_session_entries(
     entries: Sequence[SessionEntry],
     *,
     leaf_id: str | None = None,
+    tree: SessionTreeState | None = None,
 ) -> SessionReplay:
     """Replay one selected path through the parent-linked session tree."""
 
-    tree = resolve_session_tree(entries)
-    path = tree.path_to(leaf_id) if leaf_id is not None else tree.active_path
+    resolved_tree = resolve_session_tree(entries) if tree is None else tree
+    path = resolved_tree.path_to(leaf_id) if leaf_id is not None else resolved_tree.active_path
     replay = _replay_session_path(path)
     return SessionReplay(
         rows=replay.rows,
-        active_leaf_id=leaf_id if leaf_id is not None else tree.active_leaf_id,
+        active_leaf_id=leaf_id if leaf_id is not None else resolved_tree.active_leaf_id,
         path_entry_ids=tuple(entry.id for entry in path),
         cwd=replay.cwd,
         pending_directory_notes=replay.pending_directory_notes,
@@ -242,19 +247,21 @@ def replay_session_entries(
 def _path_to_leaf(
     nodes: Sequence[SessionTreeEntry],
     leaf_id: str,
+    *,
+    node_by_id: dict[str, SessionTreeEntry] | None = None,
 ) -> tuple[SessionTreeEntry, ...]:
-    node_by_id = {entry.id: entry for entry in nodes}
-    if leaf_id not in node_by_id:
+    nodes_by_id = {entry.id: entry for entry in nodes} if node_by_id is None else node_by_id
+    if leaf_id not in nodes_by_id:
         raise SessionReplayError(f"Session leaf not found: {leaf_id}")
     path: list[SessionTreeEntry] = []
-    current: SessionTreeEntry | None = node_by_id[leaf_id]
+    current: SessionTreeEntry | None = nodes_by_id[leaf_id]
     visited: set[str] = set()
     while current is not None:
         if current.id in visited:
             raise SessionReplayError(f"Cycle detected at session entry {current.id}")
         visited.add(current.id)
         path.append(current)
-        current = node_by_id.get(current.parent_id) if current.parent_id is not None else None
+        current = nodes_by_id.get(current.parent_id) if current.parent_id is not None else None
     path.reverse()
     return tuple(path)
 

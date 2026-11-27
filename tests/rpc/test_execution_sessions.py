@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import shutil
+import stat
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -32,7 +34,8 @@ from wisp.messages import Message
 from wisp.rpc import execution as rpc_execution_module
 from wisp.rpc.coordinator import _RpcCommandCompleted
 from wisp.rpc.session.state import rpc_selected_session_state
-from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
+from wisp.sessions import jsonl as jsonl_module
+from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore, SessionError, SessionNotFoundError
 
 
 @pytest.fixture(autouse=True)
@@ -80,7 +83,7 @@ def test_rpc_session_state_reads_one_coherent_run_snapshot(
     assert state.name == "Named session"
 
 
-def test_updated_rpc_session_state_reads_entries_once(
+def test_updated_rpc_session_state_reuses_run_snapshot(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -91,21 +94,80 @@ def test_updated_rpc_session_state_reads_entries_once(
         await session.append_message(Message(role="assistant", content="two"))
 
     anyio.run(write)
-    original_read_entry_snapshot = session.read_entry_snapshot
+    original_read_existing_run_snapshot = session.read_existing_run_snapshot
     read_count = 0
 
-    def count_reads() -> tuple[object, ...]:
+    def count_reads() -> object:
         nonlocal read_count
         read_count += 1
-        return original_read_entry_snapshot()
+        return original_read_existing_run_snapshot()
 
-    monkeypatch.setattr(session, "read_entry_snapshot", count_reads)
+    replay_calls = 0
+    real_replay = jsonl_module.replay_session_entries
+
+    def counting_replay(*args: object, **kwargs: object) -> object:
+        nonlocal replay_calls
+        replay_calls += 1
+        return real_replay(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(session, "read_existing_run_snapshot", count_reads)
+    monkeypatch.setattr(jsonl_module, "replay_session_entries", counting_replay)
 
     entry_count, history = rpc_execution_module.updated_rpc_session_state(session, (), 0)
+    second_count, second_history = rpc_execution_module.updated_rpc_session_state(
+        session, history, entry_count
+    )
 
     assert entry_count == 2
+    assert second_count == 2
     assert [message.content for message in history] == ["one", "two"]
-    assert read_count == 1
+    assert second_history == history
+    assert read_count == 2
+    assert replay_calls == 1
+
+
+def test_rpc_selected_session_state_validates_missing_and_symlink_paths(tmp_path: Path) -> None:
+    missing = JsonlSessionStore(tmp_path).create()
+    with pytest.raises(SessionNotFoundError):
+        rpc_selected_session_state(missing)
+
+    target = tmp_path / "target.jsonl"
+    target.write_text("", encoding="utf-8")
+    link = tmp_path / "link.jsonl"
+    link.symlink_to(target)
+    symlinked = JsonlSession(session_id="link", path=link)
+    with pytest.raises(SessionError, match="not a regular file"):
+        rpc_selected_session_state(symlinked)
+
+
+def test_session_state_readers_allow_read_only_parent_directory(tmp_path: Path) -> None:
+    if os.name != "posix" or os.geteuid() == 0:
+        pytest.skip("requires non-root POSIX directory permissions")
+
+    session_dir = tmp_path / "readonly"
+    store = JsonlSessionStore(session_dir)
+    session = store.create()
+
+    async def write() -> None:
+        await session.append_message(Message(role="user", content="persisted"))
+
+    anyio.run(write)
+    session.path.with_suffix(f"{session.path.suffix}.lock").unlink(missing_ok=True)
+    reopened = JsonlSessionStore(session_dir).load(session.session_id)
+
+    os.chmod(session_dir, 0o555)
+    try:
+        selected = rpc_selected_session_state(reopened)
+        updated_count, updated_history = rpc_execution_module.updated_rpc_session_state(
+            reopened, (), 0
+        )
+        assert selected[0] == 1
+        assert [m.content for m in selected[1]] == ["persisted"]
+        assert updated_count == 1
+        assert [m.content for m in updated_history] == ["persisted"]
+        assert stat.S_IMODE(session_dir.stat().st_mode) == 0o555
+    finally:
+        os.chmod(session_dir, 0o755)
 
 
 def test_executor_sessions_reports_empty_catalog(tmp_path: Path) -> None:

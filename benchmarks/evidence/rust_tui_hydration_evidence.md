@@ -86,3 +86,31 @@ A separate single pair included an inactive branch, turn events and a manual 40k
 (62,504 entries). Newest frame: 3525 → 1042 ms; composer: 3525 → 3739 ms; submit: 4573 →
 4780 ms; submit → reply: 1086 → 1085 ms. Both exited cleanly and restored the terminal.
 These are local measurements on disposable fixtures, not displayed pixels or CI thresholds.
+
+## HY-289: cached run snapshots and fast-path entry reads
+
+Measured 2026-11-27 on macOS arm64 (Python 3.12.12, release `wisp-tui` built from `928fa24d6`)
+after caching `SessionRunSnapshot` and `SessionTreeState` on `JsonlSession`, reusing
+`read_run_snapshot()` across `updated_rpc_session_state` and `rpc_selected_session_state`,
+and fast-pathing unchanged `(generation, FileSignature)` checks ahead of tail recovery.
+
+Three unprofiled first-reply runs each on 0, 10k, and 50k using the same `--no-profile --first-reply`
+command above (medians in ms):
+
+| History | Newest visible | Composer | Submit | Submit → reply | Launch → reply | Tree CPU |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Fresh | — | 854 | 874 | 77 | 957 | 861 ms |
+| 10k | 882 | 1305 | 1540 | 532 | 2072 | 2.83 s |
+| 50k | 906 | 3020 | 4292 | 2535 | 6853 | 11.22 s |
+
+Compared against the `#1158` preview medians in the previous section on the same machine class
+(not paired in one run): at 50k, median composer fell **3648 → 3020 ms**, submit fell
+**5232 → 4292 ms**, launch → reply fell **8062 → 6853 ms**, and process-tree CPU fell
+**13.04 → 11.22 s**.
+
+One profiled startup run (`--runs 1 --history-messages 10000,50000`) recorded `python.session_refresh`
+dropping to **1.18 ms** at 10k (down from ~18–20.5 ms previously) and **2.10 ms** at 50k, with
+`python.page_read` across all 251 pages totaling **420.6 ms** at 50k (`105.4 ms` across 51 pages at
+10k). The remaining 50k ready/submit cost is dominated by per-frame Rust JSON schema validation
+and event projection (`HY-287`). These remain local measurements on disposable fixtures, not
+portable CI thresholds.
