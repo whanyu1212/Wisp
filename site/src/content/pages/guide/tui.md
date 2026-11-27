@@ -390,12 +390,20 @@ On the first welcome screen of a launch the logo's dots gather into place, and i
 band then crosses it once, about 2 s in all. Any key, paste, or resize shows the finished logo at
 once; `WISP_TUI_MOTION=off` or a terminal in the background shows it finished from the start.
 
-Rust stores theme preferences in `~/.wisp/tui.json` (`theme`, `last_dark_theme`, and
-`startup_logo`). It preserves unrelated keys and writes atomically. Missing, unknown, or unusable
-theme preferences fall back to Vapor (and startup logo to Random); unreadable, non-UTF-8,
+Rust stores presentation preferences in `~/.wisp/tui.json` (`theme`, `last_dark_theme`,
+`startup_logo`, and `verbosity`). It preserves unrelated keys and writes atomically. Missing,
+unknown, or unusable preferences fall back to Vapor, Random, and `medium`; unreadable, non-UTF-8,
 non-regular, or over-64-KiB documents are not overwritten. A save failure leaves the live selection
 active and reports a warning; critical approval/cancellation recovery notices retain priority.
 Presentation preferences never enter `settings.json`, RPC, or session history.
+
+Run `/verbosity` to inspect the current transcript verbosity, or `/verbosity low`,
+`/verbosity medium`, or `/verbosity high` to switch live without affecting session history: `low`
+hides completed thoughts and inline diffs and collapses consecutive successful tools into one row
+while keeping live thinking, failed calls, and approvals visible; `medium` (default) groups
+exploration calls and keeps compact diff previews and collapsed thoughts; `high` expands thoughts
+and `bash` output inline, disables tool auto-grouping, and shows full retained diffs. Non-default
+levels show `verbosity: low` or `verbosity: high` in the footer deck when space allows.
 
 Set `NO_COLOR` before launching Rust for deterministic grayscale, including code, diffs, and popups.
 The conversion uses Rec.709 grayscale and minimally adjusts native foregrounds when needed to retain

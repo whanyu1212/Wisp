@@ -42,19 +42,27 @@ pub(crate) const MORE_MARKER: &str = "▸ ";
 
 /// The preview of a diff under its card. `click_opens_review` words the note on its
 /// hidden changes for a terminal where a click on that note opens the review.
+/// When `full` is true, all retained diff rows are included without truncating to
+/// [`coherent_preview_rows`].
 pub(crate) fn preview(
     detail: &ToolDetailPresentation,
     click_opens_review: bool,
+    full: bool,
 ) -> DiffCardPreview {
     let gutter = detail
         .rows
         .iter()
         .any(|row| row.old_line.is_some() || row.new_line.is_some());
-    let rows = coherent_preview_rows(
-        &card_rows(&detail.rows),
-        detail.additions.saturating_add(detail.deletions),
-        click_opens_review,
-    );
+    let card = card_rows(&detail.rows);
+    let rows = if full {
+        card
+    } else {
+        coherent_preview_rows(
+            &card,
+            detail.additions.saturating_add(detail.deletions),
+            click_opens_review,
+        )
+    };
     let emphasis = row_emphasis(&rows);
     let mut preview = DiffCardPreview {
         text: String::new(),
@@ -525,7 +533,7 @@ mod tests {
                 rows,
                 truncated: false,
             };
-            let preview = preview(&detail, false);
+            let preview = preview(&detail, false, false);
             assert!(
                 preview.text.contains("497 more changed lines"),
                 "{}",
@@ -690,7 +698,7 @@ mod tests {
             ],
             truncated: false,
         };
-        let card = preview(&detail, false);
+        let card = preview(&detail, false, false);
         let comment_pos = card.text.find("still comment").unwrap();
         let comment_class = card
             .syntax
@@ -706,5 +714,28 @@ mod tests {
             .find(|token| token.range.contains(&const_pos))
             .map(|token| token.class);
         assert_eq!(const_class, Some(crate::syntax::SyntaxClass::Keyword));
+    }
+
+    #[test]
+    fn full_preview_includes_all_retained_changed_lines() {
+        let detail = ToolDetailPresentation {
+            kind: crate::tool_detail::DetailPresentationKind::DiffModify,
+            title: "M src/lib.rs".into(),
+            summary: "+6 -0".into(),
+            additions: 6,
+            deletions: 0,
+            rows: (1..=6)
+                .map(|n| row(DetailRowKind::Addition, &format!("line {n}")))
+                .collect(),
+            truncated: false,
+        };
+        let compact = preview(&detail, false, false);
+        assert!(compact.text.contains("3 more changed lines"));
+
+        let full = preview(&detail, false, true);
+        assert!(!full.text.contains("more changed"));
+        for n in 1..=6 {
+            assert!(full.text.contains(&format!("line {n}")), "{}", full.text);
+        }
     }
 }

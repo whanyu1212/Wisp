@@ -169,7 +169,7 @@ use tool_detail::{DetailAvailability, ToolDetailPresentation};
 use transcript::{TranscriptEntryId, TranscriptEntryKind, TranscriptRole};
 use transcript_view::{
     BrowseTarget, RowPosition, TranscriptRowCache, TranscriptRowKind, TranscriptViewAction,
-    TranscriptViewport, card_run,
+    TranscriptViewport, Verbosity, card_run_for,
 };
 use ui::{ComposerLayoutCache, ConnectionInfo};
 use wisp_protocol::commands::{
@@ -4217,7 +4217,8 @@ impl LiveUi {
                 (!text.is_empty()).then(|| ("output".into(), text.to_owned()))
             }
             BrowseTarget::Group(entry_id) => {
-                let (_, members) = card_run(&self.state.transcript, entry_id)?;
+                let verbosity = self.transcript_row_cache.fold().verbosity();
+                let (_, members) = card_run_for(&self.state.transcript, entry_id, verbosity)?;
                 let lines = members
                     .into_iter()
                     .filter_map(|id| self.state.transcript.entry(id))
@@ -4277,7 +4278,8 @@ impl LiveUi {
         let BrowseTarget::Group(selected) = self.browse_selected? else {
             return None;
         };
-        let (start, members) = card_run(&self.state.transcript, selected)?;
+        let verbosity = self.transcript_row_cache.fold().verbosity();
+        let (start, members) = card_run_for(&self.state.transcript, selected, verbosity)?;
         (!self.transcript_row_cache.fold().is_run_expanded(&members)).then_some(start)
     }
 
@@ -4311,6 +4313,15 @@ impl LiveUi {
     /// card was expanded on its own.
     fn toggle_clicked_fold(&mut self, target: BrowseTarget) {
         let entry = target.entry_id();
+        let verbosity = self.transcript_row_cache.fold().verbosity();
+        let group = matches!(target, BrowseTarget::Group(_))
+            .then(|| card_run_for(&self.state.transcript, entry, verbosity))
+            .flatten();
+        let entry_expanded = self
+            .state
+            .transcript
+            .entry(entry)
+            .is_some_and(|e| self.transcript_row_cache.fold().is_entry_expanded(e));
         let fold = self.transcript_row_cache.fold_mut();
         let mut selected = entry;
         if matches!(target, BrowseTarget::Output(_)) {
@@ -4321,7 +4332,7 @@ impl LiveUi {
             }
             self.transcript_viewport.reveal_output(entry);
         } else if matches!(target, BrowseTarget::Group(_)) {
-            if let Some((start, members)) = card_run(&self.state.transcript, entry) {
+            if let Some((start, members)) = group {
                 if fold.is_run_expanded(&members) {
                     fold.collapse_group(&members);
                 } else {
@@ -4329,7 +4340,7 @@ impl LiveUi {
                 }
                 selected = start;
             }
-        } else if fold.is_expanded(entry) {
+        } else if entry_expanded {
             fold.collapse(entry);
         } else {
             fold.expand(entry);
@@ -4354,14 +4365,20 @@ impl LiveUi {
             return;
         }
         let entry = selected.entry_id();
+        let verbosity = self.transcript_row_cache.fold().verbosity();
+        let entry_expanded = self
+            .state
+            .transcript
+            .entry(entry)
+            .is_some_and(|e| self.transcript_row_cache.fold().is_entry_expanded(e));
         if matches!(selected, BrowseTarget::Output(_)) {
             self.transcript_row_cache.fold_mut().collapse_output(entry);
             self.transcript_viewport.reveal_output(entry);
-        } else if matches!(selected, BrowseTarget::Entry(_))
-            && self.transcript_row_cache.fold().is_expanded(entry)
-        {
+        } else if matches!(selected, BrowseTarget::Entry(_)) && entry_expanded {
             self.transcript_row_cache.fold_mut().collapse(entry);
-        } else if let Some((start, members)) = card_run(&self.state.transcript, entry) {
+        } else if let Some((start, members)) =
+            card_run_for(&self.state.transcript, entry, verbosity)
+        {
             self.transcript_row_cache
                 .fold_mut()
                 .collapse_group(&members);
@@ -4423,8 +4440,12 @@ impl LiveUi {
     /// current start.
     fn current_browse_target(&self, target: BrowseTarget) -> BrowseTarget {
         match target {
-            BrowseTarget::Group(entry) => card_run(&self.state.transcript, entry)
-                .map_or(target, |(start, _)| BrowseTarget::Group(start)),
+            BrowseTarget::Group(entry) => card_run_for(
+                &self.state.transcript,
+                entry,
+                self.transcript_row_cache.fold().verbosity(),
+            )
+            .map_or(target, |(start, _)| BrowseTarget::Group(start)),
             BrowseTarget::Entry(_)
             | BrowseTarget::Output(_)
             | BrowseTarget::Message(_)
@@ -4579,6 +4600,10 @@ impl LiveUi {
             }
             Command::Logo(selection) => {
                 self.apply_logo_command(selection);
+                Ok(LoopControl::Continue)
+            }
+            Command::Verbosity(selection) => {
+                self.apply_verbosity_command(selection);
                 Ok(LoopControl::Continue)
             }
             Command::History => {
@@ -4837,6 +4862,40 @@ impl LiveUi {
             self.logo_picker = Some(LogoPicker::new(self.logo_choice, self.startup_logo));
             self.rendered_overlay = None;
             self.render_pending = true;
+        }
+    }
+
+    fn apply_verbosity_command(&mut self, selection: Option<Verbosity>) {
+        self.editor.clear();
+        self.render_pending = true;
+        let Some(level) = selection else {
+            let current = self.transcript_row_cache.fold().verbosity();
+            if !self.unsendable_current_response() {
+                self.notice = Some(format!(
+                    "Transcript verbosity: {}. Use /verbosity low, medium, or high.",
+                    current.name()
+                ));
+            }
+            return;
+        };
+        self.transcript_row_cache.fold_mut().set_verbosity(level);
+        self.transcript_viewport
+            .reanchor(&self.state.transcript, &mut self.transcript_row_cache);
+        self.reconcile_browse_selection();
+        let saved = self
+            .theme_preferences
+            .as_ref()
+            .is_some_and(|store| store.save_verbosity(level).is_ok());
+        if !self.unsendable_current_response() {
+            self.notice = Some(format!(
+                "Transcript verbosity set to {}.{}",
+                level.name(),
+                if saved {
+                    ""
+                } else {
+                    " (could not save; active for this run)"
+                }
+            ));
         }
     }
 
@@ -5413,7 +5472,9 @@ impl LiveUi {
     /// transcript.
     fn reveal_card(&mut self, entry: TranscriptEntryId) {
         let fold = self.transcript_row_cache.fold_mut();
-        if let Some((start, members)) = card_run(&self.state.transcript, entry) {
+        if let Some((start, members)) =
+            card_run_for(&self.state.transcript, entry, fold.verbosity())
+        {
             if !fold.is_run_expanded(&members) {
                 fold.expand_group(start);
             }
@@ -8400,6 +8461,10 @@ where
                 .as_ref()
                 .map(ThemePreferences::load_logo)
                 .unwrap_or_default();
+            let verbosity = theme_preferences
+                .as_ref()
+                .map(ThemePreferences::load_verbosity)
+                .unwrap_or_default();
             let startup_logo = match logo_choice {
                 LogoChoice::Random => LogoChoice::choose_random(),
                 selected => selected,
@@ -8456,6 +8521,7 @@ where
                 ..LiveUi::default()
             };
             // `WISP_TUI_STREAM_PACING=0` shows each streamed delta as it arrives.
+            live_ui.transcript_row_cache.fold_mut().set_verbosity(verbosity);
             live_ui.state.stream_pacing =
                 std::env::var("WISP_TUI_STREAM_PACING").map_or(true, |value| value != "0");
             live_ui.stream_trace = stream_reveal::StreamTrace::from_env();
