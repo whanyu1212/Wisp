@@ -116,6 +116,18 @@ impl ScriptResult {
         }
     }
 
+    /// Project a result's typed `nested_calls` and `nested_calls_omitted` fields.
+    pub fn from_wire(calls: &[wisp_protocol::events::wire::NestedToolCall], omitted: u64) -> Self {
+        Self {
+            calls: calls
+                .iter()
+                .map(ScriptCall::from_wire)
+                .take(MAX_SCRIPT_CALLS)
+                .collect(),
+            omitted,
+        }
+    }
+
     fn is_empty(&self) -> bool {
         self.calls.is_empty() && self.omitted == 0
     }
@@ -381,16 +393,62 @@ impl ScriptCall {
         let call_id = record.get("call_id")?.as_str()?;
         let name = record.get("name")?.as_str()?;
         let target = record.get("target").and_then(Value::as_str);
-        let tool = target.unwrap_or(name);
+        let arguments = record.get("arguments").and_then(Value::as_object);
         let is_error = record
             .get("is_error")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let error = record
-            .get("error")
-            .and_then(Value::as_str)
-            .map(|error| clip(&one_line(error), CALL_TEXT_MAX_CHARS));
+        let error = record.get("error").and_then(Value::as_str);
         let failure_code = record.get("failure_code").and_then(Value::as_str);
+        let auto_approved = record.get("auto_approved").and_then(Value::as_bool) == Some(true);
+        let approval_note = record.get("approval_note").and_then(Value::as_str);
+        let duration_ms = record.get("duration_ms").and_then(Value::as_u64);
+        Some(Self::from_parts(
+            call_id,
+            name,
+            target,
+            arguments,
+            is_error,
+            error,
+            failure_code,
+            auto_approved,
+            approval_note,
+            duration_ms,
+        ))
+    }
+
+    /// One call from a validated typed `NestedToolCall` wire struct.
+    pub fn from_wire(wire: &wisp_protocol::events::wire::NestedToolCall) -> Self {
+        let failure_code = wire.failure_code.as_ref().map(ToString::to_string);
+        Self::from_parts(
+            &wire.call_id,
+            &wire.name,
+            wire.target.as_deref(),
+            wire.arguments.as_ref(),
+            wire.is_error,
+            wire.error.as_deref().map(String::as_str),
+            failure_code.as_deref(),
+            wire.auto_approved,
+            wire.approval_note.as_deref().map(String::as_str),
+            Some(wire.duration_ms),
+        )
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    fn from_parts(
+        call_id: &str,
+        name: &str,
+        target: Option<&str>,
+        arguments: Option<&serde_json::Map<String, Value>>,
+        is_error: bool,
+        error: Option<&str>,
+        failure_code: Option<&str>,
+        auto_approved: bool,
+        approval_note: Option<&str>,
+        duration_ms: Option<u64>,
+    ) -> Self {
+        let tool = target.unwrap_or(name);
+        let error = error.map(|error| clip(&one_line(error), CALL_TEXT_MAX_CHARS));
         let state = match (is_error, error.as_deref()) {
             (true, _) if crate::tool_presentation::is_denial(failure_code) => {
                 ScriptCallState::Denied
@@ -399,24 +457,18 @@ impl ScriptCall {
             (true, Some(error)) if ENDED_FIRST.contains(&error) => ScriptCallState::Unfinished,
             (true, _) => ScriptCallState::Failed,
         };
-        Some(Self {
+        Self {
             call_id: clip(call_id, CALL_NAME_MAX_CHARS),
             tool: clip(&one_line(tool), CALL_NAME_MAX_CHARS),
-            arguments: call_arguments(name, target, record.get("arguments")),
+            arguments: call_arguments_map(name, target, arguments),
             state,
             failure_code: failure_code.map(|code| clip(code, CALL_NAME_MAX_CHARS)),
-            auto_approved: record.get("auto_approved").and_then(Value::as_bool) == Some(true),
-            approval_note: record
-                .get("approval_note")
-                .and_then(Value::as_str)
-                .map(|note| clip(&one_line(note), CALL_TEXT_MAX_CHARS)),
+            auto_approved,
+            approval_note: approval_note.map(|note| clip(&one_line(note), CALL_TEXT_MAX_CHARS)),
             error: error
                 .filter(|_| matches!(state, ScriptCallState::Failed | ScriptCallState::Denied)),
-            duration_ms: record
-                .get("duration_ms")
-                .and_then(Value::as_u64)
-                .map(|duration| u32::try_from(duration).unwrap_or(u32::MAX)),
-        })
+            duration_ms: duration_ms.map(|duration| u32::try_from(duration).unwrap_or(u32::MAX)),
+        }
     }
 }
 
@@ -435,17 +487,26 @@ pub(crate) fn subagent_tasks<'a>(
 /// A call's arguments bounded as a direct call's would be. A proxied `mcp_call`
 /// shows the arguments its target received.
 pub fn call_arguments(name: &str, target: Option<&str>, arguments: Option<&Value>) -> Value {
-    let Some(arguments) = arguments.filter(|arguments| arguments.is_object()) else {
+    call_arguments_map(name, target, arguments.and_then(Value::as_object))
+}
+
+/// A call's arguments bounded directly from a typed map.
+pub fn call_arguments_map(
+    name: &str,
+    target: Option<&str>,
+    arguments: Option<&serde_json::Map<String, Value>>,
+) -> Value {
+    let Some(arguments) = arguments else {
         return Value::Null;
     };
     let (tool, arguments) = match target {
         Some(target) => (
             target,
-            crate::tool_cards::proxied_arguments(name, arguments, target).unwrap_or(arguments),
+            crate::tool_cards::proxied_arguments_map(name, arguments, target).unwrap_or(arguments),
         ),
         None => (name, arguments),
     };
-    crate::tool_cards::bounded_tool_arguments(tool, arguments)
+    crate::tool_cards::bounded_tool_arguments_map(tool, arguments)
 }
 
 /// A tool as the tally names it: an MCP tool by its own name, without its server.

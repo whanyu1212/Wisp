@@ -23,15 +23,47 @@ pub struct WebSearch {
 }
 
 pub(crate) fn search(value: &Value) -> WebSearch {
-    let query = text(value["query"].as_str().unwrap_or(""), 512);
+    let query = value["query"].as_str().unwrap_or("");
+    let urls = value["sources"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|source| source["url"].as_str().unwrap_or(""));
+    let failed = value["error"].as_str().is_some();
+    let action = value["action"].as_str().unwrap_or("search");
+    project_search(action, query, urls, failed)
+}
+
+pub(crate) fn search_from_wire(
+    wire: &wisp_protocol::events::wire::WebSearchPerformed,
+) -> WebSearch {
+    let action = match wire.action {
+        wisp_protocol::events::wire::WebSearchPerformedAction::Search => "search",
+        wisp_protocol::events::wire::WebSearchPerformedAction::OpenPage => "open_page",
+        wisp_protocol::events::wire::WebSearchPerformedAction::FindInPage => "find_in_page",
+    };
+    project_search(
+        action,
+        wire.query.as_deref().unwrap_or(""),
+        wire.sources.iter().map(|source| source.url.as_str()),
+        wire.error.is_some(),
+    )
+}
+
+fn project_search<'a>(
+    action: &str,
+    raw_query: &str,
+    raw_urls: impl Iterator<Item = &'a str>,
+    failed: bool,
+) -> WebSearch {
+    let query = text(raw_query, 512);
     let mut hosts = Vec::new();
-    for source in value["sources"].as_array().into_iter().flatten().take(8) {
-        let host = text(host(source["url"].as_str().unwrap_or("")), 160);
+    for raw_url in raw_urls.take(8) {
+        let host = text(host(raw_url), 160);
         if !hosts.contains(&host) {
             hosts.push(host);
         }
     }
-    let failed = value["error"].as_str().is_some();
     let query = query.trim();
     let with_query = |scope: &str| {
         if query.is_empty() {
@@ -40,7 +72,7 @@ pub(crate) fn search(value: &Value) -> WebSearch {
             format!("{scope} for “{query}”")
         }
     };
-    let (label, argument) = match value["action"].as_str().unwrap_or("search") {
+    let (label, argument) = match action {
         "open_page" => {
             // A page open has a target, not a list of search hits. Never show raw URLs.
             let target = hosts.drain(..).next().unwrap_or_else(|| "web page".into());
@@ -99,6 +131,20 @@ pub(crate) fn message_cost(message: &Value) -> Option<MessageCost> {
     cost(&message["cost"], !tool_only)
 }
 
+pub(crate) fn message_cost_from_wire(
+    message: &wisp_protocol::events::wire::MessageCompleted,
+) -> Option<MessageCost> {
+    let cost = message.cost.as_ref()?;
+    let tool_only = message.content.is_empty() && !message.tool_calls.is_empty();
+    let lower_bound = cost.web_searches.unwrap_or(0) > 0;
+    let usd = cost
+        .estimated_usd
+        .as_deref()
+        .and_then(|s| s.parse::<f64>().ok())
+        .filter(|a| a.is_finite() && *a >= 0.0);
+    project_cost(usd, lower_bound, !tool_only)
+}
+
 /// A reply's cost: the label closing it, and the estimate a run's total adds up.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MessageCost {
@@ -148,6 +194,10 @@ fn cost(value: &Value, show_unknown: bool) -> Option<MessageCost> {
         .and_then(|s| s.parse::<f64>().ok())
         .or_else(|| value["estimated_usd"].as_f64())
         .filter(|a| a.is_finite() && *a >= 0.0);
+    project_cost(usd, lower_bound, show_unknown)
+}
+
+fn project_cost(usd: Option<f64>, lower_bound: bool, show_unknown: bool) -> Option<MessageCost> {
     let Some(amount) = usd else {
         return show_unknown.then(|| MessageCost {
             label: "cost unknown".into(),

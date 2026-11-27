@@ -14,10 +14,13 @@ use crate::composer_images::{self, AttachedImage, ComposerImages};
 use crate::history::project_rpc_message_page_with_origins;
 use crate::tool_cards::{
     BoundedText, TOOL_OUTPUT_MAX_BYTES, TOOL_OUTPUT_MAX_LINES, ToolCallInput, ToolProgressInput,
-    ToolResultInput, bounded_identity, bounded_tool_arguments, bounded_tool_name,
-    proxied_arguments,
+    ToolResultInput, bounded_identity, bounded_tool_arguments, bounded_tool_arguments_map,
+    bounded_tool_name, proxied_arguments, proxied_arguments_map,
 };
-use crate::tool_detail::{capture_write_before, parse_edit_locations, project_tool_detail_source};
+use crate::tool_detail::{
+    capture_write_before, capture_write_before_str, edit_locations_from_wire, parse_edit_locations,
+    project_tool_detail_source,
+};
 use serde_json::Value;
 use thiserror::Error;
 use wisp_protocol::MAX_APPLICATION_FRAME_BYTES;
@@ -398,6 +401,401 @@ impl BackendEvent {
                     progress,
                 });
             }
+            WireEvent::RpcStateReported(payload) => {
+                let command_id = exact_str(&payload.command_id, "rpc.state", "command_id", 256)?;
+                let background_processes =
+                    wire_background_processes(&payload.state.background_processes, "rpc.state")?;
+                let mode = match payload.state.mode {
+                    wisp_protocol::events::wire::AgentMode::Build => {
+                        wisp_protocol::commands::AgentMode::Build
+                    }
+                    wisp_protocol::events::wire::AgentMode::Plan => {
+                        wisp_protocol::commands::AgentMode::Plan
+                    }
+                };
+                return Ok(Self::StateReported {
+                    command_id,
+                    mode,
+                    web_search: payload.state.web_search,
+                    background_processes,
+                });
+            }
+            WireEvent::RpcProcessesReported(payload) => {
+                let command_id =
+                    exact_str(&payload.command_id, "rpc.processes", "command_id", 256)?;
+                let processes = payload
+                    .processes
+                    .iter()
+                    .map(|process| wire_process_report(process, "rpc.processes"))
+                    .collect::<Result<_, _>>()?;
+                return Ok(Self::ProcessesReported {
+                    command_id,
+                    processes,
+                });
+            }
+            WireEvent::RpcProcessOutputReported(payload) => {
+                let command_id =
+                    exact_str(&payload.command_id, "rpc.process_output", "command_id", 256)?;
+                let process = wire_process_report(&payload.process, "rpc.process_output")?;
+                let chunks = payload
+                    .chunks
+                    .iter()
+                    .map(|chunk| {
+                        let stream = match chunk.stream {
+                            wisp_protocol::events::wire::RpcProcessOutputChunkStream::Stdout => {
+                                super::background_processes::OutputStream::Stdout
+                            }
+                            wisp_protocol::events::wire::RpcProcessOutputChunkStream::Stderr => {
+                                super::background_processes::OutputStream::Stderr
+                            }
+                        };
+                        (stream, chunk.text.clone())
+                    })
+                    .collect();
+                return Ok(Self::ProcessOutputReported {
+                    command_id,
+                    output: std::sync::Arc::new(super::background_processes::ProcessOutput {
+                        process,
+                        chunks,
+                        omitted_bytes: payload.omitted_bytes,
+                    }),
+                });
+            }
+            WireEvent::ProcessEnded(payload) => {
+                let exit_code = wire_exit_code(payload.exit_code, "process.ended")?;
+                let state = match payload.state {
+                    wisp_protocol::events::wire::ProcessEndedState::Completed
+                        if exit_code == Some(0) =>
+                    {
+                        crate::tool_cards::ProcessDisplayState::Completed
+                    }
+                    wisp_protocol::events::wire::ProcessEndedState::Completed
+                    | wisp_protocol::events::wire::ProcessEndedState::Failed => {
+                        crate::tool_cards::ProcessDisplayState::Failed
+                    }
+                    wisp_protocol::events::wire::ProcessEndedState::TimedOut => {
+                        crate::tool_cards::ProcessDisplayState::TimedOut
+                    }
+                    wisp_protocol::events::wire::ProcessEndedState::Cancelled => {
+                        crate::tool_cards::ProcessDisplayState::Cancelled
+                    }
+                };
+                return Ok(Self::ProcessEnded {
+                    process_id: exact_str(&payload.process_id, "process.ended", "process_id", 128)?,
+                    command: (*payload.command).clone(),
+                    state,
+                    exit_code,
+                    duration_ms: payload.duration_ms,
+                });
+            }
+            WireEvent::AgentStarted(payload) => {
+                return wrap_message_origin(
+                    Self::Other {
+                        event_type: "agent.started".into(),
+                    },
+                    payload.message_entry_id.as_deref().map(String::as_str),
+                    Vec::new(),
+                );
+            }
+            WireEvent::SkillInvoked(payload) => {
+                return wrap_message_origin(
+                    Self::Other {
+                        event_type: "skill.invoked".into(),
+                    },
+                    Some(&payload.message_entry_id),
+                    Vec::new(),
+                );
+            }
+            WireEvent::MessageStarted(payload) => {
+                let turn = u64::try_from(payload.turn).map_err(|_| {
+                    EventProjectionError::InvalidField {
+                        event_type: "message.started".into(),
+                        field: "turn",
+                    }
+                })?;
+                return Ok(Self::MessageStarted { turn });
+            }
+            WireEvent::MessageDelta(payload) => {
+                let turn = u64::try_from(payload.turn).map_err(|_| {
+                    EventProjectionError::InvalidField {
+                        event_type: "message.delta".into(),
+                        field: "turn",
+                    }
+                })?;
+                let content_kind = match payload.content_kind {
+                    wisp_protocol::events::wire::MessageDeltaContentKind::Text => {
+                        MessageContentKind::Text
+                    }
+                    wisp_protocol::events::wire::MessageDeltaContentKind::Thinking => {
+                        MessageContentKind::Thinking
+                    }
+                };
+                return Ok(Self::MessageDelta {
+                    turn,
+                    delta: payload.delta.clone(),
+                    content_kind,
+                });
+            }
+            WireEvent::MessageCompleted(payload) => {
+                let turn = u64::try_from(payload.turn).map_err(|_| {
+                    EventProjectionError::InvalidField {
+                        event_type: "message.completed".into(),
+                        field: "turn",
+                    }
+                })?;
+                let projected = Self::MessageCompleted {
+                    turn,
+                    content: payload.content.clone(),
+                    cost: crate::web_search::message_cost_from_wire(payload),
+                    output_tokens: payload.usage.as_ref().map(|usage| usage.output_tokens),
+                };
+                let tool_call_ids = payload
+                    .tool_calls
+                    .iter()
+                    .take(128)
+                    .map(|call| bounded_identity(&call.call_id))
+                    .collect();
+                return wrap_message_origin(
+                    projected,
+                    payload.message_entry_id.as_deref().map(String::as_str),
+                    tool_call_ids,
+                );
+            }
+            WireEvent::AgentCompleted(payload) => {
+                return Ok(Self::RunCompleted(crate::transcript::RunTotals {
+                    outcome: payload.outcome.to_string(),
+                    duration_ms: payload.duration_ms,
+                    tool_calls: payload.tool_calls,
+                    output_tokens: payload.output_tokens,
+                    model_ms: payload.model_ms,
+                    mode: payload.mode.as_ref().map(|mode| match mode {
+                        wisp_protocol::events::wire::AgentMode::Build => "build".to_owned(),
+                        wisp_protocol::events::wire::AgentMode::Plan => "plan".to_owned(),
+                    }),
+                    model: payload.model.clone(),
+                    effort: payload.effort.clone(),
+                }));
+            }
+            WireEvent::WebSearchPerformed(payload) => {
+                let turn = u64::try_from(payload.turn).map_err(|_| {
+                    EventProjectionError::InvalidField {
+                        event_type: "web.search".into(),
+                        field: "turn",
+                    }
+                })?;
+                return Ok(Self::WebSearch {
+                    turn,
+                    search: crate::web_search::search_from_wire(payload),
+                });
+            }
+            WireEvent::SessionDirectoryChanged(payload) => {
+                let Some(previous) = &payload.previous_cwd else {
+                    return Ok(Self::Other {
+                        event_type: "session.directory_changed".into(),
+                    });
+                };
+                return Ok(Self::DirectoryChanged {
+                    previous: previous.clone(),
+                    cwd: payload.cwd.clone(),
+                });
+            }
+            WireEvent::RpcWorkspaceReported(payload) => {
+                return Ok(Self::WorkspaceReported {
+                    cwd: payload.cwd.clone(),
+                    git_branch: payload.git_branch.clone(),
+                    session_images_dir: payload
+                        .session_images_dir
+                        .as_deref()
+                        .filter(|path| !path.is_empty())
+                        .map(std::path::PathBuf::from),
+                });
+            }
+            WireEvent::TrustRequested(payload) => {
+                return Ok(Self::TrustRequested {
+                    request_id: payload.request_id.clone(),
+                    project_path: payload.project_path.clone(),
+                });
+            }
+            WireEvent::ProjectConfigApplied(payload) => {
+                return Ok(Self::ProjectConfigApplied {
+                    provider: payload.provider.clone(),
+                    model: payload.model.clone(),
+                    effort: payload.effort.clone(),
+                });
+            }
+            WireEvent::RpcCommandStarted(payload) => {
+                if payload.command_type == "process_wake" {
+                    return Ok(Self::WakeStarted {
+                        command_id: exact_str(
+                            &payload.command_id,
+                            "rpc.command.started",
+                            "command_id",
+                            256,
+                        )?,
+                    });
+                }
+                return Ok(Self::Other {
+                    event_type: "rpc.command.started".into(),
+                });
+            }
+            WireEvent::RpcCommandFinished(payload) => {
+                return Ok(Self::CommandFinished {
+                    command_id: exact_str(
+                        &payload.command_id,
+                        "rpc.command.finished",
+                        "command_id",
+                        256,
+                    )?,
+                    command_type: BoundedText::head(&payload.command_type, 128, 8).text,
+                    ok: payload.ok,
+                    error: payload
+                        .error
+                        .as_deref()
+                        .map(|error| BoundedText::head(error, 1024, 8).text),
+                });
+            }
+            WireEvent::RpcShellProgress(payload) => {
+                return Ok(Self::ShellProgress {
+                    command_id: exact_str(
+                        &payload.command_id,
+                        "rpc.shell.progress",
+                        "command_id",
+                        256,
+                    )?,
+                    stdout_tail: (*payload.stdout_tail).clone(),
+                    stderr_tail: (*payload.stderr_tail).clone(),
+                    stdout_bytes: payload.stdout_bytes,
+                    stderr_bytes: payload.stderr_bytes,
+                });
+            }
+            WireEvent::RpcShellCompleted(payload) => {
+                return Ok(Self::ShellCompleted {
+                    command_id: exact_str(
+                        &payload.command_id,
+                        "rpc.shell.completed",
+                        "command_id",
+                        256,
+                    )?,
+                    command: BoundedText::head(&payload.command, 32_768, 8).text,
+                    exit_code: payload.exit_code,
+                    output: (*payload.output).clone(),
+                    truncated: payload.truncated,
+                    timed_out: payload.timed_out,
+                    cancelled: payload.cancelled,
+                    duration_ms: payload.duration_ms,
+                    error: payload
+                        .error
+                        .as_deref()
+                        .map(|error| BoundedText::head(error, 2_048, 8).text),
+                });
+            }
+            WireEvent::ToolCallRequested(payload) => {
+                return Ok(Self::ToolCall(ToolCallInput {
+                    call_id: bounded_identity(&payload.call_id),
+                    detail_source: project_tool_detail_source(&payload.name, &payload.arguments),
+                    arguments: bounded_tool_arguments_map(&payload.name, &payload.arguments),
+                    name: bounded_tool_name(&payload.name),
+                }));
+            }
+            WireEvent::ToolApprovalRequested(payload) => {
+                return Ok(project_live_approval_requested(payload));
+            }
+            WireEvent::ToolExecutionStarted(payload) => {
+                let resolved = payload.target.as_deref().and_then(|target| {
+                    let inner = proxied_arguments_map(&payload.name, &payload.arguments, target)?;
+                    Some(ToolCallInput {
+                        call_id: bounded_identity(&payload.call_id),
+                        detail_source: project_tool_detail_source(target, inner),
+                        arguments: bounded_tool_arguments_map(target, inner),
+                        name: bounded_tool_name(target),
+                    })
+                });
+                return Ok(match resolved {
+                    Some(resolved) => Self::ToolTargetResolved(resolved),
+                    None => Self::Other {
+                        event_type: "tool.execution.started".into(),
+                    },
+                });
+            }
+            WireEvent::ToolApprovalReviewed(payload) => {
+                return Ok(Self::ToolApprovalReviewed {
+                    call_id: bounded_identity(&payload.call_id),
+                    note: format!(
+                        "Command review ({}): {}",
+                        payload.verdict,
+                        BoundedText::head(&payload.reason, 500, 8).text,
+                    ),
+                });
+            }
+            WireEvent::ToolApprovalResolved(payload) => {
+                if payload.source.as_deref() == Some("auto") && payload.approved {
+                    return Ok(Self::ToolAutoApproved {
+                        call_id: bounded_identity(&payload.call_id),
+                        note: payload
+                            .reason
+                            .as_deref()
+                            .map(|reason| BoundedText::head(reason, 500, 8).text),
+                    });
+                }
+                let raw_name = payload.target.as_deref().unwrap_or(&payload.name);
+                return Ok(Self::ToolApprovalResolved {
+                    call_id: bounded_identity(&payload.call_id),
+                    name: bounded_tool_name(raw_name),
+                    approved: payload.approved,
+                    reason: payload
+                        .reason
+                        .as_deref()
+                        .map(|reason| BoundedText::head(reason, 512, 8).text),
+                });
+            }
+            WireEvent::ToolExecutionEnded(payload) => {
+                return wrap_message_origin(
+                    Self::ToolExecutionEnded {
+                        call_id: bounded_identity(&payload.call_id),
+                    },
+                    payload.message_entry_id.as_deref().map(String::as_str),
+                    Vec::new(),
+                );
+            }
+            WireEvent::ToolExecutionProgress(payload) => {
+                return Ok(Self::ToolExecutionProgress {
+                    call_id: bounded_identity(&payload.call_id),
+                    progress: ToolProgressInput {
+                        sequence: payload.sequence.get(),
+                        stdout_tail: (*payload.stdout_tail).clone(),
+                        stderr_tail: (*payload.stderr_tail).clone(),
+                        stdout_bytes: payload.stdout_bytes,
+                        stderr_bytes: payload.stderr_bytes,
+                    },
+                });
+            }
+            WireEvent::ToolNestedCallStarted(payload) => {
+                let target = payload.target.as_deref();
+                return Ok(Self::ScriptCallStarted {
+                    parent_call_id: bounded_identity(&payload.parent_call_id),
+                    call_id: payload.call_id.clone(),
+                    tool: target.unwrap_or(&payload.name).to_owned(),
+                    arguments: crate::script_card::call_arguments_map(
+                        &payload.name,
+                        target,
+                        payload.arguments.as_ref(),
+                    ),
+                });
+            }
+            WireEvent::ToolNestedCallEnded(payload) => {
+                return Ok(Self::ScriptCallEnded {
+                    parent_call_id: bounded_identity(&payload.parent_call_id),
+                    call: crate::script_card::ScriptCall::from_wire(&payload.call),
+                });
+            }
+            WireEvent::ToolResultReady(payload) => {
+                let projected = project_live_tool_result(payload)?;
+                return wrap_message_origin(
+                    projected,
+                    payload.message_entry_id.as_deref().map(String::as_str),
+                    Vec::new(),
+                );
+            }
             _ => {}
         }
         let value = event.to_value()?;
@@ -424,45 +822,6 @@ impl BackendEvent {
                 return Ok(Self::SubagentsReported {
                     command_id,
                     subagents,
-                });
-            }
-            "rpc.processes" => {
-                let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
-                let processes = array_field(&value, &event_type, "processes")?
-                    .iter()
-                    .map(|process| process_report(process, &event_type))
-                    .collect::<Result<_, _>>()?;
-                return Ok(Self::ProcessesReported {
-                    command_id,
-                    processes,
-                });
-            }
-            "rpc.process_output" => {
-                let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
-                let process = process_report(&value["process"], &event_type)?;
-                let chunks = array_field(&value, &event_type, "chunks")?
-                    .iter()
-                    .map(|chunk| {
-                        let stream = match string_field_ref(chunk, &event_type, "stream")? {
-                            "stdout" => super::background_processes::OutputStream::Stdout,
-                            "stderr" => super::background_processes::OutputStream::Stderr,
-                            _ => {
-                                return Err(EventProjectionError::InvalidField {
-                                    event_type: event_type.clone(),
-                                    field: "chunks.stream",
-                                });
-                            }
-                        };
-                        Ok((stream, string_field(chunk, &event_type, "text")?))
-                    })
-                    .collect::<Result<_, _>>()?;
-                return Ok(Self::ProcessOutputReported {
-                    command_id,
-                    output: std::sync::Arc::new(super::background_processes::ProcessOutput {
-                        process,
-                        chunks,
-                        omitted_bytes: u64_field(&value, &event_type, "omitted_bytes")?,
-                    }),
                 });
             }
             "rpc.codemode" => {
@@ -498,23 +857,6 @@ impl BackendEvent {
                 });
             }
             _ => {}
-        }
-        if event_type == "rpc.state" {
-            let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
-            let background_processes =
-                background_processes(&value["state"]["background_processes"], &event_type)?;
-            return event
-                .agent_mode(&command_id)
-                .map(|mode| Self::StateReported {
-                    command_id,
-                    mode,
-                    web_search: value["state"]["web_search"].as_bool().unwrap_or(false),
-                    background_processes,
-                })
-                .ok_or(EventProjectionError::InvalidField {
-                    event_type,
-                    field: "state.mode",
-                });
         }
         Self::from_projection_value(&value)
     }
@@ -1899,60 +2241,6 @@ fn string_field_ref<'a>(
         })
 }
 
-/// The running processes a `get_state` reply lists; an absent list is empty.
-fn background_processes(
-    value: &Value,
-    event_type: &str,
-) -> Result<Vec<super::background_processes::BackgroundProcess>, EventProjectionError> {
-    let Some(entries) = value.as_array() else {
-        return if value.is_null() {
-            Ok(Vec::new())
-        } else {
-            Err(EventProjectionError::InvalidField {
-                event_type: event_type.to_owned(),
-                field: "state.background_processes",
-            })
-        };
-    };
-    entries
-        .iter()
-        .map(|entry| {
-            Ok(super::background_processes::BackgroundProcess {
-                process_id: exact_string_field(entry, event_type, "process_id", 128)?,
-                command: string_field(entry, event_type, "command")?,
-                started_at_ms: optional_i64_field(entry, event_type, "started_at_ms")?,
-            })
-        })
-        .collect()
-}
-
-/// A process as `rpc.processes` and `rpc.process_output` describe it.
-fn process_report(
-    value: &Value,
-    event_type: &str,
-) -> Result<super::background_processes::ProcessReport, EventProjectionError> {
-    let exit_code = optional_i64_field(value, event_type, "exit_code")?
-        .map(i32::try_from)
-        .transpose()
-        .map_err(|_| EventProjectionError::InvalidField {
-            event_type: event_type.to_owned(),
-            field: "exit_code",
-        })?;
-    let state = if string_field_ref(value, event_type, "state")? == "running" {
-        crate::tool_cards::ProcessDisplayState::Running
-    } else {
-        ended_process_state(value, event_type, exit_code)?
-    };
-    Ok(super::background_processes::ProcessReport {
-        process_id: exact_string_field(value, event_type, "process_id", 128)?,
-        command: string_field(value, event_type, "command")?,
-        state,
-        exit_code,
-        started_at_ms: optional_i64_field(value, event_type, "started_at_ms")?,
-        stopped_by_user: value["stopped_by_user"].as_bool().unwrap_or(false),
-    })
-}
-
 /// How the card of a process that stopped on its own reads: a non-zero exit fails.
 fn ended_process_state(
     value: &Value,
@@ -2279,6 +2567,219 @@ fn bool_field(
 
 /// Largest confirmation argument object kept whole for display.
 const CONFIRMATION_ARGUMENTS_MAX_BYTES: usize = 64 * 1024;
+
+fn wrap_message_origin(
+    projected: BackendEvent,
+    message_entry_id: Option<&str>,
+    tool_call_ids: Vec<String>,
+) -> Result<BackendEvent, EventProjectionError> {
+    let Some(entry_id) = message_entry_id else {
+        return Ok(projected);
+    };
+    let entry_id = exact_str(entry_id, "live message", "message_entry_id", 4096)?;
+    Ok(BackendEvent::MessageOrigin {
+        entry_id,
+        tool_call_ids,
+        event: Box::new(projected),
+    })
+}
+
+fn wire_exit_code(
+    exit_code: Option<i64>,
+    event_type: &str,
+) -> Result<Option<i32>, EventProjectionError> {
+    exit_code
+        .map(i32::try_from)
+        .transpose()
+        .map_err(|_| EventProjectionError::InvalidField {
+            event_type: event_type.to_owned(),
+            field: "exit_code",
+        })
+}
+
+fn wire_background_processes(
+    entries: &[wisp_protocol::events::wire::BackgroundProcess],
+    event_type: &str,
+) -> Result<Vec<super::background_processes::BackgroundProcess>, EventProjectionError> {
+    entries
+        .iter()
+        .map(|entry| {
+            let started_at_ms = i64::try_from(entry.started_at_ms).map_err(|_| {
+                EventProjectionError::InvalidField {
+                    event_type: event_type.to_owned(),
+                    field: "started_at_ms",
+                }
+            })?;
+            Ok(super::background_processes::BackgroundProcess {
+                process_id: exact_str(&entry.process_id, event_type, "process_id", 128)?,
+                command: (*entry.command).clone(),
+                started_at_ms: Some(started_at_ms),
+            })
+        })
+        .collect()
+}
+
+fn wire_process_report(
+    process: &wisp_protocol::events::wire::RpcProcessSnapshot,
+    event_type: &str,
+) -> Result<super::background_processes::ProcessReport, EventProjectionError> {
+    use crate::tool_cards::ProcessDisplayState;
+    use wisp_protocol::events::wire::RpcProcessSnapshotState as WireState;
+
+    let exit_code = wire_exit_code(process.exit_code, event_type)?;
+    let started_at_ms =
+        i64::try_from(process.started_at_ms).map_err(|_| EventProjectionError::InvalidField {
+            event_type: event_type.to_owned(),
+            field: "started_at_ms",
+        })?;
+    let state = match process.state {
+        WireState::Running => ProcessDisplayState::Running,
+        WireState::Completed if exit_code == Some(0) => ProcessDisplayState::Completed,
+        WireState::Completed | WireState::Failed => ProcessDisplayState::Failed,
+        WireState::TimedOut => ProcessDisplayState::TimedOut,
+        WireState::Cancelled => ProcessDisplayState::Cancelled,
+    };
+    Ok(super::background_processes::ProcessReport {
+        process_id: exact_str(&process.process_id, event_type, "process_id", 128)?,
+        command: (*process.command).clone(),
+        state,
+        exit_code,
+        started_at_ms: Some(started_at_ms),
+        stopped_by_user: process.stopped_by_user,
+    })
+}
+
+fn project_live_approval_requested(
+    payload: &wisp_protocol::events::wire::ToolApprovalRequested,
+) -> BackendEvent {
+    let (raw_name, arguments) = match payload.target.as_deref() {
+        Some(target) => (
+            target,
+            proxied_arguments_map(&payload.name, &payload.arguments, target)
+                .unwrap_or(&payload.arguments),
+        ),
+        None => (payload.name.as_str(), &payload.arguments),
+    };
+    let detail_source = project_tool_detail_source(raw_name, arguments);
+    let arguments = if payload.grants_allowed {
+        bounded_tool_arguments_map(raw_name, arguments)
+    } else {
+        complete_confirmation_arguments_map(arguments)
+    };
+    BackendEvent::ToolApprovalRequested(PendingApproval {
+        call_id: payload.call_id.clone(),
+        detail_source,
+        arguments,
+        name: bounded_tool_name(raw_name),
+        safety: BoundedText::head(&payload.safety.to_string(), 128, 8).text,
+        grants_allowed: payload.grants_allowed,
+        session_only_yolo: payload.session_only_yolo,
+        command_prefix: payload.command_prefix.clone(),
+    })
+}
+
+fn optional_project_tail(value: Option<&str>) -> (Option<String>, u64) {
+    match value {
+        Some(text) => {
+            let projected = project_text(text);
+            (Some(projected.tail), projected.source_bytes)
+        }
+        None => (None, 0),
+    }
+}
+
+fn project_live_tool_result(
+    payload: &wisp_protocol::events::wire::ToolResultReady,
+) -> Result<BackendEvent, EventProjectionError> {
+    let raw_name = payload.target.as_deref().unwrap_or(&payload.name);
+    let process_state = payload.process_state.as_ref().map(ToString::to_string);
+    let cancelled = process_state.as_deref() == Some("cancelled");
+    let failed = !cancelled
+        && (payload.is_error
+            || payload.exit_code.is_some_and(|code| code != 0)
+            || matches!(process_state.as_deref(), Some("failed" | "timed_out")));
+    let projected_output = project_text(&payload.output);
+    let output_source_bytes = projected_output.source_bytes;
+    let output_source_lines = projected_output.source_lines;
+    let output_projection_cut_mid_line = !failed && projected_output.head_cut_mid_line;
+    let (output, output_tail) = if failed {
+        (projected_output.tail, None)
+    } else if cancelled {
+        (projected_output.head, None)
+    } else {
+        (projected_output.head, Some(projected_output.tail))
+    };
+    let (stdout, stdout_source_bytes) = optional_project_tail(payload.stdout.as_deref());
+    let (stderr, stderr_source_bytes) = optional_project_tail(payload.stderr.as_deref());
+    let before_text = capture_write_before_str(raw_name, payload.before_text.as_deref())
+        .ok()
+        .flatten();
+    let edit_locations = edit_locations_from_wire(&payload.edit_locations).map_err(|()| {
+        EventProjectionError::InvalidField {
+            event_type: "tool.result".into(),
+            field: "edit_locations",
+        }
+    })?;
+    Ok(BackendEvent::ToolResult(Box::new(ToolResultInput {
+        nested: crate::script_card::ScriptResult::from_wire(
+            &payload.nested_calls,
+            payload.nested_calls_omitted,
+        ),
+        images: composer_images::reported_image_lines_from_wire(&payload.images),
+        image_parts: composer_images::reported_transcript_images_from_wire(&payload.images),
+        call_id: bounded_identity(&payload.call_id),
+        name: bounded_tool_name(raw_name),
+        output,
+        output_tail,
+        output_source_bytes,
+        output_source_lines,
+        output_projection_cut_mid_line,
+        is_error: payload.is_error,
+        failure_code: payload.failure_code.as_ref().map(ToString::to_string),
+        retryable: payload.retryable,
+        recovery_hint: payload
+            .recovery_hint
+            .as_deref()
+            .map(|hint| BoundedText::head(hint, 512, 8).text),
+        exit_code: payload.exit_code,
+        output_has_exit_status: payload.output_has_exit_status,
+        before_text,
+        created: raw_name == "write" && payload.created,
+        summary: payload
+            .summary
+            .as_deref()
+            .map(|summary| BoundedText::head(summary, 512, 8).text),
+        truncated: payload.truncated,
+        process_id: payload.process_id.as_deref().map(bounded_identity),
+        process_state,
+        process_error: payload
+            .process_error
+            .as_deref()
+            .map(|error| BoundedText::head(error, 512, 8).text),
+        stdout,
+        stdout_source_bytes,
+        stderr,
+        stderr_source_bytes,
+        stdout_truncated: payload.stdout_truncated,
+        stderr_truncated: payload.stderr_truncated,
+        stdout_dropped_bytes: payload.stdout_dropped_bytes,
+        stderr_dropped_bytes: payload.stderr_dropped_bytes,
+        duration_ms: payload.duration_ms,
+        started_at_ms: payload.started_at.map(|dt| dt.timestamp_millis()),
+        process_started_at_ms: payload.process_started_at.map(|dt| dt.timestamp_millis()),
+        process_ended_at_ms: payload.process_ended_at.map(|dt| dt.timestamp_millis()),
+        edit_locations,
+    })))
+}
+
+fn complete_confirmation_arguments_map(arguments: &serde_json::Map<String, Value>) -> Value {
+    match serde_json::to_vec(arguments) {
+        Ok(encoded) if encoded.len() <= CONFIRMATION_ARGUMENTS_MAX_BYTES => {
+            Value::Object(arguments.clone())
+        }
+        _ => Value::Null,
+    }
+}
 
 fn complete_confirmation_arguments(arguments: &Value) -> Value {
     match serde_json::to_vec(arguments) {
