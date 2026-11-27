@@ -890,3 +890,33 @@ def test_moves_follow_their_message(tmp_path: Path) -> None:
     page = session.read_message_page()
     moves = [message.moved_to for message in page.messages]
     assert moves == [None, third, None, first, None, None]
+
+
+def test_read_message_page_reuses_tree_from_run_snapshot(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+
+    async def write() -> None:
+        await session.append_message(Message(role="user", content="hello"))
+        await session.append_message(Message(role="assistant", content="world"))
+
+    anyio.run(write)
+
+    tree_calls = 0
+    real_resolve = jsonl_module.resolve_session_tree
+
+    def counting_resolve(*args: object, **kwargs: object) -> object:
+        nonlocal tree_calls
+        tree_calls += 1
+        return real_resolve(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(jsonl_module, "resolve_session_tree", counting_resolve)
+
+    snapshot = session.read_run_snapshot()
+    page = session.read_message_page()
+
+    assert snapshot.entry_count == 2
+    assert [message.content for message in page.messages] == ["hello", "world"]
+    assert tree_calls == 1

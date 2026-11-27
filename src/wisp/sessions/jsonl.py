@@ -8,7 +8,8 @@ import stat
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -85,6 +86,7 @@ from wisp.sessions.pagination import (
 from wisp.sessions.replay import (
     SessionReplay,
     SessionReplayError,
+    SessionTreeState,
     StaleCompactionError,
     replay_session_entries,
     resolve_session_tree,
@@ -618,6 +620,8 @@ class JsonlSession:
         self._entry_index_generation: int | None = None
         self._entry_index_signature: FileSignature | None = None
         self._message_page_index: MessagePageIndex | None = None
+        self._run_snapshot: SessionRunSnapshot | None = None
+        self._session_tree: SessionTreeState | None = None
         self.images = SessionImageStore(path.parent / IMAGE_DIRECTORY_NAME)
 
     async def store_image(self, data: bytes) -> ImagePart:
@@ -934,17 +938,42 @@ class JsonlSession:
     def read_run_snapshot(self) -> SessionRunSnapshot:
         """Read provider context and its active leaf under one session lock."""
 
+        return self._read_run_snapshot(prepare_parent=True, require_exists=False)
+
+    def read_existing_run_snapshot(self) -> SessionRunSnapshot:
+        """Read provider context for an existing session without modifying its directory."""
+
+        return self._read_run_snapshot(prepare_parent=False, require_exists=True)
+
+    def _read_run_snapshot(
+        self,
+        *,
+        prepare_parent: bool,
+        require_exists: bool,
+    ) -> SessionRunSnapshot:
         with self._file_state.lock:
-            with self._interprocess_lock():
+            with self._interprocess_lock(prepare_parent=prepare_parent):
+                if require_exists and self._validate_session_file() is None:
+                    raise SessionNotFoundError(f"Session file does not exist: {self.path}")
                 self._refresh_entry_index()
-                assert self._entry_index is not None
-                entries = tuple(self._entry_index.values())
-                replay = replay_session_entries(entries)
-                return SessionRunSnapshot(
-                    entry_count=len(entries),
-                    active_leaf_id=replay.active_leaf_id,
-                    replay=replay,
-                    name=_session_name_from_entries(entries),
+                if self._run_snapshot is None:
+                    assert self._entry_index is not None
+                    entries = tuple(self._entry_index.values())
+                    if self._session_tree is None:
+                        self._session_tree = resolve_session_tree(entries)
+                    replay = replay_session_entries(entries, tree=self._session_tree)
+                    self._run_snapshot = SessionRunSnapshot(
+                        entry_count=len(entries),
+                        active_leaf_id=replay.active_leaf_id,
+                        replay=replay,
+                        name=_session_name_from_entries(entries),
+                    )
+                return replace(
+                    self._run_snapshot,
+                    replay=replace(
+                        self._run_snapshot.replay,
+                        codemode_state=deepcopy(self._run_snapshot.replay.codemode_state),
+                    ),
                 )
 
     def read_entry_snapshot(self) -> tuple[SessionEntry, ...]:
@@ -1027,8 +1056,12 @@ class JsonlSession:
                 self._refresh_entry_index()
                 if self._message_page_index is None:
                     assert self._entry_index is not None
+                    entries = tuple(self._entry_index.values())
+                    if self._session_tree is None:
+                        self._session_tree = resolve_session_tree(entries)
                     self._message_page_index = message_page_index_from_entries(
-                        self._entry_index.values()
+                        entries,
+                        tree=self._session_tree,
                     )
                 return message_page_from_index(
                     self._message_page_index,
@@ -1484,7 +1517,7 @@ class JsonlSession:
         self._entry_index[persisted.id] = _as_persisted(persisted)
         self._entry_index_generation = self._file_state.generation
         self._entry_index_signature = session_file_signature(info)
-        self._invalidate_message_page_index()
+        self._invalidate_derived_indexes()
         return persisted
 
     def _require_stored_images(self, entries: Sequence[SessionEntry]) -> None:
@@ -1509,13 +1542,22 @@ class JsonlSession:
         raise SessionError(f"Session entry id conflicts with persisted data: {entry.id}")
 
     def _refresh_entry_index(self) -> None:
+        info = self._validate_session_file()
+        if (
+            info is not None
+            and self._entry_index is not None
+            and self._entry_index_generation == self._file_state.generation
+            and self._entry_index_signature == session_file_signature(info)
+        ):
+            return
+
         self._recover_incomplete_tail_locked()
         info = self._validate_session_file()
         if info is None:
             self._entry_index = {}
             self._entry_index_generation = self._file_state.generation
             self._entry_index_signature = None
-            self._invalidate_message_page_index()
+            self._invalidate_derived_indexes()
             return
 
         signature = session_file_signature(info)
@@ -1527,16 +1569,18 @@ class JsonlSession:
             self._entry_index = self._load_entry_index()
             self._entry_index_generation = self._file_state.generation
             self._entry_index_signature = signature
-            self._invalidate_message_page_index()
+            self._invalidate_derived_indexes()
 
     def _invalidate_entry_index(self) -> None:
         self._entry_index = None
         self._entry_index_generation = None
         self._entry_index_signature = None
-        self._invalidate_message_page_index()
+        self._invalidate_derived_indexes()
 
-    def _invalidate_message_page_index(self) -> None:
+    def _invalidate_derived_indexes(self) -> None:
         self._message_page_index = None
+        self._run_snapshot = None
+        self._session_tree = None
 
     def _load_entry_index(self) -> dict[str, SessionEntry]:
         entries: dict[str, SessionEntry] = {}

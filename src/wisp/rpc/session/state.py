@@ -4,9 +4,7 @@ from __future__ import annotations
 
 from wisp.messages import Message
 from wisp.rpc.coordinator import _RpcSessionState
-from wisp.sessions.entries import SessionEntry, SessionInfoSessionEntry
 from wisp.sessions.jsonl import JsonlSession
-from wisp.sessions.replay import replay_session_entries
 
 
 def rpc_session_state(session: JsonlSession | None) -> _RpcSessionState:
@@ -28,25 +26,15 @@ def updated_rpc_session_state(
 ) -> tuple[int, tuple[Message, ...]]:
     if not session.path.is_file():
         return entry_start, committed_history
-    entries = session.read_entry_snapshot()
-    replay = replay_session_entries(entries)
-    return len(entries), replay.messages
+    snapshot = session.read_existing_run_snapshot()
+    return snapshot.entry_count, snapshot.replay.messages
 
 
 def rpc_selected_session_state(
     session: JsonlSession,
 ) -> tuple[int, tuple[Message, ...], str | None, str | None]:
-    entries = session.read_entries()
-    replay = replay_session_entries(entries)
-    return len(entries), replay.messages, replay.active_leaf_id, _session_name_from_entries(entries)
-
-
-def _session_name_from_entries(entries: tuple[SessionEntry, ...]) -> str | None:
-    name: str | None = None
-    for entry in entries:
-        if isinstance(entry, SessionInfoSessionEntry):
-            name = entry.name
-    return name
+    snapshot = session.read_existing_run_snapshot()
+    return snapshot.entry_count, snapshot.replay.messages, snapshot.active_leaf_id, snapshot.name
 
 
 def rpc_derived_session_state(

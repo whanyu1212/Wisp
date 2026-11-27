@@ -41,7 +41,7 @@ from wisp.sessions.entries import (
     ToolResultPresentationSnapshot,
 )
 from wisp.sessions.errors import SessionError
-from wisp.sessions.replay import resolve_session_tree
+from wisp.sessions.replay import SessionTreeState, resolve_session_tree
 from wisp.skills.models import SkillInvocationEvidence
 
 DEFAULT_SESSION_MESSAGE_PAGE_LIMIT = 200
@@ -134,9 +134,12 @@ def message_page_index_from_entries(
     entries: Iterable[SessionEntry],
     *,
     conversation_only: bool = False,
+    tree: SessionTreeState | None = None,
 ) -> MessagePageIndex:
-    tree = resolve_session_tree(tuple(entries))
-    messages = tuple(entry for entry in tree.active_path if isinstance(entry, MessageSessionEntry))
+    resolved_tree = resolve_session_tree(tuple(entries)) if tree is None else tree
+    messages = tuple(
+        entry for entry in resolved_tree.active_path if isinstance(entry, MessageSessionEntry)
+    )
     if conversation_only:
         messages = tuple(
             entry
@@ -144,7 +147,7 @@ def message_page_index_from_entries(
             if entry.message.role in ("user", "assistant") and entry.message.user_visible_content
         )
         return MessagePageIndex(
-            active_leaf_id=tree.active_leaf_id,
+            active_leaf_id=resolved_tree.active_leaf_id,
             messages=messages,
             positions={entry.id: index for index, entry in enumerate(messages)},
             web_searches={},
@@ -171,7 +174,7 @@ def message_page_index_from_entries(
     approval_notes: dict[str, str] = {}
     # Searches precede their assistant completion on the active branch. Never
     # carry evidence from an interrupted response into a later run or message.
-    for entry in tree.active_path:
+    for entry in resolved_tree.active_path:
         if isinstance(entry, MessageSessionEntry) and entry.message.role == "user":
             pending.clear()
             pending_auto.clear()
@@ -238,7 +241,7 @@ def message_page_index_from_entries(
                 pass
             run_last_message = None
     return MessagePageIndex(
-        active_leaf_id=tree.active_leaf_id,
+        active_leaf_id=resolved_tree.active_leaf_id,
         messages=messages,
         positions={entry.id: index for index, entry in enumerate(messages)},
         web_searches=searches,
