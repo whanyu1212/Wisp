@@ -1,6 +1,6 @@
 ---
 title: TUI basics
-description: Start Wisp in your terminal, compose prompts, steer active runs, reference project files, and customize themes.
+description: Work in Wisp's Rust terminal workspace—editing turns, per-turn /diff, Session | Files | Browser side panel, local ! shell, docked approvals, and live steering.
 route: guide/tui.html
 section: using
 order: 4
@@ -13,500 +13,221 @@ capture: working
 
 # TUI basics {#tui}
 
-Choose a focused guide for common terminal tasks:
-
-- [TUI keys and keybindings](./tui/keybindings.md) — Keyboard shortcuts, editing keys, and user keybinding configuration.
-- [TUI commands](./tui/commands.md) — Slash commands, provider and model selection, permissions, and MCP management.
-- [TUI sessions and scrollback](./tui/sessions.md) — Resume sessions, navigate branches, browse tool details, and search prompt history.
+`wisp` launches the Rust terminal workspace over Wisp's shared Python RPC runtime:
 
 ```bash
 wisp
 ```
 
-The Rust TUI uses the Python RPC backend for agent behavior, tools, permissions, and sessions.
+Jump to a focused TUI page for full command and key tables:
 
-> [!NOTE]
-> **TUI availability**
->
-> `wisp`, `wisp tui`, and `wisp --mode tui` launch Rust.
-> Native wheels for macOS arm64 and Linux glibc 2.28+ x86_64 bundle the binary. Pure-wheel installs
-> retain print, JSON, RPC, and SDK use, but interactive startup reports how to obtain a native wheel
-> or build a matching binary. Source checkouts set the absolute `WISP_RUST_TUI_BINARY` path after
-> building Rust; see [Development setup](../contributing/development#rust-tui-scaffold).
+- [TUI keys and keybindings](./tui/keybindings.md) — Keyboard shortcuts, composer editing keys, external editor (`Ctrl+O`), and `tui_keybindings` customization.
+- [TUI commands](./tui/commands.md) — Slash commands, `/connect`, `/model`, `/permissions`, `/codemode`, `/subagents`, `/mcp`, and live `/browser` takeover.
+- [TUI sessions and scrollback](./tui/sessions.md) — Inline and working-tree `/diff`, tool detail browsing (`F6`), `/resume`, `/tree`, `/cd`, mouse controls, and prompt history.
 
-## Conversation and composer {#rust-tui}
+## An editing turn in the workspace {#rust-tui}
 
-Rust is the interactive terminal frontend. It provides model selection, command discovery,
-context/compaction, skills/MCP, prompt history, overlays, file completion, themes, mouse navigation,
-configurable bindings, keyboard selection, undo/redo, composer clipboard actions, and compact paste
-presentation. The [architecture guide](../architecture/rust-tui-boundary#subsystem-ownership)
-describes which process owns each part of the interface.
+Start Wisp in a project (`wisp`, `wisp tui`, or `wisp --mode tui`). On an empty session, the
+welcome card lets you pick `Connect a provider`, `Resume a session`, `Browse commands`, or
+`Mention a project file` with arrows or a click; start typing at any time to write directly in the
+composer.
 
-```bash
-wisp tui
-wisp --mode tui
+When you ask Wisp to make a change, the workspace keeps the turn readable end to end:
+
+- **Composer and live transcript:** Your prompt sits in a rounded `›` composer whose bottom border
+  shows the active model, reasoning effort, and mode (`claude-opus-5-5 (high) · build`; amber in
+  `plan` mode, and a warning label when `YOLO` is active). Assistant Markdown streams into a
+  `100`-column reading measure while code blocks and tables use the full transcript width, with
+  clickable OSC 8 file paths and `http`/`https` links.
+- **Calm stream pacing:** Providers deliver tokens in uneven bursts, so Wisp reveals text at a
+  steady word pace and holds back unfinished inline Markdown markers (like `**bold**`, `` `code` ``,
+  table rows, or code fences) until complete. That prevents jitter and raw syntax flashes, then
+  flushes immediately on pauses, tool cards, or turn completion (`WISP_TUI_STREAM_PACING=0` disables
+  pacing).
+- **Truthful tool labels:** Every tool call reads as a concise action line with a status mark (`•`
+  done, `✗` failed, `⊘` denied/cancelled, or a spinner while running) that distinguishes what was
+  requested from what actually happened—for example `Searched filenames for *.rs in src` vs.
+  `Searched text for "TODO" in src`, `Proposed disabling MCP server linear` (a request, not an
+  applied change), or `Edit failed: src/main.rs · stale input`. Consecutive reads, repeated
+  commands, and repeated MCP calls fold cleanly, while failures and retries stay explicit instead of
+  being hidden by a later success. Codemode scripts and subagent delegations keep their task title
+  and nested call counts (`F6` + `→` or a click expands any card; `Enter` opens full detail).
+- **Per-turn change summary and `delta`-style `/diff` (`Alt+G`):** Every `edit` or `write` card
+  shows a syntax-highlighted inline diff preview, and the bottom of the turn rail summarizes the
+  turn's net change (`╰ +N −M in K files`). Press `Alt+G` (or click / press `Enter` on the turn
+  summary row) to open `/diff` filtered to that turn's edits—complete with hunk headers, syntax and
+  word-level highlights, folded unchanged regions, and side-by-side split view on wide terminals.
+  Run `/diff` directly for the full working tree against `HEAD`.
+- **Two-row telemetry deck footer:** Below the composer, a two-row deck tracks live state at a
+  glance:
+  - **Row 1:** run state badge (`• idle`, `● working`, `● approval`, `● trust`, or `✗ error`),
+    current folder and Git branch, MCP health (`2 MCP` or `1 MCP off`), active background processes
+    and subagents (`1 bg · 1 sub`), plus queue counts or active notices on the right.
+  - **Row 2:** context window meter with token ratio, session cost, non-default transcript
+    verbosity (`verbosity: low` / `verbosity: high`), and contextual keycap hints.
+
+## Docked approvals and project trust
+
+Read-only tools run immediately. When Wisp proposes a file edit, shell command, or MCP mutation, an
+approval panel docks above the footer in place of the composer—keeping the conversation visible and
+your draft intact:
+
+- **Inline previews:** `edit` and `write` approvals render a syntax-highlighted inline diff; `bash`
+  approvals render the wrapped syntax-highlighted `$ command`; other tools show their full
+  arguments.
+- **Deliberate confirmation (keyboard or mouse):** Press `1` allow once, `2` allow tool for this
+  session, `3` YOLO for this project (session-only in `$HOME` or broader folders), or `4` deny (or
+  the `y`/`t`/`a`/`n` aliases, `↑`/`↓` + `Enter`, `Esc` to deny, or click a painted choice
+  directly). There is no pre-selected default, so a stray `Enter` meant for the composer cannot
+  approve a tool call.
+- **Fail-closed saved command-prefix allow rules:** For eligible simple single `bash` commands
+  inside a project (never shell chaining, pipelines, subshells, redirections, or broad folders), the
+  approval dock offers an extra `2` / `p` choice: **Always allow `<prefix>` (saved)** (shifting
+  tool-session, YOLO, and deny to `3`/`4`/`5`). Inspect or revoke saved rules and switch permission
+  modes (`Ask`, `Auto edits`, macOS `Auto commands`, `YOLO`) in `/permissions`—see
+  [TUI commands: Permissions](./tui/commands.md#permissions).
+
+Project trust uses the same docked panel (`y` trust, `n` deny, keyboard-only) and stays separate
+from per-call tool approval.
+
+## Side panel: Session, Files, and Browser {#side-panel}
+
+A one-row top bar keeps the session name on the left and the **`Session`**, **`Files`**, and
+**`Browser`** tabs on the right. Click any tab to open or close the panel, press `Ctrl+P` to toggle
+it, `F8` to focus it (`[` / `]` switch tabs, `Esc` returns to the composer), or `f` to expand the
+active tab into a centered overlay.
+
+On wide terminals, the side panel docks beside the transcript—growing automatically up to a
+`76`-column cap while preserving the `100`-column prose measure—and its left border can be dragged
+wider (double-click to reset). Narrow terminals open it as a `44`-column overlay.
+
+- **`Session`:** Live run activity, context gauge and token-growth sparkline, auto-expanding MCP
+  server and skill inventories, session-touched files (`◆`, click to jump to the edit card),
+  running background processes (`/ps`), and recent turns (`Ctrl+T` opens `/tree`). Press `t` (or
+  expand with `f`) to open the **parallel turn and subagent swimlane waterfall timeline**, showing
+  wall-clock Gantt spans for parallel tool batches, nested subagent calls, and codemode scripts.
+- **`Files`:** Session-touched files above a lazy-loaded project file tree with Git status and
+  Material Design icons (use a [Nerd Fonts](https://www.nerdfonts.com/) v3 Mono font). Click a file
+  or press `Enter` for a read-only inline preview, press `e` to open it in `$VISUAL` / `$EDITOR` /
+  `vi` (returning with an updated preview on save), `/` for a project-wide filename filter, and `r`
+  to refresh.
+- **`Browser`:** Built-in live Chrome/Chromium tab in trusted projects with an address bar, search,
+  and recent addresses, plus automatic previews when Wisp renders an HTML mockup or a browser MCP
+  server captures a page. Click the viewport or run `/browser interact` (`i` when focused) for
+  interactive takeover. See
+  [Browser viewport and interactive takeover](./tui/commands.md#browser-viewport-and-interactive-takeover).
+
+## Local shell mode (`!`) and background processes
+
+Prefix a composer line with `!` to run a shell command locally without spending a model turn:
+
+```text
+!git status
+!uv run pytest tests/docs
 ```
 
-The conversation uses the terminal width with modest side margins. User turns have a subtle
-background with padding above the speaker label and below the message; assistant prose and collapsed
-tool rows stay open on the transcript background. The transcript leaves space at the top and above
-the composer, collapsing on short terminals.
+Output renders inline with a `local · Alt+S to attach` footer—your local runs are **not** sent to
+the model automatically. Press `Alt+S` to attach that command's output as a `[! …]` chip on your
+next prompt (or press `Alt+S` again, or `Backspace` on an empty draft, to detach it).
 
-The composer shares the transcript background, with a thin rounded frame, a `›` prompt, and a hint
-when empty. Long logical lines soft-wrap at word boundaries, falling back to safe hard wrapping for
-long tokens, without adding newlines to the submitted prompt. A one-line draft takes three rows,
-and the composer grows with the draft to half the conversation's height, then keeps the cursor's
-wrapped row visible. Its bottom border names the model, the effort, and the agent mode
-(`claude-opus-5-5 (high) · build`); a narrow composer keeps the mode and drops the model. In plan
-mode the whole border turns amber, and `plan` keeps the full warning colour. When YOLO is on, the
-label names it in the warning colour after the mode; YOLO that is not saved for the project reads
-`YOLO (session)`. Ask, the safe default, is not shown. During a run that takes input, the top
-border names the keys that follow up or steer. The frame collapses on short terminals to preserve
-editing space, and the footer then names the mode and model. Below the composer, the footer uses two rows when the conversation area is at least 60 columns wide and 16 rows tall, even with the side panel docked. The footer shows the folder and
-branch, then status (`idle`, `working`, `approval`, `trust`) and context, then the keys for the
-current workflow set apart by `│`, as space permits. The backend version stays in `Ctrl+G` help. An empty transcript shows a welcome
-card, centred in the conversation column: a rounded frame around the startup logo, the installed package version, and a menu of
-`Resume a session`, `Browse commands`, and `Mention a project file`, led by `Connect a provider` when
-none is set. While the draft is empty, `↑`/`↓` move through the menu and `Enter` opens the selected
-row, as does a click: a command runs, and `/` or `@` opens its picker in the draft. Typing hands the
-keys back to the draft and the menu steps back. A one-line tip sits centred under the card, a different
-one each launch. A short terminal gets a smaller logo, then none, then no tip or frame, keeping the
-menu; a narrow one gets compact copy instead.
-
-Wisp's default instructions favor the answer or outcome first, short paragraphs, and a few useful
-bullets. Progress updates focus on findings, blockers, and next steps; final replies summarize
-related checks while retaining failures and uncertainty. Ask for a detailed explanation or
-walkthrough when you need more depth. These writing defaults apply wherever Wisp uses its built-in
-prompt, including the TUI and print mode; they do not truncate responses or rewrite existing history.
-
-Assistant replies render Markdown during streaming and when loading session history: headings,
-each level in its own colour without its `#` markers, emphasis, links, lists, checklists, quotes, fenced code with syntax highlighting and continuous
-backgrounds, and tables with aligned columns, borders, and bold headers. Descriptions wrap at word
-boundaries inside their cells; very narrow layouts stack cells within each row. Ordinary prose wraps
-at word boundaries within an 88-column reading width. In terminals that support OSC 8 hyperlinks,
-an `http` or `https` link in a reply, and the file path on a read, edit or write card, can be
-clicked; other link targets stay plain text, and `TERM=dumb` or `linux` turns links off. Paragraphs and headings have one blank line
-between them; top-level list items have the same breathing room, while nested lists stay compact.
-Wrapped list text aligns beneath its content, including numbered items and checkboxes. Code and
-tables retain the available transcript width. These are display changes: the stored response retains
-its original Markdown, while mouse selection copies the painted rows, including their spacing. Very
-large unfinished blocks temporarily display as plain text and are formatted when the reply completes.
-User prompts and tool output retain their literal text.
-
-Replies that omit a table header are also supported: a paragraph beginning with at least two
-complete, pipe-enclosed rows with the same number of columns renders as a table without a header.
-Single rows, mismatched columns, and pipe syntax inside code remain literal.
-
-Tool calls read as a list of actions. Each is one line: a status mark (`•` done, `✗` failed, `⊘`
-denied or cancelled, a spinner while it runs), a verb and what it acted on,
-such as `• Ran cargo test 3.2s` or `• Read src/retry.rs`, then how long it took. Shell commands
-are shown as typed, with syntax highlighting. Consecutive reads, searches and listings fold into
-one `Explored` line, successful repeated commands into `Ran N commands`, adjacent background
-processes that exited cleanly into `Background N commands · exit 0`, and repeated MCP calls
-into one line with a count; opening a group hangs its calls under it on `└` rows. Exploration and
-MCP groups with non-success states spell out their outcomes, such as `11 succeeded · 1 failed`,
-with denied, cancelled, pending, running and awaiting-approval calls counted separately. A narrow
-row may show `1/12 failed`; that does not claim the other 11 succeeded. A successful retry never
-erases the earlier failed attempt.
-
-Collapsed calls stack with no blank row between them. A call waiting for your decision shows an
-`awaiting approval` tag; the tag disappears as soon as the wait ends. A stale edit reads
-`Edit failed: src/main.rs · stale input`. A command that actually ran can say `Ran cargo test · exit 1`. A failed command also shows
-the last line it printed; a rejected invocation shows its first diagnostic line. Opening the card
-retains the output and recovery advice. A failed check remains a failed command even when its
-failure was useful during development. Select a line with `F6` and press `→`, or click it, to show
-its details.
-
-Discovery rows distinguish a search (`Searched tools for “issue lookup”`) from a listing
-(`Listed tools` or `Listed MCP servers`). A server proposal says `Proposed disabling MCP server linear`,
-not `Disabled`: the row describes the request, not the server’s current state. Browser typing names
-its target rather than the text entered. Skills name the skill or resource, and saved-output rows
-can show the requested range (`Requested lines 41–60 of saved output out-7a91`), not a count of
-lines returned. Expand the row to inspect its bounded arguments.
-
-Filename searches say `Searched filenames for *.rs in src`; content searches say
-`Searched text for “TODO” in src`. Provider-native actions distinguish `Searched the web for …`,
-`Opened docs.rs`, and `Searched docs.rs for …`.
-
-A [codemode](tools-and-safety.md#scripting-tool-calls-with-codemode-experimental) script is one
-line that names what it does and counts the calls it makes as they finish, such as
-`• Ran codemode: count TODOs per crate · 14 calls (1 failed) · read ×12, grep ×2`. Without a title the label is simply `Ran codemode`. Delegation keeps the task title,
-as in `Delegated: Review failing tests`. Opening a codemode row shows
-the script's first lines, numbered, then one `└` row per call (repeated calls to one tool share a
-row, and a failed one says why), then what the script returned. A failed script shows what
-stopped it under its line, like a failed command. Scripts are never folded into other groups.
-Select a script with `F6` and press `Enter` for its full details: the whole script, numbered and
-highlighted, every call it made with its arguments, outcome, and duration, and its complete
-output. Unfinished child calls and unreported outcomes are counted separately; when some outcomes
-are unreported, the failure count is explicitly a count of known failures. The view keeps up while
-the script runs, and `Esc` closes it.
-
-Images are named rather than drawn. An image pasted or dragged into the composer shows as a chip
-such as `Image 1 · 640×480`, and the sent prompt shows a `[image 640×480 png]` line for it. A tool
-card whose result returned images, such as a `read` of a PNG, ends its action row with the same
-label, or with `[2 images]` when there are several; the label stays whole when the row is cut short.
-
-Providers send replies in bursts, so the TUI reveals streamed text at an even pace instead of as
-each burst arrives. Text shows a word at a time, about a tenth of a second behind the stream, and
-an unfinished `**bold**`, `` `code` `` or `~~strike~~` span, table row, or code fence line waits
-until it is complete, so raw markers do not flash before the formatting applies. When the stream
-pauses or the reply ends, waiting text is shown, and a tool card or prompt that follows the reply,
-the end of the run, or a closed connection first shows all of it. More than 16 KiB of waiting text
-is shown at once rather than animated. Set `WISP_TUI_STREAM_PACING=0` to show text as it arrives. To
-measure a provider's stream, set `WISP_TUI_STREAM_TRACE` to a file path: each text delta appends a
-tab-separated line of milliseconds since the first delta, milliseconds since the previous one, and
-its size in bytes.
-
-During a backend output burst, Rust waits up to five seconds for inbound queue capacity while
-continuing to accept input and redraw turns. Sustained transport stalls and failed command writes
-end the session with a diagnostic and terminal cleanup. A choice that changed while a key or mouse
-input was waiting must be selected again; a redraw cannot apply that input to a replacement choice.
-
-## Approvals and trust
-
-A pending tool approval docks a panel above the footer in place of the composer, so the
-conversation that led to it stays visible; your draft is kept. The title names the tool (and target
-path for `edit`/`write`), the safety category sits at the top right, and the body shows an inline
-syntax-highlighted diff preview for `edit`/`write` or a wrapped syntax-highlighted `$ command`
-(with any extra arguments) for `bash`. Every other tool, including MCP tools with a `command`
-argument, shows its complete arguments. It offers `1` allow once, `2` allow that tool for this
-session, `3` YOLO for this project (YOLO for this session in the home folder or a folder above it,
-where YOLO is never saved), or `4` deny; for eligible simple `bash` commands inside a project, an
-extra `2` choice offers **Always allow `<prefix>` (saved)** (shifting tool-session, YOLO, and deny
-to `3`/`4`/`5`, with `p` as the prefix alias). The `y`/`p`/`t`/`a`/`n` aliases also work, or
-highlight a choice with `↑`/`↓` and press `Enter`, or click a painted approval choice directly with
-the mouse (clicks outside painted choices or before the prompt is drawn stay inert). There is no
-default choice: `Enter` only confirms a highlighted choice that has been drawn, so an `Enter` meant
-for the composer cannot answer a request. `Esc` denies. Project trust uses the same panel with `y`
-trust and `n` deny (keyboard-only). Below 11 rows the panel fills the screen so every choice stays
-visible down to 30×9.
-
-## Panels and popups
-
-Pickers, help, context, skills/MCP, prompt history, and retained tool details open over the
-conversation. Output continues updating behind the popup; closing it preserves the draft and scroll
-intent. Keys and paste go to the focused popup, and its editor owns the cursor. `Escape` closes the
-popup (and cancels a device login when one is active). `Ctrl+C` closes logo, theme, help, history,
-context, discovery, model, and connection views, while session, tree, and detail views retain the
-normal run-cancellation or idle-exit behavior.
-
-Approvals and project-trust requests take precedence over popups. A refreshed selection must be
-drawn before it can be activated. Popups are centered and capped at 100×28, except `/permissions`, `/codemode`, `/subagents`
-and the `/mcp` add, enable, and remove panels, which dock above the composer; at the minimum 30×9
-terminal size they can fill the screen. Short decision layouts prioritize readable controls while
-retaining conversation state. Device-login URLs and codes wrap; use arrow/Page keys or Home/End to
-read longer challenges.
+When the agent runs a long command in the background (`Ctrl+B` moves a running command to the
+background), it appears in the `Session` side panel (and a compact strip below the composer when the
+panel is hidden). Open it with `/ps` or `↓` from an empty composer to peek at live output, jump to
+its transcript card (`Enter`), or stop it (`x` then `y`, or `/kill <number|id>`).
 
 ## Steering and follow-ups {#steering-and-follow-ups}
 
-The composer remains active while a prompt runs:
+The composer stays live while a run is active so you never have to cancel just to redirect work:
 
-- `Enter` sends a steering message for the active run. It is injected at the next safe request
-  boundary, after any current assistant/tool batch.
-- `Alt+Enter` queues follow-up work that starts when the active run would otherwise finish.
-- `Alt+Up` removes the newest queued steering or follow-up message and restores it ahead of the
-  current draft, after the shared runtime confirms the queue change.
-- `Escape` or `Ctrl+C` cancels the active prompt. Cancellation does not discard runtime-owned
-  queued messages.
+- `Enter` sends a **steering** message injected at the next safe request boundary (after the current
+  tool batch finishes).
+- `Alt+Enter` queues a **follow-up** message for when the current run would otherwise stop.
+- `Alt+Up` pops the newest queued steering or follow-up message back into your draft (and recovers
+  failed submissions).
+- `Escape` or `Ctrl+C` cancels the active run without discarding queued messages.
 
-A bounded queue panel previews up to three items and labels them `steer` or `later`; an omitted-item
-count indicates when more are queued. Rust shows steering and follow-up totals in its footer and
-composer. Failed submissions remain recoverable drafts: `Alt+Up` restores one ahead of the current
-draft. The Rust TUI clears a submitted draft only after the JSONL writer flushes it, refreshes queue
-state after startup and session changes, and reports queued or recovering text as unsent if the
-transport closes.
-
-Use `/queue` to inspect both queues, their FIFO previews, and their drain modes. The optional
-`queue.manage` action can be bound without replacing the current composer draft, for example
-`{"queue.manage": ["F7"]}` in the existing keybinding configuration. The overlay supports arrows,
-Home/End, Enter, and opt-in mouse navigation. `Escape` closes it; `Ctrl+C` retains cancellation
-behavior.
-
-- **One at a time** drains one message per eligible boundary. **All** drains the batch selected at
-  that boundary; messages added later wait for a subsequent boundary.
-- **Restore newest** acts on the selected queue, unlike `Alt+Up`'s cross-queue newest-item
-  selection. Restored text is prepended to the current draft, never automatically submitted or
-  silently truncated.
-- **Clear this queue** and **Clear both queues** require a scoped confirmation, defaulting to
-  Cancel. A changed snapshot invalidates the old choice. Modes and contents change only after
-  backend events.
-- Mutations require an active editable run and a backend snapshot token. Retained queues after a run
-  are inspectable but read-only. A stale request fails without removing a replacement item; refresh
-  and review the new state before retrying. Missing token support never falls back to an unguarded
-  pop.
-
-Opening the overlay does not change queue policy or pause draining. These queues are process-local,
-not persistent work across restarts. Predictable frame-limit failures preserve queued text;
-connection loss can leave a command outcome unknown, so destructive operations are not retried
-automatically.
+Run `/queue` (or bind `queue.manage` in `tui_keybindings`) to inspect both queues, switch drain
+modes (**One at a time** vs. **All** per boundary), restore the newest item from a specific queue,
+or clear queues with confirmation. Queues are process-local and validated with snapshot tokens so
+stale edits never drop a newer message.
 
 ## Completions and the file picker {#completions-and-the-file-picker}
 
 <div id="project-file-references"></div>
 
-Type `/` to filter commands inline. Type `@` at a token boundary to reference a project file while
-idle or streaming. The composer-anchored picker starts in fuzzy mode and matches loosely, so
-`@rust_launcher` finds `src/wisp/cli/native_tui/rust_launcher.py`; press `Tab` to switch to a
-project tree without changing the draft or query, and press `Tab` again to return.
+- Type `/` to filter slash commands and `/skill:` entries inline; `Tab` or `Enter` accepts.
+- Type `@` at a word boundary (while idle or streaming) to open the composer-anchored file picker
+  in fuzzy mode (`@rust_launcher` matches `src/wisp/cli/native_tui/rust_launcher.py`). Press `Tab`
+  to switch between fuzzy search and a collapsible project tree (`Left`/`Right` collapse/expand,
+  `Enter` inserts `@path` or `@"path with spaces"`). Wisp inserts the path reference rather than
+  inlining file contents, and respects `protected_paths`.
 
-`Up`/`Down` move the selection. In tree mode, `Left`/`Right` collapse or expand a directory, while
-`Enter` (or a click) toggles folders and inserts files. Fuzzy mode also permits directory
-references. `Escape` dismisses the picker first without cancelling the run or changing the draft;
-`Tab` at a dismissed reference reopens it and refreshes discovery.
-
-Only reference text is inserted: `@"src/example file.py"` for paths requiring JSON quoting,
-otherwise `@src/main.rs`. Wisp does not inline file contents. The picker and the Files filter share
-a bounded background index that respects `protected_paths`. The picker updates matches locally
-as paths arrive and indicates when results are incomplete. A policy change clears the old choices
-before refresh, and late responses cannot reopen a dismissed picker. Fuzzy results are capped at
-30, with deterministic smart-case matching. Shorten queries over 4096 bytes. Discovery failures
-preserve the draft. Close and reopen the picker to retry.
-
-The file popup is painted over the transcript, capped at 100 columns and 12 rows. In short terminals
-it can cover the header or upper composer rows rather than rearranging the conversation. Approval
-and trust controls take precedence. Below 30×9 no hidden selection can be inserted.
-
-The prompt editor highlights recognized commands and project paths alongside common Markdown
-structure: headings, list markers, inline code, and fenced code blocks. Highlighting is a bounded,
-presentation-only aid rather than a Markdown preview; the exact editable source remains the prompt
-submitted to the agent, and incomplete Markdown stays editable.
+The composer also highlights recognized commands, project paths, and basic Markdown structure as a
+presentation aid while keeping the exact raw text editable.
 
 ### Large pastes {#rust-large-pastes}
 
-A paste over 2,000 Unicode characters is displayed as a numbered marker with character, line, and
-byte counts. Ordinary text around it remains editable. Moving into the hidden range or editing at
-its boundary first expands it; repeat the action to edit the revealed text. Mouse cursor placement
-uses the displayed marker. At most 64 folds are retained; further pastes stay inline.
+Pastes over 2,000 characters fold into a compact numbered marker showing character, line, and byte
+counts so surrounding text stays easy to edit. Moving into or editing at a marker expands it first;
+submission, steering, history search, and queue recovery always use the exact raw text, and markers
+are never written into session history.
 
-The raw draft remains subject to the existing 1 MiB and 10,000-line limits. Submission, steering,
-follow-up, history search, and queue recovery use exact raw text. Compact live transcript echoes are
-local and bounded (32 presentations / 4 MiB each for queued and transcript metadata); eviction or
-historical replay displays raw content. Markers are never written into session history.
+## Themes, verbosity, and appearance
 
-### Side panel {#side-panel}
+- `/theme [name]` previews and applies curated themes (`Vapor`, `Glass`, `Orchid`, `Ember`, `Storm`,
+  `Grove`, `Wave`, and light themes `Paper` and `Dawn`); `theme.toggle` can be bound in
+  `tui_keybindings`.
+- `/logo [name]` chooses the startup welcome logo (`Random`, `Classic WISP`, `Wisp Braille`,
+  `Adal Braille`, or `Adal Mark Braille`).
+- `/verbosity [low|medium|high]` switches transcript detail live without touching saved history:
+  `low` hides completed thoughts and inline diffs and collapses consecutive successful tools;
+  `medium` (default) groups exploration calls with compact diff previews; `high` expands thoughts,
+  `bash` output, and full retained diffs inline.
 
-A one-row top bar shows the session name at its left and the side panel's `Session`, `Files`, and
-`Browser` tabs at its right. The highlighted tab is the view the open panel shows; no tab is highlighted while
-the panel is closed. Click a tab to open the panel on that view, or click the highlighted tab to
-close the panel. The top bar stays in place at every terminal width. The `Browser` tab is also
-how you open the live browser: with no page open, it shows an address bar for an address or a
-search, and your recent addresses. See
-[Browser viewport and interactive takeover](./tui/commands.md#browser-viewport-and-interactive-takeover).
-
-In **Files**, click a file once (or select it with the arrow keys and press `Enter`) to open a
-read-only preview. Click another file to switch the preview, or click a folder to expand or fold
-it. Press `e` with a file selected to edit it in `$VISUAL`, `$EDITOR`, or `vi`, in that order.
-Save and exit the editor to return to Wisp with the updated preview.
-
-On a terminal at least 148 columns wide, the Reading sidebar shows the session name and status,
-folder and branch, compact context usage, MCP servers, skills, changed files, and up to three
-earlier turns. The latest turn is left out because its prompt stays pinned above its reply, so a
-session with one turn has no turn list. While processes the agent started with
-`bash operation=start` are running, a **Background** section lists them, numbered, with how long
-each has run (the first five, until the panel has focus). A process that failed, timed out, or was
-stopped stays listed with how it ended for as long as the backend keeps it; one that finished
-cleanly is only counted in the heading until the panel has focus, which lists every process. Selecting a row opens its peek: its latest output under the row, read again each second while it
-runs, without moving the transcript. In the peek, Enter opens the process's card in the transcript,
-`x` asks to stop it and `y` confirms, and Esc closes the peek. While any are running and the sidebar is not docked, a strip under the composer
-shows how many and their commands; Down from an empty composer, a click
-on the strip, or `/ps` focuses the panel on the first one. Stopping one tells the agent
-with its next prompt if it asked to hear when the process stops, and never wakes it. Model, effort, and YOLO remain in the composer,
-and the panel's keys join the main footer.
-
-The **Context** section shows a segmented gauge when the context window is known, with marks for
-reserved space and the compaction threshold. A sparkline shows token growth by turn, and the
-latest completed run shows throughput and duration when available. Context's **Breakdown**
-expands source totals and costs. Open `/context` for full details, including a growth chart on
-wider layouts or a per-turn list on narrow ones.
-
-**MCP servers** and **Skills** fold to their heading row while healthy. MCP expands by itself when a
-server disconnects or the server list can't be read; Skills expands once a skill has been used, or
-when the catalog reports diagnostics or can't be read. Clicking a heading overrides this until the
-state changes again, so a new failure still expands a section you folded. MCP rows show connection
-status and expand to tool counts, errors, and `/mcp` management. Skill rows show **available** or
-**used**, and expand to their description and source. Used means a skill was successfully loaded by
-the skill tool or an explicit `/skill:name` invocation on the current session branch. Usage
-refreshes with session statistics after an operation, survives resume and compaction, and excludes
-failed calls and sibling-only usage. Project skills remain subject to trust. Empty, loading, and
-unavailable inventories are distinguished. Click a member row to expand its details.
-
-The panel starts at 44 columns and grows to at most 52 automatically. Drag its left border to resize
-it while leaving at least 104 columns for the conversation; double-click the border to restore the
-automatic width. The chosen width lasts until Wisp exits. In kitty, Ghostty, foot, and Rex the
-pointer turns into a resize arrow over the border and keeps that shape while you drag it. Other
-terminals, and any terminal inside tmux, keep the normal pointer. `Ctrl+P` hides or shows it. On narrower
-terminals, `Ctrl+P` opens a 44-column overlay above the composer.
-
-`F8` focuses the sidebar at either width. `Tab` and `Shift+Tab` move between sections, arrow keys
-move among actionable rows, and `Enter` or `Space` expands details or opens the selected view.
-`Esc` returns to the composer without changing its draft. `PageUp`/`PageDown`, or the mouse wheel
-over the panel, scroll the panel independently. Keyboard navigation brings offscreen rows into view.
-The bottom-right position indicator appears when the panel has more content below or above.
-
-Changed files show line counts and retain `◆` for files Wisp edited on this branch. Selecting an
-edited file jumps to its edit card; other files open `/diff`. File snapshots refresh when the panel
-appears and after each run, except while `/diff` is open. The Recent turns heading opens `/tree`;
-`Ctrl+T` also opens the session tree. While working or awaiting approval, the current activity and
-queue lead the panel. On terminals at least 160 columns wide, Edit and Write cards still show old
-and new content side by side.
-
-#### File icons
-
-The `Files` tab shows files touched this session and a project tree with Git status and Material
-Design file and folder icons. Use a [Nerd Fonts](https://www.nerdfonts.com/) v3 Mono font in your
-terminal to display the icons correctly. Narrow rows omit icons when filenames or Git counts need
-the space.
-
-Expand a folder to load its contents. Press `r` to refresh the tree while keeping your selection
-and expanded folders. If a folder fails to load, select it and press `Enter` to retry. Press `/`
-for project-wide matches, including folders you have yet to expand.
-
-## Themes and appearance
-
-Rust supports `/theme` and `/theme <name>` with curated Vapor, Glass, Orchid, Ember, Storm,
-Grove, Wave, Paper, and Dawn palettes. Paper is the main light theme (`wisp-light` internally), with
-Dawn as a warmer light alternative. Each palette uses coordinated diff backgrounds and word
-highlights; user panels and tool lines stay subdued. Glass leaves the main canvas on the terminal's
-default background, with smoky graphite surfaces and luminous ice, lilac, and mint accents. Configure
-opacity, wallpaper, and blur in the terminal emulator; Wisp does not simulate those effects.
-
-The picker previews with `Up`/`Down`, `PageUp`/`PageDown`, or `Home`/`End`; `Enter` applies the
-displayed choice, while `Escape` or `Ctrl+C` restores the committed theme. Streaming continues
-behind it. A new approval, trust request, or presented workflow cancels the preview without saving
-it. The `theme.toggle` binding (unbound by default) switches between Paper and the last committed
-dark theme, including when starting from Dawn; it is ignored while the theme picker owns a preview.
-These are local presentation actions, never prompts or runtime configuration commands.
-
-Run `/logo` to preview and select Random, Classic WISP, Wisp Braille, Adal Braille, or Adal Mark
-Braille. You can also select one directly, such as `/logo wisp-braille` or
-`/logo adal-mark-braille`. Arrow, Page, Home, and End keys move through the picker; `Enter` applies
-the displayed logo, and `Escape` or `Ctrl+C` closes it. The choice updates an empty welcome screen
-immediately and applies to later new-session welcome screens. Random chooses one named logo once per
-process, so terminal redraws and resizes do not change it. Each logo is shaded from its top-right
-tip, the Wisp flame, toward its far end: the theme's heading colours run from teal through blue to
-purple, and the Adal variants from light to deep pink over the terminal background. The `Wisp` name
-under the logo takes the tip's colour. At 16 colours and without colour the logo keeps one colour.
-On the first welcome screen of a launch the logo's dots gather into place, and in truecolor a light
-band then crosses it once, about 2 s in all. Any key, paste, or resize shows the finished logo at
-once; `WISP_TUI_MOTION=off` or a terminal in the background shows it finished from the start.
-
-Rust stores presentation preferences in `~/.wisp/tui.json` (`theme`, `last_dark_theme`,
-`startup_logo`, and `verbosity`). It preserves unrelated keys and writes atomically. Missing,
-unknown, or unusable preferences fall back to Vapor, Random, and `medium`; unreadable, non-UTF-8,
-non-regular, or over-64-KiB documents are not overwritten. A save failure leaves the live selection
-active and reports a warning; critical approval/cancellation recovery notices retain priority.
-Presentation preferences never enter `settings.json`, RPC, or session history.
-
-Run `/verbosity` to inspect the current transcript verbosity, or `/verbosity low`,
-`/verbosity medium`, or `/verbosity high` to switch live without affecting session history: `low`
-hides completed thoughts and inline diffs and collapses consecutive successful tools into one row
-while keeping live thinking, failed calls, and approvals visible; `medium` (default) groups
-exploration calls and keeps compact diff previews and collapsed thoughts; `high` expands thoughts
-and `bash` output inline, disables tool auto-grouping, and shows full retained diffs. Non-default
-levels show `verbosity: low` or `verbosity: high` in the footer deck when space allows.
-
-Set `NO_COLOR` before launching Rust for deterministic grayscale, including code, diffs, and popups.
-The conversion uses Rec.709 grayscale and minimally adjusts native foregrounds when needed to retain
-a 4.5:1 contrast ratio against their rendered backgrounds. Selection uses reverse video instead of
-its band, as well as a marker; status labels, approval action words, shape-coded tool markers, and diff `+`/`-` signs
-remain visible without hue. The theme choice can still be changed and remembered while monochrome is
-active.
-
-Themes are drawn in 24-bit colour. Wisp switches to the nearest 256-colour palette in macOS
-Terminal.app (unless `COLORTERM` advertises truecolor), and to the 16 ANSI colours when `TERM` names
-a 16- or 8-colour terminal such as the Linux console. Text that would fall below 4.5:1 contrast
-after the switch moves to the nearest colour that keeps it readable, and background tiers that
-would show as one gray at 256 colours move a step apart. At 16 colours, subtle background tiers
-can merge, so selected rows reverse instead of drawing a band. Diff additions use black text on
-green and deletions use white text on red; changed words stay bold and underlined rather than
-adding another tint. `NO_COLOR` keeps diffs grayscale at every depth. Pickers omit their cursor
-arrow where a selection band is visible, keeping the same label inset and mouse targets; Glass,
-monochrome and 16-colour pickers keep the arrow. Inside tmux, Wisp keeps sending
-24-bit colour and tmux converts it for its outer terminal, without that contrast step; if that
-terminal lacks truecolor, set `WISP_TUI_COLORS=256` so Wisp converts instead. Set `WISP_TUI_COLORS`
-to `truecolor`, `256`, or `16` to choose the depth yourself, or to `auto` for detection; other
-values are ignored.
-
-The terminal title follows the run: `Wisp · working · <folder>`, `needs approval`, `needs trust`, or
-`error` (after a failed prompt, `/compact`, or `/init`, until the next command), and just `Wisp · <folder>` when ready. Wisp saves
-the previous title when it starts and restores it on exit. Terminals and multiplexers without that
-title stack, tmux among them, keep Wisp's last title until something else sets one, such as a shell
-prompt that sets the title. When a run finishes, fails, or stops for an approval or trust decision
-while the terminal is in the background, Wisp sends a desktop notification (OSC 9, shown by terminals such as iTerm2, Ghostty, and
-WezTerm). So does a background process that stops on its own, naming its command and how it ended. It notifies only after the terminal has reported losing focus, so in tmux turn on
-`focus-events`; tmux also drops OSC 9 unless passthrough is allowed. Set `WISP_TUI_NOTIFY=bell` to
-ring the terminal bell instead, which macOS Terminal.app and tmux turn into a badge or an alert, or
-`WISP_TUI_NOTIFY=off` to stop notifications.
-
-A little motion marks what is live. While a run works, the indicator beside "Working" breathes slowly
-(a 2-second cycle) next to its spinner, and a tool card whose call just finished glows faintly for
-under a second, a folded group of cards for its latest member. While an approval or trust decision
-waits, its border breathes. On truecolor terminals the breathing blends colour. At 256 or 16
-colours the indicator steps between bold and dim instead, and the glow and the border stay still; a
-theme that draws on the terminal's own background also steps the indicator and shows no glow. All
-of it stops in the background, under
-`NO_COLOR`, and with `WISP_TUI_MOTION=off`, and none of it redraws an idle screen once a glow has
-faded. The startup logo's entrance follows the same rules, except that its dots still gather under
-`NO_COLOR`, which changes which dots show rather than their colour.
+Local presentation preferences save atomically to `~/.wisp/tui.json` (never `settings.json`, RPC,
+or session files). Set `NO_COLOR` for contrast-safe monochrome rendering. For `WISP_TUI_*`
+environment variables (`WISP_TUI_COLORS`, `WISP_TUI_IMAGES`, `WISP_TUI_MOTION`, `WISP_TUI_NOTIFY`,
+`WISP_TUI_MOUSE`, `WISP_TUI_STREAM_PACING`), `tmux` notes, and exact layout/paste thresholds, see
+[Environment variables: Terminal UI rendering, compatibility, and limits](../reference/environment.md#terminal-ui-rendering-compatibility-and-limits).
 
 ## Modes {#modes}
 
-**Plan mode** applies to future prompts in the current process. It exposes only read-only tools that
-were already authorized at startup; `write`, `edit`, `bash`, and non-read extension tools are
-unavailable. Use `/build` to restore. The mode is not persisted in session JSONL.
+- **`/plan`** switches future prompts in this process to read-only planning mode (`write`, `edit`,
+  `bash`, and non-read tools stay unavailable). Use **`/build`** to return to editing. Mode is not
+  persisted in session JSONL.
+- **`/new`** preserves the current session for `/resume`, clears the screen, and starts a fresh
+  session lazily while keeping your provider, model, effort, mode, permissions, and trust settings.
 
-**`/new`** preserves the current JSONL session for `/resume`, clears the transcript and screen, and
-creates the next session lazily. Provider, model, effort, mode, tool permissions, trust, and
-compaction settings are retained.
-
-## Flags and renderers {#flags-and-renderers}
+## Flags and availability {#flags-and-renderers}
 
 ```bash
 wisp tui --continue
 wisp tui --resume <session-id-prefix>
 wisp tui --no-all-tools                  # opt-in tool filter instead of the full registry
-wisp tui --yes                           # auto-approve mutating/command tools
-wisp --mode tui --provider anthropic     # top-level flags such as --provider also work
+wisp tui --yes                           # auto-approve mutating/command tools for this run
+wisp --mode tui --provider anthropic     # top-level flags such as --provider and --model work
 ```
 
-Rust loads the complete saved active path at startup and on `/resume`. Set `NO_COLOR` to request
-grayscale presentation. `wisp --mode tui` launches the same TUI and accepts the top-level options,
-including `--provider` and `--model`.
-
-A missing or non-executable binary, unsupported platform, package-version mismatch, negotiation
-failure, or non-zero Rust exit is reported as an error. For source checkouts, see
-[Development setup](../contributing/development#rust-tui-scaffold). Print, JSON, RPC, and SDK
-interfaces remain available on pure-wheel installs. The daily-use acceptance inventory for
-[#467](https://github.com/whanyu1212/Wisp/issues/467) is recorded in the parity matrix.
+Native wheels for macOS arm64 and Linux glibc 2.28+ x86_64 bundle `wisp-tui` alongside the Python
+backend. Pure-wheel installs keep print, JSON, RPC, and SDK modes, and report how to obtain a
+native wheel or build a matching Rust binary when launched interactively. From a source checkout,
+build the binary and set its absolute path in `WISP_RUST_TUI_BINARY`—see
+[Development setup](../contributing/development.md#rust-tui-scaffold) and
+[Rust terminal frontend boundary](../architecture/rust-tui-boundary.md#subsystem-ownership).
 
 ### Provider-native web search {#provider-native-web-search}
 
-Use `/search` to show the current setting and `/search on` or `/search off` to
-change it for this running session. Wait for the current operation to finish
-before changing it. The toggle applies to subsequent prompts, does not save user
-defaults, and does not change separately configured MCP search tools such as Exa.
-Persistent defaults remain available through the user-only `web_search` setting
-or `WISP_WEB_SEARCH`.
-
-When enabled, supported providers can choose to search; not every request will
-search. Google Search grounding is not yet supported. Search queries, opened pages,
-within-page searches, and failures appear with the reply, with bounded source
-titles and hosts. This metadata is restored when loading saved replies.
-
-Reply costs marked `cost ≥…` exclude provider search fees and are lower bounds,
-not complete prices. An unavailable token estimate is shown as `cost unknown`,
-except on responses containing only tool calls and no text, where the label is
-omitted to avoid a standalone placeholder before the tools. Usage and cost
-metadata are still recorded.
+Run `/search`, `/search on`, or `/search off` while idle to toggle provider-native web search for
+the current session (set `web_search` in `~/.wisp/settings.json` or `WISP_WEB_SEARCH` for a
+persistent default). This does not affect separate MCP search servers such as Exa. Google Search
+grounding is not yet supported. Replies that used provider search show bounded source titles/hosts
+and mark cost as `cost ≥…` to indicate provider search fees are excluded.
 
 ### Updates {#rust-updates}
 
-`/update`, `/update check`, and `/update install` open scrollable external instructions and preserve
-the draft. They do not check the network, install, quit, or restart. Finish work and quit, then run
-`wisp update --check` in a shell. Eligible uv tool installations can use `wisp update`; source
-installations should follow the [development guide](../contributing/development#rust-tui-scaffold).
-Rebuild or select a Rust binary matching the updated Python package before relaunching.
-Automatic notices, binary installation, rollback, and coordinated restart remain distribution work
-under [#469](https://github.com/whanyu1212/Wisp/issues/469).
+`/update`, `/update check`, and `/update install` display update instructions without leaving your
+draft. Quit Wisp and run `wisp update --check` or `wisp update` in your shell for persistent
+`uv tool` installations; source checkouts should pull and rebuild the matching Rust binary per
+[Development setup](../contributing/development.md#rust-tui-scaffold).
 
 <section class="moved-tui-sections" data-pagefind-ignore="" aria-label="Moved TUI sections"><strong id="more-tui-tasks" class="eyebrow">Topics on dedicated TUI pages</strong><ul><li id="rust-keybinding-preferences"><a data-tui-destination="" href="/Wisp/guide/tui/keybindings.html#keybinding-preferences">Keybinding preferences</a></li><li id="keybindings"><a data-tui-destination="" href="/Wisp/guide/tui/keybindings.html#keybindings">Keybindings</a></li><li id="slash-commands"><a data-tui-destination="" href="/Wisp/guide/tui/commands.html#slash-commands">Slash commands</a></li><li id="managing-mcp-servers"><a data-tui-destination="" href="/Wisp/guide/tui/commands.html#managing-mcp-servers">Managing MCP servers</a></li><li id="context-skills-and-mcp-browsers"><a data-tui-destination="" href="/Wisp/guide/tui/commands.html#context-skills-and-mcp-browsers">Context, skills, and MCP browsers</a></li><li id="resuming-long-sessions"><a data-tui-destination="" href="/Wisp/guide/tui/sessions.html#resuming-long-sessions">Resuming long sessions</a></li><li id="prompt-history"><a data-tui-destination="" href="/Wisp/guide/tui/sessions.html#prompt-history">Prompt history</a></li></ul></section>
