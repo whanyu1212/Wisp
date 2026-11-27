@@ -3,6 +3,7 @@
 use crate::{
     startup_logo::LogoChoice,
     theme::{self, Theme},
+    transcript_view::Verbosity,
 };
 use serde_json::value::{RawValue, to_raw_value};
 use std::{
@@ -101,6 +102,18 @@ impl ThemePreferences {
             .unwrap_or(LogoChoice::Random)
     }
 
+    pub fn load_verbosity(&self) -> Verbosity {
+        self.read_document()
+            .ok()
+            .and_then(|document| {
+                document
+                    .get("verbosity")
+                    .and_then(|value| serde_json::from_str::<String>(value.get()).ok())
+            })
+            .and_then(|name| Verbosity::resolve(&name))
+            .unwrap_or(Verbosity::Medium)
+    }
+
     /// Missing or malformed JSON is repairable, but unreadable/non-UTF-8/oversized
     /// documents are never replaced: their unrelated preferences are unknown.
     /// Unowned values stay raw so Python-sized integers and decimal precision
@@ -142,6 +155,12 @@ impl ThemePreferences {
     pub fn save_logo(&self, choice: LogoChoice) -> io::Result<()> {
         let mut document = self.read_document()?;
         document.insert("startup_logo".into(), to_raw_value(choice.name())?);
+        self.write_document(&document)
+    }
+
+    pub fn save_verbosity(&self, verbosity: Verbosity) -> io::Result<()> {
+        let mut document = self.read_document()?;
+        document.insert("verbosity".into(), to_raw_value(verbosity.name())?);
         self.write_document(&document)
     }
 

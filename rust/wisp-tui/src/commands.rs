@@ -34,6 +34,7 @@ pub(crate) enum Command {
     UpdateGuidance,
     Theme(Option<&'static theme::Theme>),
     Logo(Option<LogoChoice>),
+    Verbosity(Option<crate::transcript_view::Verbosity>),
     Mode(AgentMode),
     Context,
     Diff,
@@ -82,6 +83,7 @@ fn usage(name: &str) -> Option<&'static str> {
         "update" => "/update [check|install]",
         "theme" => "/theme [name]",
         "logo" => "/logo [name]",
+        "verbosity" => "/verbosity [low|medium|high]",
         "plan" => "/plan",
         "build" => "/build",
         "context" => "/context [auto on|off]",
@@ -212,6 +214,7 @@ fn parse_command(canonical: &str, tail: &str, syntax: &str) -> Command {
         "update" => parse_update(tail),
         "theme" => parse_theme(tail),
         "logo" => parse_logo(tail),
+        "verbosity" => parse_verbosity(tail),
         "search" => parse_search(tail, syntax),
         "skills" => Command::Skills,
         "mcp" => Command::Mcp,
@@ -306,6 +309,17 @@ fn parse_logo(tail: &str) -> Command {
             ),
         },
         _ => Command::Invalid("Usage: /logo [name]".into()),
+    }
+}
+
+fn parse_verbosity(tail: &str) -> Command {
+    match tail.split_whitespace().collect::<Vec<_>>().as_slice() {
+        [] => Command::Verbosity(None),
+        [level] => match crate::transcript_view::Verbosity::resolve(level) {
+            Some(verbosity) => Command::Verbosity(Some(verbosity)),
+            None => Command::Invalid("Usage: /verbosity [low|medium|high]".into()),
+        },
+        _ => Command::Invalid("Usage: /verbosity [low|medium|high]".into()),
     }
 }
 
@@ -475,6 +489,17 @@ fn logo_command() -> &'static CommandDescriptor {
     })
 }
 
+fn verbosity_command() -> &'static CommandDescriptor {
+    static COMMAND: OnceLock<CommandDescriptor> = OnceLock::new();
+    COMMAND.get_or_init(|| CommandDescriptor {
+        name: "verbosity".into(),
+        description: "Set transcript verbosity (low, medium, high)".into(),
+        slash_command: "/verbosity".into(),
+        slash_aliases: Vec::new(),
+        order: logo_command().order + 1,
+    })
+}
+
 /// Backend discovery keeps runtime commands authoritative; generated local
 /// descriptors remain available when backend discovery omits them.
 fn command_descriptors(catalog: Option<&[CommandDescriptor]>) -> Vec<&CommandDescriptor> {
@@ -494,6 +519,13 @@ fn command_descriptors(catalog: Option<&[CommandDescriptor]>) -> Vec<&CommandDes
             .position(|command| command.order > logo_command().order)
             .unwrap_or(commands.len());
         commands.insert(position, logo_command());
+    }
+    if !commands.iter().any(|command| command.name == "verbosity") {
+        let position = commands
+            .iter()
+            .position(|command| command.order > verbosity_command().order)
+            .unwrap_or(commands.len());
+        commands.insert(position, verbosity_command());
     }
     if !commands.iter().any(|command| command.name == "diff") {
         commands.push(diff_command());
@@ -1493,6 +1525,37 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn verbosity_command_reports_or_sets_level() {
+        use crate::transcript_view::Verbosity;
+        assert!(matches!(
+            classify("/verbosity", None),
+            Some(Command::Verbosity(None))
+        ));
+        for (input, expected) in [
+            ("low", Verbosity::Low),
+            ("MEDIUM", Verbosity::Medium),
+            ("high", Verbosity::High),
+        ] {
+            assert!(
+                matches!(
+                    classify(&format!("/verbosity {input}"), None),
+                    Some(Command::Verbosity(Some(level))) if level == expected
+                ),
+                "{input}"
+            );
+        }
+        for bad in ["/verbosity verbose", "/verbosity low extra"] {
+            assert!(
+                matches!(
+                    classify(bad, None),
+                    Some(Command::Invalid(message)) if message == "Usage: /verbosity [low|medium|high]"
+                ),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
     fn completion_preserves_unicode_arguments_and_requires_rendered_selection() {
         let catalog = catalog();
         let mut editor = PromptEditor::default();
@@ -1559,9 +1622,15 @@ pub(crate) mod tests {
                 .any(|item| item.spelling() == "/update")
         );
         let local = completion.view(None, None).unwrap();
-        assert_eq!(local.items.len(), 3);
+        assert_eq!(local.items.len(), 4);
         assert!(local.items.iter().any(|item| item.spelling() == "/theme"));
         assert!(local.items.iter().any(|item| item.spelling() == "/logo"));
+        assert!(
+            local
+                .items
+                .iter()
+                .any(|item| item.spelling() == "/verbosity")
+        );
 
         let without_init = catalog
             .iter()

@@ -370,6 +370,7 @@ pub fn render_interactive(
             motion.decision_pulse().then_some(activity_frame),
             palette,
         );
+        let verbosity = row_cache.fold().verbosity();
         let notice_scrolls = render_footer(
             frame,
             content_area(chunks[2]),
@@ -382,6 +383,7 @@ pub fn render_interactive(
             false,
             false,
             column.width,
+            verbosity,
         );
         // The jump label is drawn but not clickable: only painted approval choices respond.
         return mouse::Conversation {
@@ -417,6 +419,7 @@ pub fn render_interactive(
         ])
         .split(area);
 
+    let verbosity = row_cache.fold().verbosity();
     let (jump_to_latest, fold_rows, welcome_rows) = render_transcript(
         frame,
         chunks[0],
@@ -487,6 +490,7 @@ pub fn render_interactive(
         !welcome_rows.is_empty(),
         composer_framed(state, padded, chunks[3]),
         column.width,
+        verbosity,
     );
     mouse::Conversation {
         transcript: if state.history_preview().is_some() {
@@ -848,7 +852,8 @@ fn clipped_tail_assistant_header(
         .or_else(|| state.transcript.entries().last())?;
     // Only a reply with text has a label to keep in view.
     if assistant.role != TranscriptRole::Assistant
-        || crate::transcript_view::reply_lead(assistant) != crate::transcript_view::ReplyLead::Label
+        || crate::transcript_view::reply_lead_for(assistant, row_cache.fold().verbosity())
+            != crate::transcript_view::ReplyLead::Label
         || (active_reply.is_none()
             && !rows.iter().any(|row| {
                 row.anchor.entry_id == assistant.id
@@ -961,6 +966,7 @@ fn render_transcript(
     viewport.set_geometry(&state.transcript, row_cache, content_width, visible_lines);
     let mut links = Vec::new();
     let mut painted_images = Vec::new();
+    let verbosity = row_cache.fold().verbosity();
     let pinned = pinned_user_rows(state, viewport, row_cache, content_width);
     let mut rows = viewport.visible_rows(&state.transcript, row_cache);
     if let Some((user_id, mut user_rows)) = pinned {
@@ -971,7 +977,9 @@ fn render_transcript(
                 .entry_index(row.anchor.entry_id)
                 .is_some_and(|index| index > user_index)
         });
-        let has_reply = crate::transcript_view::shown_after(&state.transcript, user_id).is_some();
+        let has_reply =
+            crate::transcript_view::shown_after_for(&state.transcript, user_id, verbosity)
+                .is_some();
         let base_reply_reserve = if has_reply {
             visible_lines.saturating_sub(1).min(2)
         } else {
@@ -1152,7 +1160,7 @@ fn render_transcript(
             }
             let user_surface = row.role == TranscriptRole::User;
             let pulse = (state.view_status == ViewStatus::Running
-                && row_tool_in_progress(state, row))
+                && row_tool_in_progress(state, row, verbosity))
             .then_some(if motion.mode == MotionMode::Still {
                 0
             } else {
@@ -1162,7 +1170,7 @@ fn render_transcript(
                 .filter(|_| row.live_timer)
                 .and_then(|_| state.transcript.entry(row.anchor.entry_id))
                 .and_then(TranscriptEntry::running_elapsed);
-            let glow = finished_age(state, row, motion, activity_frame)
+            let glow = finished_age(state, row, motion, activity_frame, verbosity)
                 .and_then(|age| palette.finish_glow(motion.mode, age));
             render_transcript_row(
                 frame,
@@ -1173,7 +1181,7 @@ fn render_transcript(
                 palette,
                 pulse,
                 live_elapsed,
-                turn_rail(state, row, prompts, palette),
+                turn_rail(state, row, prompts, palette, verbosity),
                 glow,
                 &mut links,
                 &mut painted_images,
@@ -1279,7 +1287,11 @@ fn tool_in_progress(entry: &TranscriptEntry) -> bool {
         })
 }
 
-fn row_tool_in_progress(state: &UiState, row: &TranscriptRow) -> bool {
+fn row_tool_in_progress(
+    state: &UiState,
+    row: &TranscriptRow,
+    verbosity: crate::transcript_view::Verbosity,
+) -> bool {
     match row.kind {
         TranscriptRowKind::CardAction => state
             .transcript
@@ -1292,8 +1304,8 @@ fn row_tool_in_progress(state: &UiState, row: &TranscriptRow) -> bool {
                 .spans
                 .iter()
                 .any(|span| span.style.inline == InlineStyle::ToolStatus);
-            crate::transcript_view::card_run(&state.transcript, row.anchor.entry_id).is_some_and(
-                |(_, members)| {
+            crate::transcript_view::card_run_for(&state.transcript, row.anchor.entry_id, verbosity)
+                .is_some_and(|(_, members)| {
                     let members = members
                         .iter()
                         .filter_map(|id| state.transcript.entry(*id))
@@ -1304,8 +1316,7 @@ fn row_tool_in_progress(state: &UiState, row: &TranscriptRow) -> bool {
                             .is_some_and(|card| card.status == ToolStatus::AwaitingApproval)
                     });
                     members.iter().copied().any(tool_in_progress) && !(marked && awaiting)
-                },
-            )
+                })
         }
         _ => false,
     }
@@ -1792,6 +1803,7 @@ fn turn_rail(
     row: &TranscriptRow,
     prompts: TurnBounds,
     palette: Palette,
+    verbosity: crate::transcript_view::Verbosity,
 ) -> Option<(&'static str, Color)> {
     if row.role == TranscriptRole::User {
         return Some(("▎", palette.primary));
@@ -1813,7 +1825,7 @@ fn turn_rail(
     if row.kind == TranscriptRowKind::Spacer
         && (entry.run_summary().is_some()
             || entry.moved_to().is_some()
-            || crate::transcript_view::shown_after(&state.transcript, entry.id)
+            || crate::transcript_view::shown_after_for(&state.transcript, entry.id, verbosity)
                 .is_some_and(|next| next.role == TranscriptRole::User))
     {
         return None;
@@ -2226,21 +2238,26 @@ impl Motion<'_> {
 
 /// How many frames ago the call a card row shows finished, while it still glows. A
 /// folded group row glows for its most recent member.
-fn finished_age(state: &UiState, row: &TranscriptRow, motion: Motion<'_>, frame: u8) -> Option<u8> {
+fn finished_age(
+    state: &UiState,
+    row: &TranscriptRow,
+    motion: Motion<'_>,
+    frame: u8,
+    verbosity: crate::transcript_view::Verbosity,
+) -> Option<u8> {
     if motion.finished.is_empty() {
         return None;
     }
     match row.kind {
         TranscriptRowKind::CardAction => motion.finished_age(row.anchor.entry_id, frame),
         TranscriptRowKind::CardGroup => {
-            crate::transcript_view::card_run(&state.transcript, row.anchor.entry_id).and_then(
-                |(_, members)| {
+            crate::transcript_view::card_run_for(&state.transcript, row.anchor.entry_id, verbosity)
+                .and_then(|(_, members)| {
                     members
                         .iter()
                         .filter_map(|member| motion.finished_age(*member, frame))
                         .min()
-                },
-            )
+                })
         }
         _ => None,
     }
@@ -3838,6 +3855,7 @@ fn render_footer(
     menu: bool,
     identity_in_composer: bool,
     column_width: u16,
+    verbosity: crate::transcript_view::Verbosity,
 ) -> bool {
     if area.height >= 2 {
         return render_footer_deck(
@@ -3852,6 +3870,7 @@ fn render_footer(
             menu,
             identity_in_composer,
             column_width,
+            verbosity,
         );
     }
     let width = usize::from(area.width);
@@ -4142,6 +4161,7 @@ fn render_footer_deck(
     menu: bool,
     identity_in_composer: bool,
     column_width: u16,
+    verbosity: crate::transcript_view::Verbosity,
 ) -> bool {
     let width = usize::from(area.width);
     if width == 0 {
@@ -4362,8 +4382,24 @@ fn render_footer_deck(
             if let Some(cost_str) = cost
                 && used + 3 + cost_str.width() <= telem_budget
             {
+                used += 3 + cost_str.width();
                 left2_spans.push(Span::styled(" │ ", muted));
                 left2_spans.push(Span::styled(cost_str, Style::default().fg(palette.code)));
+            }
+            if verbosity != crate::transcript_view::Verbosity::Medium {
+                let label = format!("verbosity: {}", verbosity.name());
+                let short = verbosity.name();
+                let shown = if used + 3 + label.width() <= telem_budget {
+                    Some(label)
+                } else if used + 3 + short.width() <= telem_budget {
+                    Some(short.to_owned())
+                } else {
+                    None
+                };
+                if let Some(text) = shown {
+                    left2_spans.push(Span::styled(" │ ", muted));
+                    left2_spans.push(Span::styled(text, Style::default().fg(palette.secondary)));
+                }
             }
         }
     }
@@ -4744,7 +4780,7 @@ fn approval_preview(
                 },
             );
             if let DetailAvailability::LiveRetained(detail) = presentation {
-                let preview = crate::diff_card::preview(&detail, false);
+                let preview = crate::diff_card::preview(&detail, false, false);
                 let lines = styled_diff_preview_lines(&preview, width, palette);
                 if !lines.is_empty() {
                     let short_path = tail_row(
@@ -9251,7 +9287,17 @@ mod tests {
             first: Some(0),
             latest: Some(2),
         };
-        assert_eq!(turn_rail(&state, &gap, prompts, palette), None, "{screen}");
+        assert_eq!(
+            turn_rail(
+                &state,
+                &gap,
+                prompts,
+                palette,
+                crate::transcript_view::Verbosity::Medium,
+            ),
+            None,
+            "{screen}"
+        );
         let reply = TranscriptRow {
             kind: TranscriptRowKind::Content,
             anchor: RowAnchor {
@@ -9261,7 +9307,13 @@ mod tests {
             ..gap
         };
         assert_eq!(
-            turn_rail(&state, &reply, prompts, palette),
+            turn_rail(
+                &state,
+                &reply,
+                prompts,
+                palette,
+                crate::transcript_view::Verbosity::Medium,
+            ),
             Some(("│", palette.rail()))
         );
     }

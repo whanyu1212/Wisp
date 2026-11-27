@@ -1347,7 +1347,8 @@ async fn jump_opens_folded_group() {
     let mut ui = base();
     finished_edit(&mut ui, "edit-0");
     let card = finished_edit(&mut ui, "edit-1");
-    let (_, members) = card_run(&ui.state.transcript, card).expect("edits group");
+    let (_, members) =
+        crate::transcript_view::card_run(&ui.state.transcript, card).expect("edits group");
     assert!(!ui.transcript_row_cache.fold().is_run_expanded(&members));
     draw(&mut ui, &mut terminal);
     ui.jump_to_edit(

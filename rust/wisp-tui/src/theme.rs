@@ -797,7 +797,7 @@ fn tool_hue_category(label: &str) -> Option<&'static str> {
         | "Loading" => Some("Read"),
         "Search" | "Searched" | "Searching" => Some("Search"),
         "List" | "Listed" | "Listing" => Some("List"),
-        "Explore" | "Explored" | "Exploring" => Some("Explore"),
+        "Explore" | "Explored" | "Exploring" | "Worked" => Some("Explore"),
         "Bash" | "Shell" | "!" | "Run" | "Ran" | "Running" | "Script" | "Run codemode"
         | "Ran codemode" | "Running codemode" => Some("Bash"),
         "Edit" | "Edited" | "Editing" | "Propose" | "Proposed" | "Proposing" => Some("Edit"),

@@ -1376,3 +1376,274 @@ fn finish_glow_fades() {
     assert_eq!(palette.finish_glow(MotionMode::Stepped, 0), None);
     assert_eq!(palette.finish_glow(MotionMode::Still, 0), None);
 }
+
+#[test]
+fn verbosity_round_trips_without_changing_theme_or_unowned_values() {
+    use crate::transcript_view::Verbosity;
+
+    let home = TestHome::new();
+    let store = home.store();
+    assert_eq!(store.load_verbosity(), Verbosity::Medium);
+
+    home.write(
+        br#"{"theme":"wisp-wave","startup_logo":"classic","unrelated":{"large":18446744073709551617}}"#,
+    );
+    for level in [Verbosity::Low, Verbosity::High, Verbosity::Medium] {
+        store.save_verbosity(level).unwrap();
+        assert_eq!(store.load_verbosity(), level);
+    }
+    assert_eq!(store.load().active.slug, "wave");
+    assert_eq!(store.load_logo(), LogoChoice::Classic);
+    assert!(
+        fs::read_to_string(home.path())
+            .unwrap()
+            .contains("18446744073709551617")
+    );
+
+    for invalid in [
+        br#"{"verbosity":"noisy"}"#.as_slice(),
+        br#"{"verbosity":42}"#,
+        br#"{bad json"#,
+    ] {
+        home.write(invalid);
+        assert_eq!(store.load_verbosity(), Verbosity::Medium);
+    }
+    for unreadable in [vec![0xff, 0xfe], vec![b' '; 70 * 1024]] {
+        home.write(&unreadable);
+        assert_eq!(store.load_verbosity(), Verbosity::Medium);
+        assert!(store.save_verbosity(Verbosity::Low).is_err());
+        assert_eq!(fs::read(home.path()).unwrap(), unreadable);
+    }
+}
+
+#[tokio::test]
+async fn verbosity_command_applies_immediately_persists_and_shows_in_footer() {
+    use crate::transcript_view::Verbosity;
+
+    let home = TestHome::new();
+    let (writer, mut receiver) = mpsc::channel(16);
+    let mut ui = ui(&home);
+
+    // Default Medium shows no extra verbosity label in the footer.
+    let medium_screen = text(&draw(&mut ui, 120, 24));
+    assert!(!medium_screen.contains("verbosity:"));
+
+    // Querying `/verbosity` reports the active level.
+    ui.editor.insert_paste("/verbosity");
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(
+        ui.notice.as_deref(),
+        Some("Transcript verbosity: medium. Use /verbosity low, medium, or high.")
+    );
+
+    // Setting `/verbosity low` updates fold state, persists, and renders in footer.
+    ui.editor.insert_paste("/verbosity low");
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.transcript_row_cache.fold().verbosity(), Verbosity::Low);
+    assert_eq!(home.store().load_verbosity(), Verbosity::Low);
+    assert_eq!(
+        ui.notice.as_deref(),
+        Some("Transcript verbosity set to low.")
+    );
+    let low_screen = text(&draw(&mut ui, 120, 24));
+    assert!(low_screen.contains("verbosity: low"));
+
+    // Setting `/verbosity high` updates fold state, persists, and renders in footer.
+    ui.editor.insert_paste("/verbosity high");
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.transcript_row_cache.fold().verbosity(), Verbosity::High);
+    assert_eq!(home.store().load_verbosity(), Verbosity::High);
+    assert_eq!(
+        ui.notice.as_deref(),
+        Some("Transcript verbosity set to high.")
+    );
+    let high_screen = text(&draw(&mut ui, 120, 24));
+    assert!(high_screen.contains("verbosity: high"));
+    assert!(receiver.try_recv().is_err());
+}
+
+#[test]
+fn verbosity_fold_toggling_and_low_rail_spacer() {
+    use crate::tool_cards::{ToolCallInput, ToolResultInput, logical_line_count};
+    use crate::tool_detail::{EditDetailHunk, EditDetailSource, ToolDetailSource};
+    use crate::transcript_view::{BrowseTarget, Verbosity};
+
+    let home = TestHome::new();
+    let mut ui = ui(&home);
+
+    // Turn 1: reply without RunSummary, followed by a thought-only entry, then Turn 2 prompt.
+    ui.state.transcript.append_prompt("first".into());
+    let reply_one_id = ui
+        .state
+        .transcript
+        .complete_message(1, "Reply one".into())
+        .unwrap();
+    ui.state.transcript.begin_message(2);
+    ui.state
+        .transcript
+        .append_thinking_delta(2, "Hidden in low verbosity");
+    ui.state.transcript.complete_message(2, String::new());
+
+    ui.state.transcript.append_prompt("second".into());
+    ui.state.transcript.begin_message(3);
+    ui.state
+        .transcript
+        .append_thinking_delta(3, "Internal note line 1\nInternal note line 2");
+    let thought_id = ui
+        .state
+        .transcript
+        .complete_message(3, String::new())
+        .unwrap();
+    let edit_id = ui.state.transcript.observe_tool_call(ToolCallInput {
+        call_id: "e1".into(),
+        name: "edit".into(),
+        detail_source: ToolDetailSource::Edit(EditDetailSource {
+            path: "src/lib.rs".into(),
+            hunks: vec![EditDetailHunk {
+                old_text: "old_val".into(),
+                new_text: "new_val".into(),
+            }],
+        }),
+        arguments: serde_json::json!({ "path": "src/lib.rs" }),
+    });
+    ui.state.transcript.observe_tool_result(ToolResultInput {
+        nested: Default::default(),
+        call_id: "e1".into(),
+        name: "edit".into(),
+        output: "updated".into(),
+        output_tail: None,
+        output_source_bytes: 7,
+        output_source_lines: 1,
+        output_projection_cut_mid_line: false,
+        is_error: false,
+        failure_code: None,
+        retryable: false,
+        recovery_hint: None,
+        exit_code: None,
+        output_has_exit_status: false,
+        before_text: None,
+        created: false,
+        summary: None,
+        truncated: false,
+        process_id: None,
+        process_state: None,
+        process_error: None,
+        stdout: None,
+        stdout_source_bytes: 0,
+        stderr: None,
+        stderr_source_bytes: 0,
+        stdout_truncated: false,
+        stderr_truncated: false,
+        stdout_dropped_bytes: 0,
+        stderr_dropped_bytes: 0,
+        duration_ms: None,
+        started_at_ms: None,
+        process_started_at_ms: None,
+        process_ended_at_ms: None,
+        edit_locations: Vec::new(),
+        images: Vec::new(),
+        image_parts: Vec::new(),
+    });
+    let bash_id = ui.state.transcript.observe_tool_call(ToolCallInput {
+        call_id: "b1".into(),
+        name: "bash".into(),
+        detail_source: ToolDetailSource::None,
+        arguments: serde_json::json!({ "command": "echo hi" }),
+    });
+    let bash_out = "hi from bash";
+    ui.state.transcript.observe_tool_result(ToolResultInput {
+        nested: Default::default(),
+        call_id: "b1".into(),
+        name: "bash".into(),
+        output: bash_out.into(),
+        output_tail: None,
+        output_source_bytes: bash_out.len() as u64,
+        output_source_lines: logical_line_count(bash_out),
+        output_projection_cut_mid_line: false,
+        is_error: false,
+        failure_code: None,
+        retryable: false,
+        recovery_hint: None,
+        exit_code: Some(0),
+        output_has_exit_status: true,
+        before_text: None,
+        created: false,
+        summary: None,
+        truncated: false,
+        process_id: None,
+        process_state: None,
+        process_error: None,
+        stdout: None,
+        stdout_source_bytes: 0,
+        stderr: None,
+        stderr_source_bytes: 0,
+        stdout_truncated: false,
+        stderr_truncated: false,
+        stdout_dropped_bytes: 0,
+        stderr_dropped_bytes: 0,
+        duration_ms: None,
+        started_at_ms: None,
+        process_started_at_ms: None,
+        process_ended_at_ms: None,
+        edit_locations: Vec::new(),
+        images: Vec::new(),
+        image_parts: Vec::new(),
+    });
+
+    // High: default-expanded thought and bash can be collapsed/re-expanded via LiveUi fold controls.
+    ui.transcript_row_cache
+        .fold_mut()
+        .set_verbosity(Verbosity::High);
+    let high_screen = text(&draw(&mut ui, 100, 30));
+    assert!(
+        high_screen.contains("Internal note line 2"),
+        "{high_screen}"
+    );
+    assert!(high_screen.contains("hi from bash"));
+
+    ui.browse_selected = Some(BrowseTarget::Entry(thought_id));
+    ui.collapse_selected_fold();
+    ui.toggle_clicked_fold(BrowseTarget::Entry(bash_id));
+    let collapsed_screen = text(&draw(&mut ui, 100, 30));
+    assert!(!collapsed_screen.contains("Internal note line 2"));
+    assert!(!collapsed_screen.contains("hi from bash"));
+
+    ui.toggle_clicked_fold(BrowseTarget::Entry(bash_id));
+    assert!(text(&draw(&mut ui, 100, 30)).contains("hi from bash"));
+
+    // Low: spacer between Reply one and the next prompt has no continuation rail even with hidden
+    // thought-only entry between them, and clicking edit expands its un-inlined diff.
+    ui.browse_selected = None;
+    ui.transcript_row_cache
+        .fold_mut()
+        .set_verbosity(Verbosity::Low);
+    ui.transcript_viewport.reveal_entry(reply_one_id);
+    let buf = draw(&mut ui, 100, 30);
+    let rows: Vec<String> = (0..buf.area.height)
+        .map(|y| {
+            (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect();
+    let reply_row = rows.iter().position(|r| r.contains("Reply one")).unwrap();
+    let second_row = rows.iter().position(|r| r.contains("second")).unwrap();
+    for spacer in &rows[reply_row + 1..second_row] {
+        assert!(
+            !spacer.starts_with('│'),
+            "spacer above next prompt under Low must not draw a continuation rail: {rows:?}"
+        );
+    }
+
+    // Expand the Worked group, then toggle the edit card open to verify manual diff expansion in Low.
+    ui.toggle_clicked_fold(BrowseTarget::Group(edit_id));
+    assert!(!text(&draw(&mut ui, 100, 30)).contains("new_val"));
+    ui.toggle_clicked_fold(BrowseTarget::Entry(edit_id));
+    assert!(text(&draw(&mut ui, 100, 30)).contains("new_val"));
+}
