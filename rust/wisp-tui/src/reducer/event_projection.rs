@@ -83,9 +83,25 @@ fn discovery_report<T>(
         .ok_or_else(|| "Discovery report could not be displayed. Press r to retry.".into())
 }
 
+fn bounded_diagnostic(message: &str) -> BackendEvent {
+    BackendEvent::Diagnostic(super::bounded_session_text(
+        message,
+        super::SESSION_NOTICE_MAX_BYTES,
+    ))
+}
+
 impl BackendEvent {
     /// Project an already validated live event into reducer-owned semantics.
     pub fn from_live(event: &WispCurrentLiveEventOutput) -> Result<Self, EventProjectionError> {
+        use wisp_protocol::events::wire::WispCurrentLiveEventOutput as WireEvent;
+        match event.payload() {
+            WireEvent::ErrorEvent(payload) => return Ok(bounded_diagnostic(&payload.message)),
+            WireEvent::WarningEvent(payload) => return Ok(bounded_diagnostic(&payload.message)),
+            WireEvent::ProjectFilesInvalidated(payload) => {
+                return Ok(Self::ProjectFilesInvalidated(payload.generation.get()));
+            }
+            _ => {}
+        }
         let value = event.to_value()?;
         let event_type = string_field(&value, "<unknown>", "type")?;
         match event_type.as_str() {
@@ -193,13 +209,6 @@ impl BackendEvent {
                     in_progress: value["in_progress"].as_bool().unwrap_or(false),
                     snapshot,
                 });
-            }
-            "project_files.invalidated" => {
-                return Ok(Self::ProjectFilesInvalidated(u64_field(
-                    &value,
-                    &event_type,
-                    "generation",
-                )?));
             }
             "rpc.skills" => {
                 let command_id = exact_string_field(&value, &event_type, "command_id", 256)?;
