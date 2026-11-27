@@ -1974,14 +1974,14 @@ pub mod events {
         pub timestamp: String,
     }
 
+    fn owned_str(value: &str) -> String {
+        value.to_owned()
+    }
+
     impl WispCurrentLiveEventOutput {
         /// Borrow the validated, discriminator-typed wire representation of this event.
         pub fn payload(&self) -> &wire::WispCurrentLiveEventOutput {
             &self.0
-        }
-
-        fn wire_value(&self) -> serde_json::Value {
-            serde_json::to_value(&self.0).expect("validated generated events must serialize")
         }
 
         /// Return the unsolicited display lines shown while startup history loads.
@@ -2000,11 +2000,30 @@ pub mod events {
 
         /// Project safe metadata for one exact request; hierarchy and matching stay local.
         pub fn project_files(&self, id: &str) -> Option<ProjectFileSnapshot> {
-            let value = self.wire_value();
-            if value["type"] != "rpc.project_files" || value["command_id"] != id {
-                return None;
+            match self.payload() {
+                wire::WispCurrentLiveEventOutput::RpcProjectFilesReported(event)
+                    if event.command_id.as_str() == id =>
+                {
+                    Some(ProjectFileSnapshot {
+                        generation: event.generation.get(),
+                        entries: event
+                            .entries
+                            .iter()
+                            .map(|entry| ProjectFileEntry {
+                                path: entry.path.to_string(),
+                                kind: match entry.kind {
+                                    wire::RpcProjectFileKind::File => ProjectFileKind::File,
+                                    wire::RpcProjectFileKind::Directory => {
+                                        ProjectFileKind::Directory
+                                    }
+                                },
+                            })
+                            .collect(),
+                        truncated: event.truncated,
+                    })
+                }
+                _ => None,
             }
-            serde_json::from_value(value).ok()
         }
 
         /// Clear earlier snapshots when the backend changes discovery policy.
@@ -2019,164 +2038,412 @@ pub mod events {
 
         /// Project a skill catalog for one exact inspection request.
         pub fn skill_catalog(&self, id: &str) -> Option<SkillCatalogSnapshot> {
-            let value = self.wire_value();
-            if value["type"] != "rpc.skills" || value["command_id"] != id {
-                return None;
+            match self.payload() {
+                wire::WispCurrentLiveEventOutput::RpcSkillsReported(event)
+                    if event.command_id == id =>
+                {
+                    Some(SkillCatalogSnapshot::from(&event.catalog))
+                }
+                _ => None,
             }
-            serde_json::from_value(value["catalog"].clone()).ok()
         }
 
         /// Project the authoritative catalog broadcast after a trust transition.
         pub fn updated_skill_catalog(&self) -> Option<SkillCatalogSnapshot> {
-            let value = self.wire_value();
-            if value["type"] != "skill.catalog.updated" {
-                return None;
+            match self.payload() {
+                wire::WispCurrentLiveEventOutput::SkillCatalogUpdated(event) => {
+                    Some(SkillCatalogSnapshot::from(&event.catalog))
+                }
+                _ => None,
             }
-            serde_json::from_value(value["catalog"].clone()).ok()
         }
 
         /// Project sanitized MCP status for one exact inspection request.
         pub fn mcp_status(&self, id: &str) -> Option<McpStatusSnapshot> {
-            let value = self.wire_value();
-            if value["type"] != "rpc.mcp" || value["command_id"] != id {
-                return None;
+            match self.payload() {
+                wire::WispCurrentLiveEventOutput::RpcMcpStatusReported(event)
+                    if event.command_id == id =>
+                {
+                    Some(McpStatusSnapshot::from(&event.status))
+                }
+                _ => None,
             }
-            serde_json::from_value(value["status"].clone()).ok()
         }
 
         /// Project the status broadcast once servers that were connecting at startup settle.
         pub fn updated_mcp_status(&self) -> Option<McpStatusSnapshot> {
-            let value = self.wire_value();
-            if value["type"] != "mcp.status.updated" {
-                return None;
+            match self.payload() {
+                wire::WispCurrentLiveEventOutput::McpStatusUpdated(event) => {
+                    Some(McpStatusSnapshot::from(&event.status))
+                }
+                _ => None,
             }
-            serde_json::from_value(value["status"].clone()).ok()
         }
 
         /// Project the servers parsed from a pasted snippet for one exact request.
         pub fn mcp_snippet_preview(&self, id: &str) -> Option<Vec<McpServerPreview>> {
-            let value = self.wire_value();
-            if value["type"] != "rpc.mcp.preview" || value["command_id"] != id {
-                return None;
+            match self.payload() {
+                wire::WispCurrentLiveEventOutput::RpcMcpSnippetPreviewed(event)
+                    if event.command_id == id =>
+                {
+                    Some(event.servers.iter().map(McpServerPreview::from).collect())
+                }
+                _ => None,
             }
-            serde_json::from_value(value["servers"].clone()).ok()
         }
 
         /// Project a statistics snapshot for one exact command.
         pub fn session_stats(&self, id: &str) -> Option<SessionStats> {
-            let value = self.wire_value();
-            if value["type"] != "session.stats" || value["command_id"] != id {
-                return None;
+            match self.payload() {
+                wire::WispCurrentLiveEventOutput::SessionStatsReported(event)
+                    if event.command_id == id =>
+                {
+                    Some(SessionStats::from(&event.stats))
+                }
+                _ => None,
             }
-            serde_json::from_value(value["stats"].clone()).ok()
         }
 
         /// Project the budget at a provider request boundary.
         pub fn context_estimated(&self) -> Option<ContextEstimated> {
-            let value = self.wire_value();
-            if value["type"] != "context.estimated" {
-                return None;
+            match self.payload() {
+                wire::WispCurrentLiveEventOutput::ContextEstimated(event) => {
+                    Some(ContextEstimated::from(event))
+                }
+                _ => None,
             }
-            serde_json::from_value(value).ok()
         }
 
         /// Project a transient live browser viewport frame and metadata update.
         pub fn browser_viewport_updated(&self) -> Option<BrowserViewportUpdate> {
-            let value = self.wire_value();
-            if value["type"] != "browser.viewport.updated" {
+            let wire::WispCurrentLiveEventOutput::BrowserViewportUpdated(event) = self.payload()
+            else {
                 return None;
-            }
-            serde_json::from_value(value).ok()
+            };
+            let live_device_scale = event
+                .live_device_scale
+                .map(|scale| u32::try_from(u64::from(scale)))
+                .transpose()
+                .ok()?;
+            let viewport_width = event
+                .viewport_width
+                .map(|width| u32::try_from(u64::from(width)))
+                .transpose()
+                .ok()?;
+            let viewport_height = event
+                .viewport_height
+                .map(|height| u32::try_from(u64::from(height)))
+                .transpose()
+                .ok()?;
+            let image = event
+                .image
+                .as_ref()
+                .map(|image| {
+                    Ok::<_, std::num::TryFromIntError>(BrowserViewportImage {
+                        media_type: image.media_type.to_string(),
+                        sha256: owned_str(&image.sha256),
+                        byte_size: image.byte_size.get(),
+                        width: u32::try_from(image.width.get())?,
+                        height: u32::try_from(image.height.get())?,
+                    })
+                })
+                .transpose()
+                .ok()?;
+            Some(BrowserViewportUpdate {
+                live_png: event.live_png.as_deref().cloned(),
+                live_device_scale,
+                window_mode: event.window_mode,
+                image,
+                url: event.url.as_deref().cloned(),
+                title: event.title.as_deref().cloned(),
+                viewport_width,
+                viewport_height,
+                source_tool: event.source_tool.as_deref().cloned(),
+                call_id: event.call_id.as_deref().cloned(),
+                timestamp: event
+                    .timestamp
+                    .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
+            })
         }
 
         pub fn compaction_started(&self) -> Option<CompactionStarted> {
-            let value = self.wire_value();
-            if value["type"] != "compaction.started" {
-                return None;
+            match self.payload() {
+                wire::WispCurrentLiveEventOutput::CompactionStarted(event) => {
+                    Some(CompactionStarted::from(event))
+                }
+                _ => None,
             }
-            serde_json::from_value(value).ok()
         }
 
         pub fn compaction_completed(&self) -> Option<CompactionCompleted> {
-            let value = self.wire_value();
-            if value["type"] != "compaction.completed" {
-                return None;
+            match self.payload() {
+                wire::WispCurrentLiveEventOutput::CompactionCompleted(event) => {
+                    Some(CompactionCompleted::from(event))
+                }
+                _ => None,
             }
-            serde_json::from_value(value).ok()
+        }
+
+        /// Return the stable static event discriminator for this validated payload.
+        pub fn event_type_str(&self) -> &'static str {
+            use wire::WispCurrentLiveEventOutput as Wire;
+            match self.payload() {
+                Wire::AgentCompleted(_) => "agent.completed",
+                Wire::AgentStarted(_) => "agent.started",
+                Wire::BrowserViewportUpdated(_) => "browser.viewport.updated",
+                Wire::CompactionCompleted(_) => "compaction.completed",
+                Wire::CompactionStarted(_) => "compaction.started",
+                Wire::ContextEstimated(_) => "context.estimated",
+                Wire::ContextOverflow(_) => "context.overflow",
+                Wire::ContextPressure(_) => "context.pressure",
+                Wire::ErrorEvent(_) => "error",
+                Wire::McpStatusUpdated(_) => "mcp.status.updated",
+                Wire::MessageCompleted(_) => "message.completed",
+                Wire::MessageDelta(_) => "message.delta",
+                Wire::MessageStarted(_) => "message.started",
+                Wire::ModelProviderAutoSwitched(_) => "model.provider_auto_switched",
+                Wire::ProcessEnded(_) => "process.ended",
+                Wire::ProjectConfigApplied(_) => "project.config.applied",
+                Wire::ProjectFilesInvalidated(_) => "project_files.invalidated",
+                Wire::ProviderRetrying(_) => "provider.retrying",
+                Wire::QueueItemsRemoved(_) => "queue.items.removed",
+                Wire::QueueMessageInjected(_) => "queue.message.injected",
+                Wire::QueueUpdated(_) => "queue.updated",
+                Wire::RpcBrowserAddressesReported(_) => "rpc.browser_addresses",
+                Wire::RpcCodemodeReported(_) => "rpc.codemode",
+                Wire::RpcCommandFinished(_) => "rpc.command.finished",
+                Wire::RpcCommandStarted(_) => "rpc.command.started",
+                Wire::RpcCommandsReported(_) => "rpc.commands",
+                Wire::RpcConnectionCatalogReported(_) => "rpc.connection_catalog",
+                Wire::RpcDeviceCodeReported(_) => "rpc.device_code",
+                Wire::RpcDeviceCodeProgressReported(_) => "rpc.device_code.progress",
+                Wire::RpcGitDiffReported(_) => "rpc.git_diff",
+                Wire::RpcMcpStatusReported(_) => "rpc.mcp",
+                Wire::RpcMcpLoginStarted(_) => "rpc.mcp.login",
+                Wire::RpcMcpSnippetPreviewed(_) => "rpc.mcp.preview",
+                Wire::RpcMessagesReported(_) => "rpc.messages",
+                Wire::RpcModelCatalogReported(_) => "rpc.model_catalog",
+                Wire::RpcPermissionsReported(_) => "rpc.permissions",
+                Wire::RpcProcessOutputReported(_) => "rpc.process_output",
+                Wire::RpcProcessesReported(_) => "rpc.processes",
+                Wire::RpcProjectFilesReported(_) => "rpc.project_files",
+                Wire::RpcSessionCloned(_) => "rpc.session.cloned",
+                Wire::RpcSessionForked(_) => "rpc.session.forked",
+                Wire::RpcSessionNameChanged(_) => "rpc.session.name_changed",
+                Wire::RpcSessionSelected(_) => "rpc.session.selected",
+                Wire::RpcSessionTreeReported(_) => "rpc.session.tree",
+                Wire::RpcSessionTreeNavigated(_) => "rpc.session.tree.navigated",
+                Wire::RpcSessionTreeUnreverted(_) => "rpc.session.tree.unreverted",
+                Wire::RpcSessionsReported(_) => "rpc.sessions",
+                Wire::RpcSettingsReloaded(_) => "rpc.settings.reloaded",
+                Wire::RpcShellCompleted(_) => "rpc.shell.completed",
+                Wire::RpcShellProgress(_) => "rpc.shell.progress",
+                Wire::RpcSkillsReported(_) => "rpc.skills",
+                Wire::RpcStartupHistoryPreview(_) => "rpc.startup.history_preview",
+                Wire::RpcStateReported(_) => "rpc.state",
+                Wire::RpcSubagentsReported(_) => "rpc.subagents",
+                Wire::RpcWorkspaceReported(_) => "rpc.workspace",
+                Wire::SessionDirectoryChanged(_) => "session.directory_changed",
+                Wire::SessionSaved(_) => "session.saved",
+                Wire::SessionStatsReported(_) => "session.stats",
+                Wire::SkillCatalogUpdated(_) => "skill.catalog.updated",
+                Wire::SkillInvoked(_) => "skill.invoked",
+                Wire::ToolApprovalRequested(_) => "tool.approval.requested",
+                Wire::ToolApprovalResolved(_) => "tool.approval.resolved",
+                Wire::ToolApprovalReviewed(_) => "tool.approval.reviewed",
+                Wire::ToolCallRequested(_) => "tool.call",
+                Wire::ToolExecutionEnded(_) => "tool.execution.ended",
+                Wire::ToolExecutionProgress(_) => "tool.execution.progress",
+                Wire::ToolExecutionStarted(_) => "tool.execution.started",
+                Wire::ToolNestedCallEnded(_) => "tool.nested.ended",
+                Wire::ToolNestedCallStarted(_) => "tool.nested.started",
+                Wire::ToolResultReady(_) => "tool.result",
+                Wire::TrustRequested(_) => "trust.requested",
+                Wire::TrustResolved(_) => "trust.resolved",
+                Wire::TurnCompleted(_) => "turn.completed",
+                Wire::TurnStarted(_) => "turn.started",
+                Wire::WarningEvent(_) => "warning",
+                Wire::WebSearchPerformed(_) => "web.search",
+            }
         }
 
         /// Return the stable event discriminator for diagnostic display.
         pub fn event_type(&self) -> String {
-            self.wire_value()["type"]
-                .as_str()
-                .expect("validated event has a discriminator")
-                .to_owned()
+            self.event_type_str().to_owned()
         }
 
         /// Project command discovery for one exact request.
         pub fn command_catalog(&self, id: &str) -> Option<Vec<CommandDescriptor>> {
-            let value = self.wire_value();
-            if value["type"] != "rpc.commands" || value["command_id"] != id {
-                return None;
+            match self.payload() {
+                wire::WispCurrentLiveEventOutput::RpcCommandsReported(event)
+                    if event.command_id == id =>
+                {
+                    Some(
+                        event
+                            .commands
+                            .iter()
+                            .map(|command| CommandDescriptor {
+                                name: command.name.to_string(),
+                                description: command.description.to_string(),
+                                slash_command: command.slash_command.to_string(),
+                                slash_aliases: command
+                                    .slash_aliases
+                                    .iter()
+                                    .map(|alias| owned_str(alias))
+                                    .collect(),
+                                order: command.order,
+                            })
+                            .collect(),
+                    )
+                }
+                _ => None,
             }
-            serde_json::from_value(value["commands"].clone()).ok()
         }
 
         /// Project only mode; other snapshot fields must not overwrite live frontend state.
         pub fn agent_mode(&self, id: &str) -> Option<super::commands::AgentMode> {
-            let value = self.wire_value();
-            if value["type"] != "rpc.state" || value["command_id"] != id {
-                return None;
+            match self.payload() {
+                wire::WispCurrentLiveEventOutput::RpcStateReported(event)
+                    if event.command_id == id =>
+                {
+                    Some(match event.state.mode {
+                        wire::AgentMode::Build => super::commands::AgentMode::Build,
+                        wire::AgentMode::Plan => super::commands::AgentMode::Plan,
+                    })
+                }
+                _ => None,
             }
-            serde_json::from_value(value["state"]["mode"].clone()).ok()
         }
 
         /// Project the model catalog reported for one exact command.
         pub fn model_catalog(&self, id: &str) -> Option<ModelCatalogSnapshot> {
-            let value = self.wire_value();
-            if value["type"] != "rpc.model_catalog" || value["command_id"] != id {
+            let wire::WispCurrentLiveEventOutput::RpcModelCatalogReported(event) = self.payload()
+            else {
+                return None;
+            };
+            if event.command_id != id {
                 return None;
             }
-            Some(
-                serde_json::from_value(value["catalog"].clone())
-                    .expect("validated model catalog must match its public projection"),
-            )
+            let selection = &event.catalog.selection;
+            Some(ModelCatalogSnapshot {
+                selection: ModelSelection {
+                    provider: owned_str(&selection.provider),
+                    model: selection.model.as_deref().cloned(),
+                    effective_model: selection.effective_model.as_deref().cloned(),
+                    catalog_model: selection.catalog_model.as_deref().cloned(),
+                    effort: selection.effort.as_deref().cloned(),
+                    image_input: selection.image_input,
+                    max_request_image_bytes: selection.max_request_image_bytes,
+                },
+                providers: event
+                    .catalog
+                    .providers
+                    .iter()
+                    .map(|provider| ModelCatalogProvider {
+                        name: owned_str(&provider.name),
+                        display_name: owned_str(&provider.display_name),
+                        default_model: owned_str(&provider.default_model),
+                        available: provider.available,
+                        models: provider
+                            .models
+                            .iter()
+                            .map(|model| ModelCatalogEntry {
+                                id: owned_str(&model.id),
+                                lifecycle: model.lifecycle.as_ref().map(
+                                    |lifecycle| match lifecycle {
+                                        wire::RpcModelCatalogEntryLifecycle::Stable => {
+                                            ModelLifecycle::Stable
+                                        }
+                                        wire::RpcModelCatalogEntryLifecycle::Preview => {
+                                            ModelLifecycle::Preview
+                                        }
+                                        wire::RpcModelCatalogEntryLifecycle::Legacy => {
+                                            ModelLifecycle::Legacy
+                                        }
+                                    },
+                                ),
+                                effort_levels: model
+                                    .effort_levels
+                                    .iter()
+                                    .map(|level| owned_str(level))
+                                    .collect(),
+                                default_effort: model.default_effort.as_deref().cloned(),
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            })
         }
 
         /// Project the connection catalog reported for one exact command.
         pub fn connection_catalog(&self, id: &str) -> Option<ConnectionCatalogSnapshot> {
-            let value = self.wire_value();
-            if value["type"] != "rpc.connection_catalog" || value["command_id"] != id {
+            let wire::WispCurrentLiveEventOutput::RpcConnectionCatalogReported(event) =
+                self.payload()
+            else {
+                return None;
+            };
+            if event.command_id != id {
                 return None;
             }
-            Some(
-                serde_json::from_value(value["catalog"].clone())
-                    .expect("validated connection catalog must match its public projection"),
-            )
+            Some(ConnectionCatalogSnapshot {
+                providers: event
+                    .catalog
+                    .providers
+                    .iter()
+                    .map(|provider| ConnectionProviderSnapshot {
+                        id: owned_str(&provider.id),
+                        label: owned_str(&provider.label),
+                        methods: provider
+                            .methods
+                            .iter()
+                            .map(|method| ConnectionMethodSnapshot {
+                                provider: owned_str(&method.provider),
+                                label: owned_str(&method.label),
+                                kind: method.kind.to_string(),
+                                source: method.source.to_string(),
+                                environment_variable: method
+                                    .environment_variable
+                                    .as_deref()
+                                    .cloned(),
+                                oauth_expires_at: method.oauth_expires_at.as_deref().cloned(),
+                                has_stored_credential: method.has_stored_credential,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            })
         }
 
         /// Project the device-code challenge reported for one exact command.
         pub fn device_code(&self, id: &str) -> Option<DeviceCodeChallenge> {
-            let value = self.wire_value();
-            if value["type"] != "rpc.device_code" || value["command_id"] != id {
-                return None;
+            match self.payload() {
+                wire::WispCurrentLiveEventOutput::RpcDeviceCodeReported(event)
+                    if event.command_id == id =>
+                {
+                    Some(DeviceCodeChallenge {
+                        provider: owned_str(&event.provider),
+                        verification_uri: owned_str(&event.verification_uri),
+                        user_code: owned_str(&event.user_code),
+                    })
+                }
+                _ => None,
             }
-            Some(
-                serde_json::from_value(value.clone())
-                    .expect("validated device-code event must match its public projection"),
-            )
         }
 
         /// Project the device-code polling progress reported for one exact command.
         pub fn device_code_progress(&self, id: &str) -> Option<DeviceCodeProgress> {
-            let value = self.wire_value();
-            if value["type"] != "rpc.device_code.progress" || value["command_id"] != id {
+            let wire::WispCurrentLiveEventOutput::RpcDeviceCodeProgressReported(event) =
+                self.payload()
+            else {
+                return None;
+            };
+            if event.command_id != id {
                 return None;
             }
-            Some(
-                serde_json::from_value(value.clone())
-                    .expect("validated device-code progress must match its public projection"),
-            )
+            Some(DeviceCodeProgress {
+                provider: owned_str(&event.provider),
+                attempt: u32::try_from(u64::from(event.attempt)).ok()?,
+            })
         }
 
         /// Project the terminal outcome for one exact command, if this is its event.

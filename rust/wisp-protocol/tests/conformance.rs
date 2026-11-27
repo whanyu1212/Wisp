@@ -656,6 +656,8 @@ fn every_python_event_fixture_maps_to_its_exact_wire_variant() {
             Wire::WebSearchPerformed(_) => "web.search",
         };
         assert_eq!(matched, discriminator);
+        assert_eq!(event.event_type_str(), discriminator);
+        assert_eq!(event.event_type(), discriminator);
     }
 }
 
