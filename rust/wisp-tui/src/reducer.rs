@@ -157,6 +157,8 @@ pub struct SessionMessages {
 /// Raw pages arrive newest first; the transcript is built once after the oldest page.
 #[derive(Clone, Debug, PartialEq)]
 pub struct HistoryHydration {
+    /// Only text survives: interactive IDs belong to the final chronological projection.
+    preview: Vec<String>,
     report: SessionMessages,
     pages: Vec<std::sync::Arc<[Value]>>,
     seen_entry_ids: std::collections::HashSet<String>,
@@ -448,6 +450,7 @@ enum ConnectionOperation {
 #[derive(Clone, Debug, PartialEq)]
 pub enum SessionOperation {
     StartupHydration {
+        initial_excerpt: Vec<String>,
         command_id: String,
         report: Option<SessionMessages>,
         loaded: Option<HistoryHydration>,
@@ -1140,6 +1143,24 @@ pub struct UiState {
 }
 
 impl UiState {
+    pub(crate) fn history_preview(&self) -> Option<&[String]> {
+        let lines = match &self.session_operation {
+            Some(
+                SessionOperation::StartupHydration {
+                    loaded: Some(load), ..
+                }
+                | SessionOperation::HydratingSelection {
+                    loaded: Some(load), ..
+                },
+            ) => &load.preview,
+            Some(SessionOperation::StartupHydration {
+                initial_excerpt, ..
+            }) => initial_excerpt,
+            _ => return None,
+        };
+        (!lines.is_empty()).then_some(lines)
+    }
+
     pub fn new(provider: String, model: Option<String>, effort: Option<String>) -> Self {
         Self::with_provider(Some(provider), model, effort)
     }
@@ -1904,6 +1925,9 @@ pub enum BackendEvent {
     SessionTreeUnreverted {
         command_id: String,
         unreverted: SessionTreeUnrevert,
+    },
+    StartupHistoryPreview {
+        lines: Vec<String>,
     },
     MessagesReported {
         command_id: String,
@@ -2968,6 +2992,7 @@ fn start_startup_hydration(
     let command = WispTypedClientRpcCommands::get_messages(&id, None)?;
     state.input_ready = false;
     state.session_operation = Some(SessionOperation::StartupHydration {
+        initial_excerpt: Vec::new(),
         command_id: id,
         report: None,
         loaded: None,
@@ -4098,7 +4123,16 @@ fn finish_session_operation(
             report,
             loaded,
             completion,
-        } => finish_startup_hydration(state, command_id, report, loaded, completion, ids),
+            initial_excerpt,
+        } => finish_startup_hydration(
+            state,
+            command_id,
+            report,
+            loaded,
+            completion,
+            initial_excerpt,
+            ids,
+        ),
         SessionOperation::LoadingCatalog {
             command_id,
             navigation,
@@ -4230,6 +4264,7 @@ fn finish_startup_hydration(
     report: Option<SessionMessages>,
     loaded: Option<HistoryHydration>,
     completion: Option<SessionCompletion>,
+    initial_excerpt: Vec<String>,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ProtocolDecodeError> {
     match (report, completion) {
@@ -4253,6 +4288,7 @@ fn finish_startup_hydration(
                     cursor,
                 )?;
                 state.session_operation = Some(SessionOperation::StartupHydration {
+                    initial_excerpt: Vec::new(),
                     command_id: id,
                     report: None,
                     loaded: Some(hydration),
@@ -4284,6 +4320,7 @@ fn finish_startup_hydration(
         }
         (report, completion) => {
             state.session_operation = Some(SessionOperation::StartupHydration {
+                initial_excerpt,
                 command_id,
                 report,
                 loaded,
@@ -5095,12 +5132,14 @@ fn merge_hydration_page(
         if !page.truncated {
             page.source_messages = Default::default();
             return Ok(HistoryHydration {
+                preview: Vec::new(),
                 report: page,
                 pages: Vec::new(),
                 seen_entry_ids: Default::default(),
             });
         }
         HistoryHydration {
+            preview: crate::history::latest_conversation_excerpt(&page.transcript),
             report: page,
             pages: Vec::new(),
             seen_entry_ids: Default::default(),
@@ -6404,6 +6443,20 @@ fn handle_backend_event(
                 .transcript
                 .append_injected_prompt(content, local_display, image_parts);
             Ok(vec![UiEffect::RequestRender])
+        }
+        BackendEvent::StartupHistoryPreview { lines } => {
+            if let Some(SessionOperation::StartupHydration {
+                initial_excerpt,
+                loaded: None,
+                report: None,
+                ..
+            }) = &mut state.session_operation
+                && initial_excerpt.is_empty()
+            {
+                *initial_excerpt = lines;
+                return Ok(vec![UiEffect::RequestRender]);
+            }
+            Ok(Vec::new())
         }
         BackendEvent::GitDiffReported { .. }
         | BackendEvent::ProjectFilesReported { .. }
@@ -12178,6 +12231,50 @@ mod tests {
     }
 
     #[test]
+    fn startup_excerpt_cannot_install_history_or_outlive_the_first_page() {
+        let excerpt = || {
+            UiAction::BackendEvent(BackendEvent::StartupHistoryPreview {
+                lines: vec!["Assistant: old snapshot".into()],
+            })
+        };
+        for succeeds in [true, false] {
+            let mut state = UiState::unconfigured();
+            let mut ids = DeterministicIds::default();
+            assert!(reduce(&mut state, excerpt(), &mut ids).unwrap().is_empty());
+            reduce(&mut state, UiAction::StartupHydration, &mut ids).unwrap();
+            reduce(&mut state, excerpt(), &mut ids).unwrap();
+            assert_eq!(
+                state.history_preview().unwrap(),
+                &["Assistant: old snapshot"]
+            );
+            assert!(state.selected_session.is_none() && !state.input_ready);
+            assert!(state.transcript.entries().is_empty());
+            assert!(state.history.represented_durable_entry_ids.is_empty());
+            assert!(reduce(&mut state, excerpt(), &mut ids).unwrap().is_empty());
+            if succeeds {
+                reduce(
+                    &mut state,
+                    UiAction::BackendEvent(hydration_page("get_messages-1", 0, 2)),
+                    &mut ids,
+                )
+                .unwrap();
+            }
+            reduce(
+                &mut state,
+                UiAction::BackendEvent(finished("get_messages-1", "get_messages", succeeds)),
+                &mut ids,
+            )
+            .unwrap();
+            assert!(state.history_preview().is_none());
+            assert_eq!(
+                state.transcript.entries().len(),
+                if succeeds { 2 } else { 0 }
+            );
+            assert!(reduce(&mut state, excerpt(), &mut ids).unwrap().is_empty());
+        }
+    }
+
+    #[test]
     fn startup_hydration_commits_only_after_a_matching_report_and_finish_in_any_order() {
         for report_first in [true, false] {
             let mut state = UiState::unconfigured();
@@ -12372,6 +12469,9 @@ mod tests {
                     else {
                         panic!("hydration must remain pending")
                     };
+                    let preview = state.history_preview().expect("validated latest page");
+                    assert_eq!(preview.len(), 8);
+                    assert!(preview.last().unwrap().ends_with("message-15000"));
                     // Pages are retained without rebuilding any accumulated transcript or ID Vec.
                     assert!(loaded.report.transcript.entries().is_empty());
                     assert!(loaded.report.durable_entry_ids.is_empty());

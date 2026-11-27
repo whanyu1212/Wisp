@@ -8,6 +8,10 @@ pub struct Cli {
     #[arg(long)]
     pub expected_backend_version: String,
 
+    /// Inherited preview pipe for the backend; the frontend never reads it.
+    #[arg(long, hide = true, value_parser = clap::value_parser!(i32).range(3..))]
+    pub backend_pass_fd: Option<i32>,
+
     /// Exact backend executable and arguments, supplied after `--`.
     #[arg(last = true, required = true, num_args = 1.., allow_hyphen_values = true)]
     pub backend: Vec<OsString>,

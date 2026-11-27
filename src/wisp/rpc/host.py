@@ -787,6 +787,7 @@ class RpcHost:
         on_shutdown_dispatched: Callable[[], None] | None = None,
         on_shutdown_abandoned: Callable[[], None] | None = None,
         outbound_frame_limit: int | None = None,
+        _on_session_selected: Callable[[Path, str], Awaitable[None]] | None = None,
     ) -> RpcHost:
         """Build a host without starting a transport or event loop.
 
@@ -797,12 +798,11 @@ class RpcHost:
 
         sessions = JsonlSessionStore(config.session_dir)
 
-        def load_startup_state() -> tuple[_RpcSessionState, Path, Path]:
-            session = select_session(
-                sessions,
-                resume=options.resume,
-                continue_latest=options.continue_latest,
-            )
+        select_startup_session = partial(
+            select_session, sessions, resume=options.resume, continue_latest=options.continue_latest
+        )
+
+        def load_startup_state(session: JsonlSession | None) -> tuple[_RpcSessionState, Path, Path]:
             session_state = rpc_session_state(session)
             cwd = (
                 (options.cwd or options.project_context_root or Path.cwd())
@@ -816,9 +816,19 @@ class RpcHost:
             )
             return session_state, project_context_root, cwd
 
+        def select_and_load() -> tuple[_RpcSessionState, Path, Path]:
+            return load_startup_state(select_startup_session())
+
+        # Ordinary startup selects and replays in one worker call. A startup
+        # observer receives the selected session's path and ID before replay.
+        load = select_and_load
+        if _on_session_selected is not None:
+            session = await anyio.to_thread.run_sync(select_startup_session, abandon_on_cancel=True)
+            if session is not None:
+                await _on_session_selected(session.path, session.session_id)
+            load = partial(load_startup_state, session)
         session_state, project_context_root, cwd = await anyio.to_thread.run_sync(
-            load_startup_state,
-            abandon_on_cancel=True,
+            load, abandon_on_cancel=True
         )
         approval_policy = RpcToolApprovalPolicy(
             tool_approval_policy(options.approve_unsafe_tools), project_path=project_context_root

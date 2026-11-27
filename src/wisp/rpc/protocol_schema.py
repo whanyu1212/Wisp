@@ -627,6 +627,7 @@ _EVENT_FIXTURE_VALUES: dict[str, dict[str, object]] = {
     },
     "project_files.invalidated": {"generation": 2},
     "rpc.state": {"command_id": "command-1", "state": _RPC_STATE},
+    "rpc.startup.history_preview": {"lines": ("First line", "Second line, 世界")},
     "rpc.settings.reloaded": {
         "command_id": "reload-1",
         "state": {

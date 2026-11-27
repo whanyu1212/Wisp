@@ -30,12 +30,14 @@ from wisp.events import (
     RpcMessagesReported,
     RpcSessionTreeNode,
     RpcSessionTreeReported,
+    RpcStartupHistoryPreview,
     ToolCallSnapshot,
     ToolExecutionEnded,
     ToolResultReady,
     UsageCost,
     UsageCostRates,
     wisp_event_from_dict,
+    wisp_event_from_json,
 )
 from wisp.rpc.commands import (
     CompactCommand,
@@ -456,7 +458,7 @@ def test_event_schema_contains_every_current_discriminator_once() -> None:
     variants = cast(list[dict[str, str]], schema["oneOf"])
     references = {variant["$ref"] for variant in variants}
 
-    assert len(mapping) == 75
+    assert len(mapping) == 76
     assert mapping["tool.approval.reviewed"] == "#/$defs/ToolApprovalReviewed"
     assert mapping["browser.viewport.updated"] == "#/$defs/BrowserViewportUpdated"
     assert len(set(mapping.values())) == len(mapping)
@@ -472,6 +474,36 @@ def test_event_schema_contains_every_current_discriminator_once() -> None:
             )
             assert set(cast(list[str], definition["required"])) == set(properties) - optional
             assert definition["additionalProperties"] is False
+
+
+@pytest.mark.parametrize(
+    ("lines", "valid"),
+    [
+        ([""], True),
+        (["🪶" * 4096, *(str(i) for i in range(7))], True),
+        ([], False),
+        ([""] * 9, False),
+        (["🪶" * 4097], False),
+        ([1], False),
+        ("one line", False),
+    ],
+    ids=["empty-line", "upper-bounds", "no-lines", "too-many", "too-long", "non-text", "scalar"],
+)
+def test_startup_preview_bounds(lines: object, valid: bool) -> None:
+    payload = {
+        "type": "rpc.startup.history_preview",
+        "timestamp": "2026-01-02T03:04:05Z",
+        "lines": lines,
+    }
+    schema = json.loads((_REPOSITORY_SCHEMA_DIRECTORY / "events.schema.json").read_text())
+    assert Draft202012Validator(schema).is_valid(payload) == valid
+    if valid:
+        event = wisp_event_from_json(json.dumps(payload))
+        assert isinstance(event, RpcStartupHistoryPreview)
+        assert list(event.lines) == lines
+    else:
+        with pytest.raises(ValidationError):
+            wisp_event_from_json(json.dumps(payload))
 
 
 def test_event_schema_matches_current_serialized_requiredness_and_exclusions() -> None:

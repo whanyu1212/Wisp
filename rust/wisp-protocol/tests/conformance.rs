@@ -1049,6 +1049,36 @@ fn codemode_presentation_preserves_availability() {
 }
 
 #[test]
+fn startup_preview_projects_lines() {
+    let mut lines = vec!["🪶".repeat(4096)];
+    lines.extend((1..8).map(|i| i.to_string()));
+    let preview = |lines: Value| {
+        events::deserialize(serde_json::json!({
+            "type": "rpc.startup.history_preview",
+            "timestamp": "2026-01-02T03:04:05Z",
+            "lines": lines,
+        }))
+    };
+    let event = preview(serde_json::json!(lines)).unwrap();
+    assert_eq!(event.startup_history_preview(), Some(lines));
+    assert_eq!(
+        preview(serde_json::json!([""]))
+            .unwrap()
+            .startup_history_preview(),
+        Some(vec![String::new()])
+    );
+    for invalid in [
+        serde_json::json!([]),
+        serde_json::json!(vec![""; 9]),
+        serde_json::json!(["🪶".repeat(4097)]),
+        serde_json::json!([1]),
+        serde_json::json!("one line"),
+    ] {
+        assert!(preview(invalid).is_err());
+    }
+}
+
+#[test]
 fn browser_viewport_updated_projects_and_validates_fields() {
     let raw = serde_json::json!({
         "type": "browser.viewport.updated",

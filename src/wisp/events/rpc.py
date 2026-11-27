@@ -51,6 +51,8 @@ MAX_RPC_PROVIDER_ID_CHARS = 128
 MAX_RPC_MODEL_ID_CHARS = 256
 MAX_RPC_MODEL_DISPLAY_CHARS = 256
 MAX_RPC_MODEL_EFFORT_CHARS = 64
+MAX_STARTUP_HISTORY_PREVIEW_LINES = 8
+MAX_STARTUP_HISTORY_PREVIEW_LINE_CHARS = 4_096
 # The most recent calls kept per file; the TUI jumps to the latest one.
 MAX_GIT_DIFF_FILE_EDITS = 16
 MAX_LIVE_BROWSER_WIDTH = 1_600
@@ -596,6 +598,15 @@ class RpcWorkspaceReported(WispEvent):
     # Shared session image store directory so frontends can resolve images stored
     # during a fresh or /new run before the session file is committed.
     session_images_dir: Path | None = None
+
+
+class RpcStartupHistoryPreview(WispEvent):
+    """Optional, unsolicited display text shown while the startup transcript loads."""
+
+    type: Literal["rpc.startup.history_preview"] = "rpc.startup.history_preview"
+    lines: tuple[
+        Annotated[str, Field(strict=True, max_length=MAX_STARTUP_HISTORY_PREVIEW_LINE_CHARS)], ...
+    ] = Field(min_length=1, max_length=MAX_STARTUP_HISTORY_PREVIEW_LINES)
 
 
 class RpcStateReported(WispEvent):

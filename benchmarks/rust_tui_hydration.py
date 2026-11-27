@@ -1,8 +1,23 @@
 """Measure Rust TUI startup and attributed long-history hydration stages.
 
 Each run starts the source CLI in a fresh PTY with disposable saved history.
-The ready timestamp ends at PTY output, which is a paint proxy. Process-tree
-CPU and RSS are sampled and may miss short-lived processes or peaks.
+``launch_to_ready_ms`` measures the existing composer/context check after a resize.
+For saved sessions, ``launch_to_history_visible_ms`` timestamps the first complete
+PTY frame showing the seeded tail, from either preview or authoritative history.
+Fresh sessions report null. PTY reads approximate when text becomes visible.
+
+With ``--first-reply``, the harness also waits for the numeric startup context
+reading and the configured ready hold, then writes one prompt. Before that prompt
+the TUI installs a numeric budget only on completion of its validated stats read.
+``launch_to_submit_ms`` ends at the write. ``submit_to_reply_ms`` and
+``launch_to_reply_ms`` end at the first complete frame showing the fake provider's
+reply to that prompt. These three fields are null in startup-only runs. Summaries
+report distributions of the same measurements. Run the same harness in each
+checkout with its matching Rust binary and use ``--no-profile`` for timing.
+
+Memory checkpoints and hydration profiles cover startup. In first-reply mode,
+total time, output bytes and sampled tree CPU/peak RSS include the interaction
+through exit. Sampling may miss short-lived processes or peaks.
 """
 
 from __future__ import annotations
@@ -13,6 +28,7 @@ import json
 import math
 import os
 import pty
+import re
 import select
 import struct
 import sys
@@ -36,6 +52,8 @@ from benchmarks.rust_tui_e2e import (
     _drain_available,
     _elapsed_ms,
     _kill_process_group,
+    _optional_distribution,
+    _PaintedScreen,
     _plain_text,
     _read_available,
     _ready,
@@ -49,6 +67,9 @@ from benchmarks.support import environment
 from scripts.smoke_installed_rust_tui import _seed_history
 
 _HISTORY_READY = "RC2 saved history ready"
+_PROBE_PROMPT = "WispProbe42"
+_PROBE_REPLY = f"fake response to: {_PROBE_PROMPT}"
+_CONTEXT_READING = re.compile(r"\bctx\s+(?:[▰▱]+\s*)?~?[0-9]")
 _OUTPUT_TAIL_LIMIT = 65_536
 _REQUIRED_STAGES = frozenset(
     (
@@ -73,6 +94,7 @@ class BenchmarkConfig:
     timeout_seconds: float = 120.0
     profile: bool = True
     ready_hold_seconds: float = 0.0
+    first_reply: bool = False
 
 
 @dataclass(frozen=True)
@@ -126,6 +148,10 @@ class SessionSample:
     stage_totals: tuple[StageTotal, ...]
     clean_exit: bool
     terminal_restored: bool
+    launch_to_history_visible_ms: float | None = None
+    launch_to_submit_ms: float | None = None
+    submit_to_reply_ms: float | None = None
+    launch_to_reply_ms: float | None = None
 
 
 @dataclass(frozen=True)
@@ -149,6 +175,10 @@ class ConditionSummary:
     observed_process_tree_cpu_ms: Distribution
     observed_simultaneous_rss_peak_bytes: Distribution
     stages: tuple[StageSummary, ...]
+    launch_to_history_visible_ms: Distribution | None = None
+    launch_to_submit_ms: Distribution | None = None
+    submit_to_reply_ms: Distribution | None = None
+    launch_to_reply_ms: Distribution | None = None
 
 
 @dataclass(frozen=True)
@@ -398,6 +428,14 @@ def summarize_samples(samples: Sequence[SessionSample]) -> tuple[ConditionSummar
                     [float(s.observed_simultaneous_rss_peak_bytes) for s in selected]
                 ),
                 stages=tuple(stages),
+                launch_to_history_visible_ms=_optional_distribution(
+                    [s.launch_to_history_visible_ms for s in selected]
+                ),
+                launch_to_submit_ms=_optional_distribution(
+                    [s.launch_to_submit_ms for s in selected]
+                ),
+                submit_to_reply_ms=_optional_distribution([s.submit_to_reply_ms for s in selected]),
+                launch_to_reply_ms=_optional_distribution([s.launch_to_reply_ms for s in selected]),
             )
         )
     return tuple(result)
@@ -428,9 +466,98 @@ def run_benchmark(config: BenchmarkConfig | None = None) -> BenchmarkReport:
     return BenchmarkReport(selected, environment(), completed, summarize_samples(completed))
 
 
+class _BackendSettle:
+    """Wait for a quiet backend CPU sample before quitting a completed prompt.
+
+    The idle footer can paint before the post-prompt stats and session replay
+    finish. This is a teardown heuristic, never a prompt-readiness timestamp.
+    """
+
+    def __init__(self) -> None:
+        self.sample: tuple[float, float] | None = None
+
+    def quiet(self, process: psutil.Process, now: float) -> bool:
+        previous = self.sample
+        if previous is not None and now - previous[0] < 0.25:
+            return False
+        cpu = process.cpu_times()
+        total = cpu.user + cpu.system
+        self.sample = now, total
+        return previous is not None and total - previous[1] < 0.01
+
+
+class _HydrationPaint:
+    """Observe history and the optional prompt exchange on synchronized PTY frames."""
+
+    def __init__(self, history_messages: int, first_reply: bool) -> None:
+        self._awaiting_history = history_messages > 0
+        self._first_reply = first_reply
+        self._screen = _PaintedScreen() if history_messages or first_reply else None
+        self.history_visible_ns: int | None = None
+        self.context_measured = False
+        self.submitted_ns: int | None = None
+        self.reply_ns: int | None = None
+        self.reply_idle = False
+        self.startup_records: tuple[ProfileRecord, ...] = ()
+
+    def observe(self, chunk: bytes, now_ns: int) -> None:
+        """Timestamp a marker even if the next frame in the same read erases it.
+
+        Args:
+            chunk: New PTY bytes, including any partial frame.
+            now_ns: Monotonic time when the read completed.
+        """
+        screen = self._screen
+        if screen is None:
+            return
+        for _ in screen.replay(chunk):
+            if self._awaiting_history and screen.shows(_HISTORY_READY):
+                self.history_visible_ns = now_ns
+                self._awaiting_history = False
+                if not self._first_reply:
+                    self._screen = None
+                    return
+            if self._first_reply:
+                self._observe_prompt(screen, now_ns)
+                if self.reply_idle:
+                    self._screen = None
+                    return
+
+    def _observe_prompt(self, screen: _PaintedScreen, now_ns: int) -> None:
+        footer = screen.rows()[-2:]
+        if self.submitted_ns is None:
+            self.context_measured = any(_CONTEXT_READING.search(row) for row in footer)
+            return
+        if self.reply_ns is None and screen.shows(_PROBE_REPLY):
+            self.reply_ns = now_ns
+        if self.reply_ns is not None and any("idle" in row for row in footer):
+            self.reply_idle = True
+
+    def submit_if_ready(self, terminal_fd: int, profile_dir: Path | None) -> None:
+        """Write one probe once the startup context reading is on screen.
+
+        Args:
+            terminal_fd: PTY master after the ready/settled memory checkpoints.
+            profile_dir: Startup profile directory to snapshot before interaction, if enabled.
+
+        Raises:
+            RuntimeError: If startup profilers cannot be read or the prompt write is incomplete.
+        """
+        if not self.context_measured or self.submitted_ns is not None:
+            return
+        if profile_dir is not None:
+            self.startup_records = read_profile_records(profile_dir)
+        prompt = f"{_PROBE_PROMPT}\r".encode()
+        self.submitted_ns = time.perf_counter_ns()
+        if os.write(terminal_fd, prompt) != len(prompt):
+            raise RuntimeError("incomplete first prompt write to PTY")
+
+
 def _run_sample(config: BenchmarkConfig, history_messages: int, run: int) -> SessionSample:
     with tempfile.TemporaryDirectory(prefix="wisp-tui-hydration-") as temporary:
-        root = Path(temporary)
+        # macOS spells its temporary root through /var, a symlink. Use a real
+        # store path to measure the eligible route, not the symlink-safety fallback.
+        root = Path(temporary).resolve()
         home, project_dir, session_dir, profile_dir = (
             root / "home",
             root / "project",
@@ -456,6 +583,14 @@ def _run_sample(config: BenchmarkConfig, history_messages: int, run: int) -> Ses
         else:
             child_env.pop("WISP_HYDRATION_PROFILE_DIR", None)
         child_env["WISP_AUTO_COMPACTION"] = "0"
+        if config.first_reply:
+            for key in (
+                "WISP_FAKE_STREAM_INTERVAL_MS",
+                "WISP_FAKE_RESPONSE_WORDS",
+                "WISP_FAKE_RESPONSE_PREFIX",
+                "WISP_FAKE_RESPONSE_SUFFIX",
+            ):
+                child_env.pop(key, None)
         command = [
             sys.executable,
             "-m",
@@ -490,9 +625,11 @@ def _run_sample(config: BenchmarkConfig, history_messages: int, run: int) -> Ses
         terminal_output_bytes = 0
         ready_ns: int | None = None
         context_redrawn = False
-        history_marker_seen = False
+        paint = _HydrationPaint(history_messages, config.first_reply)
         quit_sent = False
-        quit_after: float | None = None
+        settle = _BackendSettle()
+        backend: psutil.Process | None = None
+        hold_until: float | None = None
         ready_process_memory: tuple[ProcessMemory, ...] = ()
         settled_process_memory: tuple[ProcessMemory, ...] = ()
         wait_result = None
@@ -514,17 +651,14 @@ def _run_sample(config: BenchmarkConfig, history_messages: int, run: int) -> Ses
             start_writer_open = False
             while time.monotonic() < deadline:
                 chunk = _read_available(terminal_fd)
+                now_ns = time.perf_counter_ns()
                 if chunk:
                     terminal_output_bytes += len(chunk)
                     output.extend(chunk)
                     if len(output) > _OUTPUT_TAIL_LIMIT:
                         del output[:-_OUTPUT_TAIL_LIMIT]
-                now_ns = time.perf_counter_ns()
+                    paint.observe(chunk, now_ns)
                 startup_plain = _plain_text(output) if ready_ns is None else ""
-                if history_messages and "".join(_HISTORY_READY.split()) in "".join(
-                    startup_plain.split()
-                ):
-                    history_marker_seen = True
                 context_visible = "~" in startup_plain and any(
                     marker in startup_plain for marker in ("ctx", "context", "offline")
                 )
@@ -538,18 +672,29 @@ def _run_sample(config: BenchmarkConfig, history_messages: int, run: int) -> Ses
                     output.clear()
                     continue
                 ready_visible = (
-                    _history_ready(startup_plain, "rust", history_marker_seen)
+                    _history_ready(startup_plain, "rust", paint.history_visible_ns is not None)
                     if history_messages
                     else _ready(startup_plain, "rust")
                 )
                 if context_redrawn and ready_ns is None and ready_visible:
                     ready_ns = now_ns
                     ready_process_memory = snapshot_process_memory(child_pid)
-                    quit_after = time.monotonic() + config.ready_hold_seconds
-                if quit_after is not None and not quit_sent and time.monotonic() >= quit_after:
+                    hold_until = time.monotonic() + config.ready_hold_seconds
+                if hold_until is not None and time.monotonic() >= hold_until:
                     settled_process_memory = snapshot_process_memory(child_pid)
-                    os.write(terminal_fd, b"/quit\r")
-                    quit_sent = True
+                    hold_until = None
+                if ready_ns is not None and hold_until is None and not quit_sent:
+                    if config.first_reply:
+                        paint.submit_if_ready(terminal_fd, profile_dir if config.profile else None)
+                    if paint.reply_idle and backend is None:
+                        backend = psutil.Process(
+                            next(p.pid for p in settled_process_memory if p.role == "rpc_backend")
+                        )
+                    if not config.first_reply or (
+                        backend is not None and settle.quiet(backend, time.monotonic())
+                    ):
+                        os.write(terminal_fd, b"/quit\r")
+                        quit_sent = True
                 wait_result = _wait_for_child(child_pid, block=False)
                 if wait_result is not None:
                     terminal_output_bytes += len(_drain_available(terminal_fd))
@@ -559,7 +704,9 @@ def _run_sample(config: BenchmarkConfig, history_messages: int, run: int) -> Ses
             if wait_result is None:
                 raise RuntimeError(
                     f"rust history={history_messages} timed out; "
-                    f"ready={ready_ns is not None} quit={quit_sent}; "
+                    f"ready={ready_ns is not None} context_measured={paint.context_measured} "
+                    f"submitted={paint.submitted_ns is not None} "
+                    f"reply={paint.reply_ns is not None} quit={quit_sent}; "
                     f"terminal tail={_diagnostic_tail(output)!r}"
                 )
         finally:
@@ -582,7 +729,7 @@ def _run_sample(config: BenchmarkConfig, history_messages: int, run: int) -> Ses
         if wait_result is None:
             raise RuntimeError("could not collect TUI exit status")
         exit_code = os.waitstatus_to_exitcode(wait_result.status)
-        if exit_code != 0 or ready_ns is None:
+        if exit_code != 0 or ready_ns is None or not quit_sent:
             raise RuntimeError(
                 f"rust history={history_messages} exited {exit_code} before ready/clean exit; "
                 f"terminal tail={_diagnostic_tail(output)!r}"
@@ -602,14 +749,34 @@ def _run_sample(config: BenchmarkConfig, history_messages: int, run: int) -> Ses
                 raise RuntimeError(
                     f"{checkpoint} process snapshot has unexpected roles: {sorted(roles)}"
                 )
-        records = read_profile_records(profile_dir) if config.profile else ()
+        records = paint.startup_records
         if config.profile:
+            if not config.first_reply:
+                records = read_profile_records(profile_dir)
             validate_profile_coverage(records, history_messages)
         return SessionSample(
             history_messages=history_messages,
             history_bytes=history_bytes,
             run=run,
             launch_to_ready_ms=_elapsed_ms(launched_ns, ready_ns),
+            launch_to_history_visible_ms=(
+                _elapsed_ms(launched_ns, paint.history_visible_ns)
+                if paint.history_visible_ns is not None
+                else None
+            ),
+            launch_to_submit_ms=(
+                _elapsed_ms(launched_ns, paint.submitted_ns)
+                if paint.submitted_ns is not None
+                else None
+            ),
+            submit_to_reply_ms=(
+                _elapsed_ms(paint.submitted_ns, paint.reply_ns)
+                if paint.submitted_ns is not None and paint.reply_ns is not None
+                else None
+            ),
+            launch_to_reply_ms=(
+                _elapsed_ms(launched_ns, paint.reply_ns) if paint.reply_ns is not None else None
+            ),
             total_ms=_elapsed_ms(launched_ns, completed_ns),
             terminal_output_bytes=terminal_output_bytes,
             observed_process_tree_cpu_ms=observer.cpu_ms,
@@ -653,6 +820,11 @@ def main(arguments: Sequence[str] | None = None) -> None:
     parser.add_argument(
         "--no-profile", action="store_true", help="measure startup without profile I/O"
     )
+    parser.add_argument(
+        "--first-reply",
+        action="store_true",
+        help="submit one prompt and time its fake-provider reply",
+    )
     parser.add_argument("--output", type=Path)
     parsed = parser.parse_args(arguments)
     report = run_benchmark(
@@ -665,6 +837,7 @@ def main(arguments: Sequence[str] | None = None) -> None:
             timeout_seconds=parsed.timeout_seconds,
             ready_hold_seconds=parsed.ready_hold_seconds,
             profile=not parsed.no_profile,
+            first_reply=parsed.first_reply,
         )
     )
     payload = report.to_json()

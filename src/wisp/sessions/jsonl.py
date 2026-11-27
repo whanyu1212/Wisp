@@ -1819,6 +1819,28 @@ def _read_entries_unlocked(path: Path, *, limit: int | None = None) -> list[Sess
 def _parse_session_entries(
     lines: Iterable[str], path: Path, *, limit: int | None
 ) -> list[SessionEntry]:
+    entries = decode_session_entries(lines, path, limit=limit)
+    resolve_session_tree(entries)
+    return entries
+
+
+def decode_session_entries(
+    lines: Iterable[str], path: Path, *, limit: int | None = None
+) -> list[SessionEntry]:
+    """Decode records with unique entry IDs and one session ID before tree replay.
+
+    Args:
+        lines (Iterable[str]): UTF-8 decoded JSONL records.
+        path (Path): Source used in diagnostics.
+        limit (int | None): Stop after this many entries when supplied.
+
+    Returns:
+        list[SessionEntry]: Strictly decoded entries in storage order.
+
+    Raises:
+        SessionError: A persisted record or its identity is invalid.
+    """
+
     entries: list[SessionEntry] = []
     session_id: str | None = None
     seen_entry_ids: set[str] = set()
@@ -1839,5 +1861,4 @@ def _parse_session_entries(
         entries.append(entry)
         if limit is not None and len(entries) >= limit:
             break
-    resolve_session_tree(entries)
     return entries

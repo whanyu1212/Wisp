@@ -1,10 +1,11 @@
-"""Command-line interface for Wisp.
+"""Public CLI exports; load the application lazily so the entry point can secure its pipe."""
 
-``app`` is the Typer application and ``main`` is the console-script entry point. The
-implementation lives in :mod:`wisp.cli.application`; sibling modules hold subcommands and
-shared helpers.
-"""
+from typing import TYPE_CHECKING
 
-from wisp.cli.application import ToolApprovalDecision, app, main
+from wisp.cli.entrypoint import application_export, main
 
+if TYPE_CHECKING:
+    from wisp.cli.application import ToolApprovalDecision, app
+
+__getattr__ = application_export
 __all__ = ["ToolApprovalDecision", "app", "main"]

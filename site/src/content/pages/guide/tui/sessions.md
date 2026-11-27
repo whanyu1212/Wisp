@@ -259,6 +259,12 @@ reading earlier content, the viewport stays anchored; press `Ctrl+End` to return
 
 ## Resuming long sessions
 
+`Latest history · loading…` shows recent conversation text while Wisp loads the complete
+transcript. The preview stays at the newest text when you resize. It is read-only: search,
+scrollback, and tool-card actions use the completed transcript, not the preview. On a trusted
+`--continue` or `--resume` launch, Wisp can show this text before the first history page arrives.
+If it cannot verify the saved session quickly, it uses normal history loading instead.
+
 Selecting a session from `/resume`, or running `/resume <session-id>`, loads the complete saved
 active-path transcript before input resumes. `PageUp` and `PageDown` scroll through the retained
 conversation; no history cap clips older messages. A failed or stale history response reports an

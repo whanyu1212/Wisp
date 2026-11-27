@@ -43,6 +43,40 @@ pub struct ProjectedHistoryPage {
     pub durable_entry_ids: Vec<String>,
 }
 
+/// Show recent conversation text while older pages load, without exposing page-local row IDs.
+pub(crate) fn latest_conversation_excerpt(transcript: &SharedTranscript) -> Vec<String> {
+    use crate::transcript::TranscriptRole;
+    let mut lines: Vec<_> = transcript
+        .entries()
+        .iter()
+        .rev()
+        .filter_map(|entry| {
+            let role = match entry.role {
+                TranscriptRole::User => "User",
+                TranscriptRole::Assistant => "Assistant",
+                TranscriptRole::Tool => return None,
+            };
+            if entry.content.is_empty() {
+                return None;
+            }
+            // Keep the latest text even when this page ends with a very long answer.
+            let available = 4096 - role.len() - ": ".len();
+            let start = entry
+                .content
+                .char_indices()
+                .rev()
+                .nth(available - 1)
+                .filter(|(start, _)| *start != 0)
+                .map_or(0, |(start, first)| start + first.len_utf8());
+            let omitted = if start > 0 { "…" } else { "" };
+            Some(format!("{role}: {omitted}{}", &entry.content[start..]))
+        })
+        .take(8)
+        .collect();
+    lines.reverse();
+    lines
+}
+
 /// Project exactly one latest-first RPC page, already validated by the protocol layer.
 ///
 /// The RPC backend returns message snapshots in chronological order. This function deliberately
@@ -796,6 +830,23 @@ mod tests {
     use crate::transcript::{TranscriptEntryKind, TranscriptRole};
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn excerpt_adds_an_ellipsis_only_when_text_was_omitted() {
+        let available = 4096 - "User: ".len();
+        let mut transcript = SharedTranscript::default();
+        let exact = "界".repeat(available);
+        transcript.append_prompt(exact.clone());
+        assert_eq!(
+            latest_conversation_excerpt(&transcript),
+            [format!("User: {exact}")]
+        );
+        transcript.append_prompt(format!("x{exact}"));
+        assert_eq!(
+            latest_conversation_excerpt(&transcript).last().unwrap(),
+            &format!("User: …{}", "界".repeat(available - 1))
+        );
+    }
 
     fn message(role: &str, content: &str) -> Value {
         static NEXT_ENTRY_ID: AtomicUsize = AtomicUsize::new(0);

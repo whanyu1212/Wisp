@@ -1982,6 +1982,15 @@ pub mod events {
             serde_json::to_value(&self.0).expect("validated generated events must serialize")
         }
 
+        /// Return the unsolicited display lines shown while startup history loads.
+        pub fn startup_history_preview(&self) -> Option<Vec<String>> {
+            let mut value = self.wire_value();
+            if value["type"] != "rpc.startup.history_preview" {
+                return None;
+            }
+            serde_json::from_value(value["lines"].take()).ok()
+        }
+
         /// Project safe metadata for one exact request; hierarchy and matching stay local.
         pub fn project_files(&self, id: &str) -> Option<ProjectFileSnapshot> {
             let value = self.wire_value();

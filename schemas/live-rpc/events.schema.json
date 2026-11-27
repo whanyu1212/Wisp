@@ -6725,6 +6725,40 @@
       "title": "RpcSkillsReported",
       "type": "object"
     },
+    "RpcStartupHistoryPreview": {
+      "additionalProperties": false,
+      "description": "Optional, unsolicited display text shown while the startup transcript loads.",
+      "properties": {
+        "lines": {
+          "items": {
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "maxItems": 8,
+          "minItems": 1,
+          "title": "Lines",
+          "type": "array"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "type": {
+          "const": "rpc.startup.history_preview",
+          "default": "rpc.startup.history_preview",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "timestamp",
+        "lines"
+      ],
+      "title": "RpcStartupHistoryPreview",
+      "type": "object"
+    },
     "RpcStateReported": {
       "additionalProperties": false,
       "description": "Immediate, non-persisted in-memory state returned over RPC.",
@@ -9784,6 +9818,7 @@
       "rpc.shell.completed": "#/$defs/RpcShellCompleted",
       "rpc.shell.progress": "#/$defs/RpcShellProgress",
       "rpc.skills": "#/$defs/RpcSkillsReported",
+      "rpc.startup.history_preview": "#/$defs/RpcStartupHistoryPreview",
       "rpc.state": "#/$defs/RpcStateReported",
       "rpc.subagents": "#/$defs/RpcSubagentsReported",
       "rpc.workspace": "#/$defs/RpcWorkspaceReported",
@@ -10036,6 +10071,9 @@
     },
     {
       "$ref": "#/$defs/RpcShellCompleted"
+    },
+    {
+      "$ref": "#/$defs/RpcStartupHistoryPreview"
     }
   ],
   "title": "Wisp current live event output",
@@ -10704,6 +10742,14 @@
       "command_id": "command-1",
       "timestamp": "2026-01-02T03:04:05Z",
       "type": "rpc.skills"
+    },
+    "rpc.startup.history_preview": {
+      "lines": [
+        "First line",
+        "Second line, 世界"
+      ],
+      "timestamp": "2026-01-02T03:04:05Z",
+      "type": "rpc.startup.history_preview"
     },
     "rpc.state": {
       "command_id": "command-1",

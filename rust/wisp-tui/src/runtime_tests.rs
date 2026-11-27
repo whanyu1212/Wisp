@@ -278,6 +278,7 @@ fn terminal_pair(
 
 fn cli() -> Cli {
     Cli {
+        backend_pass_fd: None,
         expected_backend_version: python_package_version(env!("CARGO_PKG_VERSION")),
         backend: vec![],
     }
