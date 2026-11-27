@@ -10,7 +10,25 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
-## 0.16.10 — Unreleased
+## 0.16.11 — Unreleased
+
+- **Find text in a session** ([#1155](https://github.com/whanyu1212/Wisp/pull/1155)). Press
+  `Ctrl+F` to search messages and retained tool output, including older history. Press Enter to jump
+  to a match or Esc to return without moving.
+- **Keep telemetry visible with the side panel docked** ([#1156](https://github.com/whanyu1212/Wisp/pull/1156)).
+- **Replay large compactions faster** ([#1157](https://github.com/whanyu1212/Wisp/pull/1157)).
+  Checking the replaced message IDs now takes linear time without changing the replay result.
+- **Read recent conversation text while history loads** ([#1158](https://github.com/whanyu1212/Wisp/pull/1158)).
+  In local 50k-message runs, median time to the newest visible turn fell from 3.41 s to 0.99 s.
+  The preview is read-only: the first accepted prompt came later (4.99 s → 5.23 s). If Wisp cannot
+  verify the preview, normal loading continues.
+- Live RPC adds the optional `rpc.startup.history_preview` event. Use matching `0.16.11` backend
+  and frontend packages. The saved-session format is unchanged.
+
+<!-- Keeps links to the pre-release "0.16.10 — Unreleased" heading working. -->
+<a id="01610--unreleased"></a>
+
+## 0.16.10 — 2026-11-26
 
 - **Lower-latency live browser interaction ([#1150](https://github.com/whanyu1212/Wisp/pull/1150)).**
   Keep layout and input coordinates stable while sending smaller frames during scrolling and

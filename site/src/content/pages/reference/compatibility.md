@@ -116,6 +116,13 @@ with `write_constraint`, under the exception below. Tool behavior changes are li
 `bash` runs commands in bash rather than `/bin/sh`, and that the read-only file tools follow
 symbolic links whose targets stay inside the workspace.
 
+## Wisp 0.16.11 compatibility
+
+Use the `0.16.11` backend and TUI together. Live RPC adds `rpc.startup.history_preview`, an
+optional event carrying read-only conversation excerpts. Clients must not treat it as an
+interactive transcript or as a signal to submit a prompt. There is no saved-session format change;
+existing sessions open without migration.
+
 ## Wisp 0.16.10 compatibility
 
 Use the `0.16.10` backend and TUI together. No changes to the live RPC contract, Python SDK, or
