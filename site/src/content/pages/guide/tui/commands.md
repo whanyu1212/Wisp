@@ -279,11 +279,11 @@ high-resolution page images.
   back, go forward, or reload.
 - Click the page or use `/browser interact` to type while Wisp is idle. While the page has focus,
   `Alt+Left` and `Alt+Right` move through history, `Ctrl+R` reloads, and `Esc` returns focus to Wisp.
-- Switch to `Work` or hide the pane to close the tab; the `Browser` view then shows its address
-  bar again. Wisp keeps site sign-ins in its saved browser profile for the next launch. The live
-  tab is for manual browsing, and MCP tools continue to use their own browser.
+- Switch to `Session` or `Files`, or hide the pane, to close the tab; the `Browser` view then shows
+  its address bar again. Wisp keeps site sign-ins in its saved browser profile for the next launch.
+  The live tab is for manual browsing, and MCP tools continue to use their own browser.
 
-The top bar always shows the `Work` and `Browser` tabs. Click a tab to open the side panel on
+The top bar always shows the `Session`, `Files`, and `Browser` tabs. Click a tab to open the side panel on
 that view, or click the highlighted tab to close the panel. When a browser MCP server such as
 Playwright (`@playwright/mcp`) or Chrome DevTools (`chrome-devtools-mcp`) is connected, Wisp updates
 the `Browser` view whenever the agent captures a page screenshot.
@@ -303,8 +303,8 @@ the `Browser` view whenever the agent captures a page screenshot.
     page before acting.
 - **Side-panel sizing:** Drag the left border of a docked side panel wider (up to 60% of the
   terminal width), or focus the side panel (`F8`) and press `f` (or click `[Expand]` / `[Restore]`
-  at the top of the panel) to expand either `Work` or `Browser` into a large centered overlay on
-  any terminal size.
+  at the top of the panel) to expand `Session`, `Files`, or `Browser` into a large centered overlay
+  on any terminal size.
 - **Terminal image protocols:** Wisp auto-detects Kitty `U=1` Unicode placeholders (Kitty and
   Ghostty in true-color mode), classic Kitty graphics (WezTerm or 256-color), iTerm2 inline
   images, Sixel, and Unicode half-blocks (`tmux`, `NO_COLOR`, 16-color, or fallback terminals).

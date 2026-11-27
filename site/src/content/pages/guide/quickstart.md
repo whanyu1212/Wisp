@@ -51,18 +51,35 @@ Choose **OpenAI → ChatGPT Plus/Pro** and complete the device-code flow. The sa
 masked API keys for OpenAI, xAI, DeepSeek, Anthropic, Google, and configured OpenAI-compatible
 providers. Provider credentials default to Wisp's private `~/.wisp/auth.json` file. Before
 connecting in a repository you trust, inspect its `.wisp/settings.json`: the project may set
-`auth_path`, including a relative
-path inside the repository. Pass `--auth-file` or set `WISP_AUTH_FILE` to override that choice, and
-never commit the selected credential file.
+`auth_path`, including a relative path inside the repository. Pass `--auth-file` or set
+`WISP_AUTH_FILE` to override that choice, and never commit the selected credential file.
 
-Now enter a request such as:
+## Run your first editing turn
+
+Start with a question or a small edit—use `@` to reference a file without pasting its contents:
 
 ```text
 explain the architecture of this repository
 ```
 
-Tool reads can run directly. Writes, edits, and shell commands pause for your approval unless you
-explicitly pre-approved them. See [Tools & safety](tools-and-safety.md) for the complete policy.
+- **Approvals stay explicit:** Read-only tools run directly. Edits, writes, and shell commands dock
+  an approval panel above the footer with an inline diff or syntax-highlighted `$ command` preview.
+  Approve once (`1`), allow that tool for the session, save a fail-closed command-prefix allow rule
+  for simple `bash` commands inside the project (`2` / `p`), or deny (`Esc`). Manage saved rules and
+  modes anytime in `/permissions`; see [Tools & safety](tools-and-safety.md) for the full policy.
+- **Review changes per turn:** Every editing turn ends with a change summary (`+N −M in K files`).
+  Press `Alt+G` (or click the summary row) to open `/diff` filtered to the files touched in that
+  turn (comparing each file's current working tree against `HEAD`), select an individual edit card
+  with `F6` and `Enter` for its retained before/after diff, or run `/diff` for the full working
+  tree.
+- **Inspect the workspace side panel:** Click **`Session`**, **`Files`**, or **`Browser`** in the
+  top bar (or press `Ctrl+P`) to view live context, the turn/subagent waterfall (`t`), inline file
+  previews (`e` to edit), or the built-in browser.
+- **Run quick local checks inline:** Prefix any line with `!` (such as `!git status` or `!pytest`)
+  to run a shell command locally without spending a model turn. Output stays local unless you press
+  `Alt+S` to attach it to your next prompt.
+
+See the [TUI guide](tui.md) for steering active runs, `/verbosity`, themes, and shortcuts.
 
 ## One-shot and offline runs
 

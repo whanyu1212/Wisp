@@ -243,8 +243,8 @@ setting or persisted preference.
   omitted. Stale coordinates after resize, text replacement, or catalog refresh cannot select a
   new unseen target.
 
-Approvals and project-trust decisions are answered **from the keyboard only**: clicks are ignored
-while one is docked. The wheel and the transcript scroll keys (`PgUp`/`PgDn`, `Ctrl+Up`/`Ctrl+Down`,
+While an approval panel is docked, a plain left click on a painted choice row answers it (clicks
+outside painted choices stay inert); project-trust decisions remain **keyboard-only**. The wheel and the transcript scroll keys (`PgUp`/`PgDn`, `Ctrl+Up`/`Ctrl+Down`,
 `Ctrl+Home`/`Ctrl+End`) still move the conversation so you can review what led to the request; a
 custom binding never takes a key the prompt uses. All mouse input is ignored when a failed
 cancellation response requires keyboard recovery. Horizontal wheel
