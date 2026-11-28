@@ -5936,7 +5936,7 @@
           }
         }
       ],
-      "description": "Bounded append-order page of the selected persisted session tree.",
+      "description": "Bounded page and match count for the requested view of a session tree.",
       "properties": {
         "active_leaf_id": {
           "anyOf": [

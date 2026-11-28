@@ -198,8 +198,7 @@ def start_rpc_session_tree_command(
         run_rpc_session_tree_command,
         session_state.session,
         session_state.entry_count,
-        command.limit,
-        command.after_entry_id,
+        command,
         command_id,
         cancel_scope,
         send.clone(),
@@ -520,8 +519,7 @@ async def run_rpc_sessions_command(
 async def run_rpc_session_tree_command(
     session: JsonlSession | None,
     selected_entry_count: int,
-    limit: int,
-    after_entry_id: str | None,
+    command: GetSessionTreeCommand,
     command_id: str,
     cancel_scope: anyio.CancelScope,
     send: MemoryObjectSendStream[_RpcControlEvent],
@@ -535,8 +533,8 @@ async def run_rpc_session_tree_command(
     try:
         with cancel_scope:
             if session is None:
-                if after_entry_id is not None:
-                    raise SessionError(f"Session tree cursor not found: {after_entry_id}")
+                if command.after_entry_id is not None:
+                    raise SessionError(f"Session tree cursor not found: {command.after_entry_id}")
                 page = SessionTreePage(
                     session_id=None,
                     path=None,
@@ -550,8 +548,9 @@ async def run_rpc_session_tree_command(
                 page = await _run_abandonable_session_read(
                     partial(
                         session.read_tree_page,
-                        limit=limit,
-                        after_entry_id=after_entry_id,
+                        limit=command.limit,
+                        after_entry_id=command.after_entry_id,
+                        view=command.view,
                     )
                 )
                 if session.path.is_file():

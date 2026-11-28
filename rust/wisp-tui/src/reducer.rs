@@ -18,7 +18,7 @@ use wisp_protocol::commands::{
     ModelConfiguration, QueueKind, WispTypedClientRpcCommands,
 };
 
-pub use wisp_protocol::commands::AgentMode;
+pub use wisp_protocol::commands::{AgentMode, SessionTreeView};
 pub(crate) mod background_processes;
 mod command_controls;
 mod context;
@@ -190,6 +190,12 @@ pub struct SessionTreeNode {
     pub role: Option<String>,
     pub preview: String,
     pub preview_truncated: bool,
+}
+
+impl SessionTreeNode {
+    pub(crate) fn is_user_prompt(&self) -> bool {
+        self.kind == SessionTreeNodeKind::Message && self.role.as_deref() == Some("user")
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -495,6 +501,7 @@ pub enum SessionOperation {
         completion: Option<SessionCompletion>,
     },
     LoadingTree {
+        view: SessionTreeView,
         command_id: String,
         after_entry_id: Option<String>,
         page: Option<SessionTreePage>,
@@ -2095,9 +2102,11 @@ pub enum UiAction {
     SetSessionName(String),
     CloneSession,
     ForkSession {
+        expected_active_leaf_id: Option<String>,
         entry_id: String,
     },
     LoadSessionTree {
+        view: SessionTreeView,
         after_entry_id: Option<String>,
     },
     NavigateSessionTree {
@@ -2183,6 +2192,7 @@ pub enum UiEffect {
         selected_session_id: Option<String>,
     },
     ShowSessionTreePage {
+        view: SessionTreeView,
         page: SessionTreePage,
         append: bool,
     },
@@ -2410,10 +2420,14 @@ pub fn reduce(
         UiAction::NewSession => new_session(state, ids),
         UiAction::SetSessionName(name) => set_session_name(state, name, ids),
         UiAction::CloneSession => clone_session(state, ids),
-        UiAction::ForkSession { entry_id } => fork_session(state, entry_id, ids),
-        UiAction::LoadSessionTree { after_entry_id } => {
-            load_session_tree(state, after_entry_id, ids)
-        }
+        UiAction::ForkSession {
+            entry_id,
+            expected_active_leaf_id,
+        } => fork_session(state, entry_id, expected_active_leaf_id, ids),
+        UiAction::LoadSessionTree {
+            view,
+            after_entry_id,
+        } => load_session_tree(state, view, after_entry_id, ids),
         UiAction::NavigateSessionTree { entry_id } => navigate_session_tree(state, entry_id, ids),
         UiAction::UnrevertSessionTree => unrevert_session_tree(state, ids),
         UiAction::RejectCommittedHydration { command_id, limit } => {
@@ -3301,6 +3315,7 @@ fn clone_session(
 fn fork_session(
     state: &mut UiState,
     entry_id: String,
+    expected_active_leaf_id: Option<String>,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ReduceError> {
     if !valid_session_id(&entry_id) {
@@ -3315,8 +3330,19 @@ fn fork_session(
     if let Some(effects) = begin_session_operation(state)? {
         return Ok(effects);
     }
+    if expected_active_leaf_id.is_some() && expected_active_leaf_id != state.history.active_leaf_id
+    {
+        return Ok(vec![
+            UiEffect::Notice("The branch changed. Reopen rewind to select a prompt.".into()),
+            UiEffect::RequestRender,
+        ]);
+    }
     let id = ids.next_id(CommandKind::ForkSession);
-    let command = WispTypedClientRpcCommands::fork_session(&id, &entry_id)?;
+    let command = WispTypedClientRpcCommands::fork_session_at_leaf(
+        &id,
+        &entry_id,
+        expected_active_leaf_id.as_deref(),
+    )?;
     state.input_ready = false;
     state.session_operation = Some(SessionOperation::ForkingSession {
         command_id: id,
@@ -3333,6 +3359,7 @@ fn fork_session(
 
 fn load_session_tree(
     state: &mut UiState,
+    view: SessionTreeView,
     after_entry_id: Option<String>,
     ids: &mut impl CommandIdSource,
 ) -> Result<Vec<UiEffect>, ReduceError> {
@@ -3352,9 +3379,11 @@ fn load_session_tree(
         return Ok(effects);
     }
     let id = ids.next_id(CommandKind::GetSessionTree);
-    let command = WispTypedClientRpcCommands::get_session_tree(&id, after_entry_id.as_deref())?;
+    let command =
+        WispTypedClientRpcCommands::session_tree_page(&id, after_entry_id.as_deref(), view)?;
     state.input_ready = false;
     state.session_operation = Some(SessionOperation::LoadingTree {
+        view,
         command_id: id,
         after_entry_id,
         page: None,
@@ -4066,6 +4095,7 @@ fn capture_session_event(
             after_entry_id,
             page,
             completion,
+            ..
         } => capture_tree_page(
             state,
             event,
@@ -4203,12 +4233,14 @@ fn finish_session_operation(
             ids,
         ),
         SessionOperation::LoadingTree {
+            view,
             command_id,
             after_entry_id,
             page,
             completion,
         } => Ok(finish_tree_page(
             state,
+            view,
             command_id,
             after_entry_id,
             page,
@@ -4836,6 +4868,7 @@ fn capture_tree_page(
 
 fn finish_tree_page(
     state: &mut UiState,
+    view: SessionTreeView,
     command_id: String,
     after_entry_id: Option<String>,
     page: Option<SessionTreePage>,
@@ -4846,9 +4879,20 @@ fn finish_tree_page(
             session_failure(state, "session tree", completion.error)
         }
         (Some(page), Some(_)) => {
+            if view == SessionTreeView::Prompts
+                && ((!page.nodes.is_empty() && page.active_leaf_id.is_none())
+                    || page.nodes.iter().any(|node| !node.is_user_prompt()))
+            {
+                return session_failure(
+                    state,
+                    "rewind",
+                    Some("backend returned an invalid prompt page".into()),
+                );
+            }
             state.input_ready = true;
             vec![
                 UiEffect::ShowSessionTreePage {
+                    view,
                     page,
                     append: after_entry_id.is_some(),
                 },
@@ -4857,6 +4901,7 @@ fn finish_tree_page(
         }
         (page, completion) => {
             state.session_operation = Some(SessionOperation::LoadingTree {
+                view,
                 command_id,
                 after_entry_id,
                 page,
@@ -8410,6 +8455,7 @@ mod tests {
         reduce(
             &mut state,
             UiAction::ForkSession {
+                expected_active_leaf_id: None,
                 entry_id: "user-2".into(),
             },
             &mut ids,
@@ -12346,6 +12392,26 @@ mod tests {
     }
 
     #[test]
+    fn rewind_rejects_changed_branch() {
+        let mut state = UiState::unconfigured();
+        state.selected_session = Some(session("source"));
+        state.history.active_leaf_id = Some("new-leaf".into());
+        let effects = reduce(
+            &mut state,
+            UiAction::ForkSession {
+                entry_id: "chosen-prompt".into(),
+                expected_active_leaf_id: Some("displayed-leaf".into()),
+            },
+            &mut DeterministicIds::default(),
+        )
+        .unwrap();
+        assert!(
+            matches!(effects.as_slice(), [UiEffect::Notice(message), UiEffect::RequestRender] if message.contains("branch changed"))
+        );
+        assert!(state.session_operation.is_none());
+    }
+
+    #[test]
     fn fork_restores_prompt_images() {
         let image = composer_images::AttachedImage::stored(&serde_json::json!({
             "media_type": "image/png", "sha256": "a".repeat(64),
@@ -12365,6 +12431,7 @@ mod tests {
             reduce(
                 &mut state,
                 UiAction::ForkSession {
+                    expected_active_leaf_id: None,
                     entry_id: "user-2".into(),
                 },
                 &mut ids,
@@ -12429,6 +12496,7 @@ mod tests {
         reduce(
             &mut state,
             UiAction::ForkSession {
+                expected_active_leaf_id: None,
                 entry_id: "user-2".into(),
             },
             &mut ids,
@@ -12613,6 +12681,7 @@ mod tests {
         reduce(
             &mut state,
             UiAction::LoadSessionTree {
+                view: SessionTreeView::Tree,
                 after_entry_id: None,
             },
             &mut ids,
@@ -12654,7 +12723,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             effects.as_slice(),
-            [UiEffect::ShowSessionTreePage { page: shown, append: false }, UiEffect::RequestRender]
+            [UiEffect::ShowSessionTreePage { view: SessionTreeView::Tree, page: shown, append: false }, UiEffect::RequestRender]
                 if shown == &page
         ));
     }
@@ -16193,6 +16262,7 @@ mod tests {
             derived,
         };
         let fork_action = || UiAction::ForkSession {
+            expected_active_leaf_id: None,
             entry_id: "user-2".into(),
         };
         let fork = |derived| BackendEvent::SessionForked {
@@ -16213,6 +16283,7 @@ mod tests {
             },
         };
         let tree = || UiAction::LoadSessionTree {
+            view: SessionTreeView::Tree,
             after_entry_id: Some("cursor".into()),
         };
         let cases = [
@@ -16312,6 +16383,7 @@ mod tests {
     fn next_tree_page_appends() {
         let (state, effects) = answer_session_operation(
             UiAction::LoadSessionTree {
+                view: SessionTreeView::Tree,
                 after_entry_id: Some("cursor".into()),
             },
             vec![

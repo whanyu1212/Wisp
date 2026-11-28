@@ -75,6 +75,11 @@ def test_executor_session_tree_reports_empty_and_bounded_selected_pages(
                 {"id": "tree-selected", "type": "get_session_tree", "limit": 1},
             )
             selected_completed = await receive.receive()
+            await dispatch_parsed(
+                executor,
+                {"id": "prompts-selected", "type": "get_session_tree", "view": "prompts"},
+            )
+            prompts_completed = await receive.receive()
             task_group.cancel_scope.cancel()
 
         reports = [event for event in fixture.events if isinstance(event, RpcSessionTreeReported)]
@@ -100,6 +105,13 @@ def test_executor_session_tree_reports_empty_and_bounded_selected_pages(
         assert [node.entry_id for node in reports[2].nodes] == [first.id]
         assert reports[2].truncated is True
         assert reports[2].next_after_entry_id == first.id
+        assert prompts_completed.ok is True
+        assert reports[3].command_id == "prompts-selected"
+        assert reports[3].active_leaf_id == reports[2].active_leaf_id != first.id
+        assert reports[3].total_node_count == 1
+        assert [node.entry_id for node in reports[3].nodes] == [first.id]
+        assert reports[3].truncated is False
+        assert reports[3].next_after_entry_id is None
 
     anyio.run(scenario)
 

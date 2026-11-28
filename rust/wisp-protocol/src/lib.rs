@@ -525,6 +525,8 @@ pub mod commands {
         generated::WispTypedClientRpcCommands
     );
 
+    pub use generated::SessionTreeView;
+
     #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, Eq, PartialEq)]
     #[serde(rename_all = "snake_case")]
     pub enum PermissionMode {
@@ -1367,11 +1369,24 @@ pub mod commands {
 
         /// Fork before one persisted user message and select the fork.
         pub fn fork_session(id: &str, entry_id: &str) -> Result<Self, super::ProtocolDecodeError> {
-            deserialize(serde_json::json!({
+            Self::fork_session_at_leaf(id, entry_id, None)
+        }
+
+        /// Reject the fork if the displayed source branch has since advanced.
+        pub fn fork_session_at_leaf(
+            id: &str,
+            entry_id: &str,
+            expected_active_leaf_id: Option<&str>,
+        ) -> Result<Self, super::ProtocolDecodeError> {
+            let mut command = serde_json::json!({
                 "type": "fork_session",
                 "id": id,
                 "entry_id": entry_id,
-            }))
+            });
+            if let Some(leaf) = expected_active_leaf_id {
+                command["expected_active_leaf_id"] = serde_json::json!(leaf);
+            }
+            deserialize(command)
         }
 
         /// Request one bounded append-ordered page of the selected session tree.
@@ -1379,11 +1394,22 @@ pub mod commands {
             id: &str,
             after_entry_id: Option<&str>,
         ) -> Result<Self, super::ProtocolDecodeError> {
+            Self::session_tree_page(id, after_entry_id, SessionTreeView::Tree)
+        }
+
+        /// Request a tree page or the active branch's user prompts, newest first.
+        pub fn session_tree_page(
+            id: &str,
+            after_entry_id: Option<&str>,
+            view: SessionTreeView,
+        ) -> Result<Self, super::ProtocolDecodeError> {
             let mut value = serde_json::json!({
                 "type": "get_session_tree",
                 "id": id,
                 "limit": 200,
+                "view": view,
             });
+
             if let Some(after_entry_id) = after_entry_id {
                 value
                     .as_object_mut()

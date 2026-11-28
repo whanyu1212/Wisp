@@ -117,7 +117,10 @@ fn open(ui: &mut LiveUi, kind: OverlayKind) {
             ui.connection_panel = Some(ConnectionPanel::new(catalog("openai")))
         }
         OverlayKind::SessionTree => {
-            ui.session_tree_picker = Some(SessionTreePicker::new(tree("entry-1")))
+            ui.session_tree_picker = Some(SessionTreePicker::new(
+                tree("entry-1"),
+                SessionTreeView::Tree,
+            ))
         }
         OverlayKind::Session => {
             ui.session_picker = Some(SessionPicker::new(
@@ -680,6 +683,7 @@ async fn closed_tree_does_not_reopen_on_late_page_and_ctrl_c_keeps_its_existing_
         .unwrap();
     ui.apply_effects(
         vec![UiEffect::ShowSessionTreePage {
+            view: SessionTreeView::Tree,
             page: tree("entry-2"),
             append: true,
         }],
@@ -1394,6 +1398,97 @@ async fn diff_keeps_open_without_card() {
 }
 
 #[tokio::test]
+async fn rewind_forks_selected_prompt() {
+    let (writer, mut receiver) = mpsc::channel(16);
+    let mut ui = base();
+    ui.editor.clear();
+    ui.state.input_ready = true;
+    let session = reducer::SessionIdentity {
+        session_id: "source".into(),
+        session_path: "/source.jsonl".into(),
+        session_name: None,
+    };
+    ui.state.selected_session = Some(session.clone());
+    ui.state.history.active_leaf_id = Some("leaf-a".into());
+    ui.handle_input(key(KeyCode::Esc), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(receiver.try_recv().is_err());
+    ui.handle_input(key(KeyCode::Esc), &writer, 8192)
+        .await
+        .unwrap();
+    let request = command(&mut receiver);
+    assert_eq!(request["type"], "get_session_tree");
+    assert_eq!(request["view"], "prompts");
+
+    let mut page = tree("new prompt");
+    page.nodes.push(tree("older prompt").nodes.remove(0));
+    page.session = Some(session);
+    page.active_leaf_id = Some("leaf-a".into());
+    page.truncated = false;
+    page.next_after_entry_id = None;
+    let id = request["id"].as_str().unwrap();
+    for event in [
+        BackendEvent::SessionTreeReported {
+            command_id: id.into(),
+            page,
+        },
+        BackendEvent::CommandFinished {
+            command_id: id.into(),
+            command_type: "get_session_tree".into(),
+            ok: true,
+            error: None,
+        },
+    ] {
+        ui.dispatch(UiAction::BackendEvent(event), &writer, 8192)
+            .await
+            .unwrap();
+    }
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    draw(&mut ui, &mut terminal);
+    let screen = text(terminal.backend().buffer());
+    assert!(screen.contains("rewind to a prompt"));
+    assert!(screen.contains("Keep current files."));
+    assert!(screen.find("new prompt").unwrap() < screen.find("older prompt").unwrap());
+    ui.handle_input(key(KeyCode::Down), &writer, 8192)
+        .await
+        .unwrap();
+    draw(&mut ui, &mut terminal);
+    ui.handle_input(key(KeyCode::Enter), &writer, 8192)
+        .await
+        .unwrap();
+    let fork = command(&mut receiver);
+    assert_eq!(fork["type"], "fork_session");
+    assert_eq!(fork["entry_id"], "older prompt");
+    assert_eq!(fork["expected_active_leaf_id"], "leaf-a");
+    assert!(receiver.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn rewind_requires_idle_empty_composer() {
+    let (writer, mut receiver) = mpsc::channel(16);
+    let mut ui = base();
+    ui.state.input_ready = true;
+    for _ in 0..2 {
+        ui.handle_input(key(KeyCode::Esc), &writer, 8192)
+            .await
+            .unwrap();
+    }
+    assert!(ui.editor.text().starts_with("keep this"));
+    assert!(ui.last_rewind_escape.is_none());
+    ui.editor.clear();
+    let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+    let now = Instant::now();
+    assert!(!ui.rewind_shortcut(esc, now));
+    assert!(!ui.rewind_shortcut(esc, now + Duration::from_secs(1)));
+    ui.handle_input(key(KeyCode::Char('a')), &writer, 8192)
+        .await
+        .unwrap();
+    assert!(ui.last_rewind_escape.is_none());
+    assert!(receiver.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn ctrl_t_opens_tree() {
     let (writer, _receiver) = mpsc::channel(16);
     let mut ui = base();
@@ -1857,6 +1952,7 @@ async fn effects_request_a_frame() {
             "tree page",
             idle,
             UiEffect::ShowSessionTreePage {
+                view: SessionTreeView::Tree,
                 page: tree("entry-1"),
                 append: false,
             },

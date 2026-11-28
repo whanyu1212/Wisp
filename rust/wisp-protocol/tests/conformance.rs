@@ -381,7 +381,7 @@ fn tui_command_builders_preserve_the_canonical_wire_contract() {
         .unwrap();
     assert_eq!(
         first_tree,
-        serde_json::json!({"type": "get_session_tree", "id": "tree-1", "limit": 200})
+        serde_json::json!({"type": "get_session_tree", "id": "tree-1", "limit": 200, "view": "tree"})
     );
     let next_tree =
         commands::WispTypedClientRpcCommands::get_session_tree("tree-2", Some("entry-200"))
@@ -391,7 +391,7 @@ fn tui_command_builders_preserve_the_canonical_wire_contract() {
     assert_eq!(
         next_tree,
         serde_json::json!({
-            "type": "get_session_tree", "id": "tree-2", "limit": 200,
+            "type": "get_session_tree", "id": "tree-2", "limit": 200, "view": "tree",
             "after_entry_id": "entry-200"
         })
     );

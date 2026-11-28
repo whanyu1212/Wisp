@@ -1119,6 +1119,7 @@ async fn stale_device_detail_and_tree_results_do_not_displace_a_theme_preview() 
         }),
         UiEffect::OpenExactDetail(stale_detail),
         UiEffect::ShowSessionTreePage {
+            view: SessionTreeView::Tree,
             append: true,
             page: reducer::SessionTreePage {
                 session: None,

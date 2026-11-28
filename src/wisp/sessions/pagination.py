@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Literal
 
 from pydantic import ValidationError
+from typing_extensions import TypeAliasType
 
 from wisp.events import (
     AgentCompleted,
@@ -48,6 +49,7 @@ DEFAULT_SESSION_MESSAGE_PAGE_LIMIT = 200
 MAX_SESSION_MESSAGE_PAGE_LIMIT = 500
 DEFAULT_SESSION_TREE_PAGE_LIMIT = 200
 MAX_SESSION_TREE_PAGE_LIMIT = 500
+SessionTreeView = TypeAliasType("SessionTreeView", Literal["tree", "prompts"])
 SESSION_TREE_PREVIEW_BYTE_LIMIT = 512
 MESSAGE_CONTENT_BYTE_LIMIT = 64 * 1024
 TOOL_ARGUMENTS_BYTE_LIMIT = 64 * 1024
@@ -107,7 +109,7 @@ class SessionTreeNodeSummary:
 
 @dataclass(frozen=True, slots=True)
 class SessionTreePage:
-    """One append-ordered page of a selected session tree."""
+    """One page of nodes from a selected session tree."""
 
     session_id: str | None
     path: Path | None
@@ -709,6 +711,7 @@ def tree_page_from_entries(
     path: Path | None,
     limit: int,
     after_entry_id: str | None,
+    view: SessionTreeView = "tree",
 ) -> SessionTreePage:
     if type(limit) is not int or limit < 1 or limit > MAX_SESSION_TREE_PAGE_LIMIT:
         raise ValueError(
@@ -718,39 +721,58 @@ def tree_page_from_entries(
         raise ValueError("Session tree cursor must be non-empty")
 
     tree = resolve_session_tree(entries)
+    nodes = tree.nodes
+    if view == "prompts":
+        # Use the persisted path, since replay can replace older prompts with a summary.
+        nodes = tuple(
+            entry
+            for entry in reversed(tree.active_path)
+            if isinstance(entry, MessageSessionEntry)
+            and entry.message.role == "user"
+            and not entry.message.is_process_wake
+        )
     start = 0
     if after_entry_id is not None:
         cursor_index = next(
-            (index for index, node in enumerate(tree.nodes) if node.id == after_entry_id),
+            (index for index, node in enumerate(nodes) if node.id == after_entry_id),
             None,
         )
         if cursor_index is None:
             raise SessionError(f"Session tree cursor not found: {after_entry_id}")
         start = cursor_index + 1
 
-    selected = tree.nodes[start : start + limit]
+    selected = nodes[start : start + limit]
     end = start + len(selected)
-    truncated = end < len(tree.nodes)
+    truncated = end < len(nodes)
     return SessionTreePage(
         session_id=session_id,
         path=path,
         active_leaf_id=tree.active_leaf_id,
-        total_node_count=len(tree.nodes),
-        nodes=tuple(session_tree_node_summary(node) for node in selected),
+        total_node_count=len(nodes),
+        nodes=tuple(session_tree_node_summary(node, view=view) for node in selected),
         truncated=truncated,
         next_after_entry_id=selected[-1].id if truncated and selected else None,
     )
 
 
-def session_tree_node_summary(entry: SessionTreeEntry) -> SessionTreeNodeSummary:
+def session_tree_node_summary(
+    entry: SessionTreeEntry, *, view: SessionTreeView = "tree"
+) -> SessionTreeNodeSummary:
     role: Role | None = None
     if isinstance(entry, MessageSessionEntry):
-        role = entry.message.role
-        preview = entry.message.prompt_content
-        if entry.message.is_process_wake:
+        message = entry.message
+        role = message.role
+        if view == "prompts":
+            preview = message.user_visible_content
+            if not preview.strip() and message.images:
+                image_count = len(message.images)
+                preview = "[Image]" if image_count == 1 else f"[{image_count} images]"
+        elif message.is_process_wake:
             preview = "[background process stopped]"
-        if not preview and entry.message.tool_calls:
-            names = ", ".join(call.name for call in entry.message.tool_calls)
+        else:
+            preview = message.prompt_content
+        if not preview and message.tool_calls:
+            names = ", ".join(call.name for call in message.tool_calls)
             preview = f"[tool calls: {names}]"
         kind: Literal["message", "event", "compaction"] = "message"
     elif isinstance(entry, EventSessionEntry):

@@ -106,6 +106,7 @@ from wisp.rpc.protocol import (
     RpcTransportLimits,
     validate_rpc_handshake_response,
 )
+from wisp.sessions.pagination import SessionTreeView
 
 
 class RpcTransport(Protocol):
@@ -636,11 +637,33 @@ class RpcController:
         await self._transport.send(CloneSessionCommand(id=selected_id))
         return selected_id
 
-    async def fork_session(self, entry_id: str, *, command_id: str | None = None) -> str:
-        """Fork before a selected user message and select the fork."""
+    async def fork_session(
+        self,
+        entry_id: str,
+        *,
+        expected_active_leaf_id: str | None = None,
+        command_id: str | None = None,
+    ) -> str:
+        """Fork before a selected user message and select the fork.
+
+        Args:
+            entry_id (str): Persisted user message to fork before.
+            expected_active_leaf_id (str | None): Active leaf observed when choosing
+                the message. Omit it to use the active leaf when the command runs.
+            command_id (str | None): Caller-supplied ID for the request.
+
+        Returns:
+            str: The command ID used to correlate fork and completion events.
+        """
 
         selected_id = command_id or self._command_id_factory("fork-session")
-        await self._transport.send(ForkSessionCommand(id=selected_id, entry_id=entry_id))
+        await self._transport.send(
+            ForkSessionCommand(
+                id=selected_id,
+                entry_id=entry_id,
+                expected_active_leaf_id=expected_active_leaf_id,
+            )
+        )
         return selected_id
 
     async def get_session_tree(
@@ -648,9 +671,20 @@ class RpcController:
         *,
         limit: int = 200,
         after_entry_id: str | None = None,
+        view: SessionTreeView = "tree",
         command_id: str | None = None,
     ) -> str:
-        """Request a bounded page of the selected session's tree."""
+        """Request append-order tree nodes or newest-first prompts on the active path.
+
+        Args:
+            limit (int): Maximum number of nodes in this page.
+            after_entry_id (str | None): Exclusive cursor in the selected view's order.
+            view (SessionTreeView): All tree nodes or active-path user prompts.
+            command_id (str | None): Caller-supplied ID for the request.
+
+        Returns:
+            str: The command ID used to correlate the page and completion events.
+        """
 
         selected_id = command_id or self._command_id_factory("session-tree")
         await self._transport.send(
@@ -658,6 +692,7 @@ class RpcController:
                 id=selected_id,
                 limit=limit,
                 after_entry_id=after_entry_id,
+                view=view,
             )
         )
         return selected_id

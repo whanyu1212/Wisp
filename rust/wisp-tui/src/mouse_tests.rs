@@ -854,24 +854,27 @@ async fn wheel_crosses_session_tree_page_boundary_without_jumping_ordinary_rows(
         session_path: "/session.jsonl".into(),
         session_name: None,
     });
-    ui.session_tree_picker = Some(SessionTreePicker::new(reducer::SessionTreePage {
-        session: ui.state.selected_session.clone(),
-        active_leaf_id: None,
-        total_node_count: 3,
-        nodes: (0..2)
-            .map(|index| reducer::SessionTreeNode {
-                entry_id: format!("entry-{index}"),
-                parent_id: None,
-                created_at: "now".into(),
-                kind: reducer::SessionTreeNodeKind::Message,
-                role: Some("user".into()),
-                preview: format!("Node {index}"),
-                preview_truncated: false,
-            })
-            .collect(),
-        truncated: true,
-        next_after_entry_id: Some("entry-1".into()),
-    }));
+    ui.session_tree_picker = Some(SessionTreePicker::new(
+        reducer::SessionTreePage {
+            session: ui.state.selected_session.clone(),
+            active_leaf_id: None,
+            total_node_count: 3,
+            nodes: (0..2)
+                .map(|index| reducer::SessionTreeNode {
+                    entry_id: format!("entry-{index}"),
+                    parent_id: None,
+                    created_at: "now".into(),
+                    kind: reducer::SessionTreeNodeKind::Message,
+                    role: Some("user".into()),
+                    preview: format!("Node {index}"),
+                    preview_truncated: false,
+                })
+                .collect(),
+            truncated: true,
+            next_after_entry_id: Some("entry-1".into()),
+        },
+        SessionTreeView::Tree,
+    ));
     draw(&mut ui, 80, 24);
     let (x, y) = row_point(&ui, 0);
     ui.handle_input(
