@@ -108,7 +108,7 @@ Consumers should:
 `wisp-ai` is the only published Wisp distribution.
 
 Package releases use semantic versioning expressed with Python's PEP 440 spelling (for example,
-`0.16.0` for the first stable release in the `0.16` minor line, `0.16.12` for a patch release, and
+`0.16.0` for the first stable release in the `0.16` minor line, `0.16.13` for a patch release, and
 `rcN` suffixes for release candidates).
 
 - Patch releases preserve the documented public API. They may correct behavior that contradicts a
@@ -187,6 +187,14 @@ migration or containment advice.
 > `create_only`, `non_empty`, and `receipt`. A `ToolContext` that sets none of the five is
 > unaffected. This exception covers only these fields; the normal policy continues to apply to
 > other public APIs.
+
+## Wisp 0.16.13 compatibility
+
+Use matching 0.16.13 backend, TUI, and SDK transport versions. Prompt rewind extends two existing
+RPC commands. Pass `view="prompts"` to `get_session_tree` to list user prompts on the active path,
+newest first. Omitting `view` keeps the append-order tree. Pass `expected_active_leaf_id` to
+`fork_session` to reject a fork if the active leaf has changed since selection. Both arguments are
+optional in the Python RPC controller. Existing saved sessions open without migration.
 
 ## Wisp 0.16.12 compatibility
 
