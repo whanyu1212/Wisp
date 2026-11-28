@@ -305,7 +305,7 @@ enum Paint {
 /// colours, and the Adal marks keep their pink. Without gradients, each stays flat.
 fn paint(art: LogoArt, palette: Palette, no_color: bool) -> Paint {
     let monochrome = no_color || palette.is_monochrome();
-    let gradient = !monochrome && palette.shows_gradients();
+    let gradient = !monochrome && palette.supports_extended_color();
     match art.treatment {
         ColorTreatment::WispGradient if gradient => {
             Paint::Gradient([palette.logo_tip, palette.logo_middle, palette.logo_base])

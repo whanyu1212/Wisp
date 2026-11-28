@@ -13,7 +13,13 @@ from pathlib import Path
 
 import pytest
 
-from tests.tui_e2e.support import complete_frames, context_stats_ready, screen_rows, screen_shows
+from tests.tui_e2e.support import (
+    complete_frames,
+    context_stats_ready,
+    footer_identity_shows,
+    screen_rows,
+    screen_shows,
+)
 from tests.tui_e2e.test_readiness import _rust_binary, _TuiProcess
 from wisp import __version__
 
@@ -264,7 +270,7 @@ def test_browser_takeover_click_type_key_and_panel_expand_over_pty(tmp_path: Pat
         tui.wait_until(
             lambda output: (
                 context_stats_ready(output)
-                and screen_shows(output, "─ fake ")
+                and footer_identity_shows(output, "fake")
                 and not screen_shows(output, "ctx ~?")
                 and not screen_shows(output, "ctx ~…")
                 and not screen_shows(output, "Refreshing context")

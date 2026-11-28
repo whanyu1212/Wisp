@@ -17,6 +17,7 @@ import pytest
 from tests.tui_e2e.support import (
     CONTEXT_STATS_BACKEND,
     complete_logged_commands,
+    footer_identity_shows,
     frame_cursor,
     reap,
     rendered_without_spacing,
@@ -206,7 +207,11 @@ for line in sys.stdin:
                     if exc.errno != errno.EIO:
                         raise
             commands = complete_logged_commands(command_log)
-            if phase == "startup" and welcome_ready(output) and screen_shows(output, "plan ─╯"):
+            if (
+                phase == "startup"
+                and welcome_ready(output)
+                and footer_identity_shows(output, "plan")
+            ):
                 os.write(terminal_fd, b"/he")
                 phase = "prefix"
                 output.clear()

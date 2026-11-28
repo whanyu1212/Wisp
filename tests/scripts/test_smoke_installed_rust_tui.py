@@ -14,12 +14,13 @@ from scripts import smoke_installed_rust_tui as smoke
 @pytest.mark.parametrize(
     ("history_messages", "ready_text", "reported_messages"),
     [
-        (10_000, smoke._HISTORY_READY + b" idle", 10_001),
-        (0, b"Browse\x1b[14;26Hcommands idle", 0),
+        (10_000, smoke._HISTORY_READY, 10_001),
+        (0, b"Browse\x1b[14;26Hcommands", 0),
     ],
 )
 @pytest.mark.parametrize("working_repaints", [0, 2])
 @pytest.mark.parametrize("premature_exit", [False, True])
+@pytest.mark.parametrize(("start_cap", "end_cap"), [("◖", "◗"), ("\ue0b6", "\ue0b4")])
 def test_smoke_finishes_when_idle_is_only_incrementally_repainted(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -28,6 +29,8 @@ def test_smoke_finishes_when_idle_is_only_incrementally_repainted(
     reported_messages: int,
     working_repaints: int,
     premature_exit: bool,
+    start_cap: str,
+    end_cap: str,
 ) -> None:
     """Replay the macOS failure: response finishes but idle is painted as 'dle'."""
     (tmp_path / "wisp-tui").write_bytes(b"binary")
@@ -43,14 +46,17 @@ def test_smoke_finishes_when_idle_is_only_incrementally_repainted(
         nonlocal repaints
         width = struct.unpack("HHHH", dimensions)[1]
         if width == 81:
-            packets.append(frame(b"ctx ~42%"))
+            packets.append(frame(f"{start_cap}ctx ~42%{end_cap}".encode()))
         elif not sent:
             packets.append(frame(ready_text))
         else:
             repaints += 1
-            state = b"working" if repaints <= working_repaints else b"idle"
+            label = "● working" if repaints <= working_repaints else "•\x1b[23;79Hidle"
+            badge = f"{start_cap}{label}{end_cap}"
             # Include a partial frame first: the script must wait for its end.
-            complete = frame(b"fake response to: installed wheel smoke " + state)
+            complete = frame(
+                f"fake response to: installed wheel smoke\x1b[23;1H/srv/idle     {badge}".encode()
+            )
             packets.extend([complete[:-8], complete[-8:]])
 
     def write(_fd: int, data: bytes) -> int:

@@ -16,7 +16,9 @@ import pytest
 
 from tests.tui_e2e.support import (
     complete_frames,
+    footer_identity_shows,
     reap,
+    run_settled,
     screen_rows,
     screen_shows,
     welcome_ready,
@@ -94,13 +96,13 @@ def test_rust_model_selection_survives_restart(tmp_path: Path) -> None:
                 if phase == "startup" and ready:
                     if restart:
                         phase = "restored"
-                    elif shows("─ fake "):
+                    elif footer_identity_shows(output, "fake"):
                         command = (
                             b"/model\r" if picker_only else b"/model fake::custom-model effort\r"
                         )
                         send(command, retry_after=1)
                         phase = "picker" if picker_only else "applying"
-                elif phase == "restored" and shows("custom-model (effort)"):
+                elif phase == "restored" and footer_identity_shows(output, "custom-model (effort)"):
                     phase = "quitting"
                 elif phase == "picker":
                     if shows("Effort: Default  ←/→ change"):
@@ -119,7 +121,7 @@ def test_rust_model_selection_survives_restart(tmp_path: Path) -> None:
                         assert saved["provider"] != "fake" and saved["model"]
                         assert saved["effort"]
                         phase = "quitting"
-                    elif not picker_only and shows("custom-model (effort)"):
+                    elif not picker_only and footer_identity_shows(output, "custom-model (effort)"):
                         phase = "quitting"
                     elif now >= resend_at and (
                         (picker_only and shows("←/→ change") and shows("Enter apply"))
@@ -127,7 +129,7 @@ def test_rust_model_selection_survives_restart(tmp_path: Path) -> None:
                     ):
                         # Applying replaces the picker hint and clears the composer.
                         send(b"\r", retry_after=1)
-                if phase == "quitting" and shows("idle"):
+                if phase == "quitting" and run_settled(output):
                     os.write(terminal_fd, b"\x03")
                     phase = "exiting"
             assert status is not None, f"Rust model selection timed out in {phase!r}: " + "\n".join(

@@ -51,6 +51,7 @@ from benchmarks.rust_tui_e2e import (
     _distribution,
     _drain_available,
     _elapsed_ms,
+    _footer_idle,
     _kill_process_group,
     _optional_distribution,
     _PaintedScreen,
@@ -530,7 +531,7 @@ class _HydrationPaint:
             return
         if self.reply_ns is None and screen.shows(_PROBE_REPLY):
             self.reply_ns = now_ns
-        if self.reply_ns is not None and any("idle" in row for row in footer):
+        if self.reply_ns is not None and _footer_idle(footer):
             self.reply_idle = True
 
     def submit_if_ready(self, terminal_fd: int, profile_dir: Path | None) -> None:
@@ -626,6 +627,7 @@ def _run_sample(config: BenchmarkConfig, history_messages: int, run: int) -> Ses
         ready_ns: int | None = None
         context_redrawn = False
         paint = _HydrationPaint(history_messages, config.first_reply)
+        startup_screen = _PaintedScreen() if not history_messages else None
         quit_sent = False
         settle = _BackendSettle()
         backend: psutil.Process | None = None
@@ -658,6 +660,8 @@ def _run_sample(config: BenchmarkConfig, history_messages: int, run: int) -> Ses
                     if len(output) > _OUTPUT_TAIL_LIMIT:
                         del output[:-_OUTPUT_TAIL_LIMIT]
                     paint.observe(chunk, now_ns)
+                    if startup_screen is not None and context_redrawn and ready_ns is None:
+                        startup_screen.feed(chunk)
                 startup_plain = _plain_text(output) if ready_ns is None else ""
                 context_visible = "~" in startup_plain and any(
                     marker in startup_plain for marker in ("ctx", "context", "offline")
@@ -671,12 +675,17 @@ def _run_sample(config: BenchmarkConfig, history_messages: int, run: int) -> Ses
                     context_redrawn = True
                     output.clear()
                     continue
-                ready_visible = (
-                    _history_ready(startup_plain, "rust", paint.history_visible_ns is not None)
-                    if history_messages
-                    else _ready(startup_plain, "rust")
-                )
-                if context_redrawn and ready_ns is None and ready_visible:
+                if (
+                    context_redrawn
+                    and ready_ns is None
+                    and (
+                        _ready(startup_screen.rows())
+                        if startup_screen is not None
+                        else _history_ready(
+                            startup_plain, "rust", paint.history_visible_ns is not None
+                        )
+                    )
+                ):
                     ready_ns = now_ns
                     ready_process_memory = snapshot_process_memory(child_pid)
                     hold_until = time.monotonic() + config.ready_hold_seconds

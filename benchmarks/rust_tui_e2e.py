@@ -57,9 +57,21 @@ _OTHER_ESCAPE = re.compile(rb"\x1b[ -/]*[0-~]")
 _IDLE_REPAINT_AFTER_NS = 250_000_000
 _READY_MARKERS = (
     "AskWispanything",
+    "Browsecommands",
     "Typeapromptor/forcommands.",
-    "/connecttoaddaprovider",
 )
+_CONTEXT_READING = re.compile(r"\bctx (?:[▰▱]+ )?~?\d")
+_WIDE_ACTIVITY = re.compile(
+    r"(?:^| {2,})[◖\ue0b6]"
+    r"(• idle|[●✗] (?:working|configuring|compacting|error|(?:approval|trust) needed))[◗\ue0b4]"
+)
+_COMPACT_IDLE = re.compile(
+    r"^\s*(?:[◖\ue0b6]• idle[◗\ue0b4]|idle (?:.*\bctx ~?(?:\d|[?…])|"
+    r"(?:Ask|Auto \((?:commands|edits)(?:, session)?\)|YOLO(?: \(session\)|/session)?|"
+    r"(?:auto )?(?:cmds|edits)(?:/session)?)(?: |$)))"
+)
+_WIDE_CONTEXT_PREFIXES = ("◖ctx ", "\ue0b6ctx ")
+_FAKE_MODEL = re.compile(r"^\s*fake(?= \(| · | ?[▶❯›\ue0b0]| {2,})")
 
 
 @dataclass(frozen=True)
@@ -413,7 +425,12 @@ def _run_sample(
                     context_redrawn = True
                     output.clear()
                     continue
-                if context_redrawn and ready_ns is None and _ready(startup_plain, renderer):
+                if (
+                    context_redrawn
+                    and ready_ns is None
+                    and _FRAME_END in output
+                    and _ready(screen.rows())
+                ):
                     ready_ns = now_ns
                     phase_output.clear()
                     submitted_ns = time.perf_counter_ns()
@@ -627,18 +644,25 @@ def _plain_text(output: bytes | bytearray) -> str:
     )
 
 
-def _ready(plain: str, renderer: Renderer) -> bool:
-    compact = "".join(plain.split())
-    # A framed composer's bottom border names the model, then its effort, the mode, or
-    # the border's last dash ("fake · build ─╯"); a short terminal's footer names
-    # "provider/model".
-    provider_ready = re.search(r"fake/fake|fake\s*[(·─]", plain) is not None
-    # Incremental repaints can reach the PTY with cursor moves instead of spaces,
-    # so "ctx ▰▱ ~35%" may arrive as "ctx▰▱~35%" once escapes are stripped.
-    context_hydrated = re.search(r"ctx\s*[▰▱]*\s*~?[0-9]", plain) is not None
-    return (
-        provider_ready and context_hydrated and any(marker in compact for marker in _READY_MARKERS)
-    )
+def _ready(rows: Sequence[str]) -> bool:
+    if not _footer_idle(rows) or _CONTEXT_READING.search(rows[-1]) is None:
+        return False
+    # Wide footers always show the fake model once connected. Compact layouts may
+    # omit it, so they rely on the connected welcome screen and resolved context.
+    if rows[-1].lstrip().startswith(_WIDE_CONTEXT_PREFIXES) and _FAKE_MODEL.match(rows[-2]) is None:
+        return False
+    if any("Connect a provider" in row or "/connect to add a provider" in row for row in rows):
+        return False
+    return any(marker in "".join(row.split()) for row in rows for marker in _READY_MARKERS)
+
+
+def _footer_idle(rows: Sequence[str]) -> bool:
+    if not rows:
+        return False
+    if len(rows) >= 2 and rows[-1].lstrip().startswith(_WIDE_CONTEXT_PREFIXES):
+        badge = _WIDE_ACTIVITY.search(rows[-2])
+        return badge is not None and badge.group(1) == "• idle"
+    return _COMPACT_IDLE.match(rows[-1]) is not None
 
 
 def _response_started(rows: Sequence[str]) -> bool:
@@ -675,7 +699,7 @@ def _response_final_row(rows: Sequence[str]) -> int | None:
 
 def _settled_after_final(rows: Sequence[str]) -> bool:
     final_row = _response_final_row(rows)
-    return final_row is not None and any("idle" in row for row in rows[final_row + 1 :])
+    return final_row is not None and _footer_idle(rows[final_row + 1 :])
 
 
 @dataclass
@@ -798,7 +822,8 @@ class _PaintedScreen:
 
     def _paint(self, text: str) -> None:
         for character in text:
-            if not character.isprintable():
+            # Terminal fonts can paint private-use glyphs such as Powerline caps.
+            if not character.isprintable() and unicodedata.category(character) != "Co":
                 continue
             self._cells[(self._row, self._column)] = character
             self._column += 2 if unicodedata.east_asian_width(character) in "WF" else 1

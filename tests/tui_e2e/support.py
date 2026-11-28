@@ -240,7 +240,6 @@ def screen_rows(output: bytes | bytearray) -> list[str]:
     return rows
 
 
-# The label starts a word and is followed by its separator or the end of the row.
 def screen_shows(output: bytes | bytearray, text: str) -> bool:
     """Return whether the last complete frame's screen shows ``text`` on one row.
 
@@ -257,9 +256,29 @@ def screen_shows(output: bytes | bytearray, text: str) -> bool:
     return any(text in row for row in screen_rows(complete_frames(output)))
 
 
-# The status word is followed by more status (` · `), the key hints (` │ `), or nothing.
-_STATUS_LABEL = re.compile(r"(?:^|\s)(idle|working)(?=\s[·│]|\s*$)")
-_DECK_STATUS_LABEL = re.compile(r"^\s*╭─\s+[•●✗]\s+(idle|working)(?=\s[·│]|\s*$)")
+_WIDE_ACTIVITY = re.compile(
+    r"(?:^| {2,})[◖\ue0b6]"
+    r"(• idle|[●✗] (?:working|configuring|compacting|error|(?:approval|trust) needed))[◗\ue0b4]"
+)
+_COMPACT_IDLE = re.compile(
+    r"^\s*(?:[◖\ue0b6]• idle[◗\ue0b4]|idle (?:.*\bctx ~?(?:\d|[?…])|"
+    r"(?:Ask|Auto \((?:commands|edits)(?:, session)?\)|YOLO(?: \(session\)|/session)?|"
+    r"(?:auto )?(?:cmds|edits)(?:/session)?)(?: |$)))"
+)
+_WIDE_CONTEXT_PREFIXES = ("◖ctx ", "\ue0b6ctx ")
+
+
+def footer_identity_shows(output: bytes | bytearray, identity: str) -> bool:
+    """Check the model or mode at the start of the wide footer's identity row."""
+    rows = screen_rows(complete_frames(output))
+    return (
+        len(rows) >= 2
+        and rows[-1].lstrip().startswith(_WIDE_CONTEXT_PREFIXES)
+        and re.match(
+            rf"{re.escape(identity)}(?= \(| · | ?[▶❯›\ue0b0]| {{2,}}|$)", rows[-2].lstrip()
+        )
+        is not None
+    )
 
 
 def run_settled(output: bytes | bytearray, offset: int = 0, *fragments: bytes) -> bool:
@@ -285,15 +304,11 @@ def run_settled(output: bytes | bytearray, offset: int = 0, *fragments: bytes) -
     rows = [row for row in screen_rows(frames) if row.strip()]
     if not rows:
         return False
-    if rows[-1].lstrip().startswith("╰─") and len(rows) >= 2:
-        match = _DECK_STATUS_LABEL.match(rows[-2])
-        return match is not None and match.group(1) == "idle"
-    footer = rows[-1]
-    # The status label opens the footer's right side, after the folder and branch
-    # on the left, so the last match wins and a branch named after a status word
-    # does not count.
-    labels = _STATUS_LABEL.findall(footer)
-    return bool(labels) and labels[-1] == "idle"
+    if len(rows) >= 2 and rows[-1].lstrip().startswith(_WIDE_CONTEXT_PREFIXES):
+        # A docked panel can print text after the badge with just blank cells between them.
+        badge = _WIDE_ACTIVITY.search(rows[-2])
+        return badge is not None and badge.group(1) == "• idle"
+    return _COMPACT_IDLE.match(rows[-1]) is not None
 
 
 def welcome_ready(output: bytes | bytearray) -> bool:

@@ -135,7 +135,7 @@ def test_first_visible_history(history_messages: int, expected: int | None) -> N
     assert paint.history_visible_ns == expected
 
 
-@pytest.mark.parametrize("reading", ["ctx ▰▱ ~35%", "ctx ~2.6k", "ctx 950"])
+@pytest.mark.parametrize("reading", ["◖ctx ▰▱ ~35%◗", "◖ctx ~2.6k◗", "◖ctx 950◗"])
 def test_single_accepted_probe(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, reading: str
 ) -> None:
@@ -155,7 +155,8 @@ def test_single_accepted_probe(
     paint.observe(
         _frame(
             "\x1b[1;1Hctx 42%\x1b[2;1HRC2 saved history ready"
-            "\x1b[20;1HAsk Wisp anything\x1b[23;1Hidle\x1b[24;1Hctx ~…"
+            "\x1b[20;1HAsk Wisp anything\x1b[23;1H fake · build › Ask › /srv/idle   ◖• idle◗"
+            "\x1b[24;1H ◖ctx ~…◗"
         ),
         10,
     )
@@ -174,7 +175,7 @@ def test_single_accepted_probe(
     assert writes == [b"WispProbe42\r"]
 
     profile.write_text(line * 2, encoding="utf-8")  # post-prompt refresh
-    paint.observe(_frame("\x1b[2;1H▎WispProbe42\x1b[23;1Hworking"), 40)
+    paint.observe(_frame("\x1b[2;1H▎WispProbe42\x1b[23;31H   ◖● working◗"), 40)
     paint.submit_if_ready(1, tmp_path)
     assert paint.reply_ns is None
     assert not paint.reply_idle
@@ -182,7 +183,7 @@ def test_single_accepted_probe(
     paint.observe(_frame("\x1b[4;1Hfake response to:") + _frame("\x1b[4;19HWispProbe42"), 50)
     assert paint.reply_ns == 50
     assert not paint.reply_idle
-    paint.observe(_frame("\x1b[23;1H\x1b[Kidle"), 60)
+    paint.observe(_frame("\x1b[23;31H\x1b[K      ◖• idle◗"), 60)
     paint.submit_if_ready(1, tmp_path)
     assert paint.reply_idle
     assert paint.reply_ns == 50

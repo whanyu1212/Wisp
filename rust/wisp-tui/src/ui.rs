@@ -25,7 +25,11 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wr
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 use wisp_protocol::commands::PermissionMode;
-use wisp_protocol::events::McpServerStatus;
+
+mod footer_compact;
+mod footer_deck;
+
+use footer_deck::render_footer_deck;
 
 const MIN_TERMINAL_WIDTH: u16 = 30;
 const MIN_TERMINAL_HEIGHT: u16 = 8;
@@ -344,7 +348,9 @@ pub fn render_interactive(
             .constraints([
                 Constraint::Min(2),
                 Constraint::Length(panel_height),
-                Constraint::Length(1),
+                Constraint::Length(
+                    footer_height(area).min(area.height.saturating_sub(panel_height + 3).max(1)),
+                ),
             ])
             .split(area);
         let (jump_painted, _, _) = render_transcript(
@@ -380,7 +386,6 @@ pub fn render_interactive(
             palette,
             bindings,
             jump_painted.is_some(),
-            false,
             false,
             column.width,
             verbosity,
@@ -488,7 +493,6 @@ pub fn render_interactive(
         bindings,
         jump_to_latest.is_some(),
         !welcome_rows.is_empty(),
-        composer_framed(state, padded, chunks[3]),
         column.width,
         verbosity,
     );
@@ -694,50 +698,60 @@ pub(crate) fn yolo_label(state: &UiState) -> Option<&'static str> {
     }
 }
 
-fn yolo_style(palette: Palette) -> Style {
-    Style::default()
-        .fg(palette.warning)
-        .add_modifier(Modifier::BOLD)
+/// Keep permission scope explicit; an unreported mode has no badge.
+fn footer_permission(state: &UiState) -> Option<&'static str> {
+    yolo_label(state).or_else(|| state.permissions.snapshot.as_ref().map(|_| "Ask"))
 }
 
-fn footer_leading_parts(state: &UiState, identity_in_composer: bool) -> Vec<String> {
-    let mut parts = vec![status_label(state)];
-    // YOLO follows the label, which the status budget always leaves room for, so
-    // a narrow row never shows YOLO as if it were Ask.
-    if !identity_in_composer {
-        parts.extend(yolo_label(state).map(str::to_owned));
-    }
-    if state.active_prompt_editable() {
-        let steering = state.queued_steering();
-        let follow_up = state.queued_follow_ups();
-        let omitted = steering.saturating_add(follow_up).saturating_sub(3);
-        parts.push(format!("s:{steering}/l:{follow_up}"));
-        if omitted > 0 {
-            parts.push(format!("+{omitted}"));
-        }
-    }
-    // Queue and mode stay ahead of identity so a long model name cannot hide
-    // counts, plan/build, or ctx on a 30-column row or a notice-budget footer. A
-    // framed composer names the modes first on its identity line instead.
-    if state.mode_confirmed && !identity_in_composer {
-        parts.push(state.mode.as_str().to_string());
-    }
-    parts
+/// Paint single-cell half-discs against the terminal background. On a plain
+/// palette their ink still outlines the badge when there is no fill to shape.
+fn footer_pill(body: impl IntoIterator<Item = Span<'static>>, style: Style) -> Vec<Span<'static>> {
+    // Powerline separators span the terminal cell. Text-only palettes keep standard glyphs.
+    let (left, right) = if style.bg.is_some() {
+        ("\u{e0b6}", "\u{e0b4}")
+    } else {
+        ("◖", "◗")
+    };
+    let edge = Style::default().fg(style.bg.or(style.fg).unwrap_or(Color::Reset));
+    let mut spans = vec![Span::styled(left, edge)];
+    spans.extend(body.into_iter().map(|mut span| {
+        span.style = style.patch(span.style);
+        span
+    }));
+    spans.push(Span::styled(right, edge));
+    spans
 }
 
-/// The status line's closing parts: the identity when the composer cannot show it,
-/// and any compaction in progress.
-fn footer_trailing_parts(state: &UiState, identity_in_composer: bool) -> Vec<String> {
-    let mut parts = Vec::new();
-    if !identity_in_composer {
-        if let Some(identity) = header_identity(state) {
-            parts.push(identity);
-        }
+fn status_chip(state: &UiState, palette: Palette) -> Vec<Span<'static>> {
+    if decision_pending(state) {
+        let style = palette.footer_segment(palette.warning).bold();
+        return footer_pill(
+            [Span::raw(format!("● {} needed", status_label(state)))],
+            style,
+        );
     }
-    if let Some(reason) = state.context.compaction {
-        parts.push(format!("compacting ({})", reason.as_str()));
+    let label = status_label(state);
+    if state.view_status == ViewStatus::Idle
+        && !run_in_status_line(state)
+        && !state.configuration_active()
+    {
+        return footer_pill(
+            [
+                Span::styled("• ", palette.footer_chip(palette.accent)),
+                Span::raw(label),
+            ],
+            palette.footer_chip(palette.muted),
+        );
     }
-    parts
+    let marker = if state.view_status == ViewStatus::Error {
+        "✗"
+    } else {
+        "●"
+    };
+    footer_pill(
+        [Span::raw(format!("{marker} {label}"))],
+        palette.footer_chip(status_color(state, palette)).bold(),
+    )
 }
 
 /// Where commands run, for the footer's left side. Folder and branch names come from
@@ -2553,74 +2567,43 @@ fn markdown_span_style(base: Style, semantic: TranscriptSpanStyle, palette: Pale
     style
 }
 
-/// Whether the composer draws its frame, whose bottom border then names the mode
-/// and model in place of the footer.
+/// Whether the composer has space for top and bottom borders.
 fn composer_framed(state: &UiState, padded: bool, area: Rect) -> bool {
     editable(state) && padded && area.height >= 3
 }
 
-/// The framed composer's bottom-border label, fitted to `room` columns: the model and
-/// its effort, then the mode and YOLO (`gpt-6 (high) · build · YOLO`). A narrow composer
-/// drops the model first, so the modes stay; None when even they do not fit.
-fn composer_border_label(state: &UiState, palette: Palette, room: usize) -> Option<Line<'static>> {
-    let muted = Style::default().fg(palette.muted);
-    let mut modes = Vec::new();
-    if state.mode_confirmed {
-        // Plan mode keeps the full warning colour; its border carries a dimmer amber.
-        let color = if state.mode == AgentMode::Plan {
-            palette.warning
+/// Use the provider as a fallback while its model is unknown. A stale selection
+/// keeps its qualifier wherever the footer displays it.
+fn footer_model(state: &UiState) -> Vec<Span<'static>> {
+    let Some(provider) = state.provider.as_deref() else {
+        return Vec::new();
+    };
+    let model = state
+        .model_catalog
+        .as_ref()
+        .and_then(|catalog| catalog.selection.effective_model.as_deref())
+        .or(state.model.as_deref())
+        .unwrap_or(provider);
+    let mut spans = vec![Span::styled(
+        sanitize_for_terminal(model),
+        Style::default().bold(),
+    )];
+    if let Some(effort) = shown_effort(state) {
+        let style = if effort.is_default {
+            Style::default()
         } else {
-            palette.primary
+            Style::default().bold()
         };
-        modes.push(Span::styled(
-            state.mode.as_str().to_owned(),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        ));
+        spans.extend([
+            Span::raw(" ("),
+            Span::styled(sanitize_for_terminal(effort.level), style),
+            Span::raw(")"),
+        ]);
     }
-    if let Some(yolo) = yolo_label(state) {
-        if !modes.is_empty() {
-            modes.push(Span::styled(" · ", muted));
-        }
-        modes.push(Span::styled(yolo, yolo_style(palette)));
+    if state.model_selection_stale {
+        spans.push(Span::raw(" (last confirmed)"));
     }
-    let mut full = Vec::new();
-    if let Some(provider) = state.provider.as_deref() {
-        // The model names its provider; a provider with no model yet names itself.
-        let model = state
-            .model_catalog
-            .as_ref()
-            .and_then(|catalog| catalog.selection.effective_model.as_deref())
-            .or(state.model.as_deref())
-            .unwrap_or(provider);
-        full.push(Span::styled(
-            sanitize_for_terminal(model),
-            Style::default().fg(palette.foreground),
-        ));
-        if let Some(effort) = shown_effort(state) {
-            // A chosen level stands out; the model's default stays quiet.
-            let style = if effort.is_default {
-                muted
-            } else {
-                Style::default()
-                    .fg(palette.foreground)
-                    .add_modifier(Modifier::BOLD)
-            };
-            full.push(Span::styled(" (", muted));
-            full.push(Span::styled(sanitize_for_terminal(effort.level), style));
-            full.push(Span::styled(")", muted));
-        }
-        if state.model_selection_stale {
-            full.push(Span::styled(" (last confirmed)", muted));
-        }
-        if !modes.is_empty() {
-            full.push(Span::styled(" · ", muted));
-        }
-    }
-    full.extend(modes.iter().cloned());
-    [full, modes]
-        .into_iter()
-        .map(Line::from)
-        .find(|line| line.width() > 0 && line.width() <= room)
+    spans
 }
 
 /// The columns a composer border row leaves for text: a corner and a dash on each
@@ -2646,18 +2629,6 @@ fn render_composer_border_text(frame: &mut Frame<'_>, area: Rect, y: u16, text: 
             height: 1,
         },
     );
-}
-
-/// The model and mode, in the composer's bottom border.
-fn render_composer_border_label(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    state: &UiState,
-    palette: Palette,
-) {
-    if let Some(label) = composer_border_label(state, palette, composer_border_room(area)) {
-        render_composer_border_text(frame, area, area.bottom().saturating_sub(1), label);
-    }
 }
 
 /// During a run that takes input, the keys that follow up or steer, in the
@@ -2769,7 +2740,6 @@ fn render_composer(
                 palette.accent
             };
             paint_composer_accent(frame, area, accent);
-            render_composer_border_label(frame, area, state, palette);
             if state.active_prompt_editable() {
                 render_composer_run_keys(frame, area, bindings, palette);
             }
@@ -3853,7 +3823,6 @@ fn render_footer(
     bindings: &Bindings,
     jump_painted: bool,
     menu: bool,
-    identity_in_composer: bool,
     column_width: u16,
     verbosity: crate::transcript_view::Verbosity,
 ) -> bool {
@@ -3868,567 +3837,68 @@ fn render_footer(
             bindings,
             jump_painted,
             menu,
-            identity_in_composer,
             column_width,
             verbosity,
         );
     }
-    let width = usize::from(area.width);
-    // Keep the established status priorities when outer presentation margins grow,
-    // measured on the conversation's column rather than beside a docked panel.
-    let terminal_width = usize::from(column_width);
-    // A docked side panel shows the workspace, queue, mode, context, and model, so
-    // the footer keeps only the status, YOLO, and hints beside it.
-    let panel_docked = column_width < frame.area().width;
-    let compaction_notice = state
-        .context
-        .compaction_notice
-        .as_deref()
-        .filter(|_| state.context.compaction_notice_is_warning);
-    // Only a notice with a clock scrolls; a compaction warning keeps to its row.
-    let (notice, notice_shown_for) = match notice {
-        Some(notice) => (Some(notice.text), Some(notice.shown_for)),
-        None => (compaction_notice, None),
-    };
-    let status_budget = if notice.is_some() {
-        if terminal_width >= 80 {
-            (terminal_width / 2).max(24)
-        } else if !state.configuration_active()
-            && (state.view_status == ViewStatus::Running
-                || state.interaction_status == crate::reducer::InteractionStatus::Compacting)
-        {
-            status_label(state).width()
-        } else {
-            0
-        }
-    } else {
-        (terminal_width / 2).max(19)
-    };
-    // Without a framed composer the footer is YOLO's only home, so the status keeps
-    // room for it beside the label, at the expense of the notice and the hints.
-    let status_budget = match yolo_label(state).filter(|_| !identity_in_composer) {
-        Some(yolo) => status_budget.max(status_label(state).width() + 3 + yolo.width()),
-        None => status_budget,
-    };
-
-    // Right: the status the footer always keeps, label first since it carries the
-    // status colour, then the hints that still fit.
-    // While a run is going, the status line above the composer names the run, the
-    // queue, and the context, so the footer keeps only scroll markers and hints.
-    let mut status = Vec::new();
-    if panel_docked {
-        if !run_in_status_line(state) {
-            status.push(status_label(state));
-            if !identity_in_composer {
-                status.extend(yolo_label(state).map(str::to_owned));
-            }
-        }
-    } else if !run_in_status_line(state) {
-        let leading = footer_leading_parts(state, identity_in_composer);
-        let leading_width = join_hints(leading.iter().cloned(), status_budget).width();
-        let ctx_width = status_budget
-            .saturating_sub(leading_width)
-            .saturating_sub(if leading_width == 0 { 0 } else { 3 });
-        status = leading;
-        status.push(crate::context_view::indicator(state, ctx_width));
-        status.extend(footer_trailing_parts(state, identity_in_composer));
-    }
-    if run_in_status_line(state) && !identity_in_composer {
-        // The status line names the run but not the permission mode, and an
-        // unframed composer cannot show it.
-        status.extend(yolo_label(state).map(str::to_owned));
-    }
-    if state.history.tail_evicted && viewport.follows_tail() {
-        status.push("more ↓".into());
-    } else if !jump_painted && viewport.has_unseen_output() {
-        status.push("new ↓".into());
-    } else if !jump_painted && !viewport.follows_tail() {
-        status.push("scrolled".into());
-    }
-    let status_line = join_hints(status, status_budget);
-    let status_width = status_line.width();
-
-    // Left: a notice, or where commands run. On a narrow row the branch goes
-    // first, then the hints; the folder stays while it fits beside the status.
-    let hint_cap = |room: usize| {
-        if terminal_width < 120 {
-            room.min(56)
-        } else {
-            room
-        }
-    };
-    let beside_status = width.saturating_sub(status_width.saturating_add(2));
-    let (left, left_style, hints) = match notice {
-        Some(notice) => (
-            sanitize_for_terminal(notice),
-            Style::default().fg(palette.warning),
-            String::new(),
-        ),
-        None => {
-            let workspace = if panel_docked {
-                Vec::new()
-            } else {
-                footer_workspace_parts(state)
-            };
-            let hints = footer_hints(
-                state,
-                bindings,
-                menu,
-                hint_cap(width.saturating_sub(status_width).saturating_sub(3)),
-            );
-            let hints_width = if hints.is_empty() {
-                0
-            } else {
-                hints.width() + 3
-            };
-            let left_room = (width / 3).min(beside_status.saturating_sub(hints_width + 2));
-            let left = join_hints(workspace.iter().cloned(), left_room);
-            if !left.is_empty() || workspace.is_empty() {
-                (left, Style::default().fg(palette.muted), hints)
-            } else {
-                // The folder alone does not fit beside every hint: keep the
-                // folder and give the hints what remains.
-                let left = join_hints(
-                    workspace.into_iter().take(1),
-                    (width / 3).min(beside_status),
-                );
-                let hint_room = beside_status
-                    .saturating_sub(left.width())
-                    .saturating_sub(if left.is_empty() { 1 } else { 3 });
-                let hints = footer_hints(state, bindings, menu, hint_cap(hint_room));
-                (left, Style::default().fg(palette.muted), hints)
-            }
-        }
-    };
-    let notice_ticker =
-        notice_shown_for.filter(|_| beside_status > 0 && left.width() > beside_status);
-    let left = match notice_ticker {
-        Some(shown_for) => notice_ticker_window(&left, beside_status, shown_for),
-        None => left,
-    };
-    let left_width = left.width().min(beside_status);
-    let hints = if hints.is_empty() || decision_pending(state) {
-        hints
-    } else {
-        let room = beside_status.saturating_sub(left_width + usize::from(left_width > 0) * 2);
-        with_panel_hints(state, bindings, menu, panel_docked, hint_cap(room)).unwrap_or(hints)
-    };
-
-    let mut right = if status_line.is_empty() {
-        Vec::new()
-    } else {
-        status_spans(state, &status_line, palette)
-    };
-    if !hints.is_empty() {
-        if !right.is_empty() {
-            right.push(Span::styled(
-                HINT_SEPARATOR,
-                Style::default().fg(palette.muted),
-            ));
-        }
-        right.extend(keycap_hints_separated(&hints, HINT_SEPARATOR, palette).spans);
-    }
-    let right = Line::from(right).style(Style::default().fg(palette.muted));
-    let right_width = right.width();
-    frame.render_widget(
-        Paragraph::new(left).style(left_style),
-        Rect {
-            width: left_width as u16,
-            ..area
-        },
-    );
-    frame.render_widget(
-        Paragraph::new(right).alignment(Alignment::Right),
-        Rect {
-            x: area.right().saturating_sub(right_width as u16),
-            width: right_width.min(width) as u16,
-            ..area
-        },
-    );
-    notice_ticker.is_some()
+    footer_compact::render(
+        frame,
+        area,
+        state,
+        viewport,
+        notice,
+        palette,
+        bindings,
+        jump_painted,
+        menu,
+        column_width,
+    )
 }
 
 fn spans_width(spans: &[Span<'_>]) -> usize {
     spans.iter().map(Span::width).sum()
 }
 
-fn join_span_segments(
-    segments: Vec<Vec<Span<'static>>>,
-    separator: &'static str,
-    sep_style: Style,
-    budget: usize,
-) -> Vec<Span<'static>> {
-    let sep_width = separator.width();
-    let mut out = Vec::new();
-    let mut used = 0;
-    for segment in segments {
-        let seg_width = spans_width(&segment);
-        if seg_width == 0 {
-            continue;
-        }
-        let needed = if out.is_empty() {
-            seg_width
-        } else {
-            sep_width + seg_width
-        };
-        if used + needed > budget {
-            continue;
-        }
-        if !out.is_empty() {
-            out.push(Span::styled(separator, sep_style));
-        }
-        used += needed;
-        out.extend(segment);
-    }
-    out
-}
-
-fn deck_state_spans(state: &UiState, palette: Palette) -> Vec<Span<'static>> {
-    let label = status_label(state);
-    if !state.configuration_active()
-        && state.interaction_status != crate::reducer::InteractionStatus::Compacting
-        && state.view_status == ViewStatus::Idle
-    {
-        return vec![
-            Span::styled("• ", Style::default().fg(palette.accent)),
-            Span::styled(label, Style::default().fg(palette.muted)),
-        ];
-    }
-    match state.view_status {
-        ViewStatus::Error => vec![Span::styled(
-            format!("✗ {label}"),
-            Style::default()
-                .fg(palette.error)
-                .add_modifier(Modifier::BOLD),
-        )],
-        ViewStatus::WaitingForApproval | ViewStatus::WaitingForTrust => vec![Span::styled(
-            format!("● {label}"),
-            Style::default()
-                .fg(palette.warning)
-                .add_modifier(Modifier::BOLD),
-        )],
-        _ => vec![Span::styled(
-            format!("● {label}"),
-            Style::default()
-                .fg(status_color(state, palette))
-                .add_modifier(Modifier::BOLD),
-        )],
-    }
-}
-
-fn active_subagent_count(state: &UiState) -> usize {
-    state
-        .transcript
-        .entries()
-        .iter()
-        .filter(|entry| {
-            entry.tool_card().is_some_and(|card| {
-                !card.status.terminal()
-                    && card.script.as_deref().is_some_and(|script| {
-                        script.host == crate::script_card::NestedHost::Subagent
-                    })
-            })
-        })
-        .count()
-}
-
-fn mcp_health_counts(state: &UiState) -> (usize, usize) {
-    let Some(snapshot) = state.mcp.snapshot.as_ref() else {
-        return (0, 0);
-    };
-    let mut degraded = 0;
-    let mut connected = 0;
-    for server in &snapshot.servers {
-        match server.status {
-            McpServerStatus::Disconnected | McpServerStatus::Unavailable => degraded += 1,
-            McpServerStatus::Connected => connected += 1,
-            McpServerStatus::Connecting | McpServerStatus::Disabled => {}
-        }
-    }
-    (degraded, connected)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_footer_deck(
-    frame: &mut Frame<'_>,
-    area: Rect,
+/// Status text for history navigation when the jump control is not already visible.
+fn scroll_marker(
     state: &UiState,
     viewport: &TranscriptViewport,
-    notice: Option<FooterNotice<'_>>,
-    palette: Palette,
-    bindings: &Bindings,
     jump_painted: bool,
+) -> Option<&'static str> {
+    if state.history.tail_evicted && viewport.follows_tail() {
+        Some("more ↓")
+    } else if !jump_painted && viewport.has_unseen_output() {
+        Some("new ↓")
+    } else if !jump_painted && !viewport.follows_tail() {
+        Some("scrolled")
+    } else {
+        None
+    }
+}
+
+/// Choose complete contextual hints for the remaining cells in either footer layout.
+fn footer_keys(
+    state: &UiState,
+    bindings: &Bindings,
     menu: bool,
-    identity_in_composer: bool,
-    column_width: u16,
-    verbosity: crate::transcript_view::Verbosity,
-) -> bool {
-    let width = usize::from(area.width);
-    if width == 0 {
-        return false;
+    docked: bool,
+    room: usize,
+    palette: Palette,
+) -> Vec<Span<'static>> {
+    let hints = footer_hints(state, bindings, menu, room);
+    if hints.is_empty() {
+        return Vec::new();
     }
-    let muted = Style::default().fg(palette.muted);
-    let terminal_width = usize::from(column_width);
-    let panel_docked = column_width < frame.area().width;
-
-    let compaction_notice = state
-        .context
-        .compaction_notice
-        .as_deref()
-        .filter(|_| state.context.compaction_notice_is_warning);
-    let (notice_text, notice_shown_for) = match notice {
-        Some(notice) => (Some(notice.text), Some(notice.shown_for)),
-        None => (compaction_notice, None),
-    };
-
-    // Row 1 right: active notice (with ticker) or secondary queue/scroll/session metadata.
-    let (right1_spans, notice_scrolls) = if let Some(text) = notice_text {
-        let right_budget = (width / 2).max(24).min(width);
-        let clean = sanitize_for_terminal(text);
-        let ticker = notice_shown_for.filter(|_| right_budget > 0 && clean.width() > right_budget);
-        let shown = match ticker {
-            Some(shown_for) => notice_ticker_window(&clean, right_budget, shown_for),
-            None => clip_columns(&clean, right_budget),
-        };
-        (
-            vec![Span::styled(shown, Style::default().fg(palette.warning))],
-            ticker.is_some(),
-        )
-    } else {
-        let mut right_parts: Vec<Vec<Span<'static>>> = Vec::new();
-        if !identity_in_composer {
-            if let Some(yolo) = yolo_label(state) {
-                right_parts.push(vec![Span::styled(yolo, yolo_style(palette))]);
-            }
-            if state.mode_confirmed {
-                right_parts.push(vec![Span::styled(state.mode.as_str().to_owned(), muted)]);
-            }
-        }
-        if state.active_prompt_editable() {
-            let steering = state.queued_steering();
-            let follow_up = state.queued_follow_ups();
-            let omitted = steering.saturating_add(follow_up).saturating_sub(3);
-            let mut text = format!("s:{steering}/l:{follow_up}");
-            if omitted > 0 {
-                text.push_str(&format!(" +{omitted}"));
-            }
-            right_parts.push(vec![Span::styled(text, muted)]);
-        }
-        if let Some(reason) = state.context.compaction {
-            right_parts.push(vec![Span::styled(
-                format!("compacting ({})", reason.as_str()),
-                Style::default().fg(palette.primary),
-            )]);
-        }
-        if state.history.tail_evicted && viewport.follows_tail() {
-            right_parts.push(vec![Span::styled("more ↓", muted)]);
-        } else if !jump_painted && viewport.has_unseen_output() {
-            right_parts.push(vec![Span::styled("new ↓", muted)]);
-        } else if !jump_painted && !viewport.follows_tail() {
-            right_parts.push(vec![Span::styled("scrolled", muted)]);
-        }
-        if terminal_width >= 120
-            && let Some(session) = state.selected_session.as_ref()
-        {
-            let short: String = sanitize_for_terminal(&session.session_id)
-                .chars()
-                .take(8)
-                .collect();
-            if !short.is_empty() {
-                right_parts.push(vec![Span::styled(format!("#{short}"), muted)]);
-            }
-        }
-        (
-            join_span_segments(right_parts, " · ", muted, width / 2),
-            false,
-        )
-    };
-    let right1_width = spans_width(&right1_spans);
-
-    // Row 1 left: `╭─ ` + state + workspace + git branch/diff + alerts + active tasks + MCP count.
-    let left1_budget = width.saturating_sub(right1_width + usize::from(right1_width > 0) * 2);
-    let mut left1_spans = vec![Span::styled("╭─ ", muted)];
-    left1_spans.extend(deck_state_spans(state, palette));
-    let state_width = spans_width(&left1_spans);
-
-    let mut row1_segments: Vec<Vec<Span<'static>>> = Vec::new();
-    if let Some(cwd) = state.workspace_cwd.as_deref() {
-        row1_segments.push(vec![Span::styled(
-            display_workspace(&sanitize_for_terminal(cwd)),
-            Style::default().fg(palette.foreground),
-        )]);
-    }
-    if let Some(branch) = state.git_branch.as_deref() {
-        row1_segments.push(vec![Span::styled(
-            clip_columns(&sanitize_for_terminal(branch), BRANCH_MAX_COLUMNS),
-            Style::default().fg(palette.primary),
-        )]);
-    }
-    let (degraded_mcp, connected_mcp) = mcp_health_counts(state);
-    if degraded_mcp > 0 {
-        row1_segments.push(vec![Span::styled(
-            format!("{degraded_mcp} MCP off"),
-            Style::default()
-                .fg(palette.error)
-                .add_modifier(Modifier::BOLD),
-        )]);
-    }
-    let bg_count = state.background_processes.running().len();
-    let sub_count = active_subagent_count(state);
-    let task_text = match (bg_count, sub_count) {
-        (0, 0) => None,
-        (bg, 0) => Some(format!("{bg} bg")),
-        (0, sub) => Some(format!("{sub} sub")),
-        (bg, sub) => Some(format!("{bg} bg · {sub} sub")),
-    };
-    if let Some(tasks) = task_text {
-        row1_segments.push(vec![Span::styled(
-            tasks,
-            Style::default()
-                .fg(palette.primary)
-                .add_modifier(Modifier::BOLD),
-        )]);
-    }
-    if degraded_mcp == 0 && connected_mcp > 0 {
-        row1_segments.push(vec![Span::styled(format!("{connected_mcp} MCP"), muted)]);
-    }
-
-    let extra_budget = left1_budget.saturating_sub(state_width + 3);
-    if left1_budget > state_width + 3 {
-        let extra = join_span_segments(row1_segments, " │ ", muted, extra_budget);
-        if !extra.is_empty() {
-            left1_spans.push(Span::styled(" │ ", muted));
-            left1_spans.extend(extra);
-        }
-    }
-
-    let row1_area = Rect { height: 1, ..area };
-    let left1_width = spans_width(&left1_spans).min(left1_budget);
-    frame.render_widget(
-        Paragraph::new(Line::from(left1_spans)),
-        Rect {
-            width: left1_width as u16,
-            ..row1_area
-        },
-    );
-    if !right1_spans.is_empty() {
-        frame.render_widget(
-            Paragraph::new(Line::from(right1_spans)).alignment(Alignment::Right),
-            Rect {
-                x: row1_area.right().saturating_sub(right1_width as u16),
-                width: right1_width.min(width) as u16,
-                ..row1_area
-            },
-        );
-    }
-
-    // Row 2 right: keycap hints.
-    let hint_cap = if terminal_width < 120 {
-        width.saturating_sub(14).min(56)
-    } else {
-        width.saturating_sub(14)
-    };
-    let hints = footer_hints(state, bindings, menu, hint_cap);
-    let hints = if hints.is_empty() || decision_pending(state) {
+    let hints = if decision_pending(state) {
         hints
     } else {
-        with_panel_hints(state, bindings, menu, panel_docked, hint_cap).unwrap_or(hints)
+        with_panel_hints(state, bindings, menu, docked, room).unwrap_or(hints)
     };
-    let right2_line = if hints.is_empty() {
-        Line::default()
-    } else {
-        keycap_hints_separated(&hints, HINT_SEPARATOR, palette)
-            .style(Style::default().fg(palette.muted))
-    };
-    let right2_width = right2_line.width();
-
-    // Row 2 left: `╰─ ` + context meter (+ token ratio) + session cost.
-    let left2_budget = width.saturating_sub(right2_width + usize::from(right2_width > 0) * 2);
-    let mut left2_spans = vec![Span::styled("╰─ ", muted)];
-    let telem_budget = left2_budget.saturating_sub(3);
-    if telem_budget > 0 {
-        let fill = crate::context_view::fill(state);
-        let cost = crate::context_view::session_cost(state);
-        let cost_reserve = cost.as_deref().map_or(0, |cost_str| 3 + cost_str.width());
-        let mut ctx_text = crate::context_view::indicator(state, telem_budget);
-        if cost_reserve > 0
-            && ctx_text.width() + cost_reserve > telem_budget
-            && let Some(room_for_ctx) = telem_budget.checked_sub(cost_reserve)
-            && room_for_ctx >= 6
-        {
-            ctx_text = crate::context_view::indicator(state, room_for_ctx);
-        }
-        let mut used = ctx_text.width();
-        if used <= telem_budget {
-            left2_spans.push(Span::styled(
-                ctx_text,
-                Style::default().fg(context_fill_color(fill, palette)),
-            ));
-            let cost_fits = cost_reserve > 0 && used + cost_reserve <= telem_budget;
-            let ratio_reserve = if cost_fits { cost_reserve } else { 0 };
-            if state
-                .context
-                .budget
-                .as_ref()
-                .and_then(|budget| budget.context_window)
-                .is_some_and(|window| window > 0)
-            {
-                let ratio = format!(" ({})", crate::context_view::status_text(state));
-                if used + ratio.width() + ratio_reserve <= telem_budget {
-                    used += ratio.width();
-                    left2_spans.push(Span::styled(ratio, muted));
-                }
-            }
-            if let Some(cost_str) = cost
-                && used + 3 + cost_str.width() <= telem_budget
-            {
-                used += 3 + cost_str.width();
-                left2_spans.push(Span::styled(" │ ", muted));
-                left2_spans.push(Span::styled(cost_str, Style::default().fg(palette.code)));
-            }
-            if verbosity != crate::transcript_view::Verbosity::Medium {
-                let label = format!("verbosity: {}", verbosity.name());
-                let short = verbosity.name();
-                let shown = if used + 3 + label.width() <= telem_budget {
-                    Some(label)
-                } else if used + 3 + short.width() <= telem_budget {
-                    Some(short.to_owned())
-                } else {
-                    None
-                };
-                if let Some(text) = shown {
-                    left2_spans.push(Span::styled(" │ ", muted));
-                    left2_spans.push(Span::styled(text, Style::default().fg(palette.secondary)));
-                }
-            }
-        }
+    let mut spans = keycap_hints_separated(&hints, HINT_SEPARATOR, palette).spans;
+    for span in &mut spans {
+        span.style = Style::default().fg(palette.muted).patch(span.style);
     }
-
-    let row2_area = Rect {
-        y: area.y + 1,
-        height: 1,
-        ..area
-    };
-    let left2_width = spans_width(&left2_spans).min(left2_budget);
-    frame.render_widget(
-        Paragraph::new(Line::from(left2_spans)),
-        Rect {
-            width: left2_width as u16,
-            ..row2_area
-        },
-    );
-    if right2_width > 0 {
-        frame.render_widget(
-            Paragraph::new(right2_line).alignment(Alignment::Right),
-            Rect {
-                x: row2_area.right().saturating_sub(right2_width as u16),
-                width: right2_width.min(width) as u16,
-                ..row2_area
-            },
-        );
-    }
-
-    notice_scrolls
+    spans
 }
 
 /// The footer hints with the panel key, and beside a docked panel the tree key,
@@ -4526,41 +3996,6 @@ fn notice_ticker_window(text: &str, room: usize, shown_for: std::time::Duration)
         column = next;
     }
     window
-}
-
-/// Style the footer's status line: the label in the status colour and the context
-/// meter in the warning colour once the window is mostly full.
-fn status_spans(state: &UiState, status_line: &str, palette: Palette) -> Vec<Span<'static>> {
-    let muted = Style::default().fg(palette.muted);
-    let label = status_label(state);
-    // During a run the status line names it, so the footer's status has no label.
-    let (mut spans, tail) = match status_line.strip_prefix(&label) {
-        Some(tail) => (
-            vec![Span::styled(
-                label,
-                Style::default().fg(status_color(state, palette)),
-            )],
-            tail,
-        ),
-        None => (Vec::new(), status_line),
-    };
-    let fill = crate::context_view::fill(state);
-    let yolo = yolo_label(state);
-    // After a label the tail starts with a separator, so its first part is empty.
-    for (index, part) in tail.split(" · ").enumerate() {
-        if index > 0 {
-            spans.push(Span::styled(" · ", muted));
-        }
-        let style = if Some(part) == yolo {
-            yolo_style(palette)
-        } else if part.starts_with("ctx ") {
-            Style::default().fg(context_fill_color(fill, palette))
-        } else {
-            muted
-        };
-        spans.push(Span::styled(part.to_owned(), style));
-    }
-    spans
 }
 
 /// The context meter turns to the warning colour from this fill, and error from
@@ -6145,7 +5580,10 @@ mod tests {
         let mut editor = PromptEditor::default();
         editor.insert_paste("hello");
         let rendered = render_to_string(80, 18, &state, &editor);
-        assert!(rendered.contains("─ model-x ─╯"), "{rendered}");
+        assert!(
+            rendered.lines().rev().nth(1).unwrap().contains("model-x"),
+            "{rendered}"
+        );
         assert!(rendered.contains("hello"));
         assert!(rendered.contains("Ctrl+G help"), "{rendered}");
         assert!(!rendered.contains("Enter send"), "{rendered}");
@@ -6203,7 +5641,10 @@ mod tests {
         assert!(rendered.contains("Browse commands"));
         assert!(rendered.contains("Mention a project file"));
         assert!(!rendered.contains("Connect a provider"));
-        assert!(rendered.contains("─ model-x ─╯"), "{rendered}");
+        assert!(
+            rendered.lines().rev().nth(1).unwrap().contains("model-x"),
+            "{rendered}"
+        );
 
         let compact = render_to_string(30, 8, &state, &PromptEditor::default());
         assert!(compact.contains("Wisp 0.9.0"));
@@ -6437,7 +5878,11 @@ mod tests {
             Some("Model catalog unavailable. Use /model <model> or press r to retry."),
         );
         assert!(
-            rendered.contains("custom-model (effort) · plan ─╯"),
+            rendered
+                .lines()
+                .rev()
+                .take(2)
+                .any(|line| line.contains("custom-model (effort)") && line.contains("plan")),
             "{rendered}"
         );
         assert!(rendered.contains("ctx"), "{rendered}");
@@ -7890,30 +7335,23 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        // The top border, the draft, then a bottom border naming the model and mode,
-        // above the 2-row deck on a 100-col terminal.
         let wide = rows(100);
         assert!(wide[25].trim().starts_with('╭'), "{}", wide[25]);
         assert!(wide[26].contains("› Ask Wisp anything"), "{}", wide[26]);
-        assert!(
-            wide[27]
-                .trim_end()
-                .ends_with("─ model-xyz (high) · build ─╯"),
-            "{}",
-            wide[27]
-        );
-        // A narrow composer (30 cols < 60) uses a 1-row footer and drops the model.
+        assert!(wide[27].trim_end().ends_with("──╯"), "{}", wide[27]);
+        assert!(wide[28].contains("model-xyz (high)"), "{}", wide[28]);
         let narrow = rows(30);
+        assert!(narrow[28].trim_end().ends_with("──╯"), "{}", narrow[28]);
         assert!(
-            narrow[28].trim_end().ends_with("─ build ─╯"),
+            narrow[29].contains("idle") && narrow[29].contains("ctx"),
             "{}",
-            narrow[28]
+            narrow[29]
         );
-        assert!(!narrow[28].contains("model-xyz"), "{}", narrow[28]);
+        assert!(!narrow[29].contains("model-xyz"), "{}", narrow[29]);
     }
 
     #[test]
-    fn framed_composer_moves_identity() {
+    fn footer_owns_model_identity() {
         let draw = |height: u16| {
             let mut state =
                 UiState::new("fake".into(), Some("model-x".into()), Some("high".into()));
@@ -7945,22 +7383,18 @@ mod tests {
 
         let (border, row1, row2) = draw(20);
         assert!(
-            border.trim_end().ends_with("─ model-x (high) · build ─╯"),
+            !border.contains("model-x") && border.trim_end().ends_with("──╯"),
             "{border}"
         );
-        assert!(
-            row1.trim_start()
-                .starts_with("╭─ • idle │ /srv/wisp │ feat/x"),
-            "{row1}"
-        );
-        assert!(row2.trim_start().starts_with("╰─ ctx"), "{row2}");
-        assert!(!row1.contains("model-x") && !row2.contains("model-x"));
-        assert!(!row1.contains("build") && !row2.contains("build"));
-
-        // Too short to frame the composer: the 1-row footer keeps mode and identity.
+        for text in ["model-x (high)", "build", "feat/x", "idle"] {
+            assert!(row1.contains(text), "{row1}");
+        }
+        assert!(row2.contains("ctx"), "{row2}");
         let (_, _, footer) = draw(12);
-        assert!(footer.contains("idle · build"), "{footer}");
-        assert!(footer.contains("fake/model-x · high"), "{footer}");
+        assert!(
+            footer.contains("model-x (high)") && footer.contains("build"),
+            "{footer}"
+        );
     }
 
     #[test]
@@ -7994,21 +7428,21 @@ mod tests {
 
         let (wide_top, wide_bot) = footer(100);
         assert!(
-            wide_top.contains("╭─ • idle │ /srv/wisp │ feat/footer"),
+            wide_top.contains("wisp") && wide_top.contains("feat/footer"),
             "{wide_top}"
         );
-        assert!(wide_bot.contains("╰─ ctx"), "{wide_bot}");
-        assert!(wide_bot.contains("help"), "{wide_bot}");
-
-        let (_, narrow) = footer(60);
-        assert!(narrow.contains("/srv/wisp"), "{narrow}");
-        assert!(!narrow.contains("feat/footer"), "{narrow}");
-        assert!(narrow.contains("idle · ctx"), "{narrow}");
-
-        let (_, tight) = footer(40);
-        assert!(tight.contains("/srv/wisp"), "{tight}");
-        assert!(!tight.contains("help"), "{tight}");
-        assert!(tight.contains("ctx"), "{tight}");
+        assert!(
+            wide_bot.contains("ctx") && wide_bot.contains("help"),
+            "{wide_bot}"
+        );
+        for width in [60, 40] {
+            let (_, compact) = footer(width);
+            assert!(
+                compact.contains("idle") && compact.contains("ctx"),
+                "{compact}"
+            );
+            assert!(!compact.contains("feat/footer"), "{compact}");
+        }
     }
 
     #[test]
@@ -8100,7 +7534,12 @@ mod tests {
         assert_eq!(color(&idle, "╭"), palette.accent);
         assert_eq!(color(&idle, "╰"), palette.accent);
         assert_eq!(color(&idle, "│›"), palette.accent);
-        assert_eq!(color(&idle, "high"), palette.foreground);
+        assert!(
+            style_at_text(&idle, "high")
+                .unwrap()
+                .2
+                .contains(Modifier::BOLD)
+        );
         // An 80% full window turns the meter amber.
         assert_eq!(color(&idle, "▰"), palette.warning);
         // Plan mode tints the whole border, and its word keeps the full warning colour.
@@ -8110,11 +7549,21 @@ mod tests {
         assert_ne!(palette.plan_border(), palette.muted);
         assert_eq!(color(&plan, "╮"), palette.plan_border());
         assert_eq!(color(&plan, "─╯"), palette.plan_border());
-        assert_eq!(color(&plan, "plan"), palette.warning);
+        assert!(
+            style_at_text(&plan, "plan")
+                .unwrap()
+                .2
+                .contains(Modifier::BOLD)
+        );
         state.mode = AgentMode::Build;
         let build = border(&state);
         assert_eq!(color(&build, "╮"), palette.muted);
-        assert_eq!(color(&build, "build"), palette.primary);
+        assert!(
+            style_at_text(&build, "build")
+                .unwrap()
+                .2
+                .contains(Modifier::BOLD)
+        );
         state.view_status = ViewStatus::Running;
         state.interaction_status = InteractionStatus::Running;
         state.current_command = Some(ActiveCommand {
@@ -8131,7 +7580,7 @@ mod tests {
         state.interaction_status = InteractionStatus::Idle;
         state.current_command = None;
         state.context.budget.as_mut().unwrap().estimate.total_tokens = 2000;
-        assert_eq!(color(&border(&state), "▰"), palette.muted);
+        assert_eq!(color(&border(&state), "▰"), palette.accent);
     }
 
     #[test]
@@ -10825,8 +10274,11 @@ mod tests {
             let lines: Vec<_> = screen.lines().collect();
             let row1 = lines[lines.len() - 2].trim_matches('"');
             let footer = lines[lines.len() - 1].trim_matches('"');
-            assert!(row1.contains("╭─ • idle"), "{row1}");
-            assert!(footer.contains("╰─ ctx"), "{footer}");
+            assert!(
+                row1.trim_end().ends_with("\u{e0b6}• idle\u{e0b4}"),
+                "{row1}"
+            );
+            assert!(footer.trim_start().starts_with("\u{e0b6}ctx"), "{footer}");
             // Each hint on the right is a whole key and action, set apart by `│`.
             let hints_start = footer.find("Ctrl+G").unwrap_or_else(|| panic!("{footer}"));
             let hints = footer[hints_start..]
@@ -10867,7 +10319,10 @@ mod tests {
         );
         // A narrow row drops the panel hint before the others.
         let narrow = footer(40);
-        assert!(narrow.contains("Esc interrupt │ F6 browse"), "{narrow}");
+        assert!(
+            narrow.contains("Esc interrupt") && narrow.contains("ctx"),
+            "{narrow}"
+        );
         assert!(!narrow.contains("panel"), "{narrow}");
     }
 
@@ -10912,17 +10367,15 @@ mod tests {
     }
 
     #[test]
-    fn composer_effort_is_bold() {
+    fn chosen_effort_is_bold() {
         let mut state = UiState::new("fake".into(), Some("model-x".into()), None);
         state.effort = Some("high".into());
-        let line = composer_border_label(&state, Palette::default(), usize::MAX).unwrap();
+        let line = Line::from(footer_model(&state));
         let effort = line
             .spans
             .iter()
             .find(|span| span.content == "high")
             .unwrap();
-        // Amber is left to plan mode and YOLO beside it.
-        assert_eq!(effort.style.fg, Some(Palette::default().foreground));
         assert!(effort.style.add_modifier.contains(Modifier::BOLD));
     }
 
@@ -10944,33 +10397,84 @@ mod tests {
     }
 
     #[test]
-    fn composer_names_yolo_only() {
+    fn footer_names_permission_scope() {
         use PermissionMode::{Ask, Yolo};
-        // Saved YOLO, an approval's session grant, and the home folder's session-only YOLO.
         for (mode, saved, session_only, shown) in [
-            (Ask, Some(Ask), false, None),
-            (Yolo, Some(Yolo), false, Some("YOLO")),
-            (Yolo, Some(Ask), false, Some("YOLO (session)")),
-            (Yolo, None, true, Some("YOLO (session)")),
+            (Ask, Some(Ask), false, "Ask"),
+            (Yolo, Some(Yolo), false, "YOLO"),
+            (Yolo, Some(Ask), false, "YOLO (session)"),
+            (Yolo, None, true, "YOLO (session)"),
+            (PermissionMode::Auto, None, false, "Auto (edits, session)"),
+            (
+                PermissionMode::AutoCommands,
+                Some(PermissionMode::AutoCommands),
+                false,
+                "Auto (commands)",
+            ),
         ] {
             let mut state = UiState::new("fake".into(), Some("model-x".into()), None);
-            state.mode_confirmed = true;
+            assert!(footer_permission(&state).is_none());
             with_permissions(&mut state, mode, saved, session_only);
-            let line = composer_border_label(&state, Palette::default(), usize::MAX).unwrap();
-            let text = line.to_string();
-            match shown {
-                Some(label) => {
-                    assert_eq!(text, format!("model-x · build · {label}"));
-                    let span = line
-                        .spans
-                        .iter()
-                        .find(|span| span.content == label)
-                        .unwrap();
-                    assert_eq!(span.style.fg, Some(Palette::default().warning));
-                }
-                None => assert_eq!(text, "model-x · build"),
+            for width in [48, 140] {
+                let screen = render_to_string(width, 20, &state, &PromptEditor::default());
+                assert!(
+                    screen
+                        .lines()
+                        .rev()
+                        .take(2)
+                        .any(|line| line.contains(shown)),
+                    "{screen}"
+                );
             }
         }
+    }
+
+    #[test]
+    fn compact_approval_keeps_scope() {
+        let mut state = UiState::new("fake".into(), Some("model".into()), None);
+        state.view_status = ViewStatus::WaitingForApproval;
+        with_permissions(&mut state, PermissionMode::AutoCommands, None, false);
+        for (width, scope) in [(30, "cmds/session"), (48, "Auto (commands, session)")] {
+            let screen = render_to_string(width, 20, &state, &PromptEditor::default());
+            let footer = screen.lines().last().unwrap();
+            assert!(
+                footer.contains("approval") && footer.contains(scope),
+                "{width}: {screen}"
+            );
+        }
+        with_permissions(
+            &mut state,
+            PermissionMode::Ask,
+            Some(PermissionMode::Ask),
+            false,
+        );
+        let screen = render_to_string(40, 20, &state, &PromptEditor::default());
+        let footer = screen.lines().last().unwrap();
+        assert!(
+            footer.contains("approval") && footer.contains("Ask") && footer.contains("ctx"),
+            "{footer}"
+        );
+    }
+
+    #[test]
+    fn tiny_notice_preserves_scope() {
+        let mut state = UiState::new("fake".into(), None, None);
+        state.interaction_status = InteractionStatus::Compacting;
+        with_permissions(&mut state, PermissionMode::Auto, None, false);
+        let screen = render_to_string_with_notice(
+            30,
+            18,
+            &state,
+            &PromptEditor::default(),
+            Some("Review this change"),
+        );
+        let footer = screen.lines().last().unwrap();
+        assert!(
+            footer.contains("compact")
+                && footer.contains("edits/session")
+                && footer.contains("Rev"),
+            "{screen}"
+        );
     }
 
     #[test]
@@ -10990,13 +10494,19 @@ mod tests {
             );
             render_to_string(width, height, &state, &PromptEditor::default())
         };
-        // Framed: the border label drops the model and effort before YOLO.
+        // The compact row drops the model and effort before the permission.
         let framed = draw(32, 20);
-        assert!(framed.contains("─ build · YOLO ─╯"), "{framed}");
+        assert!(framed.lines().last().unwrap().contains("YOLO"), "{framed}");
         assert!(!framed.contains("high"), "{framed}");
         // Too short to frame the composer: the footer names YOLO beside the mode.
         let short = draw(100, 12);
-        assert!(short.contains("idle · YOLO · build"), "{short}");
+        let footer = short.lines().last().unwrap();
+        assert!(
+            ["idle", "YOLO", "build"]
+                .iter()
+                .all(|part| footer.contains(part)),
+            "{short}"
+        );
         // Short and narrow at once, even the longer session label keeps its room.
         for (width, height) in [(40, 12), (30, 8)] {
             let mut state = UiState::new("fake".into(), Some("model-x".into()), None);
@@ -11021,7 +10531,6 @@ mod tests {
 
     #[test]
     fn unset_effort_shows_model_default() {
-        let palette = Palette::default();
         // A documented default, an undocumented one, and a model without effort.
         for (model, shown) in [
             ("one", Some("medium")),
@@ -11042,7 +10551,7 @@ mod tests {
                 }))
                 .unwrap(),
             );
-            let line = composer_border_label(&state, palette, usize::MAX).unwrap();
+            let line = Line::from(footer_model(&state));
             match shown {
                 Some(level) => {
                     assert_eq!(line.to_string(), format!("{model} ({level})"));
@@ -11051,7 +10560,6 @@ mod tests {
                         .iter()
                         .find(|span| span.content == level)
                         .unwrap();
-                    assert_eq!(effort.style.fg, Some(palette.muted), "{model}");
                     assert!(!effort.style.add_modifier.contains(Modifier::BOLD));
                     let identity = header_identity(&state).unwrap();
                     assert!(identity.ends_with(&format!(" · {level}")), "{identity}");
@@ -11744,7 +11252,8 @@ mod tests {
         use std::sync::Arc;
         use wisp_protocol::events::{
             ContextAccountingMethod, ContextBudget, ContextEstimate, McpServerSnapshot,
-            McpStatusSnapshot, SessionCostSummary, SessionStats, SessionTokenUsage,
+            McpServerStatus, McpStatusSnapshot, SessionCostSummary, SessionStats,
+            SessionTokenUsage,
         };
 
         let mut state = UiState::new("fake".into(), Some("model-x".into()), None);
@@ -11823,12 +11332,20 @@ mod tests {
         let palette = Palette::default();
         let screen = terminal.backend().to_string();
         assert!(
-            screen.contains("╭─ • idle │ /srv/wisp │ feat/deck │ 2 MCP"),
+            screen.contains("model-x \u{e0b0} /srv/wisp · feat/deck\u{e0b0} · 2 MCP"),
             "{screen}"
         );
+        let identity = screen.lines().rev().nth(1).unwrap();
+        assert!(
+            identity
+                .trim_end_matches(['"', ' '])
+                .ends_with("\u{e0b6}• idle\u{e0b4}"),
+            "{screen}"
+        );
+        assert!(!identity.contains("Ask"), "{screen}");
         assert!(screen.contains("#a780c86d"), "{screen}");
         assert!(
-            screen.contains("╰─ ctx ▰▰▰▰▱▱▱▱▱▱ 42% (84K / 200K) │ $0.140"),
+            screen.contains("ctx ▰▰▰▰▱▱▱▱▱▱ 42% (84K / 200K)\u{e0b4} \u{e0b6}$0.140\u{e0b4}"),
             "{screen}"
         );
         assert!(screen.contains("Ctrl+G help"), "{screen}");
@@ -11868,19 +11385,14 @@ mod tests {
         assert!(working.contains("1 sub"), "{working}");
 
         state.view_status = ViewStatus::WaitingForApproval;
-        let approval_spans = deck_state_spans(&state, palette);
-        assert_eq!(approval_spans.len(), 1);
-        assert_eq!(approval_spans[0].content, "● approval");
-        assert_eq!(approval_spans[0].style.fg, Some(palette.warning));
-        assert!(
-            approval_spans[0]
-                .style
-                .add_modifier
-                .contains(Modifier::BOLD)
-        );
-        // Decision prompts keep their 1-row footer.
         let approval = render_to_string(140, 20, &state, &PromptEditor::default());
-        assert!(!approval.contains("╭─ ● approval"), "{approval}");
+        let row = approval.lines().rev().nth(1).unwrap();
+        assert!(
+            row.trim_end_matches(['"', ' '])
+                .ends_with("\u{e0b6}● approval needed\u{e0b4}"),
+            "{approval}"
+        );
+        assert!(approval.contains("y once"), "{approval}");
 
         state.view_status = ViewStatus::Error;
         let mut err_term = Terminal::new(TestBackend::new(140, 20)).unwrap();
@@ -11900,7 +11412,7 @@ mod tests {
         let err_screen = err_term.backend().to_string();
         assert!(err_screen.contains("✗ error"), "{err_screen}");
         let (err_fg, _, err_mod) = style_at_text(err_term.backend(), "✗ error").unwrap();
-        assert_eq!(err_fg, palette.error);
+        assert_eq!(Some(err_fg), palette.footer_chip(palette.error).fg);
         assert!(err_mod.contains(Modifier::BOLD));
         let (mcp_fg, _, mcp_mod) = style_at_text(err_term.backend(), "1 MCP off").unwrap();
         assert_eq!(mcp_fg, palette.error);
@@ -11909,31 +11421,28 @@ mod tests {
         // Short (< 16), narrow (< 60), views fall back to the 1-row footer.
         state.view_status = ViewStatus::Idle;
         let short = render_to_string(140, 14, &state, &PromptEditor::default());
-        assert!(
-            !short.contains("╭─ •") && !short.contains("╰─ ctx"),
-            "{short}"
-        );
+        assert!(!short.contains("model-x \u{e0b0} /srv/wisp"), "{short}");
         let narrow = render_to_string(50, 20, &state, &PromptEditor::default());
-        assert!(
-            !narrow.contains("╭─ •") && !narrow.contains("╰─ ctx"),
-            "{narrow}"
-        );
+        assert!(!narrow.contains("model-x \u{e0b0} /srv/wisp"), "{narrow}");
         assert_eq!(footer_height(Rect::new(0, 0, 60, 16)), 2);
 
         // Terminal width 120 shows #session_id, tight deck widths preserve cost over
-        // the optional token ratio, and control-only workspace strings emit no empty `│  │`.
+        // the optional token ratio, and an empty workspace still shows the branch.
         let at_120 = render_to_string(120, 20, &state, &PromptEditor::default());
         assert!(at_120.contains("#a780c86d"), "{at_120}");
 
-        let tight_deck = render_to_string(74, 20, &state, &PromptEditor::default());
-        assert!(tight_deck.contains("╰─ ctx 42% │ $0.140"), "{tight_deck}");
+        let tight_deck = render_to_string(64, 20, &state, &PromptEditor::default());
+        let telemetry = tight_deck.lines().last().unwrap();
+        assert!(
+            telemetry.contains("42%") && telemetry.contains("$0.140"),
+            "{tight_deck}"
+        );
         assert!(!tight_deck.contains("(84K / 200K)"), "{tight_deck}");
 
         state.workspace_cwd = Some(String::new());
         let empty_cwd = render_to_string(140, 20, &state, &PromptEditor::default());
-        assert!(!empty_cwd.contains("│  │"), "{empty_cwd}");
         assert!(
-            empty_cwd.contains("╭─ • idle │ feat/deck │ 1 MCP off │ 1 sub"),
+            empty_cwd.contains("model-x \u{e0b0} feat/deck\u{e0b0} · 1 MCP off · 1 sub"),
             "{empty_cwd}"
         );
     }

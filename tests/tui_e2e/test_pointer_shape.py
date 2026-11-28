@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.tui_e2e.support import context_stats_ready, screen_shows
+from tests.tui_e2e.support import context_stats_ready, footer_identity_shows
 from tests.tui_e2e.test_browser_takeover import _start_wide_tui
 
 _SET = b"\x1b]22;ew-resize\x1b\\"
@@ -59,7 +59,7 @@ def test_border_hover_pointer(
     tui = _start_wide_tui(tmp_path, home, width=_WIDTH, environment=environment)
     try:
         tui.wait_until(
-            lambda output: context_stats_ready(output) and screen_shows(output, "─ fake "),
+            lambda output: context_stats_ready(output) and footer_identity_shows(output, "fake"),
             timeout=25,
             failure="wide TUI did not finish startup",
         )

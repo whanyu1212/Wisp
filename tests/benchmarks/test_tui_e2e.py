@@ -115,11 +115,11 @@ def test_reply_markers_read_from_replayed_screen() -> None:
     frames = [
         _frame(
             "\x1b[3;3H▎WISP_E2E_START_7F3A payload\x1b[4;3H▎payload WISP_E2E_FINAL_9C2D"
-            "\x1b[24;40Hworking".encode()
+            "\x1b[23;40H◖● working◗\x1b[24;1H ◖ctx ~30%◗".encode()
         ),
         _frame(b"\x1b[6;3Hfake response to:\x1b[22;10H0.1s\x1b[6;21HWISP_E2E_START_7F3A payload"),
         _frame(b"\x1b[7;3Hpayload WISP_E2E_FINAL_9C2D"),
-        _frame(b"\x1b[24;40Hidle   "),
+        _frame("\x1b[23;40H   ◖• idle◗".encode()),
     ]
     screen = rust_tui_e2e._PaintedScreen()
     reply = rust_tui_e2e._ReplyProgress()
@@ -137,7 +137,10 @@ def test_reply_start_counts_before_a_later_frame_scrolls_it() -> None:
     # A long reply on a short terminal: one read holds the frame showing the
     # reply's first row and the frame that scrolls it away.
     read = _frame(b"\x1b[6;3Hfake response to: WISP_E2E_START_7F3A payload") + _frame(
-        b"\x1b[6;3H\x1b[Kpayload payload\x1b[7;3Hpayload WISP_E2E_FINAL_9C2D\x1b[24;40Hidle"
+        (
+            "\x1b[6;3H\x1b[Kpayload payload\x1b[7;3Hpayload WISP_E2E_FINAL_9C2D"
+            "\x1b[12;1H ◖• idle◗ ◖Ask◗ build ◖ctx ~30%◗"
+        ).encode()
     )
     screen = rust_tui_e2e._PaintedScreen()
     reply = rust_tui_e2e._ReplyProgress()
@@ -148,26 +151,42 @@ def test_reply_start_counts_before_a_later_frame_scrolls_it() -> None:
     assert (reply.first_ns, reply.final_ns, reply.settled_ns) == (1, 1, 1)
 
 
-def test_ready_ignores_cursor_gaps() -> None:
-    # The status line as Linux CI painted it: cursor moves, no spaces.
-    status = "\x1b[24;40Hidle\x1b[24;45H·ctx\x1b[24;50H▰▰▰▱▱▱▱▱▱▱~35%".encode()
-    # The composer's bottom border names the model and mode, painted in pieces.
-    composer = "\x1b[20;5HAsk Wisp anything\x1b[21;80Hfake\x1b[21;85H·\x1b[21;87Hbuild ─╯".encode()
-    plain = rust_tui_e2e._plain_text(composer + status)
-
-    assert rust_tui_e2e._ready(plain, "rust")
-    assert not rust_tui_e2e._ready(plain.replace("▰▰▰▱▱▱▱▱▱▱~35%", "~?"), "rust")
-    # Before the mode is confirmed the label is the model alone.
-    alone = "\x1b[20;5HAsk Wisp anything\x1b[21;90Hfake ─╯".encode()
-    assert rust_tui_e2e._ready(rust_tui_e2e._plain_text(alone + status), "rust")
-    # The model's name painted twice in a row is not the label.
-    repainted = b"\x1b[20;5HAsk Wisp anything\x1b[21;90Hfake\x1b[21;90Hfake"
-    assert not rust_tui_e2e._ready(rust_tui_e2e._plain_text(repainted + status), "rust")
-    # A short terminal keeps the identity and a token count in the footer.
-    short = rust_tui_e2e._plain_text(
-        b"Ask Wisp anything idle \xc2\xb7 ctx ~3.5k \xc2\xb7 fake/fake"
+@pytest.mark.parametrize(
+    ("start_cap", "end_cap", "join"), [("◖", "◗", "❯"), ("\ue0b6", "\ue0b4", "\ue0b0")]
+)
+def test_ready_uses_complete_footer_rows(start_cap: str, end_cap: str, join: str) -> None:
+    screen = rust_tui_e2e._PaintedScreen()
+    screen.feed(
+        _frame(
+            (
+                f"\x1b[20;5HAsk Wisp anything\x1b[23;7H{join} Ask {join} /srv/fake · idle"
+                f"\x1b[23;80H{start_cap}•\x1b[23;83Hidle{end_cap}\x1b[23;92HClick filter to search"
+                f"\x1b[24;3H{start_cap}ctx\x1b[24;8H~…{end_cap}"
+            ).encode()
+        )
     )
-    assert rust_tui_e2e._ready(short, "rust")
+    assert not rust_tui_e2e._ready(screen.rows())
+    screen.feed(_frame(f"\x1b[24;9H35%{end_cap}".encode()))
+    assert not rust_tui_e2e._ready(screen.rows())
+    model = _frame(b"\x1b[23;3Hfake")
+    screen.feed(model[:-1])
+    assert not rust_tui_e2e._ready(screen.rows())
+    screen.feed(model[-1:])
+    assert rust_tui_e2e._ready(screen.rows())
+
+
+@pytest.mark.parametrize(
+    "footer",
+    [
+        " ◖• idle◗ ◖Ask◗ build ◖ctx ~3.5k◗",
+        " \ue0b6• idle\ue0b4 \ue0b6Ask\ue0b4 build \ue0b6ctx ~3.5k\ue0b4",
+        "idle Ask ctx ~3.5k",
+    ],
+)
+def test_ready_accepts_compact_footer(footer: str) -> None:
+    assert rust_tui_e2e._ready(["Ask Wisp anything", footer])
+    assert not rust_tui_e2e._ready(["/connect to add a provider", "Ask Wisp anything", footer])
+    assert not rust_tui_e2e._ready(["Ask Wisp anything", footer.split("ctx")[0]])
 
 
 @pytest.mark.parametrize("foreground", [0, os.getpgrp()])
