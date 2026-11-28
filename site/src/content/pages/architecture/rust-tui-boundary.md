@@ -83,6 +83,38 @@ schema bundles; see [Compatibility and versioning](../reference/compatibility.md
 The Rust frontend bounds handshake, event admission, shutdown, and task joins. Neither frontend
 ownership nor backend EOF alone is treated as a fail-safe cleanup guarantee.
 
+## Resumed-history startup trade-off
+
+Because the Rust TUI retains the full saved active path so upward scrollback stays unbounded,
+resuming a very large session forces a concrete UX trade-off between **time to start reading** and
+**time until the composer accepts a new prompt**.
+
+In the [saved-history startup evidence](https://github.com/whanyu1212/Wisp/blob/main/benchmarks/evidence/rust_tui_hydration_evidence.md)
+(`HY-289: read-only startup preview`, five paired release-mode blocks on macOS arm64 running
+`uv run python -m benchmarks.rust_tui_hydration --no-profile --first-reply`), adding an early
+read-only startup preview on a 50,000-message fixture produced:
+
+| Metric (50k fixture, median) | Base | With startup preview | Trade-off |
+| --- | ---: | ---: | --- |
+| Newest visible turn | 3.41 s (3408 ms) | **0.99 s** (992 ms) | **−2.42 s** to start reading (within ~105 ms of a fresh composer) |
+| Accepted submit | 4.99 s (4986 ms) | 5.23 s (5232 ms) | **+246 ms** before the first prompt is accepted |
+
+Both metrics are measured end to end over a real PTY with a deterministic fake provider (not
+displayed pixels or CI thresholds): **Newest visible turn** stops at the first complete PTY frame
+showing the fixture's last message, while **Accepted submit** measures the PTY prompt write after
+startup context settles, confirmed by the fake provider's reply (not an internal backend ack). Peak
+tree RSS stayed flat (`881 → 875 MiB`), while process-tree CPU rose from `12.29` to `13.04 s`.
+
+Buying ~2.4 s of earlier reading at a ~0.25 s submit cost was an explicit daily-driver choice: when
+you resume a long session, you read the latest context before typing anyway, and the preview lets
+you inspect recent turns right away while full chronological hydration finishes underneath. A
+separate follow-up optimization in the same
+[evidence log](https://github.com/whanyu1212/Wisp/blob/main/benchmarks/evidence/rust_tui_hydration_evidence.md)
+(cached `SessionRunSnapshot` / `SessionTreeState` and fast-path entry reads) then cut unprofiled
+50k medians further—bringing composer readiness from `3648` to `3020 ms` and accepted submit from
+`5232` to `4292 ms` while dropping `python.session_refresh` to `2.10 ms`, leaving per-frame Rust
+JSON schema validation and event projection as the main remaining 50k cost.
+
 ## RC2 decision history
 
 The RC2 release PR authorized a Rust-default trial on native-wheel installations. It

@@ -44,10 +44,9 @@ understanding the application being edited.
 We begin with an in-memory file and a model/tool loop. Next we give that same loop
 a disposable directory, an exact-match editor, and a test runner. Chapter 3 adds
 request context and on-demand file discovery. Chapter 4 introduces streaming,
-failure replays, and an opt-in live provider. Chapter 5 separates host policy,
-per-operation approval, and resource guarantees. Later chapters will add steering,
-persistence, and compaction. Each layer should solve a problem the
-previous version makes visible.
+failure replays, and an opt-in live provider. Chapter 5 closes **Part I** by separating
+host policy, per-operation approval, and filesystem/process guarantees. Each layer
+solves a problem the previous version makes visible.
 
 The first three checkpoints use a **scripted provider**: a fixed sequence of model
 decisions with checks on the observations between them. This makes the examples
@@ -67,12 +66,15 @@ python3 -m examples.crafting_agents.checkpoint_02 --deny-edits
 python3 -m examples.crafting_agents.checkpoint_03
 python3 -m examples.crafting_agents.checkpoint_04
 python3 -m examples.crafting_agents.checkpoint_05
+python3 -m examples.crafting_agents.checkpoint_05 --scenario stale-input
 ```
 
 These commands use only the Python standard library. Chapter 1 reads an in-memory
 fixture. Chapter 2 creates and removes a temporary directory; it does not edit
-your checkout. Chapters 3 and 4 extend that fixture with context, discovery, and
-stream handling. Their test tool executes the supplied fixture with the current
+your checkout. Chapters 3–5 extend that fixture with context, discovery, stream
+handling, and host-side approval boundaries (the final `--scenario stale-input`
+experiment shows how the host blocks an approved edit when the file changes
+during approval). Their test tool executes the supplied fixture with the current
 Python interpreter. The separate live command in chapter 4 requires the OpenAI
 SDK and credentials; live edits and test execution require an explicit opt-in.
 
@@ -94,39 +96,35 @@ as [Inside Wisp's built-in tools](02-tools/built-in-tools.md), use shortened
 excerpts instead and say so at the top. The teaching agent is intentionally smaller than
 Wisp; each chapter names the guarantees it has yet to earn.
 
-## Curriculum
+## Part I — Build a tool-using agent {#curriculum}
 
-Only chapters marked **available** have been written. Planned chapters describe
-the intended progression, not capabilities already present in the checkpoints.
+Part I is a complete, five-chapter arc that takes a coding agent from a single-file
+loop to controlled, verified side effects:
 
-| Chapter | What you will build or understand | Wisp connection | Status |
-| --- | --- | --- | --- |
-| [1. The smallest coding agent](01-core-loop.md) | The model/action/observation cycle, correlated tool results, explicit stopping | `run_agent_loop` | Available |
-| [2. Reading, editing, and testing code](02-tools.md) | Validated tool dispatch, exact-match edits, test feedback, output limits | Built-in tools and typed results | Available |
-| [3. Giving the model useful context](03-context.md) | Instruction assembly, repository discovery, selecting relevant information | Prompt builder, project context, skills | Available |
-| [4. Talking to models reliably](04-providers.md) | A live provider adapter, streaming, completion signals, safe retries | Provider adapters and lifecycle validation | Available |
-| [5. Controlling side effects](05-side-effects.md) | Exposure, policy, approval, trust, filesystem and process boundaries | Tool policies, secure files, process supervisor | Available |
-| 6. Keeping the user in control | Steering, follow-ups, cancellation, request boundaries | `AgentHarness` | Planned |
-| 7. Remembering and resuming work | Transcript versus audit log, durable writes, replay, repair, branching | `CodingSession` and JSONL sessions | Planned |
-| 8. Working within a context window | Budgets, retained history, compaction, overflow recovery | Context estimates and session-owned compaction | Planned |
-| 9. One engine, multiple interfaces | Commands, events, presentation state, transport compatibility | Command host, SDK, CLI, Rust TUI | Planned |
-| 10. Knowing whether it works | Fault injection, task evaluation, latency, cost, profiling | Reliability tests and benchmark evidence | Planned |
-
-Context construction comes before compaction; replay comes before replacing the
-history that gets replayed. Tests accompany each mechanism, while chapter 10 will
-distinguish runtime correctness from live-model task success.
+| Chapter | What you build | Wisp connection |
+| --- | --- | --- |
+| [1. The smallest coding agent](01-core-loop.md) | The model/action/observation cycle, correlated tool results, explicit stopping | `run_agent_loop` |
+| [2. Reading, editing, and testing code](02-tools.md) | Validated tool dispatch, exact-match edits, test feedback, output limits (companion: [Inside Wisp's built-in tools](02-tools/built-in-tools.md)) | Built-in tools and typed results |
+| [3. Giving the model useful context](03-context.md) | Instruction assembly, repository discovery, selecting relevant information | Prompt builder, project context, skills |
+| [4. Talking to models reliably](04-providers.md) | A live provider adapter, streaming, completion signals, safe retries | Provider adapters and lifecycle validation |
+| [5. Controlling side effects](05-side-effects.md) | Exposure, policy, approval, trust, filesystem and process boundaries | Tool policies, secure files, process supervisor |
 
 ## Wisp case studies
 
-These deeper readings preserve implementation detail without making it a
-prerequisite for the first working agent:
-
-- [Inside Wisp's built-in tools](02-tools/built-in-tools.md): a companion to
-  chapter 2 that explains how each built-in tool works at the system-call level.
+After Part I—or alongside Chapter 2 and Chapter 5—these case studies examine how
+Wisp handles production boundaries and performance trade-offs:
 
 - [Hardening the tool boundary](case-studies/tool-boundary.md): file races,
   process lifetime, search, scheduling, and current limitations.
 - [Earning a Rust boundary](case-studies/rust-boundary.md): benchmarks, profiling,
   narrow native kernels, and the cost of maintaining parity.
+
+Future **Part II** chapters are scoped around runtime control and durability:
+live steering and cancellation (`AgentHarness`), append-only JSONL sessions and
+replay (`CodingSession`), context compaction, multi-interface RPC, and task
+evaluation. To inspect how Wisp implements and verifies those layers today, read
+[Agent runtime](../architecture/agent-runtime.md),
+[Rust TUI boundary](../architecture/rust-tui-boundary.md), and
+[Evals and reliability](../architecture/evals-and-reliability.md).
 
 Begin with [Chapter 1: The smallest coding agent](01-core-loop.md).

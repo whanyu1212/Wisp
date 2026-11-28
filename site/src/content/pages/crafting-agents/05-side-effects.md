@@ -90,7 +90,8 @@ so a host callback raising that type is wrapped in `RuntimeError` with the origi
 exception as its cause. This prevents the outer loop from swallowing a host failure.
 
 This wrapper is synchronous, like the earlier fixture tools. Interactive waiting
-and cancellation during approval belong to chapter 6.
+and cancellation during approval are runtime-level concerns—see
+[Agent runtime](../architecture/agent-runtime.md) for how Wisp coordinates them.
 
 ## 4. Run the experiments
 
@@ -222,5 +223,24 @@ with changing a file during approval, which must invalidate execution.
 open, and write. Which substitutions are detected? Which require descriptor-based
 resource access?
 
-Next: **Keeping the user in control**. We will move from synchronous authored
-approval to runtime boundaries for user input, steering, and cancellation.
+**End of Part I — Build a tool-using agent.** You now have a complete, stdlib-only
+teaching agent that plans tool calls, edits and tests code, assembles trusted
+context, handles provider streams and failures, and gates side effects behind
+policy and approval. Before moving on, run the Part I finale from a checkout
+(no credentials required) to watch the host stop a stale edit after approval:
+
+```bash
+python3 -m examples.crafting_agents.checkpoint_05 --scenario stale-input
+```
+
+The trace grants approval, mutates `calculator.py` mid-decision, rejects dispatch
+with `error: stale_input`, and leaves the host's comment intact.
+
+To go deeper into Wisp's production trade-offs, continue with the two case
+studies—[Hardening the tool boundary](case-studies/tool-boundary.md) and
+[Earning a Rust boundary](case-studies/rust-boundary.md)—or inspect Wisp's
+runtime architecture and test receipts in
+[Agent runtime](../architecture/agent-runtime.md) and
+[Evals and reliability](../architecture/evals-and-reliability.md). Future Part II
+work is scoped around live steering and cancellation, append-only sessions,
+compaction, multi-interface RPC, and evaluation.
