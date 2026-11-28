@@ -1,6 +1,6 @@
 ---
 title: Introduction
-description: Learn how Wisp's shared runtime, safety gates, and append-only sessions work across the TUI, CLI, RPC, and Python SDK.
+description: Personal terminal coding agent in Python and Rust with a daily-driver workspace, explicit safety gates, append-only sessions, and one shared runtime.
 route: guide/index.html
 section: using
 order: 0
@@ -12,24 +12,29 @@ navTitle: Using Wisp
 
 # Introduction
 
-Wisp is a coding agent that **stays in sync with you**. Its fullscreen TUI, RPC, and SDK surfaces
-can steer an active run or queue follow-up work, and every interface uses the same typed runtime
-rather than a separate implementation.
+Wisp is a personal terminal coding agent written in Python and Rust, built for daily repository
+work and for tinkering with agent runtimes from the loop up.
 
-The harness makes its work observable and recoverable: tool calls pass through explicit safety
-gates, lifecycle events arrive in an enforced order, and sessions are append-only JSONL records
-that can be inspected and resumed. These guarantees make Wisp useful both at a terminal and inside
-long-lived integrations.
+In the terminal, it gives you a fast Rust workspace designed to stay in sync while you work:
+inline diffs and turn-scoped `/diff` (`Alt+G`), a docked `Session | Files | Browser` side panel
+with a live built-in browser and turn waterfall, local `!` shell runs you can selectively share
+with `Alt+S`, and live steering or follow-up queues so you can redirect an active run without
+cancelling it.
 
-This guide covers current Wisp (`0.16.x`). While Wisp remains below 1.0, a minor release may make
-announced breaking changes under the documented [compatibility policy](../reference/compatibility.md);
-see the [changelog](https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md) for per-release notes.
+Underneath, the Rust TUI, one-shot print/JSON CLI, JSONL-RPC backend, and Python SDK all drive the
+same typed Python runtime—with separate project trust and per-call tool approvals (including
+saved command-prefix allow rules and macOS sandboxed Auto commands) and append-only JSONL sessions
+you can inspect, resume, or branch at any time.
 
-Start with [Installation](installation.md) and the [Quickstart](quickstart.md). Then read
-[Staying in sync](staying-in-sync.md) for the exact steering, follow-up, cancellation, and approval
-behavior available through each interface. Embedders can continue with the [Python SDK](sdk.md).
+- **New to Wisp?** Follow [Installation](installation.md) and [Quickstart](quickstart.md), then
+  skim [TUI basics](tui.md) for the workspace workflow.
+- **Tuning daily use?** Read [Tools & safety](tools-and-safety.md), [MCP & codemode](mcp.md), and
+  [Sessions](sessions.md).
+- **Embedding or going deeper?** Try the [Python SDK](sdk.md), build a tool-using agent from
+  scratch in [Crafting Coding Agents](../crafting-agents/index.md), or inspect runtime internals
+  and evals under [Inside Wisp](../architecture/index.md).
 
-For daily terminal work, the [TUI guide](tui.md) covers composing prompts, reviewing changes, and
-finding commands. Read [Tools and safety](tools-and-safety.md) before enabling unattended execution,
-and [Sessions](sessions.md) when you want to resume, branch, or inspect saved work. The section
-navigation lists the rest of the guide in reading order.
+This guide tracks current Wisp (`0.16.x`); see
+[Compatibility & versioning](../reference/compatibility.md) and the
+[changelog](https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md) for release policy and
+per-version notes.

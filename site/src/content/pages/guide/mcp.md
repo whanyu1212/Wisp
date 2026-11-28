@@ -13,17 +13,19 @@ navTitle: MCP & codemode
 # MCP servers & codemode
 
 MCP connects Wisp to external tools. **Discovery** decides which tool definitions the model sees;
-**codemode** lets it orchestrate tool workflows in a sandboxed Python script. Neither changes
-what a server is allowed to do or grants extra permissions.
+**codemode** lets it batch and filter tool calls inside a sandboxed Python script. Neither grants
+extra permissions—every remote tool defaults to `command` safety and requires approval unless you
+explicitly mark it `"read"` in `tool_safety`.
 
-Start by [adding a server](#add-a-server), then choose [direct or on-demand discovery](#finding-mcp-tools-on-demand).
-For larger catalogs, see [MCP with codemode](#mcp-with-codemode) for setup, an example, and common pitfalls.
+Start by [adding a server](#add-a-server), choose [direct or on-demand discovery](#finding-mcp-tools-on-demand),
+and see [MCP with codemode](#mcp-with-codemode) for batching multi-call workflows. For exact byte,
+timeout, and storage caps across MCP and codemode, see
+[Configuration: Tool, MCP, codemode, and subagent limits](../reference/configuration.md#tool-mcp-codemode-and-subagent-limits).
 
 ## Add a server
 
-Wisp can connect to user-configured [Model Context Protocol](https://modelcontextprotocol.io/)
-servers over stdio or Streamable HTTP. Servers live only in the user settings file at
-`~/.wisp/settings.json`. The `wisp mcp` commands edit it for you:
+MCP servers live only in your user settings file (`~/.wisp/settings.json`)—never in project files.
+Use `wisp mcp` from your shell (or press `a` in `/mcp` inside the TUI):
 
 ```text
 wisp mcp add github --env-from GITHUB_TOKEN -- npx -y @modelcontextprotocol/server-github
@@ -33,14 +35,13 @@ wisp mcp import snippet.json
 wisp mcp list
 ```
 
-Before saving a stdio server, `wisp mcp` shows the exact command it will run on every launch and
-asks for confirmation; `--yes` skips the question for scripted setup. `--env NAME` prompts for the
-value with masked input, and `import` asks again for each `env` value in a pasted
-`{"mcpServers": {...}}` snippet, because published snippets usually hold placeholders. Leave an
-answer empty to forward that variable from your environment instead. Changes apply the next time
-Wisp starts. See the [CLI reference](../reference/cli.md#mcp-servers) for every command.
+Before saving a stdio server, `wisp mcp` shows the exact command it will run locally as your user on
+every launch and asks for confirmation (`--yes` skips confirmation for scripts). Prefer `--env-from`
+and `--header-from` so secrets stay in your environment; `--env NAME` and `--header NAME` prompt
+with masked input and store values in `~/.wisp/settings.json`. See the
+[CLI reference](../reference/cli.md#mcp-servers) for all flags.
 
-You can also edit the file directly:
+You can also edit `~/.wisp/settings.json` directly:
 
 ```json
 {
@@ -64,174 +65,92 @@ You can also edit the file directly:
 }
 ```
 
-Configure exactly one transport per server: `command` starts a stdio process, while `url` connects
-directly over Streamable HTTP. Remote URLs require HTTPS except for loopback development endpoints
-and cannot contain credentials, query strings, or fragments. HTTP entries do not accept stdio-only
-`args`, `env`, or `env_from` fields. Configure the final endpoint URL: redirects are not followed.
-HTTP responses must be uncompressed; JSON bodies and streamed events have bounded sizes.
-
-For HTTP servers that need authentication, `headers` holds literal header values, stored like `env`,
-and `headers_from` builds a header from an environment variable each time Wisp connects. A
-`headers_from` value is `"${VAR}"` or a scheme word and the variable, such as
-`"Bearer ${LINEAR_API_KEY}"`; nothing else, so the visible part can never hold a credential. If the
-variable is unset, or its value is empty, starts or ends with a space, or contains a line break or
-control character, the server is skipped.
-Headers go only to the configured URL's origin (scheme, host, and port), never to another host, and
-cannot replace the headers the transport manages (such as `Host`, `Accept-Encoding`, or
-`Mcp-Session-Id`). Header values are never shown, logged, or sent to the model. A server's
-`headers_from` sends that variable's value to the server, so every confirmation names the variable
-and the host it goes to. A pasted snippet's `headers` work the same way: a value written as
-`"Bearer ${VAR}"` forwards that variable, and any other value is asked for again (masked), because
-published snippets usually hold placeholders.
+Use one transport per server: `command` for local stdio processes, or `url` (HTTPS, or HTTP on
+loopback) for Streamable HTTP. `headers_from` forwards an environment variable only to the
+configured URL's origin and never logs or shows header values to the model.
 
 ## Signing in with OAuth
 
-Many hosted servers, such as Linear's, use OAuth instead of a token you paste. Add the server by URL,
-then sign in:
+For hosted servers that use OAuth (such as Linear), add the URL and sign in via your browser:
 
 ```text
 wisp mcp add linear --url https://mcp.linear.app/mcp
 wisp mcp login linear
 ```
 
-`login` opens the server's sign-in page in your browser and waits up to five minutes for the
-browser to return to Wisp, on a one-time `http://127.0.0.1` address. Wisp follows the MCP
-authorization spec: it discovers the server's authorization server, registers itself as a client,
-and uses PKCE with state and issuer checks. It opens the sign-in page only if it is HTTPS (or HTTP on
-a loopback address). Nothing is saved unless the whole sign-in succeeds.
-
-The tokens are saved in `~/.wisp/mcp-auth.json`, readable only by you, separate from `auth.json`
-and protected from Wisp's file tools like it. Each sign-in is bound to the server's URL: if the URL
-changes, the tokens are never sent to the new one. The access token goes only to the server's own
-origin, never to another host, and is never shown, logged, or sent to the model. Wisp refreshes it
-automatically. When a server refuses Wisp, or a refresh fails, the server shows as unavailable with
-"sign in with `wisp mcp login NAME`"; Wisp never opens a browser on its own. In the TUI, press `l`
-on the server in `/mcp` instead. `wisp mcp logout NAME` (or `o` in `/mcp`) forgets a sign-in, and removing a server forgets it too. A server that sends its own
-`Authorization` header does not sign in. Servers that require a pre-registered client, rather than
-registering Wisp themselves, are not supported yet.
+In the TUI, select the server in `/mcp` and press `l` to sign in or `o` to sign out (`wisp mcp logout NAME`
+in the CLI). Tokens live in private `~/.wisp/mcp-auth.json` (separate from provider credentials in
+`~/.wisp/auth.json`, protected from file tools, bound to the server's exact URL/origin, and
+refreshed automatically). Wisp never opens a browser on its own.
 
 ## Settings and tool safety
 
-For stdio servers, `env` contains literal user-owned values. `env_from` forwards only the named
-variables from Wisp's process environment; if one is missing, that server is skipped. Server
-processes otherwise receive only the MCP SDK's small safe environment baseline, run from the user's
-home directory rather than the active project, and have stderr suppressed. Commands, arguments,
-environment values, URLs, stderr, and transport errors are never included in MCP startup diagnostics.
-
-Discovered tools are named `mcp__<server>__<tool>`, with deterministic normalization and hashing when
-needed. They follow the same exposure flags as built-ins: use `--allow-tool <name>` or `--all-tools`,
-while `--allow-read-tools` also includes MCP tools explicitly assigned `read` safety. Remote tools
-default to `command` safety and require approval; server-provided annotations cannot weaken this
-policy. `tool_safety` is the only way to assign `read` or `mutating` safety and matches the remote
-tool name exactly.
-
-`/mcp` shows each server's tool count with how many are read-only, such as
-`connected · 12 tools, 3 read-only`, and its details mark each read-only tool with `read`. The list
-shows Wisp's full names, `mcp__<server>__<tool>`; `tool_safety` takes the part after the second
-`__`. Wisp rewrites some names with a hash (too long, characters providers reject, or a leading
-`_`); for those, use the server's own name. Changes apply when the server reconnects (`c` in
-`/mcp`). `/codemode` counts the MCP tools a script can call in the
-next run, after tool selection, policy and plan mode, and a run that sends its MCP tools directly
-can call from a script only tools whose names and parameters are Python identifiers.
-
-A server can describe a tool as read-only with the MCP `readOnlyHint` annotation. Wisp does not
-trust it: the server describes itself, and a wrong or hostile hint would let a tool that changes
-things run without approval. `/mcp` marks such tools with `hint` when `tool_safety` has no entry
-for them, and `h` offers to mark them read-only, up to 8 at a time, after listing each one.
-Confirming writes them into the server's `tool_safety` as `"read"` and reconnects it. Check what
-each tool does before you confirm. A tool the server adds or hints later starts unmarked, and an
-entry you wrote, `"command"` included, is never replaced.
+- **Local process isolation:** Stdio servers run from `$HOME` with only a minimal safe environment
+  plus your configured `env`/`env_from` values (missing `env_from` skips that server) and suppressed
+  stderr. Local file-tool protections do not sandbox an MCP server.
+- **Explicit safety classification:** Discovered tools are named `mcp__<server>__<tool>` and
+  default to `command` safety (requiring approval). Only your user-owned `tool_safety` map (keyed by
+  the remote tool name) can mark a tool `"read"` or `"mutating"`.
+- **Untrusted server hints:** Wisp never auto-trusts MCP `readOnlyHint` annotations. In `/mcp`,
+  unclassified hinted tools show a `hint` badge; press `h` to review and confirm copying them into
+  `tool_safety` as `"read"` before reconnecting (`c`).
 
 ## Connection limits
 
-Startup is failure-isolated: an unavailable or malformed server produces a sanitized error event
-while healthy servers and built-in tools remain available. Wisp accepts at most 16 configured
-servers, 64 discovery pages per server, 256 MCP tools overall, 1 MiB of definitions per server,
-4 MiB overall, and 2 MiB per protocol frame before parsing. One server may bring any number of tools
-within those limits. With direct exposure, every tool's definition is sent with every model request,
-so a large catalog adds to each request's size and cost; see
-[Finding MCP tools on demand](#finding-mcp-tools-on-demand). Connection and discovery have a
-10-second per-server deadline. A server's catalog is registered atomically, so invalid definitions,
-duplicate names, collisions, or limit violations expose none of that server's tools.
+Startup is failure-isolated: one broken server reports a sanitized error while healthy servers and
+built-in tools stay available, and each server's catalog registers atomically. Set `"enabled": false`
+or run `wisp mcp disable NAME` to keep a server's configuration without starting it. For exact
+server, tool, definition-size, frame, and timeout caps (16 servers, 256 tools, 10 s deadline), see
+[Configuration: MCP servers, OAuth, and discovery](../reference/configuration.md#mcp-servers-oauth-and-discovery).
 
-Set `"enabled": false` on a server, or run `wisp mcp disable NAME`, to keep its settings without
-starting it.
+> [!TIP]
+> **Why 16 servers**
+>
+> Every stdio server is a separate local process, so startup time and memory use grow with the
+> number and implementation of the configured servers. Wisp keeps this cap until local servers can
+> be started lazily on demand.
+
+Current MCP support covers stdio and Streamable HTTP tool discovery plus bounded text results
+(resources, prompts, dynamic `tools/list_changed`, legacy HTTP+SSE, and pre-registered OAuth clients
+are not yet supported).
 
 ## Managing MCP servers
 
-`/mcp` lists the configured MCP servers with their status. `↑`/`↓` select a server; below the list
-you see what it runs (or the URL it connects to), the environment variables it sets or forwards, the
-headers it sends (naming each variable a header sends and the host that receives it), any startup
-error, and its tools. `PgUp`/`PgDn` scroll those details.
+Open `/mcp` in the TUI to inspect server commands/URLs, forwarded variables, headers, errors, and
+tools (`↑`/`↓` select, `PgUp`/`PgDn` scroll details):
 
 | Key | Action |
 |---|---|
-| `a` | Add a server by pasting its config snippet |
+| `a` | Add a server by pasting its `{"mcpServers": {...}}` snippet (prompts for secret values rather than saving placeholders) |
 | `e` | Disable the selected server, or enable it after confirming what it runs |
 | `d` | Remove the selected server, after confirming |
-| `l` | Sign in to the selected HTTP server with OAuth, in your browser |
-| `o` | Sign out of the selected server |
-| `c` | Reconnect: reload servers from your settings file and restart them |
-| `r` | Refresh the status without reconnecting |
-| `Esc` | Close, step back out of a panel, or cancel a sign-in in progress |
+| `l` / `o` | Sign in with OAuth in your browser / sign out |
+| `h` | Review and confirm marking server-hinted `readOnlyHint` tools as `"read"` |
+| `c` | Reconnect: reload `~/.wisp/settings.json`, restart servers, and clear MCP session grants |
+| `r` | Refresh status without reconnecting |
+| `Esc` | Close, step back, or cancel an active sign-in |
 
-To add a server, press `a` and paste the `{"mcpServers": {...}}` block from the server's README, one
-server at a time (use `wisp mcp import` for several). Wisp reads the snippet without saving it. For
-each environment variable the server needs, choose whether to forward it from Wisp's environment or
-enter a value; then enter each HTTP header value the snippet sets. Entered values are masked, never
-shown again, and saved to `~/.wisp/settings.json`. The snippet's own values are ignored, since
-published snippets usually hold placeholders; a header written as `"Bearer ${VAR}"` forwards that
-variable instead and needs no value.
-
-A server that needs you to sign in shows "sign in required". Press `l`: Wisp opens the server's
-sign-in page in your browser and waits up to five minutes. The list shows the page's address in case
-no browser opens; open it in a browser on the same machine as Wisp, because the page returns to a
-local address. `Esc` cancels. Once you finish, the server reconnects
-with its tools; the list shows "signed in", and `o` signs out. See
-[Signing in with OAuth](#signing-in-with-oauth).
-
-Adding, enabling, and removing end in a confirmation docked above the composer that shows exactly
-what will run. Like an approval, it has no default: choose with `1`/`2`, or highlight with `↑`/`↓`
-and press `Enter`; a key pressed before the panel was drawn does nothing. Confirming saves the change
-and reconnects, and the list then shows the server's new status and tools. Changes wait until the
-current prompt finishes. "Allow for this session" answers for MCP tools are cleared on every
-reconnect.
+Adding, enabling, and removing always dock a confirmation showing exactly what will run or connect,
+with no pre-selected default. Changes apply once the current prompt finishes.
 
 ## Finding MCP tools on demand
 
-When a run's MCP tool definitions are large, the model is not sent each one. It gets three small
-tools instead:
+When a run's eligible MCP catalog is large, Wisp replaces the individual definitions with three
+compact tools: `mcp_search` (query by keywords), `mcp_describe` (full schema for one tool), and
+`mcp_call` (invoke by name). The system prompt still names each server and tool count so the model
+knows what is available.
 
-| Tool | What it does |
+Control exposure with user-only `mcp_tool_exposure` in `~/.wisp/settings.json` or
+`WISP_MCP_TOOL_EXPOSURE`:
+
+| Value | When MCP definitions reach the model |
 |---|---|
-| `mcp_search` | Finds MCP tools by query and lists each match's server, summary and parameters |
-| `mcp_describe` | Returns one tool's full description and input schema |
-| `mcp_call` | Runs one of those tools by name, with its arguments |
+| `"auto"` (default) | On demand at ≥ 2,000 estimated tokens of eligible definitions; direct below that |
+| `"direct"` | Every definition on every request |
+| `"on_demand"` | Always via `mcp_search`, `mcp_describe`, and `mcp_call` |
 
-The system prompt names each server and how many tools it has, so the model knows what to search.
-
-`"mcp_tool_exposure"` in `~/.wisp/settings.json`, or `WISP_MCP_TOOL_EXPOSURE` for one process,
-chooses when this happens:
-
-| Value | MCP tools reach the model |
-|---|---|
-| `"auto"` (default) | On demand when the run's MCP tool definitions come to at least 2,000 tokens, by the estimate `/stats` uses; directly below that |
-| `"direct"` | Every definition, on every request |
-| `"on_demand"` | Always through `mcp_search`, `mcp_describe` and `mcp_call` |
-
-`auto` decides for each run from the MCP tools that run may use, so `--allow-tool` or plan mode can
-bring a large catalog under the threshold. 2,000 tokens is roughly 20 small tools or a handful of
-real-server ones. The setting is user-only: a project cannot change what the model sees or what
-each request costs.
-
-`mcp_call` reaches only the MCP tools direct mode would have offered that run: tool selection
-(`--allow-tool`, `--all-tools`), plan mode and the run's own tool limits all apply, and built-in tools
-are refused. Wisp resolves each `mcp_call` to the tool it names before any check, so that tool's own
-safety decides: a `command` tool asks for approval exactly as a direct call does, the approval and
-"allow for this session" name that tool, and a grant applies to that tool alone. A call missing a
-required parameter is rejected before you are asked; everything else, including types, is left to
-the server to validate, exactly as for a direct call. Events for a proxied call keep `name: "mcp_call"`
-and add `target` with the tool that runs.
+`mcp_call` resolves the target tool before policy checks, so tool selection, plan mode, approvals,
+and session grants apply to the underlying tool exactly as in direct mode.
 
 ### What on-demand discovery saves
 
@@ -261,167 +180,58 @@ uses, which runs about 1.4 times the provider's count:
 | 30 | about 2,700 | −9%, −32% |
 | 50 | about 4,400 | −34%, −49% |
 
-The 50-tool row is the same task as in the first table, measured again in a separate run, so its
-figures differ a little from the first table's. On a single question, on demand breaks even at
-about 1,800 tokens of definitions. Over tasks of
-several steps it saves more, since each request would otherwise resend every definition. Below the
-threshold, `auto` keeps `direct`, which is also faster.
-
-The committed baselines in `evals/tool_use/baselines/` hold every run:
-`2026-11-08-mcp-direct.json` and `2026-11-08-mcp-on-demand.json` for the table above, and
-`2026-11-09-mcp-sweep-direct.json` and `2026-11-09-mcp-sweep-on-demand.json` for the sweep. Compare
-them with `uv run python -m evals.tool_use compare`.
-
-Run `/mcp` in the TUI to inspect server status, what each server runs, registered tool names, and
-sanitized startup failures, and to add, remove, enable, disable, or reconnect servers without
-restarting Wisp; see [Managing MCP servers](#managing-mcp-servers). Adding or enabling a server
-always shows exactly what it runs and asks for confirmation. SDK and RPC clients can make the same
-changes; see the [SDK reference](../reference/sdk.md). Changes made with `wisp mcp` apply the next time
-Wisp starts, or after a reconnect (`c` in `/mcp`).
-
-> [!TIP]
-> **Why 16 servers**
->
-> Every stdio server is a separate local process, so startup time and memory use grow with the number
-> and implementation of the configured servers. Wisp may revisit this limit when it can avoid eagerly
-> starting every local server, rather than raising it without a lifecycle or lazy-start solution.
-
-Current MCP support covers stdio and Streamable HTTP tool discovery plus bounded text results.
-Resources, prompts, dynamic `tools/list_changed` updates, legacy HTTP+SSE, and OAuth clients that
-must be registered in advance are not yet supported.
+On a single question, on-demand discovery breaks even around 1,800 estimated tokens of definitions;
+for small catalogs (6–12 tools) it costs **more** tokens and extra latency, which is why `auto`
+stays `direct` below 2,000 tokens. Committed baselines live in `evals/tool_use/baselines/`
+(`2026-11-08-mcp-*` and `2026-11-09-mcp-sweep-*`; compare with `uv run python -m evals.tool_use compare`).
 
 ## Asking Wisp to set up a server
 
-You can ask Wisp to add, remove, or disable an MCP server, for example "set up the GitHub MCP
-server". Saving a server means running its command every time Wisp starts, so Wisp proposes the
-change instead of making it: `~/.wisp/settings.json` is protected from its file tools, and it calls
-one of these tools. (Shell commands are not checked against protected paths, so under YOLO or an
-"allow bash for this session" grant a shell command could still edit the file, as it could any of
-your files. Keep `bash` on ask when that matters.)
+You can ask Wisp to add, disable, or remove a server (for example, "add the Linear MCP server").
+Because `~/.wisp/settings.json` is protected from file tools, Wisp uses `list_mcp_servers`,
+`propose_mcp_server`, and `propose_mcp_server_change`:
 
-| Tool | Safety | What it does |
-|---|---|---|
-| `list_mcp_servers` | read | Lists saved servers: the executable or URL origin and the environment variable names; never arguments, URL paths, or values |
-| `propose_mcp_server` | command | Proposes adding (or replacing) a server: name, command and arguments or URL, `env_from` names, and `headers_from` for an HTTP server's token |
-| `propose_mcp_server_change` | command | Proposes removing or disabling a saved server |
-
-With [web search](providers.md#web-search) on, Wisp can look up a server's command or URL itself,
-for example "add the Linear MCP server". What it finds is still only a proposal. For a hosted server,
-Wisp proposes its URL and [signs in with OAuth](#signing-in-with-oauth) itself, which it prefers
-over API keys; a proposal that wraps a Streamable HTTP URL in a local bridge such as `mcp-remote` is
-refused with a pointer to the URL instead. A bridge is still allowed for a server that only offers a
-legacy SSE endpoint, which Wisp cannot reach directly. After you confirm one, press `l` in `/mcp` if it shows "sign in required".
-
-Every proposal opens a confirmation that shows exactly what the server would run or connect to and
-which variables it forwards. A header built from a variable is shown with the host that receives
-it, such as "sends $LINEAR_API_KEY to mcp.linear.app in header Authorization". A proposal with any
-field the confirmation does not show cannot be confirmed. Only **Confirm** or **Deny** is offered: no permission mode, `--yes`,
-or "allow for this session" answer ever approves a proposal, and a confirmation cannot be accepted
-while part of it is hidden. In print and JSON modes a proposal is always refused. Confirming saves
-the change from exactly the arguments you were shown; MCP servers then restart when the reply ends,
-so a new server's tools are available from your next message.
-
-Secrets never pass through the model. A proposal forwards environment variables by name with
-`env_from`. Arguments or URLs that look like they carry a secret (known token formats,
-`--api-key VALUE`, `TOKEN=…`, `scheme://user:password@…`, an `Authorization` header, an opaque
-token in a URL path) are rejected before you are asked, as are line breaks and control characters.
-This is a heuristic, so read every proposal before confirming. To store a value in the settings file instead, add the server from
-`/mcp` or with `wisp mcp add --env`.
+- Every proposal opens a mandatory **Confirm** / **Deny** prompt showing the exact command or URL,
+  forwarded `env_from` variables, and target host for any `headers_from` variable. No permission
+  mode (`YOLO`, `--yes`, or session grant) can auto-approve a proposal, and print/JSON modes refuse
+  them.
+- Secrets never pass through the model—arguments or URLs that look like tokens are rejected before
+  prompting (use `/mcp` or `wisp mcp add --env` for literal secrets). Confirming restarts MCP
+  servers after the reply completes.
 
 ## MCP with codemode
 
-On-demand discovery saves sending a full catalog on every request. Codemode solves a different
-problem: making the model spend a turn on every lookup and read a large result each time. The model
-writes a short Python script to batch or chain calls, then filters the results inside the script.
-Only printed output and the last expression return as result content, plus a tool-call summary;
-raw nested results do not enter the model's conversation. Calls still run on the MCP server and
-may incur that service's costs. Codemode is not an MCP server, an alternative transport, or a way
-to run arbitrary local Python.
+Codemode lets the model batch and filter tool calls in a short sandboxed Python script instead of
+spending a model turn and context window on every lookup. Only printed output, the last expression,
+and a tool-call summary return to the conversation.
 
 ### Enable it and check availability
 
-Install the optional extra in the same environment as Wisp. For a persistent uv tool installation:
+Install the optional `codemode` extra (which adds [monty](https://github.com/pydantic/monty)) and
+restart Wisp:
 
 ```bash
 uv tool install --force --python 3.12 'wisp-ai[codemode]'
 ```
 
-This adds [monty](https://github.com/pydantic/monty), the sandbox scripts run in. Restart Wisp after
-installation. A plain `wisp-ai` install does not include it. For source development, use
-`uv sync --extra codemode` instead. No server is installed or granted permissions by adding the extra.
+For source checkouts, run `uv sync --extra codemode`. With the extra installed, control availability
+and presentation via `/codemode` in the TUI, user-only settings (`codemode`,
+`codemode_presentation`), or `WISP_CODEMODE` / `WISP_CODEMODE_PRESENTATION`:
 
-The following table assumes the extra is installed and the run has eligible tools:
-
-| `mcp_tool_exposure` | `codemode` omitted or `null` (automatic) | `codemode: true` | `codemode: false` |
-|---|---|---|---|
-| `auto` | Offered when a script may call one of this run's MCP tools, whichever way it sends them | Offered | Not offered |
-| `on_demand` | Offered when this run's on-demand MCP catalog has a tool a script may call | Offered | Not offered |
-| `direct` | Offered when one of this run's MCP tools is one a script may call by name | Offered | Not offered |
-
-A script may call eligible MCP tools with `read`, `mutating`, or `command` safety. Each child
-call follows its normal approval policy, tool selection, plan-mode restrictions, and protected-path
-checks. Sent directly, a tool must also be callable by its name: its name and parameters must be
-Python identifiers. Automatic mode requires at least one eligible MCP tool; command and mutating
-tools count too. Set `codemode: true` to script the eligible built-in tools without an MCP server.
-
-Both settings are user-only. `WISP_MCP_TOOL_EXPOSURE` and `WISP_CODEMODE` override their settings-file
-values at startup. In the TUI, `/codemode` shows the setting, extra availability, whether the
-next prompt would offer the tool, and how many of its MCP tools a script can call; automatic
-mode turns on when that count is above zero. It updates when MCP servers connect or change and
-after each prompt. Choose automatic, always, or never there. `/codemode always` and
-`/codemode never` apply those choices directly. Settings changes affect the next prompt, not a script
-already running. RPC/SDK clients use `get_codemode` and `set_codemode` for the same information.
-
-**Offered does not mean used.** The model chooses whether to call codemode. A single lookup often
-needs no script; a script can combine dependent lookups, calculations, edits, and tests.
-
-### Choose the presentation
-
-Availability and presentation are separate user settings. `codemode` still decides whether the
-script tool is offered. `codemode_presentation` decides which schemas the model sees when it is:
-
-| Presentation | Model-facing tools |
-|---|---|
-| `direct_and_codemode` (default) | Direct tools, discovery, and codemode; optional subagent delegation remains available |
-| `codemode_only` | `codemode` and its `tool_search` / `tool_describe` discovery tools |
-
-For a local workflow, set `{"codemode": true, "codemode_presentation": "codemode_only"}` in your
-user settings. `WISP_CODEMODE_PRESENTATION` overrides the saved presentation at startup. In the
-TUI use `/codemode presentation codemode_only`, or choose presentation in `/codemode`; switch back
-with `/codemode presentation direct_and_codemode`. RPC/SDK clients can pass
-`presentation="codemode_only"` to `set_codemode("always", ...)`. Omitting presentation preserves it.
-Changes apply to the next run and survive settings reload.
-
-Codemode-only hides direct schemas and their prompt guidance; `tool_describe` supplies the target's
-guidelines, schema, and confirmation requirements before a script calls it. This changes
-presentation, not permissions: tool selection, plan mode, approvals, and protected paths still
-apply to each child. Tools with unscriptable names or arguments cannot be called, and scripts do
-not deliver images. `spawn_agent` is not offered in this mode. Provider-native features such as
-web search remain controlled by their own settings.
-
-If codemode is disabled, unavailable, or has no eligible tools under automatic mode, Wisp retains
-the direct tools. It also retains them if an existing custom tool uses a discovery-reader name,
-so the unified discovery interface cannot be supplied. The picker and RPC snapshot distinguish the selected presentation from the
-effective fallback. Selecting codemode-only does not install the extra or force availability.
-
-The default remains direct-plus-codemode. The eval runner records presentation separately so paired
-runs can compare correctness, tool failures, tokens, latency, and cost before any default change;
-smaller initial schemas alone are not evidence of better complete workflows.
+- **Availability (`codemode`):** `null`/omitted (**automatic**) offers codemode whenever the run has
+  at least one eligible MCP tool; `true` also enables local-only workflows; `false` disables it.
+- **Presentation (`codemode_presentation`):** `direct_and_codemode` (default) exposes direct tools
+  alongside codemode; `codemode_only` hides direct schemas and exposes `codemode`, `tool_search`,
+  and `tool_describe` (falling back to direct tools whenever codemode is unavailable).
 
 ### Classify MCP tools accurately
 
-MCP tools default to `command` safety, even if their names sound read-only or the server advertises
-read-only annotations. Codemode does not infer safety; `h` in `/mcp` only copies a hint into
-`tool_safety` once you confirm it. Inspect the server's implementation and
-contract before setting `tool_safety` for individual remote tool names. Command and mutating
-tools can be scripted under their usual policy; they need no read-only classification. A `read`
-classification permits calls without the ordinary command approval, so it is a security decision,
-not a performance switch.
+Inspect a server's contract before marking a remote tool `"read"` in `tool_safety`—that skips
+per-call command approval, so it is a security decision, not a performance switch. Command and
+mutating tools can still be scripted under their normal approval prompts.
 
-For example, suppose you operate a server named `inventory` at the placeholder endpoint below. It
-has a verified read-only remote tool `get_item(item_id: string)` returning JSON text with `id` and
-`stock` fields. Merge this into your user `~/.wisp/settings.json`, substituting your actual endpoint
-and exact remote name (not the `mcp__inventory__`-prefixed name):
+Example configuration for a verified read-only `get_item` tool on an `inventory` server (merge into
+`~/.wisp/settings.json` and reconnect with `c` in `/mcp`):
 
 ```json
 {
@@ -435,22 +245,12 @@ and exact remote name (not the `mcp__inventory__`-prefixed name):
 }
 ```
 
-Reconnect with `c` in `/mcp` after editing. This example leaves `codemode` automatic; with the extra
-installed, the on-demand catalog and read-only tool make it available. Other tools on that server
-remain `command` unless separately classified.
-
 ### From discovery to a filtered result
 
-Ask Wisp, for example: “Check inventory items A and B and report only those with no stock. Use
-codemode to avoid bringing full records into the conversation.” The model can:
-
-1. Use `mcp_search` to find the inventory tool and `mcp_describe` to inspect its parameters.
-2. Call codemode with a script using the full discovered tool name as an async function.
-3. Return the filtered answer, or continue with an authorized write in the same script.
-
-For the hypothetical tool above, this is the script body passed in codemode's `code` argument,
-not a command to paste into your shell. Both calls return text; `json.loads` is appropriate only
-because this example server promises JSON text:
+Inside a script, callable tools are async keyword-argument functions (use `mcp_call(name=..., arguments=...)`
+for non-Python identifiers or parameter names, and `await gather_settled(...)` to collect partial
+outcomes without aborting on one tool error). MCP tools that declare an output schema return typed
+dicts validated before execution:
 
 ```python
 import asyncio
@@ -464,52 +264,16 @@ items = [json.loads(text) for text in raw]
 [(item["id"], item["stock"]) for item in items if item["stock"] == 0]
 ```
 
-Tool functions take keyword arguments and return the same text as a normal call, but more of it:
-up to 512 KiB, where a direct call stops at the output limit (50 KB by default), so a script can
-count or search all of a long listing before printing a little. A result that is only part of the
-answer, cut at that size or stopped early by the tool (`grep` at `max_results`, say), ends with the
-line `[result incomplete]`, and the script's tool-call summary counts it. A page read with
-`limit` (from `read` or `read_output`) is not incomplete when it returns that many lines, even
-if more follow. A result is also cut
-at 50,000 lines. Print what the script found rather than whole results: three results near
-512 KiB already pass the 1 MiB a script may print, which ends it. A failed call
-raises `RuntimeError`; the script can catch it to continue with other work. Independent calls can
-use `asyncio.gather`; Wisp still serializes tools not marked parallel-safe. Under `gather` one
-failed call ends the script and the other results are lost, so Wisp gives every script
-`await gather_settled(...)`: it takes the same calls and returns every outcome in order, with a
-failed call's `RuntimeError` in place of its result (`isinstance(outcome, RuntimeError)` tells
-them apart). It hands back only failed tool calls, recognised by their message
-`<tool> failed: …` naming one of the run's tools; a bug in the script, or reaching a limit, still
-ends it. Scripts may also call
-the run's eligible local tools, including `read`, `edit`, `write`, and `bash`, but only through
-their provided functions, not by opening files directly.
-
-An MCP tool that declares an output schema returns its structured result to a script instead of
-text: a dict typed from the schema, so a script that reads a field the schema lacks fails its type
-check before any call runs. `tool_describe` shows the output schema and what a script receives;
-`mcp_describe` also supports MCP catalog tools. A schema that only wraps one `result`
-field, which the MCP Python SDK writes for a tool returning a plain value, returns that value, and
-one wrapping a string keeps returning text. A call whose structured result is missing, not JSON,
-or over 512 KiB fails like any failed call. Direct calls and subagents still read the text.
-
-With on-demand discovery, eligible catalog tools need not appear in codemode's description to be
-callable by full name. The name and all parameter names must be Python identifiers and not keywords.
-For other schemas, use the provided `mcp_call(name=..., arguments=...)` function in the script;
-its resolved target passes the same per-call policy and approval checks. Inspect the actual schema
-rather than assuming every MCP tool returns JSON or has Python-compatible parameters.
-
 ### Inspect, calculate, edit, and test
 
-For a local workflow, enable `codemode: true` and select the needed built-in tools. Suppose an
-existing `settings.py` contains the unique line `RETRY_SECONDS = 2`, and you want to double it and
-run its focused tests. First inspect it in one script:
+With `codemode: true`, scripts can combine eligible local tools too. Inspect first:
 
 ```python
 print(await read(path="settings.py"))
 ```
 
-After confirming the current contents, the next script can calculate the replacement, edit it,
-write a short note, and run the tests:
+Then edit, write, and test (each mutating or `bash` child follows its normal policy and approval
+checks; failed tests do not roll back completed file edits):
 
 ```python
 retry_seconds = 2 * 2
@@ -521,48 +285,13 @@ print(await write(path="retry-note.txt", content="Retry interval: " + str(retry_
 print(await bash(operation="run", command="uv run pytest tests/test_settings.py"))
 ```
 
-The example assumes that test file exists. Each edit, write, and shell call follows its own normal
-policy and may need approval. If the test fails, the file changes remain; inspect the failure
-before choosing the next step.
-
-### Shell process lifetimes
-
-A foreground `bash(operation="run", command=...)` child belongs to the script. Its child call ID
-cannot be used to move it into the background. To keep work running independently, explicitly use
-`bash(operation="start", command=...)`, then use the returned process ID with
-`bash(operation="poll", process_id=...)` or `bash(operation="cancel", process_id=...)`.
-These operations use the session's shared process supervisor. Processes started this way persist
-after the script ends by design; use `/processes` to inspect or stop them.
-
-### Finding tools for scripts
-
-When codemode is offered, `tool_search` and `tool_describe` provide one catalog of callable
-built-ins and MCP tools. Search by words in a name, namespace, or description; an
-empty `query` lists the catalog. Results include exact callable names, namespaces, connection
-state, and whether confirmation is required. Use `offset` with the returned `next_offset` to
-continue; `limit` defaults to 8 and permits at most 20 results.
-
-`tool_describe(name=...)` returns the tool's input/output schemas, script return semantics,
-and registered guidance. Both discovery tools return structured dictionaries inside a script.
-Their JSON responses are limited to 16 KiB and the current tool-output budget. Large fields
-are explicitly marked in `omitted_fields`. Follow the supplied `schema_path` (a JSON Pointer,
-such as `/input_schema/properties/path`) to inspect a subtree. Oversized objects and arrays
-return paged child paths; oversized indivisible values report their size and remain omitted.
-
-Listing a tool does not approve it. Selection, plan-mode restrictions, protected paths, and
-confirmation checks still apply when it executes. Use the returned `callable_name`: entries
-with `invocation: "function"` support direct keyword calls. In on-demand MCP mode, tools with
-non-Python names or parameters use `invocation: "mcp_call"`; pass the discovered target name
-and an `arguments` object to `mcp_call`. That wrapper returns text even if the target declares
-a structured output schema. Existing MCP discovery remains available. If an extension already owns either
-unified discovery name, Wisp preserves that extension and omits the generated pair.
-Fresh subagents keep their existing tool set. Forked subagents retain the parent's schemas
-and catalog to preserve the conversation prefix; their calls still pass through the nested
-read-only executor.
+Foreground `bash(operation="run", ...)` children end with the script; use `bash(operation="start", ...)`
+and `poll`/`cancel` for processes that outlive the script (inspect them in `/ps`).
 
 ### Keeping data across scripts
 
-Codemode provides three async helpers for branch-local JSON data:
+Use `store`, `load`, and `delete` for branch-local JSON state that survives restarts and compaction
+without filling model context:
 
 ```python
 await store("inventory", {"A": 3, "B": 0})
@@ -571,106 +300,41 @@ print([name for name, count in items.items() if count == 0])
 await delete("inventory")
 ```
 
-A script reads its own staged writes. Changes commit only when the script succeeds and its
-successful tool result is saved; errors, timeouts and cancellation discard staged changes.
-`load` returns a copy and raises `KeyError` for a missing key. `delete` returns whether a key
-existed. Modifying a loaded object does not update storage: call `store` again explicitly.
-The helper names `store`, `load` and `delete` are reserved in scripts.
-
-State follows the selected conversation branch, survives backend restart and compaction, and
-is copied when a session is cloned. Navigating to an earlier point restores that point's state.
-Replay never reruns a tool to rebuild it. State is saved as session metadata, outside the
-model's conversation context; print only the values needed for an answer and mention useful
-keys so later prompts can find them. State is not global memory or a freshness cache: saved
-external data can become stale, and the model must decide when to fetch it again.
-
-Each branch may retain 128 keys, with non-empty names up to 128 UTF-8 bytes. A value is limited
-to 64 KiB and the complete store to 256 KiB, measured as compact UTF-8 JSON including keys.
-Values may nest at most 32 containers. Only JSON values with string object keys and finite
-numbers are accepted. Delete keys to reclaim space; a single over-limit write is rejected.
-These are active-state limits, not a bound on append-only session history: older snapshots
-remain in the audit log. This transaction covers only `store` and `delete`: filesystem writes,
-MCP mutations, and shell effects are never rolled back when a script fails. Do not blindly retry a
-failed script; inspect which calls completed and the current external state first. Wisp disables
-automatic overflow replay for codemode so it cannot repeat these effects.
+Staged state writes commit only when the script succeeds and saves—errors or cancellation discard
+them, while file, shell, and MCP side effects are never rolled back (Wisp disables automatic
+overflow replay for codemode so side effects are not repeated).
 
 ### Why a script cannot call a tool
 
 | Symptom | Check or next step |
 |---|---|
-| Codemode is missing | Check the installed extra, `/codemode`, and environment overrides. Automatic mode requires an eligible MCP tool; command and mutating tools count too. With tools sent directly, at least one needs a name and parameters that are Python identifiers. Set `codemode: true` for local-only workflows. |
-| A tool is missing | Check tool selection, plan mode, and the tool schema, and reconnect MCP servers after changes. Do not loosen safety just to make the script work. |
-| A write or command call is refused | Check the child call's policy, plan mode, protected paths, and approval outcome. Allowing codemode does not approve its children. Subagents remain read-only. |
-| A child tool requires confirmation | The TUI or RPC/SDK client receives an approval for that child call. Child prompts are serialized. Without a live approval channel, the call fails; call the tool directly instead. |
-| Script type-check fails | Describe the tool and correct its name, parameter types, and keyword arguments. Scripts are checked before any calls run. |
-| A server fails or needs sign-in | Fix the server connection or authentication, not codemode. See [MCP troubleshooting](#troubleshooting). |
+| Codemode is missing | Check the `wisp-ai[codemode]` extra, `/codemode`, and `WISP_CODEMODE`. Automatic mode needs an eligible MCP tool; set `codemode: true` for local-only workflows. |
+| A tool is missing | Check tool selection, plan mode, and schema, and reconnect MCP servers (`c` in `/mcp`). |
+| A write or command call is refused | Check the child call's policy, plan mode, protected paths, and approval outcome. Allowing codemode never approves its children. |
+| A child tool requires confirmation | Child approvals serialize over the live event channel; without one (e.g. non-interactive without `--yes`), the call fails. |
+| Script type-check fails | Inspect the tool with `tool_describe` / `mcp_describe` and fix argument names or types; scripts are checked before any calls run. |
+| A server fails or needs sign-in | Fix the server connection or OAuth sign-in in `/mcp`. See [Troubleshooting](#troubleshooting). |
 
 ## Scripting tool calls with codemode (experimental)
 
-### Recovering a long result
-
-When a script's output exceeds the model-facing preview, codemode saves the bounded text and
-reports an `output_id`. Use `read_output` with that ID and a 1-indexed `offset` and `limit` to
-read more lines without running the script again. For a single long line, use 0-indexed
-`character_offset` and `character_limit` instead; follow the returned character cursor to
-continue. Do not mix line and character paging arguments.
-
-Printed output is also saved when a script fails, even though that script's state changes are
-discarded. A hard output limit retains only a prefix: bytes beyond it cannot be recovered.
-Storage failures are reported explicitly. Output previews use the run's configured tool-output
-byte and line budgets; saving output does not increase those model-facing budgets.
-
-Artifacts share the existing `read_output` store with shell output: they last only while the
-Wisp process runs, and older output may be evicted (32 outputs, 8 MiB per output, 64 MiB total).
-They are not durable script state and do not survive a backend restart. If you restrict the
-tool list, include `read_output` to enable saving and recovery. This feature saves text;
-image artifacts are not yet supported by codemode.
-
-### Execution limits
-
-Codemode's safety, audit, and resource limits apply regardless of discovery mode:
-
-- **Eligible tools under normal policy.** A script can call the run's selected tools, including
-  `read`, `edit`, `write`, `bash`, and MCP tools with any safety classification. Tool selection,
-  plan mode, protected paths, and approvals apply as for direct calls. On-demand MCP catalog tools
-  can be called by full name when their names and parameters are Python identifiers; other schemas
-  use `mcp_call`. Scripts cannot call `codemode` recursively or invoke `spawn_agent`. Subagents
-  remain read-only.
-- **Each call is checked on its own.** Every call a script makes passes the same checks as a direct
-  call. A child that needs approval opens its own prompt through the live event channel. Only one
-  child approval is pending at a time; denial reaches the script as a catchable error. With no live
-  channel the call fails. Approving or allowing the script grants nothing to the calls it makes.
-  Subagents still cannot request approvals. A script cancellation or timeout clears pending child
-  approvals, and waiting for approval counts toward the script’s wall-clock limit.
-- **Each call is recorded.** The script's `tool.execution.ended` and `tool.result` events list every
-  call it made in `nested_calls`, with each call's arguments, outcome and timing. Refused calls
-  are listed too, and so are calls the script ended before they finished. The session saves that
-  list. While the script runs, RPC and SDK clients and `--mode json` also receive transient
-  `tool.nested.started` and `tool.nested.ended` events, on a best-effort basis. The model still
-  reads only what the script prints and returns. A run cancelled while a script is running
-  records that script as interrupted and saves its bounded child-call audit: completed calls
-  retain their outcomes, and unfinished calls are marked interrupted. These records survive
-  session resume. The terminal UI shows each script as one card that lists these calls when opened, and
-  a script's optional `title` names it there. Foreground shell progress is aggregated on that parent
-  codemode card, while each child's start and end remain separate audit events.
-- **A sandbox, not a shell.** Scripts run in a separate process with no files, network, environment
-  or third-party packages, in a subset of Python. They are type-checked against the tools'
-  declarations before anything runs.
-- **Limits.** 200 tool calls, 2 minutes, 10 seconds of the script's own computing, 128 MiB and
-  1 MiB of combined printed and final-value output per script. A script that reaches one fails with the limit named. A
-  script cannot start another script, and cancelling a run kills it along with its active
-  foreground calls. Explicitly started background processes have a separate lifecycle; see
-  [Shell process lifetimes](#shell-process-lifetimes). Returning after a cancellation or time limit
-  can take longer while a mutation or foreground process finishes its cleanup.
+- **Isolated sandbox, normal policy:** Scripts run in a separate `monty` process with no direct
+  filesystem, network, environment, or third-party package access. Every child tool call goes
+  through Wisp's normal policy, protected paths, plan mode, and per-call approval prompt (child
+  approvals serialize; approving codemode grants nothing to children; scripts cannot invoke
+  `codemode` or `spawn_agent`).
+- **Full audit trail & recoverable output:** Every child call (including refused or interrupted
+  calls) is saved in `nested_calls` and shown inside the TUI's script card. Oversized script output
+  is saved to the shared process-local `read_output` store so the model can page through it without
+  rerunning the script.
+- **Resource & state limits:** Exact execution, nested-result, discovery, `store`/`load`/`delete`,
+  and `read_output` caps live in
+  [Configuration: Codemode and subagents](../reference/configuration.md#codemode-and-subagents).
 
 ## Troubleshooting
 
-Start in `/mcp`: check the server's status and sanitized error, confirm needed environment variables
-were present when Wisp started, and sign in with `l` if required. `r` only refreshes status; `c`
-reloads settings and reconnects, clearing session grants. Stdio servers need their command installed;
-HTTP servers need a supported final endpoint and valid authentication. Codemode cannot repair a
-missing server or bypass its access controls.
-
-See [MCP connection troubleshooting](troubleshooting.md#an-mcp-server-will-not-start-or-authenticate)
-for a symptom checklist and safe diagnostic sharing. For a connected server whose tools cannot be
-scripted, use [Why a script cannot call a tool](#why-a-script-cannot-call-a-tool).
+Open `/mcp` to check server status and sanitized errors, confirm required environment variables were
+set at startup, and sign in with `l` if prompted (`r` refreshes status; `c` reloads settings and
+reconnects, clearing MCP session grants). See
+[MCP connection troubleshooting](troubleshooting.md#an-mcp-server-will-not-start-or-authenticate)
+for a symptom checklist and [Why a script cannot call a tool](#why-a-script-cannot-call-a-tool) for
+script issues.

@@ -48,6 +48,7 @@ the dedicated `wisp tui` command are listed separately below.
 | `--resume SESSION` | Continue by JSONL path, filename, session id, or unique id prefix | — |
 | `--continue` | Continue the newest session in the selected session directory | — |
 | `--yes`, `--allow-unsafe-tool-execution` | Pre-approve mutating and command tools | — |
+| `--auto-command-read-dir PATH` | Grant one absolute directory for read-only `/bin/ls` and `/bin/cat` in macOS `Auto commands` (TUI and RPC only; may be passed once) | — |
 | `--max-tool-iterations N` | Cap model/tool rounds; omitted means uncapped | — |
 | `--timeout SECONDS` | Stop a `-p` run after this many seconds; see [Exit status](#exit-status) | — |
 | `--help` | Show generated help and exit | — |
@@ -78,6 +79,7 @@ modes. See [Tools & safety](../guide/tools-and-safety.md).
 | `--resume SESSION` | Continue a selected session |
 | `--continue` | Continue the newest session |
 | `--yes`, `--allow-unsafe-tool-execution` | Pre-approve mutating and command tools |
+| `--auto-command-read-dir PATH` | Grant one absolute directory for read-only `/bin/ls` and `/bin/cat` in macOS `Auto commands` (may be passed once) |
 | `--max-tool-iterations N` | Cap model/tool rounds |
 
 Provider and model defaults for the dedicated command come from configuration and

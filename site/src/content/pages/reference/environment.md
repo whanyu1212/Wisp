@@ -149,6 +149,7 @@ for normal use.
 | Name | Internal purpose |
 |---|---|
 | `WISP_RUST_TUI_BINDINGS_JSON` | Launcher-to-frontend handoff of resolved keybindings. The Python launcher overwrites it from user settings; configure `tui_keybindings` instead. |
+| `WISP_COMMAND_TOKEN` | Random per-command token injected into `bash` tool children so Wisp and its crash watchdog can identify and stop detached processes on cleanup. |
 | `WISP_TUI_STREAM_TRACE` | Diagnostic stream-timing log path; each streamed text delta appends a tab-separated line of milliseconds since first delta, milliseconds since previous delta, and byte length. |
 | `WISP_VISUAL_OUTPUT` | Output directory for the explicitly requested, ignored Rust visual-capture test; not a runtime rendering option. |
 | `WISP_HYDRATION_PROFILE_DIR` | Opt-in Python/Rust saved-history benchmark timings, appended as per-process JSONL files in an existing directory. |
