@@ -128,6 +128,53 @@ them. Failed changes, trusted-project configuration, CLI flags, and external RPC
 rewrite these preferences. If `~/.wisp/settings.json` is not valid JSON, Wisp leaves it untouched and
 warns that the preference was not saved; fix the file to resume saving.
 
+## Tool, MCP, codemode, and subagent limits
+
+Exact operational caps, timeouts, and storage limits referenced from [Tools & safety](../guide/tools-and-safety.md) and [MCP servers & codemode](../guide/mcp.md):
+
+### File, search, and shell tools
+
+| Surface | Limit or contract |
+|---|---|
+| `grep`, `find`, `ls` | `30 s` search deadline (returns partial results); fails after `5 s` extra if a filesystem call remains blocked; max `100` directory levels below start |
+| `edit` | Refuses files over `16 MiB`; requires prior read in the current conversation with no unseen modification |
+| `bash` timeouts | One-shot `timeout` ≤ `3,600 s`; started process `lifetime_seconds` ≤ `86,400 s` (24 h); `yield_seconds` / `wait_seconds` ≤ `600 s`; backgrounded via `Ctrl+B` runs up to `1 h` |
+| Auto-wake on process exit | At most `3` automatic wake runs between user prompts (`wake_on_process_exit` / `WISP_WAKE_ON_PROCESS_EXIT`; on by default in CLI/TUI, off in in-process SDK) |
+| Live shell progress | Starts after `0.5 s`, throttled to ≤ `4` updates/s when output changes; transient (`tool.execution.progress`), never sent to the model or saved |
+| Truncated command preview | Default tool output budget `50,000` bytes / `2,000` lines; head `64` lines (≤ `4,000` bytes) + tail `192` lines (≤ `8,000` bytes), scaled down for smaller budgets (tail-only below ~`1,000` bytes or `8` lines) |
+| Saved output (`read_output`) | First `8 MiB` per stream (stdout/stderr stored separately), max `64 MiB` and `32` saved streams per runtime in private `~/.wisp/tool-output/`, deleted on exit (or by next process after crash) |
+| Environment & process cleanup | Withholds provider API key variables (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `DEEPSEEK_API_KEY`, `GOOGLE_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`, `OPENAI_COMPATIBLE_API_KEY`, and custom endpoint key vars). Injects random `WISP_COMMAND_TOKEN` to clean up detached children; macOS/Linux watchdog cleans up managed processes on crash/`SIGKILL` (Windows crash leaves them running) |
+
+### macOS `Auto commands` (Seatbelt & reviewer)
+
+| Surface | Limit or contract |
+|---|---|
+| Consent & platform | Separate `sandbox_commands_v1` consent; macOS only with Seatbelt available (earlier `command_review_v1` is not reused) |
+| Fast-path test/build runners | Supported `pytest`, `python -m pytest`/`unittest`, `uv run --no-sync pytest`/`unittest`, `npm test`/`run test`/`run build`, and Cargo `test`/`check`/`build` run without model review. Test fast paths (`cargo test` requires an ancestor `Cargo.lock`) run with a read-only workspace, fresh per-command `TMPDIR`/`HOME`/`UV_CACHE_DIR` deleted on exit, and an isolated session Cargo target cache |
+| Model reviewer | Fresh no-tools request on the active provider/model (receives user request, exact arguments, and `cwd` only—no conversation/instructions/files); max `8` review requests per run, `20 s` deadline each |
+| Containment & environment | Controlled env (`PYTHONUNBUFFERED=1`, `CARGO_NET_OFFLINE=true`); denies `chflags` and TCP/UDP network access; Unix sockets allowed only inside private `TMPDIR`; fails closed to human approval if sandboxing is unavailable (never retries unrestricted). Known limitation: pre-existing hardlinks under allowed names are not isolated |
+| `--auto-command-read-dir` | Grants one absolute directory for the initial session in the launch project: allows `/bin/ls` on one directory or `/bin/cat` on one regular file (no flags, workspace `cwd`); excludes symlinks, hardlinks, and protected paths; expires on session/project switch or leaving Auto commands |
+
+### MCP servers, OAuth, and discovery
+
+| Surface | Limit or contract |
+|---|---|
+| Configured catalog caps | Max `16` servers, `64` discovery pages/server, `256` MCP tools overall, `1 MiB` definitions/server, `4 MiB` overall, `2 MiB` per protocol frame before parsing; `10 s` per-server connection/discovery deadline; atomic per-server registration |
+| Transport & HTTP rules | Exactly one transport per server (`command` stdio or `url` Streamable HTTP). Remote URLs require HTTPS (HTTP allowed only on loopback) with no credentials, query string, or fragment; redirects are not followed; responses must be uncompressed |
+| Headers & stdio env | `headers_from` allows only `"${VAR}"` or `"<Scheme> ${VAR}"`; headers go only to the configured URL origin and cannot override transport-managed headers (`Host`, `Accept-Encoding`, `Mcp-Session-Id`). Stdio servers run from `$HOME` with the MCP SDK's minimal safe baseline env plus `env`/`env_from` and suppressed stderr |
+| OAuth sign-in | `5 min` wait for one-time `http://127.0.0.1` PKCE callback; tokens stored in private `~/.wisp/mcp-auth.json`, bound to the server URL/origin, auto-refreshed; pre-registered OAuth clients are not supported |
+| Discovery & hints | `mcp_tool_exposure: "auto"` switches to on-demand at `2,000` estimated tokens of eligible MCP definitions. In `/mcp`, `h` marks up to `8` `readOnlyHint` tools at once after confirmation |
+
+### Codemode and subagents
+
+| Surface | Limit or contract |
+|---|---|
+| Codemode execution | Max `200` tool calls, `2 min` wall clock (includes approval waits), `10 s` script CPU time, `128 MiB` memory, `1 MiB` combined printed + return output per script; runs in isolated `monty` process (no filesystem, network, env, or third-party imports); automatic overflow replay is disabled |
+| Codemode nested results & discovery | Nested tool results cap at `512 KiB` and `50,000` lines (marked `[result incomplete]` when truncated); structured MCP output schemas also cap at `512 KiB`. `tool_search` returns `8` results by default (max `20`); `tool_search`/`tool_describe` JSON responses cap at `16 KiB` with `omitted_fields` + JSON Pointer `schema_path` paging |
+| Codemode branch state (`store`/`load`/`delete`) | Max `128` keys/branch (`128`-byte UTF-8 key names), `64 KiB`/value, `256 KiB` total compact UTF-8 JSON, max `32` nested containers; transactional for state only (file/shell/MCP side effects are never rolled back); commits only when the script succeeds and saves |
+| Codemode saved output | Shares the `read_output` store (`32` outputs, `8 MiB`/output, `64 MiB` total, process-local); supports 1-indexed `offset`/`limit` or 0-indexed `character_offset`/`character_limit` |
+| Subagents (`spawn_agent`) | Up to `8` tasks per call (`4` concurrent), max `63` tool rounds per subagent, `500`-word target / `8,000`-byte report truncation cap; read-only tools only, text-only (images omitted); model usage billed to session totals |
+
 ## Secrets
 
 Never commit auth files or real API keys.
