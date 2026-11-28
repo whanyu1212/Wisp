@@ -58,6 +58,11 @@ pub(crate) fn render(
     let mut targets = Vec::new();
     let mut offset = 0u16;
     for mode in PanelMode::ALL {
+        // Keep the three workspace tabs reachable at the minimum frame width.
+        // The reference is also available through contextual help.
+        if mode == PanelMode::Shortcuts && inner.width < 40 {
+            continue;
+        }
         if !spans.is_empty() {
             spans.push(Span::raw(" "));
             offset += 1;

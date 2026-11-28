@@ -18,7 +18,7 @@ use crate::terminal_images::{CellSize, ImagePreviewMeta, PaintedImage};
 use crate::theme::Palette;
 use crate::transcript::TranscriptRole;
 use crate::ui::{self, sanitize_for_terminal};
-use crossterm::event::{KeyCode, KeyEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -73,11 +73,12 @@ pub(crate) enum PanelMode {
     LiveWork,
     Files,
     Browser,
+    Shortcuts,
 }
 
 impl PanelMode {
     /// Every view, in the order the top bar lists their tabs.
-    pub(crate) const ALL: [Self; 3] = [Self::LiveWork, Self::Files, Self::Browser];
+    pub(crate) const ALL: [Self; 4] = [Self::LiveWork, Self::Files, Self::Browser, Self::Shortcuts];
 
     /// The view's tab label.
     pub(crate) fn label(self) -> &'static str {
@@ -85,6 +86,7 @@ impl PanelMode {
             Self::LiveWork => "Session",
             Self::Files => "Files",
             Self::Browser => "Browser",
+            Self::Shortcuts => "Shortcuts",
         }
     }
 
@@ -133,6 +135,7 @@ pub(crate) struct SidePanel {
     reported_files_tab: bool,
     /// State and cached previews for `PanelMode::Files`.
     files_view: RefCell<files::FilesState>,
+    shortcuts: RefCell<shortcuts::Shortcuts>,
     /// Whether the inline `Session` turn timeline waterfall is toggled in the docked panel.
     timeline_open: bool,
     /// State for the parallel turn & subagent swimlane waterfall.
@@ -340,6 +343,9 @@ impl SidePanel {
         if mode != PanelMode::Browser {
             self.browser_interacting = false;
         }
+        if mode == PanelMode::Shortcuts {
+            self.expanded = false;
+        }
         self.mode = mode;
         self.timeline_open = false;
         self.close_peek();
@@ -378,6 +384,9 @@ impl SidePanel {
             self.close();
         } else {
             self.show(mode);
+            if mode == PanelMode::Shortcuts {
+                self.focus();
+            }
         }
     }
 
@@ -513,7 +522,7 @@ impl SidePanel {
                     && self.mode == PanelMode::Browser;
                 if std::mem::take(&mut self.had_browser_viewport) {
                     self.auto_switched_browser = false;
-                    if !live_page_shown {
+                    if !live_page_shown && self.mode != PanelMode::Shortcuts {
                         self.mode = PanelMode::LiveWork;
                     }
                 }
@@ -523,7 +532,10 @@ impl SidePanel {
                 self.had_live_page = view.live;
                 if view.image.is_some() && !self.auto_switched_browser {
                     self.auto_switched_browser = true;
-                    if self.docked() && !self.output_view.expanded() {
+                    if self.docked()
+                        && !self.output_view.expanded()
+                        && self.mode != PanelMode::Shortcuts
+                    {
                         self.mode = PanelMode::Browser;
                     }
                 }
@@ -698,12 +710,35 @@ impl SidePanel {
         outcome
     }
 
+    pub(crate) fn paste_shortcut_filter(&mut self, text: &str) {
+        if self.mode == PanelMode::Shortcuts {
+            self.shortcuts.get_mut().paste(text);
+        }
+    }
+
     pub(crate) fn key_activates(&self, key: KeyEvent) -> bool {
         if self.mode == PanelMode::Files {
             return !self.files_view.borrow().filter_active()
                 && matches!(key.code, KeyCode::Enter | KeyCode::Char('e'));
         }
         key.code == KeyCode::Enter
+            && !(self.mode == PanelMode::Shortcuts && self.shortcuts.borrow().filtering())
+    }
+
+    pub(crate) fn key_event(&mut self, key: KeyEvent, state: &UiState) -> OverlayKey {
+        if self.mode == PanelMode::Shortcuts {
+            let panel_key = matches!(key.code, KeyCode::Char('[' | ']' | 'f' | 'b'))
+                && matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
+                && !self.shortcuts.get_mut().filtering();
+            if !panel_key {
+                return self.shortcuts.get_mut().key(key);
+            }
+        }
+        if matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT) {
+            self.key(key.code, state)
+        } else {
+            OverlayKey::Ignored
+        }
     }
 
     /// Keyboard navigation follows the same rows and disclosure controls as clicks.
@@ -747,7 +782,7 @@ impl SidePanel {
             self.browser_interacting = false;
             self.timeline_open = false;
             self.mode = match self.mode {
-                PanelMode::LiveWork | PanelMode::Files => PanelMode::Browser,
+                PanelMode::LiveWork | PanelMode::Files | PanelMode::Shortcuts => PanelMode::Browser,
                 PanelMode::Browser => PanelMode::LiveWork,
             };
             self.cursor = None;
@@ -972,6 +1007,15 @@ impl SidePanel {
         if !self.contains(column, row) {
             return OverlayKey::Ignored;
         }
+        if self.mode == PanelMode::Shortcuts {
+            let result = self.shortcuts.get_mut().click(column, row);
+            match result {
+                OverlayKey::Close => self.close(),
+                OverlayKey::Moved => self.overlay = true,
+                _ => {}
+            }
+            return result;
+        }
         if self
             .painted
             .borrow()
@@ -1058,6 +1102,10 @@ impl SidePanel {
     }
 
     pub(crate) fn scroll_at(&self, column: u16, row: u16, lines: i32) {
+        if self.mode == PanelMode::Shortcuts {
+            self.shortcuts.borrow_mut().scroll(lines);
+            return;
+        }
         if self.output_view.expanded() {
             self.output_view.scroll(lines);
             return;
@@ -1114,6 +1162,7 @@ impl SidePanel {
     pub(crate) fn observe_width(&mut self, width: u16) {
         if self.overlay
             && self.peek.is_none()
+            && self.mode != PanelMode::Shortcuts
             && !self.expanded
             && !docks(self.width)
             && docks(width)
@@ -1508,6 +1557,18 @@ pub(crate) fn render_with_preview(
         return;
     }
 
+    if panel.mode == PanelMode::Shortcuts {
+        *panel.painted.borrow_mut() = Painted {
+            surface: area,
+            area: inner,
+            ..Painted::default()
+        };
+        panel
+            .shortcuts
+            .borrow_mut()
+            .render(frame, inner, bindings, palette, panel.overlay_open());
+        return;
+    }
     if panel.output_view.expanded() {
         peek::render_expanded(frame, inner, area, state, panel, palette);
         return;
@@ -2227,6 +2288,7 @@ mod peek;
 mod plan;
 mod reading;
 mod running;
+mod shortcuts;
 mod terminal_output;
 mod timeline;
 

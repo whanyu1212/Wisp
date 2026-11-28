@@ -37,8 +37,8 @@ the entire default keymap; other valid user settings still apply.
 
 | Action ID | Default keys | Behavior |
 |---|---|---|
-| `prompt.submit` | Enter | Send a prompt; steer while running |
-| `prompt.alternate_submit` | Alt+Enter | Newline while idle; follow-up while running |
+| `prompt.submit` | Enter | Send a prompt, or queue a follow-up while running |
+| `prompt.alternate_submit` | Alt+Enter | Insert a newline while idle, or steer the active run |
 | `prompt.newline` | Shift+Enter, Ctrl+J | Insert newline |
 | `queue.restore` | Alt+Up | Restore newest queued draft |
 | `queue.manage` | Unbound (`/queue`) | Inspect queues, change drain modes, restore or clear |
@@ -48,7 +48,7 @@ the entire default keymap; other valid user settings still apply.
 | `theme.toggle` | Unbound (`/theme`) | Toggle Paper / last dark theme |
 | `panel.toggle` | Ctrl+P | Show or hide the side panel |
 | `run.background` | Ctrl+B | Move the running shell command to the background |
-| `panel.focus` | F8 | Focus the side panel (`Session`, `Files`, `Browser`; `[` / `]` tabs, `t` turn timeline, `/` file filter); Esc returns to the composer |
+| `panel.focus` | F8 | Focus the side panel (`Session`, `Files`, `Browser`, `Shortcuts`; `[` / `]` tabs, `t` turn timeline, `/` file filter); Esc returns to the composer |
 | `panel.background` | Unbound (`Down`, `/ps`) | Focus the side panel's background processes |
 | `session.tree` | Ctrl+T | Open the session tree to switch branches (`/tree`) |
 | `transcript.browse` | F6 | Browse and copy transcript messages, code blocks, and cards |
@@ -142,8 +142,8 @@ characters per chord.
 
 | Key | Action |
 |---|---|
-| `Enter` | Submit; while a prompt runs, steer it; or activate the selected slash/file-picker item |
-| `Alt+Enter` | While a prompt runs, queue a follow-up; otherwise insert a newline |
+| `Enter` | Submit a prompt, queue a follow-up during a run, or activate the selected slash/file-picker item |
+| `Alt+Enter` | Steer the active run, or insert a newline while idle |
 | `Alt+Up` | While a prompt runs, restore the newest queued item to the composer |
 | `Ctrl+J` | Insert newline when a terminal cannot distinguish `Shift+Enter` from `Enter` |
 | `Shift+Enter` | Insert newline in Rust when the terminal reports the modified key |
@@ -155,7 +155,7 @@ characters per chord.
 | `Ctrl+T` | Open the session tree to switch branches (`/tree`) |
 | `Ctrl+P` | Hide or show the side panel on a wide terminal; open or close it as an overlay otherwise |
 | `Ctrl+B` | While the agent runs a shell command in the foreground, move it to the background (in tmux, press it twice) |
-| `F8` | Focus the side panel for keyboard navigation (`[`/`]` switches Session/Files/Browser; `f` expands/restores; `b` jumps Browser; `i` enters browser takeover; `r` refreshes) |
+| `F8` | Focus the side panel for keyboard navigation (`[`/`]` switches between the four tabs; `f` expands/restores; `b` jumps Browser; `i` enters browser takeover; `r` refreshes) |
 | `F6` | Browse transcript messages, code blocks, and cards (`Tab`/`↑`/`↓`/`j`/`k` select, `y` copies, `Right` expands, `Left` collapses, `Enter` opens retained detail) |
 | `Alt+Y` | Copy the last assistant response as raw source Markdown (with OSC 52 fallback over SSH) |
 | `Alt+G` | Open `/diff` filtered to the latest turn that edited files (click or press `Enter` on any turn's change summary in Browse for that turn's diff) |
@@ -177,5 +177,6 @@ characters per chord.
 
 `Ctrl+G` and `/help` open the same native contextual guide. It follows focus across the editor, tool
 cards, pickers, context reports, and safety decisions; its key reference is derived from live
-bindings. The panel moves below the conversation on narrow terminals and never runs a tool, changes
+bindings. From composer or side-panel help, press `k` to open the full **Keyboard shortcuts**
+reference. Use `/` to filter by action or key, and `Esc` to clear the filter and return. The contextual help panel moves below the conversation on narrow terminals and never runs a tool, changes
 the session, or resolves an approval.

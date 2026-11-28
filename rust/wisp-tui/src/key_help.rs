@@ -19,6 +19,7 @@ pub(crate) enum Owner {
     Composer,
     Browse,
     Rewind,
+    Shortcuts,
     Files,
     Completion,
     Overlay(OverlayKind),
@@ -47,6 +48,16 @@ impl KeyHelp {
             update_guidance: true,
             ..Self::new(owner)
         }
+    }
+
+    /// The reference can replace the panel while the composer or panel owns focus.
+    /// Other dialogs keep their contextual help and their original focus.
+    pub(crate) fn offers_shortcuts(&self) -> bool {
+        !self.update_guidance
+            && matches!(
+                self.owner,
+                Owner::Composer | Owner::Overlay(OverlayKind::SidePanel) | Owner::Shortcuts
+            )
     }
 
     pub fn rows(&self, bindings: &Bindings) -> Vec<Line<'static>> {
@@ -114,6 +125,10 @@ impl KeyHelp {
                 "History: type to search; Up/Down/Page/Home/End select.",
                 "Enter restores without submitting; Esc/Ctrl+C closes.",
             ],
+            Owner::Shortcuts => &[
+                "Keyboard shortcuts: / filters by action or key. Enter toggles the selected group.",
+                "Esc clears the filter, then closes the reference. With the reference docked, Ctrl+C or a click in the composer returns to your draft and leaves the reference visible.",
+            ],
             Owner::Rewind => &[
                 "Up/Down select a prompt. PgDn at the last row loads older prompts.",
                 "Enter forks before the prompt and opens it for editing. Files keep their current contents.",
@@ -142,7 +157,7 @@ impl KeyHelp {
                 &["Up/Down/Page/Home/End scroll; r refreshes; Esc/Ctrl+C closes."]
             }
             Owner::Overlay(OverlayKind::SidePanel) => &[
-                "Side panel: Session (status, context, turns), Files (repo tree & preview), and Browser tabs.",
+                "Side panel: Session (status, context, turns), Files (repo tree & preview), Browser, and Shortcuts.",
                 "Press [ or ] to switch tabs (b jumps to Browser); Tab/Shift+Tab move sections; Up/Down/Home/End select.",
                 "In Files: click or Enter previews, e opens your editor, / filters, @ attaches path to prompt.",
                 "Files: d opens /diff, f expands/restores, r refreshes.",
@@ -213,6 +228,16 @@ impl KeyHelp {
                 key: key(KeyCode::Down),
             },
         ];
+        if self.offers_shortcuts() {
+            hints.insert(
+                1,
+                Hint {
+                    label: "k",
+                    description: "shortcuts",
+                    key: key(KeyCode::Char('k')),
+                },
+            );
+        }
         if area.width >= 56 {
             hints.extend([
                 Hint {

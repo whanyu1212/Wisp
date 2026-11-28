@@ -91,7 +91,10 @@ fn closed_panel_shows_bar() {
         let buffer = draw(&mut ui, width);
         let row = row_text(&buffer, 0);
         assert!(row.starts_with(" fix-login-redirect "), "{row:?}");
-        assert!(row.ends_with(" Session   Files   Browser  "), "{row:?}");
+        assert!(
+            row.ends_with(" Session   Files   Browser   Shortcuts  "),
+            "{row:?}"
+        );
         assert!(!tab_active(&ui, &buffer, "Session"));
         assert!(!tab_active(&ui, &buffer, "Files"));
         assert!(!tab_active(&ui, &buffer, "Browser"));
@@ -248,4 +251,125 @@ async fn panel_starts_below_bar() {
     draw(&mut ui, DOCKED);
     let popup = ui.mouse_frame.as_ref().unwrap().popup.unwrap();
     assert!(popup.y >= 1, "{popup:?}");
+}
+
+#[tokio::test]
+async fn shortcuts_preserve_composer_draft() {
+    let (writer, _receiver) = mpsc::channel(16);
+    for width in [DOCKED, NARROW] {
+        let mut ui = ui();
+        ui.handle_input(Input::Paste("keep this draft".into()), &writer, 8192)
+            .await
+            .unwrap();
+        click_tab(&mut ui, width, "Shortcuts").await;
+        let buffer = draw(&mut ui, width);
+        assert!(tab_active(&ui, &buffer, "Shortcuts"));
+        for input in [
+            Input::Key(KeyCode::Char('/').into()),
+            Input::Paste("copy last".into()),
+        ] {
+            ui.handle_input(input, &writer, 8192).await.unwrap();
+        }
+        let b = draw(&mut ui, width);
+        assert!((1..HEIGHT).any(|y| row_text(&b, y).contains("Alt+Y")));
+        ui.handle_input(Input::Key(KeyCode::Esc.into()), &writer, 8192)
+            .await
+            .unwrap();
+        let b = draw(&mut ui, width);
+        assert!((1..HEIGHT).any(|y| row_text(&b, y).contains("Essentials")));
+        ui.handle_input(Input::Key(KeyCode::Esc.into()), &writer, 8192)
+            .await
+            .unwrap();
+        assert_eq!(ui.active_overlay(), None);
+        assert!(!ui.side_panel.visible());
+        assert_eq!(ui.editor.text(), "keep this draft");
+    }
+}
+
+#[tokio::test]
+async fn help_opens_shortcuts() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut ui = ui();
+    draw(&mut ui, DOCKED);
+    let help = || Input::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL));
+    ui.handle_input(help(), &writer, 8192).await.unwrap();
+    assert!(ui.key_help.as_ref().unwrap().offers_shortcuts());
+    ui.handle_input(Input::Key(KeyCode::Char('k').into()), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.side_panel.active_tab(), Some(PanelMode::Shortcuts));
+    assert!(ui.key_help.is_none());
+    draw(&mut ui, NARROW);
+    ui.handle_input(help(), &writer, 8192).await.unwrap();
+    assert_eq!(
+        ui.key_help.as_ref().unwrap().owner,
+        key_help::Owner::Shortcuts
+    );
+    ui.handle_input(Input::Key(KeyCode::Esc.into()), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.active_overlay(), Some(OverlayKind::SidePanel));
+}
+
+#[tokio::test]
+async fn dock_keeps_reference_visible() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut ui = ui();
+    click_tab(&mut ui, DOCKED, "Shortcuts").await;
+    draw(&mut ui, DOCKED);
+    // Click the conversation to give the composer focus, then type an ordinary slash.
+    ui.handle_input(click(2, HEIGHT - 2), &writer, 8192)
+        .await
+        .unwrap();
+    ui.handle_input(Input::Key(KeyCode::Char('/').into()), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.editor.text(), "/");
+    assert!(ui.side_panel.docked());
+    assert!(!ui.side_panel.overlay_open());
+    assert_eq!(ui.side_panel.active_tab(), Some(PanelMode::Shortcuts));
+}
+
+#[tokio::test]
+async fn resize_preserves_composer_focus() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut ui = ui();
+    click_tab(&mut ui, DOCKED, "Shortcuts").await;
+    draw(&mut ui, DOCKED);
+    ui.handle_input(
+        Input::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    assert!(ui.side_panel.docked());
+    assert_eq!(ui.active_overlay(), None);
+    draw(&mut ui, NARROW);
+    ui.handle_input(Input::Paste("keep typing".into()), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.editor.text(), "keep typing");
+    draw(&mut ui, DOCKED);
+    assert_eq!(ui.side_panel.active_tab(), Some(PanelMode::Shortcuts));
+    assert_eq!(ui.active_overlay(), None);
+}
+
+#[tokio::test]
+async fn filter_accepts_immediate_enter() {
+    let (writer, _receiver) = mpsc::channel(16);
+    let mut ui = ui();
+    click_tab(&mut ui, DOCKED, "Shortcuts").await;
+    draw(&mut ui, DOCKED);
+    for input in [
+        Input::Key(KeyCode::Char('/').into()),
+        Input::Paste("copy".into()),
+        Input::Key(KeyCode::Enter.into()),
+        Input::Key(KeyCode::Char('f').into()),
+    ] {
+        ui.handle_input(input, &writer, 8192).await.unwrap();
+    }
+    assert!(ui.side_panel.expanded());
+    let frame = draw(&mut ui, DOCKED);
+    assert!((1..HEIGHT).any(|row| row_text(&frame, row).contains("Copy last response")));
 }
