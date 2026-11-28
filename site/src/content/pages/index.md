@@ -19,13 +19,15 @@ Its fullscreen Rust TUI, print mode, JSONL RPC process, and Python SDK share one
 
 ## Choose a starting point
 
-- **[Use Wisp](guide/quickstart.md):** install the application and start working in
-  your repository.
-- **[Build a coding agent](crafting-agents/index.md):** follow runnable chapters
-  from a tiny model-tool loop to controlled side effects, paired with Wisp's own
-  engineering trade-offs.
-- **[Understand Wisp's architecture](architecture/index.md):** find the runtime
-  boundaries and implementation entry points.
+- **[Try Wisp](guide/tui.md):** explore the Rust terminal workspace—editing turns,
+  turn-scoped `/diff` (`Alt+G`), `Session | Files | Browser` side panel, local `!`
+  shell, and live steering.
+- **[Build an agent](crafting-agents/index.md):** follow *Crafting Coding Agents*
+  Part I—five runnable stdlib-only Python chapters from a minimal loop to
+  controlled side effects, paired with Wisp's real trade-offs.
+- **[Inspect the evidence](architecture/index.md):** read Inside Wisp's runtime
+  boundaries, SWE-bench Pro V2 pilot results, interruption invariants, protocol
+  fuzzing, and 50k hydration benchmarks.
 
 ## Install Wisp
 
@@ -39,4 +41,4 @@ wisp
 
 Begin with the [Introduction](guide/index.md) and [Quickstart](guide/quickstart.md). Then read [how Wisp stays in sync](guide/staying-in-sync.md), [embed Wisp with the Python SDK](guide/sdk.md), or browse the [Changelog](https://github.com/whanyu1212/Wisp/blob/main/CHANGELOG.md).
 
-The later parts of this book cover the public reference, Wisp's internal architecture, and contributor workflows.
+The later parts of this book cover the public reference, Inside Wisp's architecture and evidence, and development workflows.

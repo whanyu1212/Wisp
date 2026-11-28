@@ -1,29 +1,79 @@
 ---
 import { Code } from "astro:components";
-import { getCollection } from "astro:content";
-import { navigation } from "../content/navigation";
 import { href } from "../content/paths";
 import TuiCapture from "./TuiCapture.astro";
-const groups = navigation(
-  (await getCollection("pages")).map((page) => page.data),
-);
-const introductions: Record<string, { title: string; summary: string }> = {
-  using: {
-    title: "Start using Wisp",
+
+const views = [
+  {
+    id: "editing",
+    label: "Editing",
+    capture: "sessionEditing" as const,
     summary:
-      "Install Wisp, connect a provider, and get comfortable with the terminal UI and live controls.",
+      "Inline syntax-highlighted diffs, codemode calls, captured browser previews, context sparkline, and the two-row telemetry deck.",
+    linkLabel: "Explore the terminal workspace",
+    route: "guide/tui.html",
+    eager: true,
   },
-  reference: {
-    title: "Look up the knobs & APIs",
+  {
+    id: "files",
+    label: "Files",
+    capture: "sessionFiles" as const,
     summary:
-      "CLI flags, configuration precedence, environment variables, and the Python SDK in one place.",
+      "Filter the project tree in the docked side panel with Nerd Font icons, read-only inline previews, and one-key editor handoff.",
+    linkLabel: "Side panel guide",
+    route: "guide/tui.html#side-panel",
+    eager: false,
   },
-  learn: {
-    title: "Build a coding agent",
+  {
+    id: "browser",
+    label: "Browser",
+    capture: "sessionBrowser" as const,
     summary:
-      "Follow runnable chapters from a tiny model-tool loop to controlled side effects—written from what I learned building Wisp.",
+      "Open a live Chrome/Chromium tab right inside the terminal to inspect web apps, preview HTML mockups, or take over interactively.",
+    linkLabel: "Browser viewport & takeover",
+    route: "guide/tui/commands.html#browser-viewport-and-interactive-takeover",
+    eager: false,
   },
-};
+  {
+    id: "permissions",
+    label: "Permissions",
+    capture: "sessionPermissions" as const,
+    summary:
+      "Keep project trust and tool approval separate—choose Ask, Auto edits, macOS sandboxed Auto commands, saved prefix rules, or YOLO.",
+    linkLabel: "Tools & safety model",
+    route: "guide/tools-and-safety.html",
+    eager: false,
+  },
+];
+
+const pillars = [
+  {
+    eyebrow: "01 / Try Wisp",
+    title: "Explore the terminal workspace",
+    summary:
+      "Editing turns, turn-scoped /diff (Alt+G), Session | Files | Browser side panel, local ! shell, and live steering.",
+    route: "guide/tui.html",
+  },
+  {
+    eyebrow: "02 / Build an agent",
+    title: "Crafting Coding Agents · Part I",
+    summary:
+      "Five runnable stdlib-only Python chapters from a tiny model-tool loop to controlled side effects, paired with Wisp's real trade-offs.",
+    route: "crafting-agents/index.html",
+  },
+  {
+    eyebrow: "03 / Inspect the evidence",
+    title: "Inside Wisp & evals",
+    summary:
+      "One typed runtime across every interface, SWE-bench Pro V2 pilot receipts, interruption invariants, protocol fuzzing, and 50k hydration benchmarks.",
+    route: "architecture/index.html",
+  },
+];
+
+const secondaryLinks = [
+  { label: "Reference", route: "reference/index.html" },
+  { label: "Development", route: "contributing/index.html" },
+];
 ---
 
 <section class="home-intro" aria-labelledby="wisp">
@@ -65,13 +115,180 @@ const introductions: Record<string, { title: string; summary: string }> = {
   </section>
 </section>
 
-<div class="home-showcase">
-  <TuiCapture
-    capture="sessionWelcome"
-    eager
-    sizes="(max-width: 760px) calc(100vw - 40px), (max-width: 936px) calc(100vw - 56px), 880px"
-  />
-</div>
+<section class="home-showcase" aria-labelledby="work-with-wisp">
+  <div class="workspace-stage">
+    {views.map((view, index) => (
+      <input
+        class="stage-radio"
+        type="radio"
+        name="workspace-view"
+        id={`stage-${view.id}`}
+        checked={index === 0}
+      />
+    ))}
+    <div class="stage-bar">
+      <h2 id="work-with-wisp" class="stage-heading">
+        Inside a live session
+      </h2>
+      <div class="stage-controls">
+        <div class="stage-tabs" role="tablist" aria-label="Workspace views">
+          {views.map((view) => (
+            <label
+              class="stage-tab"
+              for={`stage-${view.id}`}
+              data-stage={view.id}
+            >
+              <span>{view.label}</span>
+              <span class="stage-tab-progress" aria-hidden="true" />
+            </label>
+          ))}
+        </div>
+        <button
+          type="button"
+          class="stage-toggle"
+          aria-pressed="false"
+          aria-label="Pause workspace slideshow"
+          hidden
+        >
+          Pause
+        </button>
+      </div>
+    </div>
+    <div class="stage-panels">
+      {views.map((view) => (
+        <div class="stage-panel" data-stage={view.id}>
+          <TuiCapture
+            capture={view.capture}
+            eager
+            compact
+            sizes="(max-width: 760px) calc(100vw - 40px), (max-width: 1136px) calc(100vw - 56px), 1080px"
+          />
+          <div class="stage-foot">
+            <p>{view.summary}</p>
+            <a class="workflow-link" href={href(view.route)}>
+              {view.linkLabel} →
+            </a>
+          </div>
+        </div>
+      ))}
+    </div>
+  </div>
+</section>
+
+<script>
+  const stage = document.querySelector<HTMLElement>(".workspace-stage");
+  const radios = stage
+    ? [...stage.querySelectorAll<HTMLInputElement>(".stage-radio")]
+    : [];
+  const toggle = stage?.querySelector<HTMLButtonElement>(".stage-toggle");
+  if (stage && radios.length > 1 && toggle) {
+    const INTERVAL_MS = 3800;
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+    let userPaused = reducedMotion.matches;
+    let pointerInside = false;
+    let focusInside = false;
+    let timer: number | undefined;
+
+    const isPaused = () =>
+      userPaused || pointerInside || focusInside || document.hidden;
+
+    const restartProgress = () => {
+      stage.dataset.cycle = String((Number(stage.dataset.cycle) || 0) + 1);
+      for (const bar of stage.querySelectorAll<HTMLElement>(
+        ".stage-tab-progress",
+      )) {
+        bar.style.animation = "none";
+        void bar.offsetWidth;
+        bar.style.animation = "";
+      }
+    };
+
+    const sync = () => {
+      const paused = isPaused();
+      stage.dataset.autoplay = "true";
+      stage.dataset.paused = paused ? "true" : "false";
+      toggle.hidden = false;
+      toggle.textContent = userPaused ? "Play" : "Pause";
+      toggle.setAttribute("aria-pressed", userPaused ? "true" : "false");
+      toggle.setAttribute(
+        "aria-label",
+        userPaused ? "Play workspace slideshow" : "Pause workspace slideshow",
+      );
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+        timer = undefined;
+      }
+      if (!paused) {
+        timer = window.setTimeout(() => {
+          const current = radios.findIndex((r) => r.checked);
+          const next = (current + 1) % radios.length;
+          radios[next]!.checked = true;
+          restartProgress();
+          sync();
+        }, INTERVAL_MS);
+      }
+    };
+
+    toggle.addEventListener("click", () => {
+      userPaused = !userPaused;
+      if (!userPaused) restartProgress();
+      sync();
+    });
+    for (const radio of radios) {
+      radio.addEventListener("change", () => {
+        restartProgress();
+        sync();
+      });
+    }
+    stage.addEventListener("pointerenter", () => {
+      pointerInside = true;
+      sync();
+    });
+    stage.addEventListener("pointerleave", () => {
+      pointerInside = false;
+      restartProgress();
+      sync();
+    });
+    stage.addEventListener("focusin", () => {
+      focusInside = true;
+      sync();
+    });
+    stage.addEventListener("focusout", (event) => {
+      if (!stage.contains(event.relatedTarget as Node | null)) {
+        focusInside = false;
+        restartProgress();
+        sync();
+      }
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden) restartProgress();
+      sync();
+    });
+    reducedMotion.addEventListener("change", (event) => {
+      if (event.matches) userPaused = true;
+      sync();
+    });
+
+    restartProgress();
+    sync();
+  }
+</script>
+
+<section class="home-section" aria-labelledby="choose-a-starting-point">
+  <div class="home-section-head">
+    <div class="eyebrow">Explore the docs</div>
+    <h2 id="choose-a-starting-point">Where to go next</h2>
+  </div>
+  <div class="starting-points">
+    {pillars.map((pillar) => (
+      <a class="starting-card" href={href(pillar.route)}>
+        <span class="eyebrow">{pillar.eyebrow}</span>
+        <strong>{pillar.title} →</strong>
+        <p>{pillar.summary}</p>
+      </a>
+    ))}
+  </div>
+</section>
 
 <section class="home-story" aria-labelledby="why-wisp">
   <div class="home-story-body">
@@ -111,81 +328,11 @@ const introductions: Record<string, { title: string; summary: string }> = {
     <div>
       <dt>Made to stay in sync</dt>
       <dd>
-        Steer active runs, queue follow-ups, read inline diffs as edits land,
-        and keep project trust separate from per-call approval.
+        Steer active runs, queue follow-ups, review per-turn diffs, and keep
+        project trust separate from per-call approval.
       </dd>
     </div>
   </dl>
-</section>
-
-<section class="home-workflows" aria-labelledby="work-with-wisp">
-  <div class="home-section-head">
-    <div class="eyebrow">In action</div>
-    <h2 id="work-with-wisp">Inside a live session</h2>
-  </div>
-  <div class="workflow-rows">
-    <div class="workflow-row">
-      <div class="workflow-copy">
-        <h3>Follow every edit</h3>
-        <p>
-          Watch tool activity and inline diffs land as Wisp works, with context
-          usage, active skills, changed files, and recent turns right beside the
-          conversation.
-        </p>
-        <a class="workflow-link" href={href("guide/tui.html")}>
-          Explore the terminal UI →
-        </a>
-      </div>
-      <div class="workflow-media">
-        <TuiCapture
-          capture="sessionEditing"
-          compact
-          sizes="(max-width: 900px) calc(100vw - 40px), 660px"
-        />
-      </div>
-    </div>
-    <div class="workflow-row">
-      <div class="workflow-copy">
-        <h3>Approve on your terms</h3>
-        <p>
-          Project trust and tool approval stay separate decisions. Inspect any
-          proposed command and allow it once, grant a broader session scope, or
-          deny it before it runs.
-        </p>
-        <a class="workflow-link" href={href("guide/tools-and-safety.html")}>
-          Understand tools and safety →
-        </a>
-      </div>
-      <div class="workflow-media">
-        <TuiCapture
-          capture="sessionApproval"
-          compact
-          sizes="(max-width: 900px) calc(100vw - 40px), 660px"
-        />
-      </div>
-    </div>
-  </div>
-</section>
-
-<section class="home-section" aria-labelledby="choose-a-starting-point">
-  <div class="home-section-head">
-    <div class="eyebrow">Explore the docs</div>
-    <h2 id="choose-a-starting-point">Where to go next</h2>
-  </div>
-  <div class="starting-points">
-    {groups.slice(0, 3).map(
-      (group, index) =>
-        group.pages[0] && (
-          <a class="starting-card" href={href(group.pages[0].route)}>
-            <span class="eyebrow">
-              {String(index + 1).padStart(2, "0")} / {group.title}
-            </span>
-            <strong>{introductions[group.key]?.title} →</strong>
-            <p>{introductions[group.key]?.summary}</p>
-          </a>
-        ),
-    )}
-  </div>
 </section>
 
 <section class="home-content" aria-labelledby="start-reading">
@@ -200,13 +347,8 @@ const introductions: Record<string, { title: string; summary: string }> = {
     </p>
   </div>
   <div class="secondary-starts">
-    {groups
-      .slice(3)
-      .map(
-        (group) =>
-          group.pages[0] && (
-            <a href={href(group.pages[0].route)}>{group.title} →</a>
-          ),
-      )}
+    {secondaryLinks.map((item) => (
+      <a href={href(item.route)}>{item.label} →</a>
+    ))}
   </div>
 </section>

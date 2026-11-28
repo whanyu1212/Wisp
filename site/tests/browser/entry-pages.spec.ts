@@ -55,24 +55,25 @@ test("homepage offers install, product context, and preserved entry anchors with
     await expect(page.locator(`[id="${id}"]`)).toHaveCount(1);
   }
   await expect(page.locator(".secondary-starts a")).toHaveText([
-    "Inside Wisp →",
+    "Reference →",
     "Development →",
   ]);
 });
 
-test("homepage centers a reader-friendly hero showcase and renders uncropped workflow captures", async ({
+test("homepage renders the v0.16.12 workspace stage with uncropped tabs and pause control", async ({
   page,
 }) => {
   await page.goto("");
-  const hero = page.locator(".home-showcase img");
-  await expect(hero).toHaveAttribute("width", "2592");
-  await expect(hero).toHaveAttribute("height", "1502");
-  await expect(hero).toHaveAttribute("alt", /prompt composer, and side panel/);
+  const editingPanel = page.locator('.stage-panel[data-stage="editing"]');
+  const hero = editingPanel.locator("img");
+  await expect(hero).toHaveAttribute("width", "3404");
+  await expect(hero).toHaveAttribute("height", "1946");
+  await expect(hero).toHaveAttribute("alt", /live editing turn/);
+  await expect(editingPanel).toBeVisible();
   const heroBox = (await hero.boundingBox())!;
   const mainBox = (await page.locator("main").boundingBox())!;
-  expect(heroBox.width).toBeLessThanOrEqual(880);
+  expect(heroBox.width).toBeLessThanOrEqual(1080);
   if (page.viewportSize()!.width > 936) {
-    expect(heroBox.width).toBeLessThan(mainBox.width);
     expect(heroBox.x + heroBox.width / 2).toBeCloseTo(
       mainBox.x + mainBox.width / 2,
       0,
@@ -80,19 +81,29 @@ test("homepage centers a reader-friendly hero showcase and renders uncropped wor
   }
   // Ignore the one-pixel image border and allow responsive image rounding.
   expect(
-    Math.abs(heroBox.height - 1 - (heroBox.width * 1502) / 2592),
-  ).toBeLessThan(1);
+    Math.abs(heroBox.height - 1 - (heroBox.width * 1946) / 3404),
+  ).toBeLessThan(1.5);
 
-  const workflowImages = page.locator(".workflow-rows .tui-capture img");
-  await expect(workflowImages).toHaveCount(2);
-  const approval = workflowImages.nth(1);
-  await approval.scrollIntoViewIfNeeded();
-  await expect(approval).toHaveAttribute("width", "2718");
-  await expect(approval).toHaveAttribute("height", "1528");
-  const approvalBox = (await approval.boundingBox())!;
-  expect(
-    Math.abs(approvalBox.height - 1 - (approvalBox.width * 1528) / 2718),
-  ).toBeLessThan(1);
+  const toggle = page.locator(".stage-toggle");
+  await expect(toggle).toBeVisible();
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-pressed", "true");
+  await expect(toggle).toHaveText("Play");
+
+  for (const [id, altPattern] of [
+    ["files", /Files side panel/],
+    ["browser", /Browser side panel/],
+    ["permissions", /Project permissions panel/],
+  ] as const) {
+    await page.locator(`.stage-tab[data-stage="${id}"]`).click();
+    await expect(page.locator(`#stage-${id}`)).toBeChecked();
+    const panel = page.locator(`.stage-panel[data-stage="${id}"]`);
+    await expect(panel).toBeVisible();
+    await expect(panel.locator("img")).toHaveAttribute("width", "3404");
+    await expect(panel.locator("img")).toHaveAttribute("height", "1946");
+    await expect(panel.locator("img")).toHaveAttribute("alt", altPattern);
+  }
+
   await page.goto("guide/installation.html");
   await expect(page.locator("article")).toContainText(
     "Python 3.11+ is supported; Python 3.12 is recommended for installation.",
@@ -163,17 +174,13 @@ test("TUI captures load responsively with accurate provenance in both themes", a
       expect(response.headers()["content-type"]).toContain("image/png");
     }
     if (route === "") {
-      await expect(figures).toHaveCount(3);
-      await expect(page.locator(".home-showcase img")).toHaveAttribute(
-        "alt",
-        /welcome screen with the Braille mascot/,
-      );
+      await expect(figures).toHaveCount(4);
       await expect(
-        page.getByRole("heading", { name: "Follow every edit" }),
+        page.locator('.stage-panel[data-stage="editing"] img'),
+      ).toHaveAttribute("alt", /live editing turn/);
+      await expect(
+        page.getByRole("heading", { name: "Inside a live session" }),
       ).toBeVisible();
-      await expect(page.getByText("Steer without starting over")).toHaveCount(
-        0,
-      );
     }
     for (const theme of ["light", "dark"]) {
       await page.getByRole("combobox", { name: "Theme" }).selectOption(theme);
@@ -200,12 +207,19 @@ test("homepage and section navigation remain useful with JavaScript disabled", a
     await page.goto("http://127.0.0.1:4322/Wisp/");
     await expect(page.locator(".home-intro .primary")).toBeInViewport();
     await expect(page.locator(".home-intro pre")).toBeVisible();
-    await expect(page.locator(".home-showcase .tui-capture img")).toBeVisible();
-    await page.locator('.starting-points a[href="/Wisp/guide/"]').click();
+    await expect(
+      page.locator('.stage-panel[data-stage="editing"] .tui-capture img'),
+    ).toBeVisible();
+    await expect(page.locator(".stage-toggle")).toBeHidden();
+    await page.locator('.stage-tab[data-stage="files"]').click();
+    await expect(page.locator("#stage-files")).toBeChecked();
+    await expect(
+      page.locator('.stage-panel[data-stage="files"] .tui-capture img'),
+    ).toBeVisible();
     await page
-      .locator('.section-index a[href="/Wisp/guide/quickstart.html"]')
+      .locator('.starting-points a[href="/Wisp/guide/tui.html"]')
       .click();
-    await expect(page.locator("h1")).toHaveText("Quickstart");
+    await expect(page.locator("h1")).toHaveText("TUI basics");
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= innerWidth,
