@@ -278,7 +278,7 @@ fn nearest_16(r: u8, g: u8, b: u8) -> Color {
 }
 
 /// The RGB value xterm uses for a 256-colour index.
-fn indexed_rgb(index: u8) -> (u8, u8, u8) {
+pub(crate) fn indexed_rgb(index: u8) -> (u8, u8, u8) {
     match index {
         0..16 => ANSI_16[usize::from(index)].1,
         16..232 => {

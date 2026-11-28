@@ -154,11 +154,14 @@ pub(crate) struct SidePanel {
     /// Logical action rows from the last paint, including rows below the viewport.
     painted: RefCell<Painted>,
     scroll: Cell<usize>,
-    /// The background process whose peek is open under its row, while the panel has
-    /// focus; moving off its row closes it.
+    /// The process shown under Running. The dock follows the first active process;
+    /// the focused panel follows the selection.
     peek: Option<String>,
     /// Whether `x` asked to stop the peeked process and waits for `y`.
     confirm_stop: bool,
+    output_view: peek::OutputView,
+    /// Return keyboard focus to the composer after a click expanded the dock.
+    output_from_dock: bool,
     /// Whether the next paint scrolls the peek that just opened into view.
     reveal_peek: Cell<bool>,
     /// Whether focus moved to the background processes since the reducer was last
@@ -176,6 +179,7 @@ struct ActionHit {
 
 #[derive(Debug, Default)]
 struct Painted {
+    output_button: Option<Rect>,
     surface: Rect,
     area: Rect,
     total: usize,
@@ -302,7 +306,7 @@ impl SidePanel {
     }
 
     pub(crate) fn expanded(&self) -> bool {
-        self.expanded
+        self.expanded || self.output_view.expanded()
     }
 
     pub(crate) fn timeline_active(&self) -> bool {
@@ -519,7 +523,7 @@ impl SidePanel {
                 self.had_live_page = view.live;
                 if view.image.is_some() && !self.auto_switched_browser {
                     self.auto_switched_browser = true;
-                    if self.docked() {
+                    if self.docked() && !self.output_view.expanded() {
                         self.mode = PanelMode::Browser;
                     }
                 }
@@ -538,6 +542,7 @@ impl SidePanel {
         self.expanded = false;
         self.timeline_open = false;
         if docks(self.width) {
+            self.close_peek();
             self.rehide = false;
             self.hidden = !self.hidden;
             self.overlay = false;
@@ -565,6 +570,7 @@ impl SidePanel {
     /// row the panel can act on. A panel the user hid hides again when focus leaves.
     pub(crate) fn focus_background(&mut self) {
         let hidden = self.hidden;
+        self.close_peek();
         self.focus();
         self.mode = PanelMode::LiveWork;
         self.expanded = false;
@@ -598,9 +604,24 @@ impl SidePanel {
                     .finished()
                     .iter()
                     .any(|process| process.process_id == *process_id);
-            if !listed || !self.overlay {
+            if !listed
+                || !self.visible()
+                || self.mode != PanelMode::LiveWork
+                || self.timeline_active()
+            {
                 self.close_peek();
             }
+        }
+        // The docked Session panel follows one running command without taking the
+        // composer focus. Retain its final output until another command starts.
+        if self.docked()
+            && !self.overlay
+            && self.mode == PanelMode::LiveWork
+            && !self.timeline_active()
+            && let Some(first) = state.background_processes.running().first()
+            && self.peek.as_ref() != Some(&first.process_id)
+        {
+            self.peek = Some(first.process_id.clone());
         }
         let reading = state
             .background_processes
@@ -610,6 +631,8 @@ impl SidePanel {
     }
 
     fn close_peek(&mut self) {
+        self.restore_output();
+        self.output_view = peek::OutputView::default();
         self.peek = None;
         self.confirm_stop = false;
     }
@@ -651,6 +674,10 @@ impl SidePanel {
                 self.confirm_stop = true;
                 Some(OverlayKey::Moved)
             }
+            KeyCode::Char('f') if open => {
+                self.output_view.expand();
+                Some(OverlayKey::Moved)
+            }
             KeyCode::Enter if open => Some(OverlayKey::Open(Target::Process(process_id.clone()))),
             KeyCode::Esc if open => {
                 self.close_peek();
@@ -681,6 +708,13 @@ impl SidePanel {
 
     /// Keyboard navigation follows the same rows and disclosure controls as clicks.
     pub(crate) fn key(&mut self, key: KeyCode, state: &UiState) -> OverlayKey {
+        if self.output_view.expanded() {
+            if matches!(key, KeyCode::Esc | KeyCode::Char('f')) {
+                self.restore_output();
+                return OverlayKey::Moved;
+            }
+            return self.output_view.key(key);
+        }
         if self.mode == PanelMode::Files && self.files_view.borrow().filter_active() {
             return self.handle_files_key(key, state);
         }
@@ -902,7 +936,7 @@ impl SidePanel {
             PanelAction::BrowserControl(control) => OverlayKey::BrowserControl(control),
             PanelAction::Toggle(Disclosure::Process(process_id)) => {
                 self.browser_interacting = false;
-                if self.peek.as_ref() == Some(&process_id) {
+                if self.overlay && self.peek.as_ref() == Some(&process_id) {
                     self.close_peek();
                 } else {
                     self.peek = Some(process_id);
@@ -927,9 +961,31 @@ impl SidePanel {
             && row < area.bottom()
     }
 
+    fn restore_output(&mut self) {
+        self.output_view.restore();
+        if std::mem::take(&mut self.output_from_dock) {
+            self.overlay = false;
+        }
+    }
+
     pub(crate) fn click(&mut self, column: u16, row: u16) -> OverlayKey {
         if !self.contains(column, row) {
             return OverlayKey::Ignored;
+        }
+        if self
+            .painted
+            .borrow()
+            .output_button
+            .is_some_and(|rect| rect.contains((column, row).into()))
+        {
+            if self.output_view.expanded() {
+                self.restore_output();
+            } else {
+                self.output_from_dock = !self.overlay;
+                self.overlay = true;
+                self.output_view.expand();
+            }
+            return OverlayKey::Moved;
         }
         let hit = {
             let painted = self.painted.borrow();
@@ -1002,6 +1058,10 @@ impl SidePanel {
     }
 
     pub(crate) fn scroll_at(&self, column: u16, row: u16, lines: i32) {
+        if self.output_view.expanded() {
+            self.output_view.scroll(lines);
+            return;
+        }
         if self.timeline_active() {
             self.timeline_view.borrow().scroll_by(lines);
             return;
@@ -1052,7 +1112,12 @@ impl SidePanel {
     /// Follow the terminal's width. An overlay open when the terminal grows wide
     /// enough becomes the docked panel, unless the user explicitly expanded it.
     pub(crate) fn observe_width(&mut self, width: u16) {
-        if self.overlay && !self.expanded && !docks(self.width) && docks(width) {
+        if self.overlay
+            && self.peek.is_none()
+            && !self.expanded
+            && !docks(self.width)
+            && docks(width)
+        {
             self.overlay = false;
             // A panel the background strip opened over a hidden one stays hidden.
             self.hidden = std::mem::take(&mut self.rehide);
@@ -1396,6 +1461,11 @@ pub(crate) fn render_with_preview(
     ignore_overlay_rect: bool,
     border_hovered: bool,
 ) {
+    // A docked panel is also painted behind the centered overlay. Only the
+    // foreground pass owns the output viewport, cache, and mouse geometry.
+    if panel.output_view.expanded() && !ignore_overlay_rect {
+        return;
+    }
     let overlay = !panel.docked() || panel.expanded();
     let surface = if palette.shows_bands() {
         palette.base().bg(palette.surface)
@@ -1435,6 +1505,11 @@ pub(crate) fn render_with_preview(
     let height = usize::from(inner.height);
     if width == 0 || height == 0 {
         *panel.painted.borrow_mut() = Painted::default();
+        return;
+    }
+
+    if panel.output_view.expanded() {
+        peek::render_expanded(frame, inner, area, state, panel, palette);
         return;
     }
 
@@ -1483,6 +1558,7 @@ pub(crate) fn render_with_preview(
         *panel.painted.borrow_mut() = Painted {
             surface: area,
             area: body,
+            output_button: None,
             total: rows.lines.len(),
             actions: rows.actions,
             viewport_image_rect: None,
@@ -1689,6 +1765,17 @@ pub(crate) fn render_with_preview(
     *panel.painted.borrow_mut() = Painted {
         surface: area,
         area: body,
+        output_button: peek_span.and_then(|(_, hint)| {
+            let y = hint.checked_sub(offset)?;
+            if y >= usize::from(body.height) || panel.confirm_stop {
+                return None;
+            }
+            Some(peek::expand_button(
+                body,
+                body.y + y as u16,
+                panel.overlay_open(),
+            ))
+        }),
         total: rows.lines.len(),
         actions: rows.actions,
         viewport_image_rect: None,
@@ -2140,6 +2227,7 @@ mod peek;
 mod plan;
 mod reading;
 mod running;
+mod terminal_output;
 mod timeline;
 
 #[derive(Default)]

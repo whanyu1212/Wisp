@@ -70,8 +70,7 @@ pub(super) fn running_lines(
 
     // Running background processes first, numbered as `/ps` and `/kill` number them,
     // so `focus_background()` lands on the first background process.
-    let peek_open =
-        |process_id: &str| panel.overlay_open() && panel.peek.as_deref() == Some(process_id);
+    let peek_open = |process_id: &str| panel.peek.as_deref() == Some(process_id);
     let peek = |process_id: &str| {
         state
             .background_processes
@@ -112,7 +111,7 @@ pub(super) fn running_lines(
             lines.extend(peek::peek_lines(
                 peek(&process.process_id),
                 None,
-                panel.confirm_stop,
+                panel,
                 &process.command,
                 width,
                 palette,
@@ -189,11 +188,15 @@ pub(super) fn running_lines(
     }
 
     // Finished background processes held by the backend.
-    // The docked panel leaves clean exits to the `+N more · /ps` count so only
-    // running or failed processes take a row; with focus every process is listed.
+    // Keep the watched process visible after a clean exit. Other clean exits
+    // contribute only to the dock’s count until the user focuses the panel.
     let finished_rows = finished_processes
         .iter()
-        .filter(|process| panel.overlay_open() || process.state != ProcessDisplayState::Completed)
+        .filter(|process| {
+            panel.overlay_open()
+                || peek_open(&process.process_id)
+                || process.state != ProcessDisplayState::Completed
+        })
         .take(shown.saturating_sub(listed));
     for process in finished_rows {
         listed += 1;
@@ -221,7 +224,7 @@ pub(super) fn running_lines(
             lines.extend(peek::peek_lines(
                 peek(&process.process_id),
                 Some(process),
-                false,
+                panel,
                 &process.command,
                 width,
                 palette,
@@ -296,22 +299,8 @@ fn collect_subagents(state: &UiState) -> Vec<SubagentRow<'_>> {
     rows
 }
 
-/// The latest non-empty output line known for a running background process, from
-/// its live peek or its transcript process card.
+/// The latest non-empty line from the transcript card of an unselected process.
 fn process_latest_line(state: &UiState, process_id: &str) -> Option<String> {
-    if let Some(peek) = state
-        .background_processes
-        .peek()
-        .filter(|peek| peek.process_id == process_id)
-    {
-        if let Some(output) = &peek.output {
-            if let Some((_, line)) = peek::output_lines(&output.chunks, 1).pop() {
-                if !line.trim().is_empty() {
-                    return Some(line);
-                }
-            }
-        }
-    }
     let entry_id = state.transcript.process_card(process_id)?;
     let index = state.transcript.entry_index(entry_id)?;
     let card = state.transcript.entries()[index].process_card()?;

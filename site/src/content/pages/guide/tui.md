@@ -134,8 +134,12 @@ next prompt (or press `Alt+S` again, or `Backspace` on an empty draft, to detach
 
 When the agent runs a long command in the background (`Ctrl+B` moves a running command to the
 background), it appears in the `Session` side panel (and a compact strip below the composer when the
-panel is hidden). Open it with `/ps` or `↓` from an empty composer to peek at live output, jump to
-its transcript card (`Enter`), or stop it (`x` then `y`, or `/kill <number|id>`).
+panel is hidden). The docked Session panel shows the first running command’s latest output under
+**Running**. Colors and progress updates appear as the command prints them. To inspect another
+process, open `/ps` (or press `↓` from an empty composer), select its row, and press `Enter`.
+Click **Expand output** or press `f` in the focused peek for a read-only view of the retained output.
+Use `↑` / `↓` or Page Up / Page Down to scroll, `End` to follow new output, and `Esc` to return.
+In the compact peek, `Enter` jumps to the transcript card and `x` then `y` stops the process.
 
 ## Steering and follow-ups {#steering-and-follow-ups}
 

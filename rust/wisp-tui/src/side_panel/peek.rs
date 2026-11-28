@@ -1,25 +1,38 @@
 //! The peek under a selected background process: its latest output, read again
 //! while it runs, its outcome once it ends, and the keys that act on it.
 
-use std::collections::VecDeque;
-
+use super::terminal_output::{RenderedOutput, terminal_lines};
 use super::*;
-use crate::reducer::background_processes::{OutputStream, Peek, ProcessReport};
+use crate::reducer::background_processes::{Peek, ProcessOutput, ProcessReport};
 use crate::tool_cards::ProcessDisplayState;
 
 /// Output lines a peek shows, the latest last.
-const PEEK_LINES: usize = 6;
+const PEEK_LINES: u16 = 6;
 /// What leads each peek row, so the output reads as belonging to the row above.
 const GUTTER: &str = "  │ ";
+const DOCK_EXPAND: &str = "Expand output";
+const BACK: &str = "Esc back";
+
+/// Only the painted expand label responds to a click.
+pub(super) fn expand_button(body: Rect, row: u16, focused: bool) -> Rect {
+    let gutter = GUTTER.width() as u16;
+    let width = if focused { "f expand" } else { DOCK_EXPAND }.width() as u16;
+    Rect::new(
+        body.x.saturating_add(gutter),
+        row,
+        width.min(body.width.saturating_sub(gutter)),
+        1,
+    )
+}
 
 /// The peek's rows under its process row; focus lands on none of them.
 ///
 /// `ended` is the outcome the panel lists for a process that is no longer running,
-/// and `confirming` asks whether to stop it instead of naming the keys.
+/// and a pending stop confirmation replaces the usual key hints.
 pub(super) fn peek_lines(
     peek: Option<&Peek>,
     ended: Option<&ProcessReport>,
-    confirming: bool,
+    panel: &SidePanel,
     command: &str,
     width: usize,
     palette: Palette,
@@ -41,16 +54,17 @@ pub(super) fn peek_lines(
             output: Some(output),
             ..
         }) => {
-            let printed = output_lines(&output.chunks, PEEK_LINES);
+            let screen = panel
+                .output_view
+                .screen(output, room as u16, PEEK_LINES, palette);
+            let printed = &screen.lines;
             if printed.is_empty() {
                 lines.push(row("No output yet".into(), muted));
             }
-            for (stream, text) in printed {
-                let style = match stream {
-                    OutputStream::Stdout => Style::default(),
-                    OutputStream::Stderr => Style::default().fg(palette.warning),
-                };
-                lines.push(row(text, style));
+            for line in &printed[printed.len().saturating_sub(usize::from(PEEK_LINES))..] {
+                let mut line = line.clone();
+                line.spans.insert(0, Span::styled(GUTTER, muted));
+                lines.push(line);
             }
         }
         _ => lines.push(row("reading…".into(), muted)),
@@ -64,7 +78,7 @@ pub(super) fn peek_lines(
         lines.push(row(outcome(ended), muted));
     }
     let running = ended.is_none() && !peek.is_some_and(|peek| peek.gone);
-    let hint = if confirming && running {
+    let hint = if panel.confirm_stop && running {
         let mut spans = vec![
             Span::styled(GUTTER, muted),
             Span::styled(
@@ -77,11 +91,13 @@ pub(super) fn peek_lines(
         ];
         spans.extend(ui::keycap_hints("y stop · n keep", palette).spans);
         Line::from(spans)
+    } else if !panel.overlay_open() {
+        row(DOCK_EXPAND.into(), Style::default().fg(palette.accent))
     } else {
         let keys = if running {
-            "Enter card · x stop · Esc close"
+            "f expand · x stop · Enter card"
         } else {
-            "Enter card · Esc close"
+            "f expand · Enter card"
         };
         let mut spans = vec![Span::styled(GUTTER, muted)];
         spans.extend(ui::keycap_hints(keys, palette).spans);
@@ -101,43 +117,6 @@ pub(super) fn outcome(process: &ProcessReport) -> String {
         (_, Some(code)) => format!("failed (exit {code})"),
         _ => "failed".into(),
     }
-}
-
-/// The last `max` lines of output, made safe to draw.
-///
-/// Escape sequences such as colours are dropped. A carriage return starts its line
-/// again, as a terminal shows a progress bar, so a line keeps what was printed after
-/// the last one. A line printed in parts across chunks reads as one, with the stream
-/// that finished it. Other control characters are replaced.
-pub(super) fn output_lines(
-    chunks: &[(OutputStream, String)],
-    max: usize,
-) -> Vec<(OutputStream, String)> {
-    let mut lines: VecDeque<(OutputStream, String)> = VecDeque::new();
-    let mut open: Option<(OutputStream, String)> = None;
-    for (stream, text) in chunks {
-        for piece in without_escapes(text).split_inclusive('\n') {
-            let line = open.get_or_insert_with(|| (*stream, String::new()));
-            line.0 = *stream;
-            line.1.push_str(piece.trim_end_matches('\n'));
-            if piece.ends_with('\n') {
-                if lines.len() == max {
-                    lines.pop_front();
-                }
-                lines.extend(open.take());
-            }
-        }
-    }
-    if let Some(line) = open.filter(|(_, text)| !text.is_empty()) {
-        if lines.len() == max {
-            lines.pop_front();
-        }
-        lines.push_back(line);
-    }
-    lines
-        .into_iter()
-        .map(|(stream, text)| (stream, sanitize_for_terminal(last_overwrite(&text))))
-        .collect()
 }
 
 /// The last non-empty line of `text`, stripped of terminal escape sequences and
@@ -202,59 +181,241 @@ fn without_escapes(text: &str) -> String {
     kept
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Parsed output is shared across repaints until a new snapshot, palette, or
+/// viewport arrives. Each backend reply is a replacement tail, not a delta.
+#[derive(Debug)]
+struct ParsedOutput {
+    output: Arc<ProcessOutput>,
+    size: (u16, u16),
+    palette: Palette,
+    screen: Arc<RenderedOutput>,
+}
 
-    fn stdout(text: &str) -> (OutputStream, String) {
-        (OutputStream::Stdout, text.to_owned())
+#[derive(Clone, Copy, Debug, Default)]
+enum Position {
+    #[default]
+    Compact,
+    Follow,
+    Scrolled(usize),
+}
+
+#[derive(Debug, Default)]
+pub(super) struct OutputView {
+    cache: RefCell<Option<ParsedOutput>>,
+    position: Cell<Position>,
+    max_offset: Cell<usize>,
+    page: Cell<u16>,
+}
+
+impl OutputView {
+    fn screen(
+        &self,
+        output: &Arc<ProcessOutput>,
+        width: u16,
+        height: u16,
+        palette: Palette,
+    ) -> Arc<RenderedOutput> {
+        let mut cache = self.cache.borrow_mut();
+        // A polling reply replaces the tail, and can evict its oldest lines.
+        // Keep the snapshot under the reader until they resume following.
+        let output = cache
+            .as_ref()
+            .filter(|parsed| {
+                self.paused() && parsed.output.process.process_id == output.process.process_id
+            })
+            .map_or_else(|| output.clone(), |parsed| parsed.output.clone());
+        if let Some(parsed) = cache.as_ref()
+            && Arc::ptr_eq(&parsed.output, &output)
+            && parsed.size == (width, height)
+            && parsed.palette == palette
+        {
+            return parsed.screen.clone();
+        }
+        let screen = Arc::new(terminal_lines(&output.chunks, width, height, &palette));
+        *cache = Some(ParsedOutput {
+            output,
+            size: (width, height),
+            palette,
+            screen: screen.clone(),
+        });
+        screen
     }
 
-    fn texts(lines: &[(OutputStream, String)]) -> Vec<&str> {
-        lines.iter().map(|(_, text)| text.as_str()).collect()
+    fn paused(&self) -> bool {
+        matches!(self.position.get(), Position::Scrolled(_))
     }
 
-    #[test]
-    fn keeps_latest_lines() {
-        let lines = output_lines(&[stdout("one\ntwo\nthree\nfour")], 3);
-        assert_eq!(texts(&lines), ["two", "three", "four"]);
+    pub(super) fn expanded(&self) -> bool {
+        !matches!(self.position.get(), Position::Compact)
+    }
+    pub(super) fn expand(&self) {
+        self.position.set(Position::Follow);
+    }
+    pub(super) fn restore(&self) {
+        self.position.set(Position::Compact);
     }
 
-    #[test]
-    fn joins_lines_across_chunks() {
-        let lines = output_lines(
-            &[
-                stdout("build "),
-                (OutputStream::Stderr, "warning\n".into()),
-                stdout("done\n"),
-            ],
-            6,
+    pub(super) fn scroll(&self, delta: i32) {
+        let max = self.max_offset.get();
+        let top = self.top(max).saturating_add_signed(delta as isize);
+        self.position.set(if top >= max {
+            Position::Follow
+        } else {
+            Position::Scrolled(top)
+        });
+    }
+
+    fn top(&self, max: usize) -> usize {
+        match self.position.get() {
+            Position::Scrolled(top) => top.min(max),
+            _ => max,
+        }
+    }
+
+    pub(super) fn key(&self, key: KeyCode) -> OverlayKey {
+        match key {
+            KeyCode::Up => self.scroll(-1),
+            KeyCode::Down => self.scroll(1),
+            KeyCode::PageUp => self.scroll(-i32::from(self.page.get())),
+            KeyCode::PageDown => self.scroll(i32::from(self.page.get())),
+            KeyCode::Home => self.position.set(Position::Scrolled(0)),
+            KeyCode::End => self.expand(),
+            _ => return OverlayKey::Ignored,
+        }
+        OverlayKey::Moved
+    }
+}
+
+pub(super) fn render_expanded(
+    frame: &mut Frame<'_>,
+    inner: Rect,
+    area: Rect,
+    state: &UiState,
+    panel: &SidePanel,
+    palette: Palette,
+) {
+    let peek = state
+        .background_processes
+        .peek()
+        .filter(|peek| Some(&peek.process_id) == panel.peek.as_ref());
+    let output = peek.and_then(|peek| peek.output.as_ref());
+    let command = output
+        .map(|output| output.process.command.as_str())
+        .or_else(|| {
+            state
+                .background_processes
+                .running()
+                .iter()
+                .find(|p| Some(&p.process_id) == panel.peek.as_ref())
+                .map(|p| p.command.as_str())
+        })
+        .unwrap_or("Background process");
+    let header = Line::from(vec![
+        heading("Running  ", palette),
+        Span::raw(first_line(command)),
+    ]);
+    frame.render_widget(Paragraph::new(header), Rect { height: 1, ..inner });
+    let footer = Rect {
+        y: inner.bottom() - 1,
+        height: 1,
+        ..inner
+    };
+    let body = Rect {
+        y: inner.y.saturating_add(2),
+        height: inner.height.saturating_sub(3),
+        ..inner
+    };
+    let view = &panel.output_view;
+    let screen = output.map(|output| view.screen(output, body.width, body.height, palette));
+    let printed = screen
+        .as_ref()
+        .map(|screen| screen.lines.as_slice())
+        .unwrap_or_default();
+    let status = match output {
+        Some(output) if output.process.state != ProcessDisplayState::Running => {
+            outcome(&output.process)
+        }
+        _ if peek.is_some_and(|p| p.gone) => "unavailable".to_string(),
+        _ => "live".to_string(),
+    };
+    let omitted = view
+        .cache
+        .borrow()
+        .as_ref()
+        .filter(|_| screen.is_some())
+        .map_or(0, |snapshot| snapshot.output.omitted_bytes);
+    let omitted = if omitted > 0 {
+        format!(" · {omitted} earlier bytes omitted")
+    } else {
+        String::new()
+    };
+    let recent = if screen.as_ref().is_some_and(|screen| screen.history_limited) {
+        " · showing recent output"
+    } else {
+        ""
+    };
+    let reading = if view.paused() {
+        "scroll paused"
+    } else {
+        "read-only"
+    };
+    let status_line = format!("{status} · {reading}{recent}{omitted}");
+    if inner.height > 2 {
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                status_line,
+                Style::default().fg(palette.secondary),
+            )),
+            Rect {
+                y: inner.y + 1,
+                height: 1,
+                ..inner
+            },
         );
-        assert_eq!(
-            lines,
-            [
-                (OutputStream::Stderr, "build warning".into()),
-                stdout("done")
-            ]
-        );
     }
-
-    #[test]
-    fn progress_keeps_last_overwrite() {
-        let lines = output_lines(&[stdout("10%\r50%\r100%\r\nnext\r\n")], 6);
-        assert_eq!(texts(&lines), ["100%", "next"]);
+    let max = printed.len().saturating_sub(usize::from(body.height));
+    view.page.set(body.height);
+    view.max_offset.set(max);
+    let top = view.top(max);
+    if printed.is_empty() {
+        let message = if peek.is_some_and(|p| p.gone) {
+            "No longer held by the backend"
+        } else if output.is_some() {
+            "No output yet"
+        } else {
+            "reading…"
+        };
+        frame.render_widget(Paragraph::new(message), body);
+    } else {
+        for (i, line) in printed[top..]
+            .iter()
+            .take(usize::from(body.height))
+            .enumerate()
+        {
+            frame.render_widget(
+                line,
+                Rect {
+                    y: body.y + i as u16,
+                    height: 1,
+                    ..body
+                },
+            );
+        }
     }
-
-    #[test]
-    fn escapes_are_dropped() {
-        let printed = "\u{1b}[1;31mred\u{1b}[0m \u{1b}]0;title\u{7}\u{1b}]8;;https://x\u{1b}\\link\u{1b}]8;;\u{1b}\\\u{1b}(B\n";
-        let lines = output_lines(&[stdout(printed)], 6);
-        assert_eq!(texts(&lines), ["red link"]);
-    }
-
-    #[test]
-    fn controls_are_replaced() {
-        let lines = output_lines(&[stdout("a\u{7}b\u{202e}c\tz\n")], 6);
-        assert_eq!(texts(&lines), ["a�b�c   z"]);
-    }
+    frame.render_widget(
+        Paragraph::new(ui::keycap_hints(
+            "Esc back · ↑↓ scroll · End follow",
+            palette,
+        )),
+        footer,
+    );
+    *panel.painted.borrow_mut() = Painted {
+        surface: area,
+        area: body,
+        output_button: Some(Rect {
+            width: (BACK.width() as u16).min(footer.width),
+            ..footer
+        }),
+        ..Painted::default()
+    };
 }

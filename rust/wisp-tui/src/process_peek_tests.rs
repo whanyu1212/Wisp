@@ -459,3 +459,105 @@ async fn low_peek_scrolls_into_view() {
         "{rows:#?}"
     );
 }
+
+#[tokio::test]
+async fn expanded_output_preserves_peek() {
+    let (writer, mut receiver) = mpsc::channel(32);
+    let mut ui = server_running();
+    let read = open_peek(&mut ui, &writer, &mut receiver).await;
+    let output: String = (0..80).map(|i| format!("row {i:02}\n")).collect();
+    backend(&mut ui, output_reply(&read, "running", &output));
+    press(&mut ui, &writer, &[KeyCode::Char('f')]).await;
+    let rows = draw(&mut ui);
+    assert!(rows.iter().any(|row| row.contains("live · read-only")));
+    assert!(rows.iter().any(|row| row.contains("row 79")));
+    assert!(!rows.iter().any(|row| row.contains("row 00")));
+    press(&mut ui, &writer, &[KeyCode::Home]).await;
+    assert!(draw(&mut ui).iter().any(|row| row.contains("row 00")));
+    backend(
+        &mut ui,
+        serde_json::json!({"type":"rpc.command.finished", "command_id":read,
+        "command_type":"get_process_output","ok":true}),
+    );
+    ui.poll_process_peek(&writer, 8192).await.unwrap();
+    let commands = sent(&mut receiver);
+    let next = of_type(&commands, "get_process_output")[0]["id"]
+        .as_str()
+        .unwrap();
+    let mut latest = output_reply(next, "running", "newest output");
+    latest["omitted_bytes"] = 512.into();
+    backend(&mut ui, latest);
+    let paused = draw(&mut ui);
+    assert!(paused.iter().any(|row| row.contains("row 00")));
+    assert!(!paused.iter().any(|row| row.contains("bytes omitted")));
+    press(&mut ui, &writer, &[KeyCode::End]).await;
+    assert!(
+        draw(&mut ui)
+            .iter()
+            .any(|row| row.contains("newest output"))
+    );
+    press(&mut ui, &writer, &[KeyCode::Esc]).await;
+    assert!(
+        draw(&mut ui)
+            .iter()
+            .any(|row| row.contains("│ newest output"))
+    );
+    assert!(of_type(&sent(&mut receiver), "get_process_output").is_empty());
+}
+
+#[tokio::test]
+async fn docked_output_keeps_composer() {
+    let (writer, mut receiver) = mpsc::channel(32);
+    let mut ui = server_running();
+    ui.mouse_enabled = true;
+    let mut terminal = Terminal::new(TestBackend::new(180, HEIGHT)).unwrap();
+    let connection = ConnectionInfo {
+        backend_version: "test".into(),
+    };
+    ui.draw(&mut terminal, &connection).unwrap();
+    ui.sync_side_panel(&writer, 8192).await.unwrap();
+    let commands = sent(&mut receiver);
+    let id = of_type(&commands, "get_process_output")[0]["id"]
+        .as_str()
+        .unwrap();
+    backend(&mut ui, output_reply(id, "running", "1%\r99%"));
+    ui.draw(&mut terminal, &connection).unwrap();
+    let frame = rows(terminal.backend().buffer());
+    assert!(frame.iter().any(|row| row.contains("│ 99%")));
+    assert_eq!(ui.active_overlay(), None);
+    let y = frame
+        .iter()
+        .position(|row| row.contains("Expand output"))
+        .unwrap() as u16;
+    let x = (0..180)
+        .find(|&x| terminal.backend().buffer()[(x, y)].symbol() == "E")
+        .unwrap();
+    ui.handle_input(
+        Input::Mouse(crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        }),
+        &writer,
+        8192,
+    )
+    .await
+    .unwrap();
+    ui.draw(&mut terminal, &connection).unwrap();
+    assert!(
+        rows(terminal.backend().buffer())
+            .iter()
+            .any(|row| row.contains("live · read-only"))
+    );
+    // The pane was opened from the composer, including across the docking threshold.
+    draw(&mut ui);
+    ui.handle_input(key(KeyCode::Esc), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.active_overlay(), None);
+    ui.handle_input(key(KeyCode::Char('w')), &writer, 8192)
+        .await
+        .unwrap();
+    assert_eq!(ui.editor.text(), "w");
+}
