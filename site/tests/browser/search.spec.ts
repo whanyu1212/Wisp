@@ -16,6 +16,12 @@ for (const [query, title, route, section] of [
     "crafting-agents/01-core-loop.html",
     "Learn",
   ],
+  [
+    "SWE-bench Pro V2",
+    "Evals and reliability",
+    "architecture/evals-and-reliability.html",
+    "Inside Wisp",
+  ],
 ]) {
   test(`search finds and opens ${route} under the base path`, async ({
     page,

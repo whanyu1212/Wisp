@@ -45,6 +45,12 @@ provider adapters to preserve their own request, replay, continuation, and usage
 See [Agent runtime](agent-runtime.md) for the loop and harness lifecycles, ownership boundaries,
 request-boundary handshake, and source navigation.
 
+## Evals and reliability
+
+Read [Evals and reliability](evals-and-reliability.md) for Wisp's pinned SWE-bench Pro V2 pilot
+results, deterministic harness interruption and fault-injection invariants, and AddressSanitizer
+JSONL-RPC protocol fuzzing targets.
+
 ## SDK design evidence
 
 The [SDK capability audit](sdk-capability-audit.md) records a comparison against pinned
