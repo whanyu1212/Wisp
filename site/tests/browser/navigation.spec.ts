@@ -42,13 +42,18 @@ test("homepage, desktop, and mobile share user-first section destinations", asyn
     await expect(
       mobile.locator("section").nth(index).locator("a").first(),
     ).toHaveAttribute("href", destination);
-    if (index < 3) {
-      const card = page.locator(".starting-points a").nth(index);
-      await expect(card).toHaveAttribute("href", destination);
-      await expect(card).toContainText(group.title);
-    }
   }
-  await expect(page.locator(".starting-points a")).toHaveCount(3);
+  const pillars = [
+    ["/Wisp/guide/tui.html", "Try Wisp"],
+    ["/Wisp/crafting-agents/", "Build an agent"],
+    ["/Wisp/architecture/", "Inspect the evidence"],
+  ] as const;
+  await expect(page.locator(".starting-points a")).toHaveCount(pillars.length);
+  for (const [index, [destination, label]] of pillars.entries()) {
+    const card = page.locator(".starting-points a").nth(index);
+    await expect(card).toHaveAttribute("href", destination);
+    await expect(card).toContainText(label);
+  }
   if (info.project.name === "mobile") {
     await page.locator(".mobile-navigation > summary").click();
     await mobile.getByRole("link", { name: "Using Wisp", exact: true }).click();

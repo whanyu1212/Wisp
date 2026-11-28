@@ -838,11 +838,209 @@ svg {
   margin: 0;
 }
 .home-showcase {
-  max-width: 880px;
-  margin-inline: auto;
+  margin-top: 8px;
 }
-.home-showcase .tui-capture {
+.workspace-stage {
+  border: 1px solid var(--rule);
+  border-radius: 12px;
+  background: var(--bg);
+  overflow: hidden;
+}
+.stage-radio {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.stage-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--paper);
+}
+.stage-heading {
+  font:
+    600 11.5px/1.5 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.11em;
+  color: var(--muted);
   margin: 0;
+}
+.stage-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.stage-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.stage-tab {
+  position: relative;
+  overflow: hidden;
+  cursor: pointer;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--muted);
+  user-select: none;
+}
+.stage-tab:hover {
+  color: var(--ink);
+  background: var(--soft);
+}
+.stage-tab-progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: currentColor;
+  opacity: 0;
+  transform-origin: left center;
+  transform: scaleX(0);
+}
+@keyframes stage-progress {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+.stage-toggle {
+  cursor: pointer;
+  padding: 5px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--muted);
+  background: var(--bg);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+}
+.stage-toggle:hover {
+  color: var(--ink);
+  border-color: var(--accent);
+}
+#stage-editing:checked ~ .stage-bar .stage-tab[data-stage="editing"],
+#stage-files:checked ~ .stage-bar .stage-tab[data-stage="files"],
+#stage-browser:checked ~ .stage-bar .stage-tab[data-stage="browser"],
+#stage-permissions:checked ~ .stage-bar .stage-tab[data-stage="permissions"] {
+  color: var(--paper);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.workspace-stage[data-autoplay="true"][data-paused="false"]
+  #stage-editing:checked
+  ~ .stage-bar
+  .stage-tab[data-stage="editing"]
+  .stage-tab-progress,
+.workspace-stage[data-autoplay="true"][data-paused="false"]
+  #stage-files:checked
+  ~ .stage-bar
+  .stage-tab[data-stage="files"]
+  .stage-tab-progress,
+.workspace-stage[data-autoplay="true"][data-paused="false"]
+  #stage-browser:checked
+  ~ .stage-bar
+  .stage-tab[data-stage="browser"]
+  .stage-tab-progress,
+.workspace-stage[data-autoplay="true"][data-paused="false"]
+  #stage-permissions:checked
+  ~ .stage-bar
+  .stage-tab[data-stage="permissions"]
+  .stage-tab-progress {
+  opacity: 0.55;
+  animation: stage-progress 3.8s linear forwards;
+}
+#stage-editing:focus-visible ~ .stage-bar .stage-tab[data-stage="editing"],
+#stage-files:focus-visible ~ .stage-bar .stage-tab[data-stage="files"],
+#stage-browser:focus-visible ~ .stage-bar .stage-tab[data-stage="browser"],
+#stage-permissions:focus-visible
+  ~ .stage-bar
+  .stage-tab[data-stage="permissions"] {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.stage-panels {
+  display: grid;
+  overflow: hidden;
+  background: var(--bg);
+}
+.stage-panel {
+  grid-area: 1 / 1;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  z-index: 0;
+  transition:
+    opacity 900ms ease-in-out,
+    visibility 0s linear 900ms;
+}
+#stage-editing:checked ~ .stage-panels .stage-panel[data-stage="editing"],
+#stage-files:checked ~ .stage-panels .stage-panel[data-stage="files"],
+#stage-browser:checked ~ .stage-panels .stage-panel[data-stage="browser"],
+#stage-permissions:checked
+  ~ .stage-panels
+  .stage-panel[data-stage="permissions"] {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  z-index: 1;
+  transition:
+    opacity 900ms ease-in-out,
+    visibility 0s linear 0s;
+}
+@media (prefers-reduced-motion: reduce) {
+  .stage-panel {
+    transition: none;
+  }
+  .stage-tab-progress {
+    display: none;
+  }
+}
+.stage-panel .tui-capture {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+}
+.stage-panel .tui-capture figcaption {
+  padding: 8px 18px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--bg);
+}
+.stage-foot {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 20px;
+  flex-wrap: wrap;
+  padding: 14px 18px;
+  background: var(--paper);
+}
+.stage-foot p {
+  margin: 0;
+  font-size: 14.5px;
+  line-height: 1.5;
+  color: var(--muted);
+  max-width: 68ch;
+}
+.stage-foot .workflow-link {
+  flex-shrink: 0;
 }
 .home-story {
   margin-top: 64px;
@@ -891,42 +1089,6 @@ svg {
 }
 .home-section-head h2 {
   margin: 8px 0 0;
-}
-.home-workflows {
-  margin-top: 64px;
-  padding-top: 48px;
-  border-top: 1px solid var(--rule);
-}
-.workflow-rows {
-  display: flex;
-  flex-direction: column;
-  gap: 44px;
-  margin-top: 28px;
-}
-.workflow-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.55fr);
-  align-items: center;
-  gap: 36px;
-}
-.workflow-media,
-.workflow-copy {
-  min-width: 0;
-}
-.workflow-media .tui-capture {
-  margin: 0;
-}
-.workflow-copy h3 {
-  font-family: Georgia, "Times New Roman", serif;
-  font-weight: 400;
-  font-size: 24px;
-  letter-spacing: -0.02em;
-  margin: 0 0 12px;
-}
-.workflow-copy p {
-  margin: 0 0 18px;
-  color: var(--muted);
-  line-height: 1.65;
 }
 .workflow-link {
   display: inline-flex;
@@ -1137,7 +1299,6 @@ svg {
 @media (max-width: 900px) {
   .home-intro,
   .home-story,
-  .workflow-row,
   .home-content {
     grid-template-columns: 1fr;
     gap: 24px;
@@ -1230,14 +1391,21 @@ svg {
     margin-bottom: 16px;
   }
   .home-story,
-  .home-workflows,
   .home-section {
     margin-top: 44px;
     padding-top: 32px;
   }
-  .workflow-rows {
-    gap: 32px;
-    margin-top: 20px;
+  .stage-bar {
+    padding: 10px 14px;
+    gap: 10px;
+  }
+  .stage-tab {
+    padding: 5px 10px;
+    font-size: 13px;
+  }
+  .stage-foot {
+    padding: 12px 14px;
+    gap: 10px;
   }
   .starting-points {
     grid-template-columns: 1fr;

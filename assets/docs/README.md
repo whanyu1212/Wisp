@@ -2,20 +2,23 @@
 
 ## Real-session screenshots
 
-The landing page uses three user-supplied screenshots of Wisp in Ember:
+The landing page uses four user-supplied screenshots captured on the **`v0.16.12`** release baseline
+(macOS, Vapor theme, window chrome removed, `3404 × 1946` full workspace frames) inside the tabbed
+workspace stage, plus an updated `v0.16.12` welcome master:
 
-| Master | Size | Crop and use |
-| --- | --- | --- |
-| `tui-session-welcome.png` | 2592 × 1502 | Original November 14, 2026 welcome screenshot; full interface including sidebar and composer; homepage hero capped at 1040 CSS pixels |
-| `tui-session-editing.png` | 2568 × 1496 | November 14, 2026 documentation-editing session; window chrome removed; inline diffs and side panel |
-| `tui-session-approval.png` | 2718 × 1528 | Original November 16, 2026 session; CSS shows a gentle left-aligned close-up while retaining the conversation and part of the sidebar; full screenshot in the image link |
+| Master | Release / Theme | Size | Role on site |
+| --- | --- | --- | --- |
+| `tui-session-editing.png` | `v0.16.12` · Vapor | 3404 × 1946 | Default homepage workspace view — live editing turn with inline diffs, codemode, inline browser thumbnail, `Session` sparkline + `Timeline`, and two-row telemetry deck |
+| `tui-session-files.png` | `v0.16.12` · Vapor | 3404 × 1946 | Homepage `Files` tab — docked project tree with Nerd Font Material Design icons and `/ filter files...` |
+| `tui-session-browser.png` | `v0.16.12` · Vapor | 3404 × 1946 | Homepage `Browser` tab — live built-in Chrome/Chromium viewport inside the terminal side panel |
+| `tui-session-permissions.png` | `v0.16.12` · Vapor | 3404 × 1946 | Homepage `Permissions` tab — docked `/permissions` panel (Ask, Auto edits, macOS sandboxed Auto commands, YOLO) above the composer and two-row telemetry deck |
+| `tui-session-welcome.png` | `v0.16.12` · Vapor | 3404 × 1946 | Updated `v0.16.12` welcome screen master (not shown on the landing page) |
 
-These are actual session pixels, not synthetic fixtures. The welcome screen shows Wisp 0.10.0;
-these screenshots illustrate the UI rather than claiming to show the latest release. Site captions
-identify their real-session provenance. The synthetic regeneration command below does not overwrite
-them. The welcome and approval masters retain every pixel of the supplied originals: adjust display
-framing in CSS rather than cropping these source files in place. Review any replacement for private
-content before publishing.
+These are actual session pixels captured on November 28, 2026 (`v0.16.12`), not synthetic fixtures.
+Site captions identify their real-session provenance. The synthetic regeneration command below does
+not overwrite them. Keep all masters uncropped at full resolution (`3404 × 1946`) so Astro can
+generate responsive WebP variants (`480`–`2400px`) and full-size links remain sharp. Review any
+replacement for private content before publishing.
 
 ## Synthetic captures
 
@@ -69,7 +72,8 @@ the six documented frames, and the banner script rebuilds `assets/wisp-banner-v2
 them. Inspect the selected buffer text and resulting images before publishing; never substitute a
 personal session dump. Keep each master here once. Astro generates 480/800/1200/1600/2400px
 WebP variants during the build; do not commit those derived files or copies in Markdown source directories or
-`site/public/`. Full-size image links, descriptive alt text, and captions keep the content usable
-without JavaScript or animation. No recordings or autoplay are used.
+`site/public/`. Full-size image links, descriptive alt text, captions, pure-CSS tabs, and
+`prefers-reduced-motion` support keep the content usable without JavaScript or motion. No video
+recordings are used.
 
 `assets/media_assets.json` is not used or modified by this workflow.

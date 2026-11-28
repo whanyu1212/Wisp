@@ -10,7 +10,13 @@ Requires Python 3.11+ on macOS or Linux (Windows is best-effort). Prebuilt macOS
 
 ```bash
 uv tool install --python 3.12 wisp-ai
+
+# Credential-free offline smoke test
 wisp -p "hello" --provider fake
+
+# Launch the interactive Rust TUI in a repository
+cd path/to/project
+wisp
 ```
 
 From a source checkout (needs `uv` and the Rust toolchain in `rust-toolchain.toml` for the TUI):
@@ -33,12 +39,12 @@ Wisp passed **all 32 attempts on an eight-task SWE-bench Pro V2 pilot**, includi
 issues. GPT-6.2 Sol (high effort) and GPT-6.2 Astra (medium effort) each resolved all eight tasks
 with both prompt versions. [Method and per-task results](evals/tool_use/reports/2026-11-23-swe-bench-pro-v2.md)
 
-## Links
+## Explore Wisp
 
-- **[Docs & quickstart](https://whanyu1212.github.io/Wisp/)** — install, TUI guide, safety & permissions, SDK, and reference
-- **[Architecture](https://whanyu1212.github.io/Wisp/architecture/)** — how the loop, harness, session, and Rust TUI fit together
-- **[Crafting Coding Agents](https://whanyu1212.github.io/Wisp/crafting-agents/)** — runnable walkthrough of the design trade-offs
-- **[Examples](examples/)** · **[Changelog](CHANGELOG.md)**
+- **[Try Wisp](https://whanyu1212.github.io/Wisp/guide/tui.html)** — Rust TUI workspace (`Session | Files | Browser`, turn-scoped `/diff`, `!` local shell, `/permissions`), quickstart, SDK, and reference
+- **[Build an agent — Crafting Coding Agents (Part I)](https://whanyu1212.github.io/Wisp/crafting-agents/)** — five runnable Python chapters from a minimal loop to controlled side effects, plus production case studies
+- **[Inspect the evidence — Inside Wisp](https://whanyu1212.github.io/Wisp/architecture/)** — shared runtime boundaries, [SWE-bench Pro V2 pilot & fault-injection/fuzzing receipts](https://whanyu1212.github.io/Wisp/architecture/evals-and-reliability.html), and 50k hydration benchmarks
+- **[Docs home](https://whanyu1212.github.io/Wisp/)** · **[Examples](examples/)** · **[Changelog](CHANGELOG.md)**
 
 ## Note
 

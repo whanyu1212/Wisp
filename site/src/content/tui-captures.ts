@@ -5,29 +5,45 @@ import working from "../../../assets/docs/tui-new-turn.png";
 import showcase from "../../../assets/docs/tui-showcase.png";
 import sessionWelcome from "../../../assets/docs/tui-session-welcome.png";
 import sessionEditing from "../../../assets/docs/tui-session-editing.png";
-import sessionApproval from "../../../assets/docs/tui-session-approval.png";
+import sessionFiles from "../../../assets/docs/tui-session-files.png";
+import sessionBrowser from "../../../assets/docs/tui-session-browser.png";
+import sessionPermissions from "../../../assets/docs/tui-session-permissions.png";
 
 export const tuiCaptures = {
   sessionWelcome: {
     image: sessionWelcome,
-    alt: "Wisp welcome screen with the Braille mascot, session shortcuts, prompt composer, and side panel showing context, MCP servers, skills, and changed files.",
+    alt: "Wisp 0.16.12 welcome screen with the Braille mascot, session shortcuts, prompt composer, two-row telemetry deck, and Session | Files | Browser side panel.",
     caption:
-      "Start a task in your terminal, resume a session, or browse the available commands.",
-    provenance: "Real session screenshot · full interface.",
+      "Start a task in your terminal, resume a session, or browse available commands.",
+    provenance: "Real session screenshot (v0.16.12) · full interface.",
   },
   sessionEditing: {
     image: sessionEditing,
-    alt: "Wisp editing its own documentation, with inline diffs and a side panel tracking context, skills, changed files, and recent turns.",
+    alt: "Wisp 0.16.12 live editing turn showing inline syntax-highlighted diffs, codemode and tool calls, an inline browser screenshot preview, the docked Session panel with context sparkline and turn timeline, and the two-row telemetry deck.",
     caption:
-      "Follow repository exploration and edits inline, with context and changed files alongside the conversation.",
-    provenance: "Real session screenshot · window chrome cropped.",
+      "Watch inline diffs, tool activity, and captured previews stream beside context growth, turn timelines, and the two-row telemetry deck.",
+    provenance: "Real session screenshot (v0.16.12) · full workspace.",
   },
-  sessionApproval: {
-    image: sessionApproval,
-    alt: "Wisp session awaiting approval for git status --short, with the conversation, side panel, and choices to allow once, allow bash for this session, enable YOLO for this session, or deny.",
+  sessionFiles: {
+    image: sessionFiles,
+    alt: "Wisp 0.16.12 workspace with the Files side panel open, showing a project file tree with Nerd Font Material Design file and folder icons and an inline filter bar.",
     caption:
-      "Inspect the proposed command and choose whether to allow it once, allow a broader scope for the session, or deny it.",
-    provenance: "Real session screenshot · window chrome cropped.",
+      "Browse and filter the project tree with Nerd Font icons, inline file previews, and quick editor handoff (e).",
+    provenance: "Real session screenshot (v0.16.12) · full workspace.",
+  },
+  sessionBrowser: {
+    image: sessionBrowser,
+    alt: "Wisp 0.16.12 workspace with the Browser side panel rendering a live Chrome/Chromium page inside the terminal alongside navigation buttons and address bar.",
+    caption:
+      "Open a live Chrome/Chromium tab right inside the terminal side panel with click-to-interact takeover.",
+    provenance: "Real session screenshot (v0.16.12) · full workspace.",
+  },
+  sessionPermissions: {
+    image: sessionPermissions,
+    alt: "Wisp 0.16.12 workspace with the docked Project permissions panel above the composer and two-row telemetry deck, offering Ask before changes, Auto edits, macOS sandboxed Auto commands, and YOLO.",
+    caption:
+      "Switch between Ask, Auto edits, macOS sandboxed Auto commands, and YOLO from the docked /permissions panel.",
+    provenance: "Real session screenshot (v0.16.12) · full workspace.",
   },
   showcase: {
     image: showcase,

@@ -45,7 +45,7 @@ test("navigation, highlighted code, and controls retain readable contrast", asyn
         const failures = new Set<string>();
         document
           .querySelectorAll<HTMLElement>(
-            ".site-header a, .eyebrow, .breadcrumbs a, article p, .lede, .install-note, .home-story p, .home-highlights dd, .workflow-copy p, .home-content p, .tui-capture figcaption, .primary, .secondary-action, .section-index p, .sidebar a, .toc a, .astro-code span, button, select",
+            ".site-header a, .eyebrow, .breadcrumbs a, article p, .lede, .install-note, .home-story p, .home-highlights dd, .stage-foot p, .stage-tab, .home-content p, .tui-capture figcaption, .primary, .secondary-action, .section-index p, .sidebar a, .toc a, .astro-code span, button, select",
           )
           .forEach((element) => {
             if (
