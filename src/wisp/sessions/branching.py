@@ -70,7 +70,7 @@ def project_fork_from_user_message(
         source_leaf_id=projection.source_leaf_id,
         mode="fork",
         selected_entry_id=selected.id,
-        # A fork re-asks the prompt; any process notices belonged to the old run.
-        selected_prompt=selected.message.prompt_content,
+        # A fork re-asks the submitted prompt, before provider-only expansion.
+        selected_prompt=selected.message.user_visible_content,
         selected_images=selected.message.images or (),
     )

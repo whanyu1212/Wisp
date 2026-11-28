@@ -840,6 +840,15 @@
           "title": "ForkSessionCommandEntryId",
           "type": "string"
         },
+        "expected_active_leaf_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "ForkSessionCommandExpectedActiveLeafId"
+        },
         "id": {
           "anyOf": [
             {
@@ -1342,7 +1351,7 @@
     },
     "GetSessionTreeCommand": {
       "additionalProperties": false,
-      "description": "Return a bounded page of the selected session's tree.",
+      "description": "Return a bounded page of tree nodes or active-path prompts.",
       "properties": {
         "after_entry_id": {
           "anyOf": [
@@ -1375,11 +1384,17 @@
           "default": "get_session_tree",
           "title": "GetSessionTreeCommandType",
           "type": "string"
+        },
+        "view": {
+          "$ref": "#/$defs/SessionTreeView",
+          "default": "tree",
+          "title": "GetSessionTreeCommandView"
         }
       },
       "required": [
         "type",
-        "limit"
+        "limit",
+        "view"
       ],
       "title": "GetSessionTreeCommand",
       "type": "object"
@@ -2266,6 +2281,13 @@
       ],
       "title": "SelectSessionCommand",
       "type": "object"
+    },
+    "SessionTreeView": {
+      "enum": [
+        "tree",
+        "prompts"
+      ],
+      "type": "string"
     },
     "SetCodemodeCommand": {
       "additionalProperties": false,

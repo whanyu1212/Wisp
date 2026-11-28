@@ -10,7 +10,7 @@ from wisp.events import (
     ErrorEvent,
     ToolCallSnapshot,
 )
-from wisp.messages import CompactionRecord, Message
+from wisp.messages import CompactionRecord, Message, ProcessNotice
 from wisp.sessions import (
     SessionTreePage,
     pagination,
@@ -28,6 +28,7 @@ from wisp.sessions.jsonl import (
     JsonlSessionStore,
     SessionError,
 )
+from wisp.skills.models import SkillInvocationEvidence
 
 
 def test_tree_page_returns_empty_identified_reserved_session(tmp_path: Path) -> None:
@@ -111,6 +112,84 @@ def test_tree_page_includes_inactive_nodes_in_append_order(
     assert "secret" not in first.nodes[3].preview
     assert second.nodes[1].preview == "error"
     assert "hidden event payload" not in second.nodes[1].preview
+
+
+@pytest.mark.parametrize(("image_count", "image_preview"), [(1, "[Image]"), (2, "[2 images]")])
+def test_prompt_pages_follow_active_path(
+    tmp_path: Path, image_count: int, image_preview: str
+) -> None:
+    session = JsonlSessionStore(tmp_path).create()
+    image_data = (Path(__file__).parents[1] / "fixtures" / "images" / "pixel.png").read_bytes()
+    notice = ProcessNotice(process_id="p1", command="make", state="failed")
+
+    async def write() -> tuple[str, ...]:
+        image = await session.store_image(image_data)
+        first = await session.append_message(
+            Message(
+                role="user",
+                content="expanded skill instructions",
+                images=(image,),
+                skill_invocation=SkillInvocationEvidence(
+                    name="review",
+                    original_content="/review " + "🙂" * 200,
+                    request="request",
+                    content_sha256="1" * 64,
+                ),
+            ).with_process_notices((notice,))
+        )
+        answer = await session.append_message(Message(role="assistant", content="answer"))
+        abandoned = await session.append_message(Message(role="user", content="abandoned"))
+        await session.select_active_leaf(answer.id, expected_active_leaf_id=abandoned.id)
+        last_prompt = await session.append_message(
+            Message(role="user", content="", images=(image,) * image_count)
+        )
+        last_answer = await session.append_message(Message(role="assistant", content="answer"))
+        compacted = await session.append_compaction_entry(
+            CompactionSessionEntry(
+                session_id=session.session_id,
+                compaction=CompactionRecord(
+                    summary="First turn summary.",
+                    replaced_entry_ids=(first.id, answer.id),
+                    provider="test",
+                ),
+            ),
+            expected_context_entry_ids=(first.id, answer.id, last_prompt.id, last_answer.id),
+        )
+        wake = await session.append_message(
+            Message(role="user", content="").with_process_notices((notice,))
+        )
+        leaf = await session.append_event(ErrorEvent(message="event on active path"))
+        return first.id, answer.id, abandoned.id, compacted.id, wake.id, last_prompt.id, leaf.id
+
+    first_id, answer, abandoned, compacted, wake, image_prompt, leaf = anyio.run(write)
+
+    assert first_id not in session.read_context().context_entry_ids
+    newest = session.read_tree_page(view="prompts", limit=1)
+    older = session.read_tree_page(
+        view="prompts", limit=1, after_entry_id=newest.next_after_entry_id
+    )
+    exhausted = session.read_tree_page(view="prompts", after_entry_id=first_id)
+
+    assert newest.active_leaf_id == older.active_leaf_id == exhausted.active_leaf_id == leaf
+    assert newest.total_node_count == older.total_node_count == exhausted.total_node_count == 2
+    assert [node.entry_id for node in newest.nodes] == [image_prompt]
+    assert newest.nodes[0].preview == image_preview
+    assert newest.nodes[0].role == "user"
+    assert newest.truncated is True
+    assert newest.next_after_entry_id == image_prompt
+    assert [node.entry_id for node in older.nodes] == [first_id]
+    assert older.nodes[0].kind == "message"
+    assert older.nodes[0].preview.startswith("/review 🙂")
+    assert len(older.nodes[0].preview.encode("utf-8")) <= 512
+    assert older.nodes[0].preview_truncated is True
+    assert older.truncated is False
+    assert older.next_after_entry_id is None
+    assert exhausted.nodes == ()
+    assert exhausted.truncated is False
+    assert exhausted.next_after_entry_id is None
+    for cursor in (answer, abandoned, compacted, wake, leaf):
+        with pytest.raises(SessionError, match="Session tree cursor not found"):
+            session.read_tree_page(view="prompts", after_entry_id=cursor)
 
 
 def test_tree_compaction_preview_is_utf8_bounded() -> None:

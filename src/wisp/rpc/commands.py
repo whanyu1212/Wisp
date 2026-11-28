@@ -44,6 +44,7 @@ from wisp.project_files import (
     is_display_safe_path,
 )
 from wisp.sessions.jsonl import SAVED_SESSION_ID_PATTERN
+from wisp.sessions.pagination import SessionTreeView
 from wisp.validation import redact_validation_error_inputs
 
 ApprovalScope = TypeAliasType(
@@ -670,14 +671,16 @@ class ForkSessionCommand(RpcCommandModel):
 
     type: Literal["fork_session"] = "fork_session"
     entry_id: str = Field(min_length=1)
+    expected_active_leaf_id: str | None = Field(default=None, min_length=1)
 
 
 class GetSessionTreeCommand(RpcCommandModel):
-    """Return a bounded page of the selected session's tree."""
+    """Return a bounded page of tree nodes or active-path prompts."""
 
     type: Literal["get_session_tree"] = "get_session_tree"
     limit: int = Field(default=200, ge=1, le=500, strict=True)
     after_entry_id: str | None = Field(default=None, min_length=1)
+    view: SessionTreeView = "tree"
 
 
 class NavigateSessionTreeCommand(RpcCommandModel):

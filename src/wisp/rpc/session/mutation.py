@@ -139,7 +139,6 @@ def start_rpc_fork_session_command(
 ) -> _RpcRunningCommand | None:
     lifecycle = RpcCommandLifecycle.for_command(command, write_event=write_event)
     command_id = lifecycle.command_id
-    entry_id = command.entry_id
     if session_state.session is None:
         lifecycle.fail("RPC fork_session command requires a selected session")
         return None
@@ -150,7 +149,7 @@ def start_rpc_fork_session_command(
         sessions,
         session_state.session,
         session_state.entry_count,
-        entry_id,
+        command,
         command_id,
         cancel_scope,
         send.clone(),
@@ -476,7 +475,7 @@ async def run_rpc_fork_session_command(
     sessions: JsonlSessionStore,
     source_session: JsonlSession,
     selected_entry_count: int,
-    entry_id: str,
+    command: ForkSessionCommand,
     command_id: str,
     cancel_scope: anyio.CancelScope,
     send: MemoryObjectSendStream[_RpcControlEvent],
@@ -496,14 +495,16 @@ async def run_rpc_fork_session_command(
             await anyio.sleep(0)
             if not source_session.path.is_file():
                 raise SessionError("Cannot fork an empty session")
-            source_active_leaf_id = await _run_abandonable_session_read(
-                source_session.read_active_leaf_id
-            )
+            source_active_leaf_id = command.expected_active_leaf_id
+            if source_active_leaf_id is None:
+                source_active_leaf_id = await _run_abandonable_session_read(
+                    source_session.read_active_leaf_id
+                )
             await anyio.sleep(0)
             with anyio.CancelScope(shield=True):
                 fork_result = await sessions.fork_from_user_message(
                     source_session,
-                    entry_id,
+                    command.entry_id,
                     expected_active_leaf_id=source_active_leaf_id,
                 )
                 (

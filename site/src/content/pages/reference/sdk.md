@@ -329,8 +329,8 @@ like `set_codemode`.
 | `select_session` | `(session_id: str, *, command_id: str \| None = None)` | `RpcSessionSelected` |
 | `set_session_name` | `(name: str, *, session_id: str \| None = None, command_id: str \| None = None)` | `RpcSessionNameChanged` |
 | `clone_session` | `(*, command_id: str \| None = None)` | `RpcSessionCloned` |
-| `fork_session` | `(entry_id: str, *, command_id: str \| None = None)` | `RpcSessionForked` |
-| `get_session_tree` | `(*, limit: int = 200, after_entry_id: str \| None = None, command_id: str \| None = None)` | `RpcSessionTreeReported` |
+| `fork_session` | `(entry_id: str, *, expected_active_leaf_id: str \| None = None, command_id: str \| None = None)` | `RpcSessionForked` |
+| `get_session_tree` | `(*, limit: int = 200, after_entry_id: str \| None = None, view: SessionTreeView = "tree", command_id: str \| None = None)` | `RpcSessionTreeReported` |
 | `navigate_session_tree` | `(entry_id: str, *, command_id: str \| None = None)` | `RpcSessionTreeNavigated` |
 | `unrevert_session_tree` | `(*, command_id: str \| None = None)` | `RpcSessionTreeUnreverted` |
 

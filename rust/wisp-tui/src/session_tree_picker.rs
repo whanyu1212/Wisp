@@ -5,7 +5,7 @@ use std::collections::{HashSet, VecDeque};
 use crate::dialog::{self, Dialog, Hint};
 use crate::mouse::Rows;
 use crate::reducer::{
-    SESSION_TREE_RETAINED_LIMIT, SessionTreeNode, SessionTreeNodeKind, SessionTreePage,
+    SESSION_TREE_RETAINED_LIMIT, SessionTreeNode, SessionTreePage, SessionTreeView,
 };
 use crate::session_picker::terminal_row;
 use crate::theme::Palette;
@@ -21,6 +21,7 @@ const RETAINED_PAGE_LIMIT: usize = 2;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionTreePicker {
+    pub(crate) view: SessionTreeView,
     pages: VecDeque<SessionTreePage>,
     selected: Option<usize>,
     earlier_nodes_omitted: bool,
@@ -37,9 +38,10 @@ pub enum SessionTreePickerAction {
 }
 
 impl SessionTreePicker {
-    pub fn new(page: SessionTreePage) -> Self {
+    pub fn new(page: SessionTreePage, view: SessionTreeView) -> Self {
         let selected = (!page.nodes.is_empty()).then_some(0);
         Self {
+            view,
             pages: VecDeque::from([page]),
             selected,
             earlier_nodes_omitted: false,
@@ -48,7 +50,7 @@ impl SessionTreePicker {
 
     pub fn append(&mut self, page: SessionTreePage) -> Result<(), &'static str> {
         let Some(first) = self.pages.front() else {
-            *self = Self::new(page);
+            *self = Self::new(page, self.view);
             return Ok(());
         };
         if first.session != page.session
@@ -87,6 +89,13 @@ impl SessionTreePicker {
         Ok(())
     }
 
+    pub(crate) fn rewind_source_leaf(&self) -> Option<&str> {
+        if self.view != SessionTreeView::Prompts {
+            return None;
+        }
+        self.pages.front()?.active_leaf_id.as_deref()
+    }
+
     pub fn at_page_end(&self) -> bool {
         self.selected == self.node_count().checked_sub(1)
     }
@@ -97,16 +106,18 @@ impl SessionTreePicker {
         }
         match key.code {
             KeyCode::Esc => SessionTreePickerAction::Cancelled,
+            KeyCode::Enter if self.view == SessionTreeView::Prompts => self
+                .selected_node()
+                .filter(|node| node.is_user_prompt())
+                .map(|node| SessionTreePickerAction::Fork(node.entry_id.clone()))
+                .unwrap_or(SessionTreePickerAction::None),
             KeyCode::Enter => self
                 .selected_node()
                 .map(|node| SessionTreePickerAction::Navigate(node.entry_id.clone()))
                 .unwrap_or(SessionTreePickerAction::None),
-            KeyCode::Char('f') => self
+            KeyCode::Char('f') if self.view == SessionTreeView::Tree => self
                 .selected_node()
-                .filter(|node| {
-                    node.kind == SessionTreeNodeKind::Message
-                        && node.role.as_deref() == Some("user")
-                })
+                .filter(|node| node.is_user_prompt())
                 .map(|node| SessionTreePickerAction::Fork(node.entry_id.clone()))
                 .unwrap_or(SessionTreePickerAction::ForkUnavailable),
             KeyCode::Up => {
@@ -172,16 +183,12 @@ pub fn render(
     palette: Palette,
 ) -> dialog::Rendered {
     let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    let prompts = picker.view == SessionTreeView::Prompts;
     let mut hints = vec![
         Hint {
             label: "Enter",
-            description: "navigate",
+            description: if prompts { "fork and edit" } else { "navigate" },
             key: key(KeyCode::Enter),
-        },
-        Hint {
-            label: "f",
-            description: "fork user",
-            key: key(KeyCode::Char('f')),
         },
         Hint {
             label: "Esc",
@@ -189,6 +196,16 @@ pub fn render(
             key: key(KeyCode::Esc),
         },
     ];
+    if !prompts {
+        hints.insert(
+            1,
+            Hint {
+                label: "f",
+                description: "fork user",
+                key: key(KeyCode::Char('f')),
+            },
+        );
+    }
     if area.width >= 56 {
         hints.extend([
             Hint {
@@ -214,13 +231,28 @@ pub fn render(
         ]);
     }
     let layout = Dialog {
-        title: "session tree",
+        title: if prompts {
+            "rewind to a prompt"
+        } else {
+            "session tree"
+        },
         tabs: &[],
         filter: None,
         hints: &hints,
     }
     .render(frame, area, palette);
-    let inner = layout.body;
+    let mut inner = layout.body;
+    if prompts && inner.height > 0 {
+        let note = if inner.width >= 38 {
+            "Fork before prompt. Keep current files."
+        } else {
+            "Keep current files."
+        };
+        let row = Rect { height: 1, ..inner };
+        frame.render_widget(Paragraph::new(note).style(palette.base()), row);
+        inner.y += 1;
+        inner.height -= 1;
+    }
     if inner.width == 0 || inner.height == 0 {
         return dialog::Rendered {
             rows: Rows::default(),
@@ -239,7 +271,11 @@ pub fn render(
         let marker_area = Rect::new(inner.x + 1, next_y, inner.width.saturating_sub(2), 1);
         frame.render_widget(
             Paragraph::new(terminal_row(
-                "… earlier nodes omitted; reopen /tree to restart",
+                if prompts {
+                    "… newer prompts omitted; reopen rewind to restart"
+                } else {
+                    "… earlier nodes omitted; reopen /tree to restart"
+                },
                 usize::from(marker_area.width),
             ))
             .style(Style::default().fg(palette.muted)),
@@ -251,7 +287,11 @@ pub fn render(
         let empty_area = Rect::new(inner.x + 1, next_y, inner.width.saturating_sub(2), 1);
         frame.render_widget(
             Paragraph::new(terminal_row(
-                "No persisted tree nodes.",
+                if prompts {
+                    "No prompts on this branch."
+                } else {
+                    "No persisted tree nodes."
+                },
                 usize::from(empty_area.width),
             ))
             .style(Style::default().fg(palette.muted)),
@@ -282,13 +322,16 @@ pub fn render(
             let content = Rect::new(row.x + 1, row.y, row.width.saturating_sub(2), 1);
             if content.width > 0 {
                 frame.render_widget(
-                    Paragraph::new(tree_line(
-                        node,
-                        selected,
-                        active,
-                        usize::from(content.width),
-                        palette,
-                    )),
+                    Paragraph::new(if prompts {
+                        let preview = if node.preview.is_empty() {
+                            "[Empty prompt]"
+                        } else {
+                            &node.preview
+                        };
+                        Line::raw(terminal_row(preview, usize::from(content.width)))
+                    } else {
+                        tree_line(node, selected, active, usize::from(content.width), palette)
+                    }),
                     content,
                 );
             }
@@ -378,7 +421,7 @@ fn compact_id(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reducer::SessionIdentity;
+    use crate::reducer::{SessionIdentity, SessionTreeNodeKind};
 
     fn page(start: usize, count: usize, truncated: bool) -> SessionTreePage {
         let nodes = (start..start + count)
@@ -408,7 +451,7 @@ mod tests {
 
     #[test]
     fn pages_evict_whole_oldest_page_and_reject_duplicates() {
-        let mut picker = SessionTreePicker::new(page(0, 200, true));
+        let mut picker = SessionTreePicker::new(page(0, 200, true), SessionTreeView::Tree);
         picker.append(page(200, 200, true)).unwrap();
         picker.append(page(400, 200, false)).unwrap();
         assert!(picker.earlier_nodes_omitted);
@@ -418,7 +461,7 @@ mod tests {
 
     #[test]
     fn only_user_messages_can_fork() {
-        let mut picker = SessionTreePicker::new(page(0, 2, false));
+        let mut picker = SessionTreePicker::new(page(0, 2, false), SessionTreeView::Tree);
         assert_eq!(
             picker.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE)),
             SessionTreePickerAction::Fork("entry-0".into())
@@ -432,7 +475,7 @@ mod tests {
 
     #[test]
     fn final_page_down_requests_the_next_cursor_and_rows_are_terminal_safe() {
-        let mut picker = SessionTreePicker::new(page(0, 2, true));
+        let mut picker = SessionTreePicker::new(page(0, 2, true), SessionTreeView::Tree);
         picker.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
         assert_eq!(
             picker.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)),
@@ -458,7 +501,7 @@ mod tests {
 
     #[test]
     fn navigation_and_tiny_terminal_render_are_bounded() {
-        let mut picker = SessionTreePicker::new(page(0, 30, false));
+        let mut picker = SessionTreePicker::new(page(0, 30, false), SessionTreeView::Tree);
         picker.handle_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
         assert_eq!(picker.selected, Some(PAGE_STEP));
         picker.handle_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));

@@ -305,7 +305,7 @@ class RpcSessionNameChanged(WispEvent):
 
 
 class RpcSessionTreeReported(WispEvent):
-    """Bounded append-order page of the selected persisted session tree."""
+    """Bounded page and match count for the requested view of a session tree."""
 
     type: Literal["rpc.session.tree"] = "rpc.session.tree"
     command_id: str

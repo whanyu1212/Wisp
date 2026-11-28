@@ -271,6 +271,15 @@ def test_typed_command_output_validates_but_none_is_never_a_wire_value() -> None
     assert not validator.is_valid({"prompt": "missing discriminator"})
 
 
+def test_tree_view_schema_validates_output() -> None:
+    validator = Draft202012Validator(_artifact("commands.schema.json"))
+    command = {"type": "get_session_tree", "limit": 200}
+    assert validator.is_valid({**command, "view": "tree"})
+    assert validator.is_valid({**command, "view": "prompts"})
+    assert not validator.is_valid({**command, "view": "all"})
+    assert not validator.is_valid({**command, "view": None})
+
+
 @pytest.mark.parametrize(
     "payload",
     [

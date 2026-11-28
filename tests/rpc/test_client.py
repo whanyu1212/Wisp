@@ -116,8 +116,10 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
         new_session_id = await controller.new_session()
         select_id = await controller.select_session("session-1")
         clone_id = await controller.clone_session()
-        fork_id = await controller.fork_session("entry-1")
-        tree_id = await controller.get_session_tree(limit=25, after_entry_id="entry-1")
+        fork_id = await controller.fork_session("entry-1", expected_active_leaf_id="entry-2")
+        tree_id = await controller.get_session_tree(
+            limit=25, after_entry_id="entry-1", view="prompts"
+        )
         navigate_id = await controller.navigate_session_tree("entry-2")
         unrevert_id = await controller.unrevert_session_tree()
         name_id = await controller.set_session_name("Display", session_id="session-1")
@@ -218,11 +220,14 @@ def test_rpc_controller_sends_typed_commands_and_closes_transport() -> None:
             NewSessionCommand(id="new-session-id"),
             SelectSessionCommand(id="select-session-id", session_id="session-1"),
             CloneSessionCommand(id="clone-session-id"),
-            ForkSessionCommand(id="fork-session-id", entry_id="entry-1"),
+            ForkSessionCommand(
+                id="fork-session-id", entry_id="entry-1", expected_active_leaf_id="entry-2"
+            ),
             GetSessionTreeCommand(
                 id="session-tree-id",
                 limit=25,
                 after_entry_id="entry-1",
+                view="prompts",
             ),
             NavigateSessionTreeCommand(
                 id="navigate-session-tree-id",

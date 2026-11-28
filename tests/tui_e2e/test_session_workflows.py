@@ -25,7 +25,8 @@ from wisp import __version__
 
 
 @pytest.mark.process
-def test_rust_tui_session_workflows_over_pty(tmp_path: Path) -> None:
+@pytest.mark.parametrize("rewind", [False, True], ids=["tree", "rewind"])
+def test_rust_tui_session_workflows_over_pty(tmp_path: Path, rewind: bool) -> None:
     binary_value = os.environ.get("RUST_TUI_BINARY_UNDER_TEST")
     if binary_value is None:
         pytest.skip("set RUST_TUI_BINARY_UNDER_TEST to a built wisp-tui binary")
@@ -159,8 +160,8 @@ for line in sys.stdin:
         finish(command)
     elif command_type == "get_session_tree":
         node = RpcSessionTreeNode(
-            entry_id="entry-user",
-            parent_id=None,
+            entry_id=active_leaf if command.get("view") == "prompts" else "entry-user",
+            parent_id=None if command.get("view") == "prompts" else "previous-prompt",
             operation_id="prompt-1",
             created_at=datetime(2026, 8, 31, tzinfo=UTC),
             kind="message",
@@ -178,7 +179,7 @@ for line in sys.stdin:
         ))
     elif command_type == "navigate_session_tree":
         previous_leaf = active_leaf
-        active_leaf = None
+        active_leaf = "previous-prompt"
         emit(RpcSessionTreeNavigated(
             command_id=command["id"],
             session_id=current_session,
@@ -362,16 +363,22 @@ for line in sys.stdin:
                 and now - phase_started > 0.25
             ):
                 os.write(terminal_fd, b"\x7f" * len("nav-restored-z"))
-                os.write(terminal_fd, b"/tree\r")
+                os.write(terminal_fd, b"\x1b" if rewind else b"/tree\r")
+                phase = "second escape" if rewind else "second tree"
+                phase_started = now
+                phase_output_offset = len(output)
+            elif phase == "second escape" and now - phase_started >= 0.10:
+                os.write(terminal_fd, b"\x1b")
                 phase = "second tree"
                 phase_started = now
                 phase_output_offset = len(output)
             elif (
                 phase == "second tree"
                 and command_types.count("get_session_tree") >= 2
+                and (not rewind or screen_shows(output, "Keep current files."))
                 and now - phase_started > 0.25
             ):
-                os.write(terminal_fd, b"f")
+                os.write(terminal_fd, b"\r" if rewind else b"f")
                 phase = "fork"
                 phase_started = now
                 phase_output_offset = len(output)
@@ -434,7 +441,10 @@ for line in sys.stdin:
     ]
     assert workflows[0]["name"] == "client-requested"
     assert workflows[3]["entry_id"] == "entry-user"
-    assert workflows[5]["entry_id"] == "entry-user"
+    assert workflows[4]["view"] == ("prompts" if rewind else "tree")
+    assert workflows[5]["entry_id"] == ("previous-prompt" if rewind else "entry-user")
+    if rewind:
+        assert workflows[5]["expected_active_leaf_id"] == "previous-prompt"
     assert b"nav-restored-z" in output
     assert b"fork-restored-z" in output
     assert os.waitstatus_to_exitcode(status) == 0, bytes(output)

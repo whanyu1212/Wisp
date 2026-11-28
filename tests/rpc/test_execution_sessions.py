@@ -773,8 +773,9 @@ def test_executor_clone_session_reports_name_from_inherited_clone_snapshot(
     anyio.run(scenario)
 
 
+@pytest.mark.parametrize("include_expected_leaf", [False, True])
 def test_executor_fork_session_returns_prompt_and_selects_parent_path(
-    tmp_path: Path,
+    tmp_path: Path, include_expected_leaf: bool
 ) -> None:
     async def scenario() -> None:
         fixture = await build_rpc_executor_fixture(tmp_path)
@@ -789,7 +790,7 @@ def test_executor_fork_session_returns_prompt_and_selects_parent_path(
             expected_active_leaf_id=abandoned.id,
         )
         await source.append_message(Message(role="user", content="active alternative"))
-        await source.append_message(Message(role="assistant", content="new answer"))
+        active = await source.append_message(Message(role="assistant", content="new answer"))
         fixture.session_state.session = source
         fixture.session_state.history = source.read_context_messages()
         fixture.session_state.entry_count = len(source.read_entries())
@@ -797,10 +798,10 @@ def test_executor_fork_session_returns_prompt_and_selects_parent_path(
         async with send, receive, anyio.create_task_group() as task_group:
             executor = fixture.executor(task_group=task_group, send=send)
 
-            result = await dispatch_parsed(
-                executor,
-                {"id": "fork", "type": "fork_session", "entry_id": selected.id},
-            )
+            command = {"id": "fork", "type": "fork_session", "entry_id": selected.id}
+            if include_expected_leaf:
+                command["expected_active_leaf_id"] = active.id
+            result = await dispatch_parsed(executor, command)
             completed = await receive.receive()
             assert not any(isinstance(event, RpcSessionForked) for event in fixture.events)
             fixture.coordinator.running_command = result.running_command
@@ -828,6 +829,53 @@ def test_executor_fork_session_returns_prompt_and_selects_parent_path(
         assert report.selected_prompt == editable_prompt
         assert report.session_id == completed.selected_session.session_id
         assert report.active_leaf_id == completed.selected_session.read_active_leaf_id()
+
+    anyio.run(scenario)
+
+
+def test_fork_rejects_stale_leaf(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        fixture = await build_rpc_executor_fixture(tmp_path)
+        source = fixture.sessions.create()
+        await source.append_message(Message(role="user", content="first"))
+        await source.append_message(Message(role="assistant", content="answer"))
+        selected = await source.append_message(Message(role="user", content="edit this"))
+        fixture.session_state.session = source
+        fixture.session_state.history = source.read_context_messages()
+        fixture.session_state.entry_count = len(source.read_entries())
+
+        # Another writer advances the session after the picker read this leaf.
+        new_leaf = await source.append_message(Message(role="assistant", content="new answer"))
+        send, receive = anyio.create_memory_object_stream(10)
+        async with send, receive, anyio.create_task_group() as task_group:
+            executor = fixture.executor(task_group=task_group, send=send)
+            result = await dispatch_parsed(
+                executor,
+                {
+                    "id": "fork-stale",
+                    "type": "fork_session",
+                    "entry_id": selected.id,
+                    "expected_active_leaf_id": selected.id,
+                },
+            )
+            completed = await receive.receive()
+            fixture.coordinator.running_command = result.running_command
+            await fixture.coordinator.handle_event(
+                completed,
+                dispatch=preserve_running_command,
+                reject=reject_unexpected_command,
+            )
+            task_group.cancel_scope.cancel()
+
+        assert completed.ok is False
+        assert fixture.session_state.session is source
+        assert source.read_active_leaf_id() == new_leaf.id
+        assert tuple(source.path.parent.glob("*.jsonl")) == (source.path,)
+        assert not any(isinstance(event, RpcSessionForked) for event in fixture.events)
+        finished = next(event for event in fixture.events if isinstance(event, RpcCommandFinished))
+        assert finished.error == (
+            f"Session tree changed: expected active leaf {selected.id!r}, found {new_leaf.id!r}"
+        )
 
     anyio.run(scenario)
 

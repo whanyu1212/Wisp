@@ -286,6 +286,14 @@ Output bodies and tool arguments use bounded previews during initial loading. An
 load returns the exact text stored in JSONL; it cannot recover bytes truncated before persistence.
 
 
+## Rewind to a prompt
+
+With the composer empty and the run finished, press `Esc` twice quickly. The picker lists
+your prompts on the current branch, newest first. Select one with the arrow keys and press
+`Enter` to fork immediately before it. The selected prompt and its images return to the
+composer for editing. Submit when ready. The original conversation is available in
+`/resume`, and files on disk keep their current contents. Press `Esc` to dismiss the picker.
+
 ## Prompt history
 
 Press `Ctrl+R` or run `/history` to search the prompts submitted in the current TUI run, including

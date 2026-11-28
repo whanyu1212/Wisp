@@ -141,7 +141,7 @@ use ratatui::Terminal;
 use ratatui::backend::Backend;
 use reducer::{
     BackendEvent, BrowserInteractRequest, CommandIdSource, CommandKind, ImageMessageTarget,
-    InteractionStatus, PendingApproval, UiAction, UiEffect, UiState, ViewStatus,
+    InteractionStatus, PendingApproval, SessionTreeView, UiAction, UiEffect, UiState, ViewStatus,
 };
 use session_picker::{SessionPicker, SessionPickerAction, SessionPickerPurpose};
 use session_tree_picker::{SessionTreePicker, SessionTreePickerAction};
@@ -862,6 +862,7 @@ struct LiveUi {
     recovered_queue_recovery: bool,
     session_picker: Option<SessionPicker>,
     session_tree_picker: Option<SessionTreePicker>,
+    last_rewind_escape: Option<Instant>,
     connection_panel: Option<ConnectionPanel>,
     model_picker: Option<ModelPicker>,
     rendered_model_picker: bool,
@@ -954,6 +955,7 @@ impl Default for LiveUi {
             recovered_queue_recovery: false,
             session_picker: None,
             session_tree_picker: None,
+            last_rewind_escape: None,
             connection_panel: None,
             model_picker: None,
             rendered_model_picker: false,
@@ -1257,8 +1259,8 @@ impl LiveUi {
                     }
                     self.render_pending = true;
                 }
-                UiEffect::ShowSessionTreePage { page, append } => {
-                    self.show_session_tree_page(page, append);
+                UiEffect::ShowSessionTreePage { view, page, append } => {
+                    self.show_session_tree_page(view, page, append);
                 }
                 UiEffect::CloseSessionTree => {
                     self.session_tree_picker = None;
@@ -1477,7 +1479,12 @@ impl LiveUi {
         self.render_pending = true;
     }
 
-    fn show_session_tree_page(&mut self, page: reducer::SessionTreePage, append: bool) {
+    fn show_session_tree_page(
+        &mut self,
+        view: SessionTreeView,
+        page: reducer::SessionTreePage,
+        append: bool,
+    ) {
         self.invalidate_overlay(OverlayKind::SessionTree);
         self.prompt_history_view = None;
         self.session_picker = None;
@@ -1496,7 +1503,7 @@ impl LiveUi {
         } else {
             self.theme_picker = None;
             self.logo_picker = None;
-            self.session_tree_picker = Some(SessionTreePicker::new(page));
+            self.session_tree_picker = Some(SessionTreePicker::new(page, view));
         }
         self.render_pending = true;
     }
@@ -1688,7 +1695,8 @@ impl LiveUi {
         let paging_tree = matches!(
             &action,
             UiAction::LoadSessionTree {
-                after_entry_id: Some(_)
+                after_entry_id: Some(_),
+                ..
             }
         );
         let frame_limit_notice =
@@ -2129,7 +2137,16 @@ impl LiveUi {
         if let Some(decision) = self.current_decision_context() {
             key_help::Owner::Decision(decision)
         } else if let Some(overlay) = self.active_overlay() {
-            key_help::Owner::Overlay(overlay)
+            if overlay == OverlayKind::SessionTree
+                && self
+                    .session_tree_picker
+                    .as_ref()
+                    .is_some_and(|picker| picker.view == SessionTreeView::Prompts)
+            {
+                key_help::Owner::Rewind
+            } else {
+                key_help::Owner::Overlay(overlay)
+            }
         } else if self.browse_selected.is_some() {
             key_help::Owner::Browse
         } else if self.file_picker.is_open() {
@@ -4980,6 +4997,7 @@ impl LiveUi {
             SessionCommand::Tree => {
                 self.dispatch_session_action(
                     UiAction::LoadSessionTree {
+                        view: SessionTreeView::Tree,
                         after_entry_id: None,
                     },
                     writer,
@@ -5425,6 +5443,7 @@ impl LiveUi {
             side_panel::Target::Tree => {
                 self.dispatch_session_action_with(
                     UiAction::LoadSessionTree {
+                        view: SessionTreeView::Tree,
                         after_entry_id: None,
                     },
                     false,
@@ -5604,6 +5623,7 @@ impl LiveUi {
         let Some(picker) = self.session_tree_picker.as_mut() else {
             return Ok(LoopControl::Continue);
         };
+        let view = picker.view;
         let action = picker.handle_key(key);
         if self.state.session_operation.is_some()
             && matches!(
@@ -5634,6 +5654,7 @@ impl LiveUi {
             SessionTreePickerAction::LoadNext(after_entry_id) => {
                 self.dispatch_session_action(
                     UiAction::LoadSessionTree {
+                        view,
                         after_entry_id: Some(after_entry_id),
                     },
                     writer,
@@ -5650,8 +5671,16 @@ impl LiveUi {
                 .await
             }
             SessionTreePickerAction::Fork(entry_id) => {
-                self.dispatch_session_action(UiAction::ForkSession { entry_id }, writer, limit)
-                    .await
+                let expected_active_leaf_id = picker.rewind_source_leaf().map(str::to_owned);
+                self.dispatch_session_action(
+                    UiAction::ForkSession {
+                        entry_id,
+                        expected_active_leaf_id,
+                    },
+                    writer,
+                    limit,
+                )
+                .await
             }
         }
     }
@@ -6146,6 +6175,13 @@ impl LiveUi {
         writer: &mpsc::Sender<WriterMessage>,
         limit: usize,
     ) -> Result<LoopControl, Error> {
+        if self.last_rewind_escape.is_some()
+            && !matches!(input, Input::Redraw)
+            && !(matches!(&input, Input::Key(key) if key.code == KeyCode::Esc && key.modifiers.is_empty())
+                && self.composer_owns_clipboard())
+        {
+            self.last_rewind_escape = None;
+        }
         let control = self.apply_input(input, writer, limit).await?;
         // Input can hide the panel or leave the Browser view, by key or by a tab
         // click. Held wheel input is dropped then, not at the next poll, which may
@@ -6692,6 +6728,7 @@ impl LiveUi {
                 self.render_pending = true;
                 self.dispatch_session_action_with(
                     UiAction::LoadSessionTree {
+                        view: SessionTreeView::Tree,
                         after_entry_id: None,
                     },
                     false,
@@ -7850,6 +7887,26 @@ impl LiveUi {
         Ok(None)
     }
 
+    /// Recognize two distinct presses only after focused menus and editors have handled Escape.
+    fn rewind_shortcut(&mut self, key: KeyEvent, now: Instant) -> bool {
+        let previous = self.last_rewind_escape.take();
+        if key.kind != crossterm::event::KeyEventKind::Press
+            || !key.modifiers.is_empty()
+            || !self.idle_prompt_editable()
+            || !self.editor.text().is_empty()
+            || !self.images.is_empty()
+            || self.state.saved_session_attachment.is_some()
+            || !self.state.attached_shell_outputs.is_empty()
+        {
+            return false;
+        }
+        if previous.is_some_and(|last| now.duration_since(last) <= Duration::from_millis(500)) {
+            return true;
+        }
+        self.last_rewind_escape = Some(now);
+        false
+    }
+
     async fn handle_shortcut_key(
         &mut self,
         key: KeyEvent,
@@ -7872,6 +7929,20 @@ impl LiveUi {
             return Ok(Some(LoopControl::Continue));
         }
         if is_escape(key) {
+            if self.rewind_shortcut(key, Instant::now()) {
+                return self
+                    .dispatch_session_action_with(
+                        UiAction::LoadSessionTree {
+                            view: SessionTreeView::Prompts,
+                            after_entry_id: None,
+                        },
+                        false,
+                        writer,
+                        limit,
+                    )
+                    .await
+                    .map(Some);
+            }
             return self.interrupt(writer, limit, false).await.map(Some);
         }
         if self.bound_transcript_action(key).is_some()
@@ -13425,6 +13496,7 @@ mod tests {
             session_name: None,
         });
         ui.state.session_operation = Some(reducer::SessionOperation::LoadingTree {
+            view: SessionTreeView::Tree,
             command_id: "tree-1".into(),
             after_entry_id: None,
             page: None,
@@ -13506,12 +13578,13 @@ mod tests {
             next_after_entry_id: Some("entry-1".into()),
         };
         let mut live_ui = LiveUi {
-            session_tree_picker: Some(SessionTreePicker::new(page)),
+            session_tree_picker: Some(SessionTreePicker::new(page, SessionTreeView::Tree)),
             render_pending: false,
             ..LiveUi::default()
         };
         live_ui.state.selected_session = Some(selected);
         live_ui.state.session_operation = Some(reducer::SessionOperation::LoadingTree {
+            view: SessionTreeView::Tree,
             command_id: "get_session_tree-1".into(),
             after_entry_id: Some("previous-entry".into()),
             page: None,
@@ -15696,6 +15769,7 @@ mod tests {
             (
                 |state| {
                     state.session_operation = Some(reducer::SessionOperation::LoadingTree {
+                        view: SessionTreeView::Tree,
                         command_id: "get_session_tree-1".into(),
                         after_entry_id: None,
                         page: None,

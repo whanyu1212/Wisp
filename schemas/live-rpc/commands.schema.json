@@ -1419,6 +1419,15 @@
           "title": "Entry Id",
           "type": "string"
         },
+        "expected_active_leaf_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            }
+          ],
+          "title": "Expected Active Leaf Id"
+        },
         "id": {
           "anyOf": [
             {
@@ -1999,7 +2008,7 @@
     },
     "GetSessionTreeCommand": {
       "additionalProperties": false,
-      "description": "Return a bounded page of the selected session's tree.",
+      "description": "Return a bounded page of tree nodes or active-path prompts.",
       "properties": {
         "after_entry_id": {
           "anyOf": [
@@ -2032,11 +2041,16 @@
           "default": "get_session_tree",
           "title": "Type",
           "type": "string"
+        },
+        "view": {
+          "$ref": "#/$defs/SessionTreeView",
+          "default": "tree"
         }
       },
       "required": [
         "type",
-        "limit"
+        "limit",
+        "view"
       ],
       "title": "GetSessionTreeCommand",
       "type": "object"
@@ -2924,6 +2938,13 @@
       "title": "SelectSessionCommand",
       "type": "object"
     },
+    "SessionTreeView": {
+      "enum": [
+        "tree",
+        "prompts"
+      ],
+      "type": "string"
+    },
     "SetCodemodeCommand": {
       "additionalProperties": false,
       "description": "Apply a codemode setting from the next run and save it as the user setting.",
@@ -3736,6 +3757,7 @@
     },
     "fork_session": {
       "entry_id": "entry-1",
+      "expected_active_leaf_id": "entry-2",
       "type": "fork_session"
     },
     "get_browser_addresses": {
@@ -3785,7 +3807,8 @@
     },
     "get_session_tree": {
       "limit": 200,
-      "type": "get_session_tree"
+      "type": "get_session_tree",
+      "view": "prompts"
     },
     "get_sessions": {
       "limit": 50,

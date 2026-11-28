@@ -298,7 +298,7 @@ def test_select_session_command_rejects_invalid_id() -> None:
 
 def test_session_derivation_commands_serialize_as_jsonl_and_parse() -> None:
     clone = CloneSessionCommand(id="clone-1")
-    fork = ForkSessionCommand(id="fork-1", entry_id="entry-1")
+    fork = ForkSessionCommand(id="fork-1", entry_id="entry-1", expected_active_leaf_id="entry-2")
 
     assert json.loads(clone.to_json_line()) == {
         "id": "clone-1",
@@ -308,14 +308,17 @@ def test_session_derivation_commands_serialize_as_jsonl_and_parse() -> None:
         "id": "fork-1",
         "type": "fork_session",
         "entry_id": "entry-1",
+        "expected_active_leaf_id": "entry-2",
     }
     assert rpc_command_from_json(clone.to_json_line()) == clone
     assert rpc_command_from_json(fork.to_json_line()) == fork
 
 
-def test_fork_session_command_rejects_empty_entry_id() -> None:
+def test_fork_command_rejects_empty_ids() -> None:
     with pytest.raises(ValidationError):
         ForkSessionCommand(entry_id="")
+    with pytest.raises(ValidationError):
+        ForkSessionCommand(entry_id="entry-1", expected_active_leaf_id="")
 
 
 def test_session_tree_commands_serialize_as_jsonl_and_parse() -> None:
@@ -323,6 +326,7 @@ def test_session_tree_commands_serialize_as_jsonl_and_parse() -> None:
         id="tree-1",
         limit=25,
         after_entry_id="entry-1",
+        view="prompts",
     )
     navigate = NavigateSessionTreeCommand(id="navigate-1", entry_id="entry-2")
     unrevert = UnrevertSessionTreeCommand(id="unrevert-1")
@@ -332,6 +336,7 @@ def test_session_tree_commands_serialize_as_jsonl_and_parse() -> None:
         "type": "get_session_tree",
         "limit": 25,
         "after_entry_id": "entry-1",
+        "view": "prompts",
     }
     assert json.loads(navigate.to_json_line()) == {
         "id": "navigate-1",
@@ -343,6 +348,9 @@ def test_session_tree_commands_serialize_as_jsonl_and_parse() -> None:
         "type": "unrevert_session_tree",
     }
     assert rpc_command_from_json(get_tree.to_json_line()) == get_tree
+    assert rpc_command_from_json('{"type":"get_session_tree"}') == GetSessionTreeCommand(
+        view="tree"
+    )
     assert rpc_command_from_json(navigate.to_json_line()) == navigate
     assert rpc_command_from_json(unrevert.to_json_line()) == unrevert
 
@@ -353,6 +361,8 @@ def test_session_tree_commands_reject_invalid_fields() -> None:
             GetSessionTreeCommand(limit=limit)  # type: ignore[arg-type]
     with pytest.raises(ValidationError):
         GetSessionTreeCommand(after_entry_id="")
+    with pytest.raises(ValidationError):
+        GetSessionTreeCommand(view="all")  # type: ignore[arg-type]
     with pytest.raises(ValidationError):
         NavigateSessionTreeCommand(entry_id="")
 

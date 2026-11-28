@@ -18,6 +18,7 @@ use crate::{
 pub(crate) enum Owner {
     Composer,
     Browse,
+    Rewind,
     Files,
     Completion,
     Overlay(OverlayKind),
@@ -113,6 +114,11 @@ impl KeyHelp {
                 "History: type to search; Up/Down/Page/Home/End select.",
                 "Enter restores without submitting; Esc/Ctrl+C closes.",
             ],
+            Owner::Rewind => &[
+                "Up/Down select a prompt. PgDn at the last row loads older prompts.",
+                "Enter forks before the prompt and opens it for editing. Files keep their current contents.",
+                "Esc closes the picker.",
+            ],
             Owner::Overlay(OverlayKind::SessionTree) => &[
                 "Tree: Up/Down/Page/Home/End select; Enter navigates; f forks; Esc closes.",
                 "Ctrl+C retains normal cancellation/exit behavior.",
@@ -161,6 +167,7 @@ impl KeyHelp {
                 "Shell: !<command> runs locally without sending to the model; Alt+S attaches its output to your next prompt.",
                 "Typing, paste, Tab, newline and deletion replace selected text. Plain arrows collapse selection.",
                 "Large-paste markers expand on first cursor/edit interaction; an explicit selection replaces its raw text.",
+                "Press Esc twice in an empty, idle composer to rewind to an earlier prompt.",
                 "Esc cancels active work; Ctrl+C cancels or exits when no composer text is selected.",
             ],
         };

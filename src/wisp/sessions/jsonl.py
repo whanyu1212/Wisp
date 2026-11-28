@@ -78,6 +78,7 @@ from wisp.sessions.pagination import (
     SessionMessagePage,
     SessionTreeNodeSummary,
     SessionTreePage,
+    SessionTreeView,
     message_page_from_index,
     message_page_index_from_entries,
     tree_page_from_entries,
@@ -1080,8 +1081,22 @@ class JsonlSession:
         *,
         limit: int = DEFAULT_SESSION_TREE_PAGE_LIMIT,
         after_entry_id: str | None = None,
+        view: SessionTreeView = "tree",
     ) -> SessionTreePage:
-        """Read bounded tree-node metadata in persisted append order."""
+        """Read append-order tree nodes or newest-first prompts on the active path.
+
+        Args:
+            limit (int): Maximum number of nodes in this page.
+            after_entry_id (str | None): Exclusive cursor in the selected view's order.
+            view (SessionTreeView): All tree nodes or active-path user prompts.
+
+        Returns:
+            SessionTreePage: Bounded metadata and counts for the selected view.
+
+        Raises:
+            ValueError: The limit or cursor is invalid.
+            SessionError: The session cannot be read or the cursor is absent from the view.
+        """
 
         try:
             self.path.lstat()
@@ -1095,6 +1110,7 @@ class JsonlSession:
             path=self.path,
             limit=limit,
             after_entry_id=after_entry_id,
+            view=view,
         )
 
     def read_context_messages(self) -> tuple[Message, ...]:

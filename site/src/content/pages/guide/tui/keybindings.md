@@ -169,6 +169,7 @@ characters per chord.
 | `PageUp` / `PageDown` | Scroll the transcript by one page |
 | `Ctrl+Up` / `Ctrl+Down` | Scroll the transcript by one line |
 | `Ctrl+Home` / `Ctrl+End` | Traverse to the session beginning / return to the latest output |
+| `Esc` twice | Rewind to a prompt from an empty, idle composer |
 | `Escape` | Dismiss nearest menu or overlay, then cancel an active prompt |
 | `Ctrl+C` | Cancel the active workflow or quit when idle |
 | `Ctrl+D` | Delete right; EOF only from an empty editor |

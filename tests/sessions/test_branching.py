@@ -11,7 +11,7 @@ import pytest
 from pytest import MonkeyPatch
 
 from wisp.events import ErrorEvent
-from wisp.messages import CompactionRecord, Message
+from wisp.messages import CompactionRecord, Message, ProcessNotice
 from wisp.sessions import jsonl as jsonl_module
 from wisp.sessions.branching import SessionBranchProjection
 from wisp.sessions.entries import (
@@ -30,6 +30,7 @@ from wisp.sessions.errors import (
 )
 from wisp.sessions.jsonl import JsonlSession, JsonlSessionStore
 from wisp.sessions.replay import SessionReplayError
+from wisp.skills.models import SkillInvocationEvidence
 
 
 def test_clone_copies_only_active_path_with_entry_ids(tmp_path: Path) -> None:
@@ -179,6 +180,33 @@ def test_fork_drops_selected_user_message_and_returns_it(tmp_path: Path) -> None
     assert prompt == "edit me"
     assert [message.content for message in forked.read_messages()] == ["first", "answer"]
     assert forked.read_active_leaf_id() == source_leaf_id
+
+
+def test_fork_restores_submitted_prompt(tmp_path: Path) -> None:
+    store = JsonlSessionStore(tmp_path)
+    source = store.create()
+    submitted = "/review\n  edit me 🙂  \n"
+    notice = ProcessNotice(process_id="p1", command="make", state="failed")
+
+    async def fork() -> str:
+        selected = await source.append_message(
+            Message(
+                role="user",
+                content="expanded skill instructions",
+                skill_invocation=SkillInvocationEvidence(
+                    name="review",
+                    original_content=submitted,
+                    request="edit me 🙂",
+                    content_sha256="1" * 64,
+                ),
+            ).with_process_notices((notice,))
+        )
+        result = await store.fork_from_user_message(
+            source, selected.id, expected_active_leaf_id=selected.id
+        )
+        return result.selected_prompt
+
+    assert anyio.run(fork) == submitted
 
 
 def test_branching_drops_provider_hints(
