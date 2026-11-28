@@ -2133,6 +2133,25 @@ impl LiveUi {
         self.dispatch(action, writer, limit).await
     }
 
+    fn open_shortcuts_from_help(&mut self, key: KeyEvent) -> bool {
+        if key.code != KeyCode::Char('k')
+            || !key.modifiers.is_empty()
+            || !self
+                .key_help
+                .as_ref()
+                .is_some_and(|help| help.offers_shortcuts() && help.owner == self.key_help_owner())
+        {
+            return false;
+        }
+        self.key_help = None;
+        self.side_panel.show(side_panel::PanelMode::Shortcuts);
+        self.side_panel.focus();
+        self.rendered_overlay = None;
+        self.mouse_frame = None;
+        self.render_pending = true;
+        true
+    }
+
     fn key_help_owner(&self) -> key_help::Owner {
         if let Some(decision) = self.current_decision_context() {
             key_help::Owner::Decision(decision)
@@ -2144,6 +2163,10 @@ impl LiveUi {
                     .is_some_and(|picker| picker.view == SessionTreeView::Prompts)
             {
                 key_help::Owner::Rewind
+            } else if overlay == OverlayKind::SidePanel
+                && self.side_panel.mode() == side_panel::PanelMode::Shortcuts
+            {
+                key_help::Owner::Shortcuts
             } else {
                 key_help::Owner::Overlay(overlay)
             }
@@ -6294,6 +6317,7 @@ impl LiveUi {
                     self.mouse_frame = None;
                     return self.handle_focused_input(input, writer, limit).await;
                 }
+                Input::Key(key) if self.open_shortcuts_from_help(*key) => {}
                 Input::Key(key) => {
                     let help = self.key_help.as_mut().expect("open key help");
                     help.scroll.scroll(key.code, help.rendered_rows);
@@ -6352,6 +6376,9 @@ impl LiveUi {
                             } else if let Some(key) =
                                 frame.dialog_controls.key_at(event.column, event.row)
                             {
+                                if self.open_shortcuts_from_help(key) {
+                                    return Ok(LoopControl::Continue);
+                                }
                                 if is_escape(key) {
                                     self.key_help = None;
                                     self.mouse_frame = None;
@@ -6855,6 +6882,11 @@ impl LiveUi {
                 self.render_pending = true;
                 Ok(LoopControl::Continue)
             }
+            (OverlayKind::SidePanel, Input::Paste(text)) => {
+                self.side_panel.paste_shortcut_filter(&text);
+                self.render_pending = true;
+                Ok(LoopControl::Continue)
+            }
             (OverlayKind::SidePanel, Input::Key(key)) => {
                 self.handle_side_panel_key(key, writer, limit).await
             }
@@ -7124,12 +7156,14 @@ impl LiveUi {
             self.render_pending = true;
             return Ok(LoopControl::Continue);
         }
-        if !matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT) {
-            return Ok(LoopControl::Continue);
-        }
         let browser_shown = self.side_panel.mode() == side_panel::PanelMode::Browser;
         self.side_panel.sync_files_context(&self.state);
-        match self.side_panel.key(key.code, &self.state) {
+        match self.side_panel.key_event(key, &self.state) {
+            side_panel::OverlayKey::Close
+                if self.side_panel.mode() == side_panel::PanelMode::Shortcuts =>
+            {
+                self.side_panel.close()
+            }
             side_panel::OverlayKey::Close => self.side_panel.close_overlay(),
             // `b` switched the focused panel to the Browser view.
             side_panel::OverlayKey::Moved

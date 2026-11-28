@@ -92,10 +92,10 @@ your draft intact:
 Project trust uses the same docked panel (`y` trust, `n` deny, keyboard-only) and stays separate
 from per-call tool approval.
 
-## Side panel: Session, Files, and Browser {#side-panel}
+## Side panel and keyboard shortcuts {#side-panel}
 
 A one-row top bar keeps the session name on the left and the **`Session`**, **`Files`**, and
-**`Browser`** tabs on the right. Click any tab to open or close the panel, press `Ctrl+P` to toggle
+**`Browser`** tabs on the right, followed by **Shortcuts** when space permits. Click any tab to open or close the panel, press `Ctrl+P` to toggle
 it, `F8` to focus it (`[` / `]` switch tabs, `Esc` returns to the composer), or `f` to expand the
 active tab into a centered overlay.
 
@@ -118,6 +118,13 @@ wider (double-click to reset). Narrow terminals open it as a `44`-column overlay
   server captures a page. Click the viewport or run `/browser interact` (`i` when focused) for
   interactive takeover. See
   [Browser viewport and interactive takeover](./tui/commands.md#browser-viewport-and-interactive-takeover).
+
+- **Shortcuts:** Open the keyboard reference from the top bar, or press `Ctrl+G` then `k` from the
+  composer. Expand groups with `Enter`, or press `/` and filter by action or key. The reference
+  shows your configured bindings. With the reference focused on a wide terminal, press `Ctrl+C`
+  or click the composer to keep writing with the reference beside the conversation. On narrow
+  terminals the reference opens as an overlay.
+  `Esc` clears the filter, then closes the reference and returns to your draft.
 
 ## Local shell mode (`!`) and background processes
 
@@ -145,9 +152,9 @@ In the compact peek, `Enter` jumps to the transcript card and `x` then `y` stops
 
 The composer stays live while a run is active so you never have to cancel just to redirect work:
 
-- `Enter` sends a **steering** message injected at the next safe request boundary (after the current
+- `Alt+Enter` sends a **steering** message injected at the next safe request boundary (after the current
   tool batch finishes).
-- `Alt+Enter` queues a **follow-up** message for when the current run would otherwise stop.
+- `Enter` queues a **follow-up** message for when the current run would otherwise stop.
 - `Alt+Up` pops the newest queued steering or follow-up message back into your draft (and recovers
   failed submissions).
 - `Escape` or `Ctrl+C` cancels the active run without discarding queued messages.
