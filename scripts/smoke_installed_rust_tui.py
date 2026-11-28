@@ -20,6 +20,7 @@ from pathlib import Path
 
 _HISTORY_READY = b"RC2 saved history ready"
 _ESCAPE_SEQUENCE = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]")
+_IDLE_BADGE = re.compile("(?:◖|\ue0b6) *• *idle *(?:◗|\ue0b4)".encode())
 # The context snapshot replaces the footer's "ctx ~?" with a reading: a meter and
 # percent such as "ctx ▰▰▰▰▱▱▱▱▱▱ ~42%" or "ctx ~811%" when the window is known,
 # otherwise a token count such as "ctx ~2.6k". Frames repaint only changed cells, so
@@ -207,7 +208,7 @@ def run(wisp: Path, session_dir: Path, history_messages: int = 0) -> dict[str, f
                 if (
                     frame is not None
                     and b"fake response to: installed wheel smoke" in frame
-                    and b"idle" in frame
+                    and _IDLE_BADGE.search(_ESCAPE_SEQUENCE.sub(b"", frame))
                     and redraw_due
                 ):
                     os.write(terminal_fd, b"\x03")

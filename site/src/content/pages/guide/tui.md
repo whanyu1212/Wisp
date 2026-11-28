@@ -34,9 +34,7 @@ composer.
 
 When you ask Wisp to make a change, the workspace keeps the turn readable end to end:
 
-- **Composer and live transcript:** Your prompt sits in a rounded `›` composer whose bottom border
-  shows the active model, reasoning effort, and mode (`claude-opus-5-5 (high) · build`; amber in
-  `plan` mode, and a warning label when `YOLO` is active). Assistant Markdown streams into a
+- **Composer and live transcript:** Your prompt sits in a rounded `›` composer above the status line. Assistant Markdown streams into a
   `100`-column reading measure while code blocks and tables use the full transcript width, with
   clickable OSC 8 file paths and `http`/`https` links.
 - **Calm stream pacing:** Providers deliver tokens in uneven bursts, so Wisp reveals text at a
@@ -60,13 +58,13 @@ When you ask Wisp to make a change, the workspace keeps the turn readable end to
   cumulative working-tree diff against `HEAD` with hunk headers, syntax and word-level highlights,
   folded unchanged regions, and side-by-side split view on wide terminals. Run `/diff` directly for
   the full working tree against `HEAD`.
-- **Two-row telemetry deck footer:** Below the composer, a two-row deck tracks live state at a
-  glance:
-  - **Row 1:** run state badge (`• idle`, `● working`, `● approval`, `● trust`, or `✗ error`),
-    current folder and Git branch, MCP health (`2 MCP` or `1 MCP off`), active background processes
-    and subagents (`1 bg · 1 sub`), plus queue counts or active notices on the right.
-  - **Row 2:** context window meter with token ratio, session cost, non-default transcript
-    verbosity (`verbosity: low` / `verbosity: high`), and contextual keycap hints.
+- **Status line:** Connected segments below the draft show the active model and reasoning effort,
+  confirmed mode and permissions, and workspace and branch. Choose a Nerd Font Mono in your
+  terminal for full-height chevrons and rounded badges. A separate badge shows when Wisp is
+  working, needs a decision, or has hit an error. The second row shows context usage and session
+  cost when available, alongside keys for the current workflow. Notices, queued work, background
+  jobs, and tool-server health appear as space permits. With a narrow conversation column or a
+  short terminal, a single row prioritizes run state, permission scope, and context usage.
 
 ## Docked approvals and project trust
 

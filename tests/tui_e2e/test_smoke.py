@@ -38,13 +38,13 @@ def test_run_settled_ignores_partial_frame() -> None:
     and the TUI cancelled instead of quitting.
     """
 
-    welcome = _frame(b"Ask Wisp anything idle")
-    running = _frame(b"fake response to: hi  working")
+    welcome = _frame("Ask Wisp anything\x1b[2;1H ◖• idle◗ ◖Ask◗ build ◖ctx ~30%◗".encode())
+    running = _frame("fake response to: hi\x1b[2;1H ◖● working◗".encode())
     partial = welcome + running[: running.index(b"working")]
 
     assert not run_settled(partial, len(welcome), b"fake", b"response", b"to:")
     assert not run_settled(welcome + running, len(welcome), b"fake", b"response", b"to:")
-    settled = welcome + running + _frame(b"\x1b[2;1Hidle")
+    settled = welcome + running + _frame("\x1b[2;1H ◖• idle◗   ".encode())
     assert run_settled(settled, len(welcome), b"fake", b"response", b"to:")
 
 
@@ -52,8 +52,8 @@ def test_screen_rows_skip_terminal_control_output() -> None:
     # The title, a notification and the bell are written between frames; a terminal
     # shows none of them on the screen, even at the cursor the frame left on the footer.
     control = b"\x1b]0;Wisp \xc2\xb7 working \xc2\xb7 app\x07\x1b]9;Wisp finished\x1b\\\x07"
-    output = _frame(b"\x1b[2;1Hidle") + control + _frame(b"")
-    assert screen_rows(output) == ["", "idle"]
+    output = _frame("\x1b[2;1H◖• idle◗".encode()) + control + _frame(b"")
+    assert screen_rows(output) == ["", "◖• idle◗"]
     assert run_settled(output, 0)
 
 
@@ -62,32 +62,53 @@ def test_screen_rows_join_partial_repaints() -> None:
     output = _frame(b"\x1b[2;3Hworking") + _frame(b"\x1b[2;3Hidle\x1b[2;7H\x1b[K")
     assert screen_rows(output) == ["", "  idle"]
 
-    reused = _frame(b"\x1b[2;1Hidea") + _frame(b"\x1b[2;3Hl\x1b[2;4He")
-    assert screen_rows(reused)[-1] == "idle"
+    reused = _frame("\x1b[2;1H◖• idea◗".encode()) + _frame(b"\x1b[2;6Hl\x1b[2;7He")
+    assert screen_rows(reused)[-1] == "◖• idle◗"
     assert run_settled(reused + _frame(b""), 0, b"l")
 
-    # A branch named after a status word does not settle a working run.
-    branch = _frame(b"\x1b[2;1Hidle \xc2\xb7 fix/idle     working \xc2\xb7 ctx ~?")
-    assert not run_settled(branch, 0, b"fix")
 
-    # Two-row deck places the status label on the row above `╰─ ctx ...`.
-    deck_idle = _frame(
-        "\x1b[1;1H ╭─ • idle │ /srv/wisp │ feat/x\x1b[2;1H ╰─ ctx ~30% │ Ctrl+G help".encode()
+@pytest.mark.parametrize(
+    "panel", ["", "  │ panel", "      Click filter to search", "      ◖• idle◗"]
+)
+@pytest.mark.parametrize(
+    ("start_cap", "end_cap", "join"), [("◖", "◗", "❯"), ("\ue0b6", "\ue0b4", "\ue0b0")]
+)
+def test_wide_footer_uses_activity_badge(
+    panel: str, start_cap: str, end_cap: str, join: str
+) -> None:
+    # The branch says idle in both frames. The state badge to its right settles the run.
+    identity = f"\x1b[1;1H fake · build{join} Ask{join} /srv/wisp · fix/idle "
+    telemetry = f"\x1b[2;1H {start_cap}ctx ~30%{end_cap}     Ctrl+G help{panel}"
+    working = _frame(f"{identity}    {start_cap}● working{end_cap}{panel}{telemetry}".encode())
+    approval = _frame(
+        f"{identity}    {start_cap}● approval needed{end_cap}{panel}{telemetry}".encode()
     )
-    assert run_settled(deck_idle, 0, b"feat/x")
-    deck_working = _frame(
-        (
-            "\x1b[1;1H ╭─ ● working │ /srv/wisp │ fix/idle\x1b[2;1H ╰─ ctx ~30% │ Esc interrupt"
-        ).encode()
-    )
-    assert not run_settled(deck_working, 0, b"fix/idle")
+    idle = _frame(f"{identity}       {start_cap}• idle{end_cap}{panel}{telemetry}".encode())
+
+    assert not run_settled(working, 0, b"fix/idle")
+    assert not run_settled(approval, 0, b"fix/idle")
+    assert run_settled(idle, 0, b"fix/idle")
 
 
 def test_run_settled_respects_offset() -> None:
-    output = _frame(b"fake response to: old idle")
+    output = _frame("fake response to: old\x1b[2;1H◖• idle◗".encode())
 
     assert not run_settled(output, len(output), b"response")
     assert run_settled(output, 0, b"response")
+
+
+@pytest.mark.parametrize(
+    ("footer", "settled"),
+    [
+        ("idle YOLO (session) ctx ~…", True),
+        ("idle edits/session build", True),
+        ("working Ask ctx ~30% · idle", False),
+        ("◖• idle ctx ~30%", False),
+        ("idle text", False),
+    ],
+)
+def test_compact_status_without_badge(footer: str, settled: bool) -> None:
+    assert run_settled(_frame(footer.encode())) is settled
 
 
 @pytest.mark.parametrize(

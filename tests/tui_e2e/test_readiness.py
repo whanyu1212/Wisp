@@ -20,6 +20,7 @@ import pytest
 from tests.tui_e2e.support import (
     complete_frames,
     context_stats_ready,
+    footer_identity_shows,
     full_repaint_after,
     rendered_without_spacing,
     run_settled,
@@ -154,12 +155,11 @@ class _TuiProcess:
         )
         self.resize(width=101)
         offset = len(self.output)
-        # The composer border styles the model and mode apart, so read it from the
-        # replayed screen rather than the raw bytes.
+        # Read the identity chip from the replayed footer after the resize.
         self.wait_until(
             lambda output: (
                 welcome_ready(output[offset:])
-                and screen_shows(output, "─ fake ")
+                and footer_identity_shows(output, "fake")
                 and not screen_shows(output, "ctx ~?")
                 and not screen_shows(output, "ctx ~…")
                 and not screen_shows(output, "Refreshing context")

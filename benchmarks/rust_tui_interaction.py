@@ -30,6 +30,7 @@ import psutil
 from typing_extensions import TypeAliasType
 
 from benchmarks.rust_tui_e2e import (
+    _FRAME_END,
     START_TOKEN,
     Distribution,
     Renderer,
@@ -496,7 +497,7 @@ def _run_sample(
                 ready_visible = (
                     _history_ready(startup_plain, renderer, history_marker_seen)
                     if history_messages
-                    else _ready(startup_plain, renderer)
+                    else _FRAME_END in output and _ready(screen.rows())
                 )
                 if context_redrawn and ready_ns is None and ready_visible:
                     ready_ns = now_ns

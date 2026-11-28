@@ -1143,7 +1143,11 @@ async fn mode_acknowledgement_controls_header_and_draft_and_ctrl_c_remains_avail
         assert_eq!(ui.editor.text(), if ok { "" } else { "/plan" });
         let rendered = draw(&mut ui, 80, 18);
         assert!(
-            rendered.contains(if ok { " plan ─╯" } else { " build ─╯" }),
+            rendered
+                .lines()
+                .rev()
+                .take(2)
+                .any(|row| row.contains(if ok { "plan" } else { "build" })),
             "{rendered}"
         );
     }

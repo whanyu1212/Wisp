@@ -134,16 +134,43 @@ impl Palette {
         mix(self.muted, self.background, 0.7)
     }
 
-    /// Whether a gradient can show: not in monochrome, and not at 16 colours, where
-    /// its steps would collapse into unrelated named colours.
-    pub fn shows_gradients(self) -> bool {
+    /// Whether gradients and small coloured fills can use the theme palette.
+    pub fn supports_extended_color(self) -> bool {
         !(self.monochrome || self.depth == ColorDepth::Ansi16)
     }
 
     /// Whether a row band can show: not in monochrome, on the terminal's own
     /// background, or at 16 colours.
     pub fn shows_bands(self) -> bool {
-        !(self.monochrome || self.terminal_background || self.depth == ColorDepth::Ansi16)
+        self.supports_extended_color() && !self.terminal_background
+    }
+
+    /// A telemetry pill falls back to its semantic text colour on a terminal
+    /// that cannot distinguish background tiers.
+    pub(crate) fn footer_chip(self, color: Color) -> Style {
+        if self.supports_extended_color() {
+            let fill = self.selected;
+            Style::default().fg(self.readable_on(color, fill)).bg(fill)
+        } else {
+            Style::default().fg(color)
+        }
+    }
+
+    /// Give a filled status segment legible ink on both paper and dark themes.
+    pub(crate) fn footer_segment(self, fill: Color) -> Style {
+        if !self.supports_extended_color() {
+            return Style::default().fg(fill);
+        }
+        let ink = [
+            self.background,
+            self.foreground,
+            Color::Rgb(0, 0, 0),
+            Color::Rgb(255, 255, 255),
+        ]
+        .into_iter()
+        .find(|&color| contrast_ratio(color, fill) >= 4.5)
+        .unwrap_or(self.foreground);
+        Style::default().fg(ink).bg(fill)
     }
 
     /// The user's prompt: a band on the panel tier, or bold text where a theme draws on

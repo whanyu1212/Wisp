@@ -2593,7 +2593,7 @@ mod tests {
         let mut compacting = state.clone();
         compacting.view_status = ViewStatus::Running;
         compacting.interaction_status = crate::reducer::InteractionStatus::Compacting;
-        // A framed composer names it; a short terminal's footer does, also while
+        // The footer names it in both tall and short terminals, also while
         // the status line names a compaction the composer cannot frame.
         for (state, height) in [(&state, 40), (&state, 12), (&compacting, 40)] {
             let rows = screen_of_height(state, &mut SidePanel::default(), 200, height);
@@ -3035,8 +3035,8 @@ mod tests {
                 .take(usize::from(200 - auto_width(200)))
                 .collect::<String>()
         };
-        assert!(conversation(&rows[rows.len() - 2]).contains("╭─"));
-        assert!(conversation(rows.last().unwrap()).contains("╰─"));
+        assert!(conversation(&rows[rows.len() - 2]).contains("• idle"));
+        assert!(conversation(rows.last().unwrap()).contains("ctx"));
     }
 
     #[test]
@@ -3242,7 +3242,10 @@ mod tests {
         let rows = screen(&session(), &mut SidePanel::default(), 140);
         let footer = rows[rows.len() - 2..].join("\n");
         assert!(!rows.iter().any(|row| row.contains("2 MCP · 2 changed")));
-        assert!(footer.contains("/srv/wisp │ fix/timeouts"), "{footer}");
+        assert!(
+            footer.contains("wisp") && footer.contains("fix/timeouts"),
+            "{footer}"
+        );
         assert!(footer.contains("Ctrl+P panel"), "{footer}");
     }
 
@@ -3486,10 +3489,7 @@ mod tests {
             .map(|row| row.chars().take(start).collect())
             .collect();
         assert!(!panel.contains("idle"), "{panel}");
-        assert!(
-            column[column.len() - 2].contains("╭─ • idle"),
-            "{column:#?}"
-        );
+        assert!(column[column.len() - 2].contains("• idle"), "{column:#?}");
     }
 
     /// Whether the panel has a `Now` section heading.
