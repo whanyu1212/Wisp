@@ -10,6 +10,24 @@ the `src/wisp/events/` package. Event changes are recorded under the release tha
 The `## Live RPC protocol vN` and `## Schema vN` headings below are historical records from before
 this policy.
 
+## 0.16.13 — Unreleased
+
+- **Rewind to an earlier prompt.** Press `Esc` twice in an empty, idle composer and choose a prompt
+  to fork the session and edit its text and images. The original conversation stays available in
+  `/resume`, and workspace files keep their current contents. [#1173](https://github.com/whanyu1212/Wisp/pull/1173)
+- **Watch background processes while you work.** The Session panel shows live terminal output,
+  including ANSI colors and progress updates. Expand a process for more room to read its output.
+  [#1174](https://github.com/whanyu1212/Wisp/pull/1174)
+- **Find keyboard shortcuts beside the conversation.** Open Shortcuts from the top bar or press
+  `Ctrl+G` then `k`. Search by key or action to see your configured bindings.
+  [#1175](https://github.com/whanyu1212/Wisp/pull/1175)
+- **Read model and session state in the footer.** Powerline segments show the model, mode,
+  permissions, and workspace. Badges show run state, context usage, and session cost when available.
+  Compact layouts prioritize run state, permissions, and context.
+  [#1176](https://github.com/whanyu1212/Wisp/pull/1176)
+- Live RPC adds an optional `view` to `get_session_tree` and an optional `expected_active_leaf_id`
+  to `fork_session`. Use matching backend and frontend versions. Existing sessions open without migration.
+
 <!-- Keeps links to the pre-release "0.16.12 — Unreleased" heading working. -->
 <a id="01612--unreleased"></a>
 
